@@ -2,7 +2,8 @@
 
 **Status:** Phase 0 Complete ✅
 
-RunEcho is a deterministic intermediate representation (IR) and execution fingerprinting primitive for AI model interactions. It provides structural containment and reproducible codebase snapshots via content-addressed hashing.
+RunEcho provides deterministic structural state for AI execution.
+By generating a content-addressed intermediate representation (IR) of a codebase, it enables verifiable scope containment and reproducible model interactions.
 
 ---
 
@@ -169,11 +170,11 @@ Any expansion requires v2 and architecture review.
 
 ## Upcoming Phases
 
-- **Phase 1**: Config system + schema validation
-- **Phase 2**: CLI skeleton (`ai init`, `ai ir`, `ai exec`)
-- **Phase 3**: Policy engine (warn/strict modes)
-- **Phase 4**: Engine interface + Claude adapter
-- **Phase 5**: Integration tests + verification
+- **Phase 1**: Deterministic Core Hardening *COMPLETE*
+- **Phase 2**: Execution Fingerprinting Layer
+- **Phase 3**: CLI Interface (Minimal)
+- **Phase 4**: Boundary / Scope Controls
+- **Phase 5**: Engine Adapters
 
 ---
 

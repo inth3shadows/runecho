@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ai-governor/internal/ir"
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // Validates byte-identical IR generation and shows JSON structure

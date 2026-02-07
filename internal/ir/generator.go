@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ai-governor/internal/parser"
+	"github.com/inth3shadows/runecho/internal/parser"
 	"golang.org/x/text/unicode/norm"
 )
 

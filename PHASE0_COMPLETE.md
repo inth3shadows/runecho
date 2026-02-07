@@ -2,7 +2,7 @@
 
 ## Status: DELIVERED
 
-Phase 0 of AI Governor v1 has been implemented according to the locked architecture specification.
+Phase 0 of RunEcho v1 has been implemented according to the locked architecture specification.
 
 ---
 
@@ -231,7 +231,7 @@ package main
 
 import (
     "fmt"
-    "github.com/ai-governor/internal/ir"
+    "github.com/inth3shadows/runecho/internal/ir"
 )
 
 func main() {

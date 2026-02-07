@@ -1,4 +1,4 @@
-# AI Governor v1 --- Config Reference
+# RunEcho v1 --- Config Reference
 
 This document describes the configuration options defined in
 `.ai/config.schema.json`.

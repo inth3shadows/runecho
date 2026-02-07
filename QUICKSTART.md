@@ -1,4 +1,4 @@
-# AI Governor Phase 0 - Quick Start
+# RunEcho Phase 0 - Quick Start
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ go run phase0_demo.go
 
 Expected output:
 ```
-=== AI Governor v1 - Phase 0 Demo ===
+=== RunEcho v1 - Phase 0 Demo ===
 
 Generating IR from testdata/sample-project...
 ✓ Generated IR with 2 files
@@ -71,7 +71,7 @@ Determinism Check:
 package main
 
 import (
-    "github.com/ai-governor/internal/ir"
+    "github.com/inth3shadows/runecho/internal/ir"
 )
 
 func main() {
@@ -125,7 +125,7 @@ package main
 
 import (
     "encoding/json"
-    "github.com/ai-governor/internal/ir"
+    "github.com/inth3shadows/runecho/internal/ir"
 )
 
 func main() {

@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ai-governor/internal/ir"
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // Phase 0 demonstration - Generate IR from testdata/sample-project
 func main() {
-	fmt.Println("=== AI Governor v1 - Phase 0 Demo ===\n")
+	fmt.Println("=== RunEcho v1 - Phase 0 Demo ===\n")
 
 	// Configure generator
 	config := ir.GeneratorConfig{

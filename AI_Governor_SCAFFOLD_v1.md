@@ -1,8 +1,8 @@
-# AI Governor v1 --- Scaffold
+# RunEcho v1 --- Scaffold
 
 ## Purpose
 
-AI Governor is a deterministic scoping and governance layer placed in
+RunEcho is a deterministic scoping and governance layer placed in
 front of AI model execution.
 
 It prevents:

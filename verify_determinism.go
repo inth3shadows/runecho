@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ai-governor/internal/ir"
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // Verification: Regenerating IR twice produces byte-identical JSON

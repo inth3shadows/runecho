@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "AI Governor Config v1",
+  "title": "RunEcho Config v1",
   "type": "object",
   "additionalProperties": false,
   "properties": {

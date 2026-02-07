@@ -1,8 +1,8 @@
-# AI Governor v1
+# RunEcho v1
 
 **Status:** Phase 0 Complete ✅
 
-AI Governor is a deterministic scoping and governance layer for AI model execution. It prevents architectural rediscovery, context explosion, and unbounded file ingestion.
+RunEcho is a deterministic scoping and governance layer for AI model execution. It prevents architectural rediscovery, context explosion, and unbounded file ingestion.
 
 ## Architecture
 

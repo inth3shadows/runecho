@@ -1,4 +1,4 @@
-# AI Governor v1 --- Architecture Lock
+# RunEcho v1 --- Architecture Lock
 
 ## Status
 

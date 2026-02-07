@@ -1,14 +1,23 @@
-# RunEcho v1
+# RunEcho v1.2
 
 **Status:** Phase 0 Complete ✅
 
-RunEcho is a deterministic scoping and governance layer for AI model execution. It prevents architectural rediscovery, context explosion, and unbounded file ingestion.
+RunEcho is a deterministic intermediate representation (IR) and execution fingerprinting primitive for AI model interactions. It provides structural containment and reproducible codebase snapshots via content-addressed hashing.
 
-## Architecture
+---
 
-This tool is **not** a static analyzer, compiler, or multi-agent framework. It is a **governance + structural containment layer**.
+## What It Does
 
-### Core Principles
+- **Deterministic IR Generation**: Parses source files into stable, reproducible JSON representations
+- **Execution Fingerprinting**: RootHash provides cryptographic identity for entire codebase state
+- **Incremental Updates**: Hash-based change detection avoids redundant parsing
+- **Cross-Platform Determinism**: Unicode NFC normalization ensures identical output across Windows/Linux/macOS
+
+RunEcho is **not** a static analyzer, compiler, or multi-agent framework. It is a **structural containment layer** that prevents architectural rediscovery and context explosion in AI-assisted development.
+
+---
+
+## Core Principles
 
 1. Deterministic
 2. Minimal
@@ -18,34 +27,70 @@ This tool is **not** a static analyzer, compiler, or multi-agent framework. It i
 6. No background processes
 7. No hidden state
 
-## Current Status: Phase 0
+---
 
-Phase 0 implements the IR (Intermediate Representation) foundation:
+## Phase 0 Capabilities
 
-- ✅ Shallow JS/TS/GS parser (regex-based, no AST)
-- ✅ SHA256 file hasher
-- ✅ Deterministic IR generator
-- ✅ Incremental updates via hash comparison
-- ✅ Deterministic JSON marshalling
-- ✅ Comprehensive determinism test suite (100x stability verified)
+### Parser
+- Shallow regex-based parsing (no AST)
+- Extracts top-level: functions, classes, imports, exports
+- Supports: `.js`, `.ts`, `.gs`
+- Deterministic symbol ordering (sorted, deduplicated)
 
-### What Phase 0 Delivers
+### Hasher
+- SHA256 file hashing
+- Lowercase hex output
+- Byte-identical results on repeated runs
 
-- **Parser**: Extracts top-level functions, classes, imports, exports
-- **Hasher**: SHA256 file hashing with lowercase hex output
-- **Generator**: Walks directory tree, skips ignored paths, generates IR
-- **Storage**: Deterministic JSON with sorted keys and stable ordering
-- **Tests**: 100x stability tests prove byte-identical output
+### Generator
+- Directory tree traversal with ignored paths
+- Incremental updates via hash comparison
+- Path normalization (Windows → Unix paths)
+- Unicode NFC normalization for cross-platform determinism
 
-See [PHASE0_COMPLETE.md](./PHASE0_COMPLETE.md) for detailed documentation.
+### Storage
+- Deterministic JSON marshalling
+- Sorted file paths and symbol arrays
+- RootHash: content-addressed fingerprint of entire IR
+- Save/Load to `.ai/ir.json`
 
-## Supported Languages (v1)
+### Testing
+- 100x stability tests verify byte-identical output
+- Parser, hasher, generator, storage all determinism-verified
 
-- `.js` - JavaScript
-- `.ts` - TypeScript
-- `.gs` - Google Apps Script
+See [PHASE0_COMPLETE.md](./PHASE0_COMPLETE.md) for implementation details.
 
-Shallow parsing only. No semantic analysis.
+---
+
+## IR Format (v1.2)
+
+```json
+{
+  "version": 1,
+  "root_hash": "a1b2c3d4e5f6...",
+  "files": {
+    "src/example.ts": {
+      "hash": "abc123...",
+      "imports": ["react", "lodash"],
+      "functions": ["foo", "bar"],
+      "classes": ["UserService"],
+      "exports": ["foo", "UserService"]
+    }
+  }
+}
+```
+
+**Key Fields:**
+- `version`: IR schema version (always 1 for v1.x)
+- `root_hash`: SHA256 of concatenated `path:hash` pairs (sorted, newline-delimited)
+- `files`: Map of normalized paths to file IR
+
+**Changes from v1.0:**
+- Added `root_hash` for execution fingerprinting
+- Removed `generated_at` (non-deterministic timestamp)
+- Path normalization now includes Unicode NFC (macOS/Linux consistency)
+
+---
 
 ## Ignored Paths
 
@@ -54,6 +99,16 @@ Shallow parsing only. No semantic analysis.
 - `.git/`
 - `.cursor/`
 - `.vscode/`
+
+---
+
+## Requirements
+
+- **Go 1.24+**
+- **Dependencies:**
+  - `golang.org/x/text` (Unicode normalization)
+
+---
 
 ## Testing
 
@@ -67,10 +122,11 @@ go test ./internal/parser -v -run Determinism
 go test ./internal/ir -v -run Determinism
 ```
 
+---
+
 ## Demo
 
 ```bash
-# Run Phase 0 demo
 go run phase0_demo.go
 ```
 
@@ -80,38 +136,7 @@ This will:
 3. Save IR to JSON
 4. Verify byte-identical regeneration (determinism check)
 
-## IR Format
-
-```json
-{
-  "version": 1,
-  "generated_at": "2024-01-15T10:30:00Z",
-  "files": {
-    "src/example.ts": {
-      "hash": "abc123...",
-      "imports": ["react", "lodash"],
-      "functions": ["foo", "bar"],
-      "classes": ["UserService"],
-      "exports": ["foo", "UserService"]
-    }
-  }
-}
-```
-
-## Architecture Documents
-
-- [AI_Governor_ARCHITECTURE_LOCK_v1.md](./AI_Governor_ARCHITECTURE_LOCK_v1.md) - Locked architecture spec
-- [AI_Governor_SCAFFOLD_v1.md](./AI_Governor_SCAFFOLD_v1.md) - Project structure
-- [AI_Governor_CONFIG_REFERENCE_v1.md](./AI_Governor_CONFIG_REFERENCE_v1.md) - Config spec
-- [PHASE0_COMPLETE.md](./PHASE0_COMPLETE.md) - Phase 0 delivery report
-
-## Upcoming Phases
-
-- **Phase 1**: Config system + schema validation
-- **Phase 2**: CLI skeleton (`ai init`, `ai ir`, `ai exec`)
-- **Phase 3**: Policy engine (warn/strict modes)
-- **Phase 4**: Engine interface + Claude adapter
-- **Phase 5**: Integration tests + verification
+---
 
 ## v1 Constraints
 
@@ -128,11 +153,30 @@ This is v1. The following are **explicitly forbidden**:
 
 Any expansion requires v2 and architecture review.
 
+---
+
+## Determinism Guarantees
+
+1. **Parse Stability**: 100x identical `FileStructure` output
+2. **JSON Marshalling**: 100x byte-identical JSON
+3. **Full Pipeline**: 100x byte-identical IR generation
+4. **Hash Stability**: 100x identical SHA256 output
+5. **Path Normalization**: Windows/Unix/macOS produce identical paths
+6. **Unicode Normalization**: macOS NFD and Linux NFC produce identical output
+7. **RootHash Stability**: Identical codebase state → identical root_hash
+
+---
+
+## Upcoming Phases
+
+- **Phase 1**: Config system + schema validation
+- **Phase 2**: CLI skeleton (`ai init`, `ai ir`, `ai exec`)
+- **Phase 3**: Policy engine (warn/strict modes)
+- **Phase 4**: Engine interface + Claude adapter
+- **Phase 5**: Integration tests + verification
+
+---
+
 ## License
 
 TBD
-
-## Requirements
-
-- Go 1.21+
-- No external dependencies (stdlib only for Phase 0)

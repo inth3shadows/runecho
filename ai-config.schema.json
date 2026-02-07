@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Governor Config v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["warn", "strict"],
+      "default": "warn",
+      "description": "Policy enforcement mode. 'warn' logs violations. 'strict' blocks execution unless overridden."
+    },
+    "maxFilesPerExecution": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 5,
+      "description": "Maximum number of files allowed in scoped execution."
+    },
+    "ignoredPaths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [
+        "node_modules",
+        "dist",
+        ".git",
+        ".cursor",
+        ".vscode"
+      ],
+      "description": "Directory names to ignore during IR generation."
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["claude"],
+      "default": "claude",
+      "description": "Execution engine. v1 supports only 'claude'."
+    },
+    "allowOverride": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether CLI --override can downgrade strict violations."
+    }
+  },
+  "required": []
+}

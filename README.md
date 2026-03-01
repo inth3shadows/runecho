@@ -81,10 +81,12 @@ Add to `~/.claude/settings.json`:
 
 | Signal in prompt | Route |
 |---|---|
-| plan, implement feature, build new, end-to-end | Pipeline: haiku explore → opus design → sonnet implement |
-| architect, security review, trade-off, root cause | Opus subagent for reasoning |
+| implement feature, build new, from scratch, scaffold | Pipeline: haiku explore → opus design → sonnet implement |
+| architect, security review, trade-off, root cause, right direction, do these align, feasibility, what I really want | Opus subagent for reasoning |
 | summarize, search, find, explain code, grep | Haiku subagent |
 | bug fix, refactor, write tests, direct code | Sonnet handles directly (no delegation) |
+
+Opus check runs before pipeline — "review the plan" routes to opus, not pipeline.
 
 ---
 
@@ -100,14 +102,9 @@ Add to `~/.claude/settings.json`:
 
 ## Stage B: IR Injection
 
-Index a project (run from the project root, or pass a path):
+**No manual indexing needed.** `ir-injector.sh` runs `ai-ir` automatically on session turn 1. The index is created or updated in-place before the context is injected.
 
-```bash
-ai-ir              # indexes current directory → .ai/ir.json
-ai-ir /path/to/project
-```
-
-On the next Claude Code session in that directory, turn 1 will include:
+On every new Claude Code session in a JS/TS project, turn 1 will include:
 
 ```
 IR CONTEXT [root_hash: abc123456789...]:
@@ -115,9 +112,14 @@ IR CONTEXT [root_hash: abc123456789...]:
 Symbols (12): AuthService, UserService, fetchUser, validateToken, ...
 ```
 
-Subsequent turns: silent (no injection). Projects without `.ai/ir.json`: silent. Requires `jq`.
+Subsequent turns: silent. Non-JS/TS projects: silent. Requires `jq` and `ai-ir` on PATH (both satisfied by `bash install.sh`).
 
-Re-run `ai-ir` any time the codebase changes. It performs incremental updates (only re-parses changed files).
+To manually force a re-index (e.g. after a large merge):
+
+```bash
+ai-ir              # current directory
+ai-ir /path/to/project
+```
 
 ---
 
@@ -175,11 +177,12 @@ RunEcho is a three-stage arc:
 - Model enforcer (PreToolUse gate)
 - Decision persistence via CLAUDE.md rules
 
-**B — Structural Intelligence ✅ done (Stage B)**
+**B — Structural Intelligence ✅ done**
 - `ai-ir` CLI: generates `.ai/ir.json` (file list + symbols) for any JS/TS project
-- IR injector hook: injects compact codebase summary on session turn 1
+- IR injector hook: auto-runs `ai-ir` and injects codebase summary on session turn 1
 - Incremental updates: only re-parses files whose hash changed
-- Remaining (Stage C): IR-diff, session handoff, context compression
+- Routing audit: enforcer warns when opus/pipeline expected but Task called without model param
+- Routing fixes: opus check before pipeline; 6 new opus patterns (alignment, feasibility, direction, etc.)
 
 **C — Multi-Agent Orchestrator (future)**
 - Claude-native agent framework built on the IR + governance layer

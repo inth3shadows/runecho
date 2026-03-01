@@ -9,11 +9,13 @@ HOOK_DIR="$HOME/.claude/hooks"
 
 mkdir -p "$HOOK_DIR"
 
-# Build ai-ir binary
+# Build ai-ir binary → ~/bin (already on PATH on this machine)
+BIN_DIR="$HOME/bin"
+mkdir -p "$BIN_DIR"
 echo "Building ai-ir..."
 cd "$SCRIPT_DIR"
-go build -o "$HOOK_DIR/ai-ir" ./cmd/ir
-echo "  Built: $HOOK_DIR/ai-ir"
+go build -o "$BIN_DIR/ai-ir" ./cmd/ir
+echo "  Built: $BIN_DIR/ai-ir"
 
 # Symlink hooks
 ln -sf "$SCRIPT_DIR/hooks/session-governor.sh" "$HOOK_DIR/session-governor.sh"
@@ -30,7 +32,7 @@ echo "RunEcho hooks installed:"
 ls -la "$HOOK_DIR/session-governor.sh"
 ls -la "$HOOK_DIR/model-enforcer.sh"
 ls -la "$HOOK_DIR/ir-injector.sh"
-ls -la "$HOOK_DIR/ai-ir"
+ls -la "$BIN_DIR/ai-ir"*
 
 echo ""
 echo "Add ir-injector.sh to ~/.claude/settings.json UserPromptSubmit hooks."

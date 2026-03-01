@@ -8,9 +8,9 @@
 #   3. If the subagent's model doesn't match the routing, DENY it
 #
 # What this enforces:
-#   - If router said "haiku", subagents MUST use haiku (or no model = default)
-#   - If router said "opus", subagents CAN use opus
-#   - If router said "pipeline", haiku and opus are both allowed
+#   - If router said "haiku", subagents MUST use haiku (default or opus/sonnet → DENY)
+#   - If router said "opus", subagents MUST use opus or haiku (default or sonnet → DENY)
+#   - If router said "pipeline", haiku and opus are both allowed (audit-only on default)
 #   - If no routing (Sonnet direct), any model is fine (no constraint)
 #
 # What this can NOT enforce:
@@ -42,11 +42,15 @@ case "$ROUTE" in
     fi
     ;;
   opus)
-    # Router said opus — allow opus and haiku, but warn if model not set explicitly.
-    # Claude Code's subagent_type dispatch doesn't require a model param, so the enforcer
-    # can't block it — but we surface it so Claude is aware.
+    # Router said opus — only allow opus or haiku; deny if model not explicitly set.
+    # Relying on Claude to set the param from system-prompt instructions is unreliable.
+    # Hard deny forces a retry with model: "opus" explicit.
     if [ "$REQUESTED_MODEL" = "default" ]; then
-      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"additionalContext\":\"MODEL ENFORCER AUDIT: Route was opus but Task called without explicit model parameter. Native subagent_type routing may not use opus. Set model: \\\"opus\\\" on this Task call to comply with routing.\"}}"
+      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"MODEL ENFORCER: Router directed opus for this task. Task called without explicit model parameter. Re-run with model: \\\"opus\\\" to comply with routing.\"}}"
+      exit 0
+    fi
+    if [ "$REQUESTED_MODEL" = "sonnet" ]; then
+      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"MODEL ENFORCER: Router directed opus for this task. Subagent requested 'sonnet'. Re-run with model: \\\"opus\\\".\"}}"
       exit 0
     fi
     ;;

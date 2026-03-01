@@ -8,7 +8,25 @@
       "Bash(go version:*)",
       "Bash(go list:*)",
       "Bash(go get:*)",
-      "Bash(go test:*)"
+      "Bash(go test:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh api:*)",
+      "Bash(tail:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:medium.com)",
+      "Bash(go install:*)",
+      "Bash(bd:*)",
+      "Bash(chmod +x:*)",
+      "Bash(seq 2:*)",
+      "Bash(seq 17:*)",
+      "Bash(seq 27:*)",
+      "Bash(bash:*)",
+      "Bash(rm:*)",
+      "Bash(xxd:*)"
     ]
   }
 }

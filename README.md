@@ -1,180 +1,144 @@
-# RunEcho v1.2
+# RunEcho
 
-**Status:** Phase 0 Complete ✅
+**Status:** Hooks Active ✅
 
-RunEcho provides deterministic structural state for AI execution.
-By generating a content-addressed intermediate representation (IR) of a codebase, it enables verifiable scope containment and reproducible model interactions.
+RunEcho is a session governance and model routing layer for Claude Code. It enforces cost-optimal model selection and session discipline via Claude Code hooks.
 
 ---
 
 ## What It Does
 
-- **Deterministic IR Generation**: Parses source files into stable, reproducible JSON representations
-- **Execution Fingerprinting**: RootHash provides cryptographic identity for entire codebase state
-- **Incremental Updates**: Hash-based change detection avoids redundant parsing
-- **Cross-Platform Determinism**: Unicode NFC normalization ensures identical output across Windows/Linux/macOS
+- **Session Governor**: Tracks turn count per session. Warns at turn 15, 25, and 35. Tells Claude to wrap up before context degrades and cache costs compound.
+- **Model Router**: Analyzes each prompt and injects routing guidance — haiku for cheap tasks, opus for architecture, full pipeline (haiku→opus→sonnet) for multi-step work.
+- **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
 
-RunEcho is **not** a static analyzer, compiler, or multi-agent framework. It is a **structural containment layer** that prevents architectural rediscovery and context explosion in AI-assisted development.
-
----
-
-## Core Principles
-
-1. Deterministic
-2. Minimal
-3. Incremental
-4. Local-first
-5. Model-agnostic (Claude-first implementation)
-6. No background processes
-7. No hidden state
+Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = brain.**
 
 ---
 
-## Phase 0 Capabilities
+## Install
 
-### Parser
-- Shallow regex-based parsing (no AST)
-- Extracts top-level: functions, classes, imports, exports
-- Supports: `.js`, `.ts`, `.gs`
-- Deterministic symbol ordering (sorted, deduplicated)
+```bash
+bash install.sh
+```
 
-### Hasher
-- SHA256 file hashing
-- Lowercase hex output
-- Byte-identical results on repeated runs
-
-### Generator
-- Directory tree traversal with ignored paths
-- Incremental updates via hash comparison
-- Path normalization (Windows → Unix paths)
-- Unicode NFC normalization for cross-platform determinism
-
-### Storage
-- Deterministic JSON marshalling
-- Sorted file paths and symbol arrays
-- RootHash: content-addressed fingerprint of entire IR
-- Save/Load to `.ai/ir.json`
-
-### Testing
-- 100x stability tests verify byte-identical output
-- Parser, hasher, generator, storage all determinism-verified
-
-See [PHASE0_COMPLETE.md](./PHASE0_COMPLETE.md) for implementation details.
+This symlinks `hooks/session-governor.sh` and `hooks/model-enforcer.sh` into `~/.claude/hooks/`.
 
 ---
 
-## IR Format (v1.2)
+## Settings
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
-  "version": 1,
-  "root_hash": "a1b2c3d4e5f6...",
-  "files": {
-    "src/example.ts": {
-      "hash": "abc123...",
-      "imports": ["react", "lodash"],
-      "functions": ["foo", "bar"],
-      "classes": ["UserService"],
-      "exports": ["foo", "UserService"]
-    }
+  "model": "sonnet",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/session-governor.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/model-enforcer.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-**Key Fields:**
-- `version`: IR schema version (always 1 for v1.x)
-- `root_hash`: SHA256 of concatenated `path:hash` pairs (sorted, newline-delimited)
-- `files`: Map of normalized paths to file IR
+---
 
-**Changes from v1.0:**
-- Added `root_hash` for execution fingerprinting
-- Removed `generated_at` (non-deterministic timestamp)
-- Path normalization now includes Unicode NFC (macOS/Linux consistency)
+## Model Routing Logic
+
+| Signal in prompt | Route |
+|---|---|
+| plan, implement feature, build new, end-to-end | Pipeline: haiku explore → opus design → sonnet implement |
+| architect, security review, trade-off, root cause | Opus subagent for reasoning |
+| summarize, search, find, explain code, grep | Haiku subagent |
+| bug fix, refactor, write tests, direct code | Sonnet handles directly (no delegation) |
 
 ---
 
-## Ignored Paths
+## Session Warnings
 
-- `node_modules/`
-- `dist/`
-- `.git/`
-- `.cursor/`
-- `.vscode/`
-
----
-
-## Requirements
-
-- **Go 1.24+**
-- **Dependencies:**
-  - `golang.org/x/text` (Unicode normalization)
+| Turn | Message |
+|---|---|
+| 15 | Consider wrapping up or /compact |
+| 25 | Finish current task, suggest new session |
+| 35 | Session degraded — wrap up now |
 
 ---
 
-## Testing
+## Verify
 
 ```bash
-# Run all tests
-go test ./internal/parser -v
-go test ./internal/ir -v
+# Hooks installed
+ls -la ~/.claude/hooks/
 
-# Run determinism tests specifically
-go test ./internal/parser -v -run Determinism
-go test ./internal/ir -v -run Determinism
+# Governor fires (test haiku routing)
+echo '{"session_id":"test","prompt":"summarize the code"}' | bash hooks/session-governor.sh
+
+# Enforcer reads state
+cat ~/.claude/hooks/.governor-state/test.route
 ```
 
 ---
 
-## Demo
+## Repo Structure
 
-```bash
-go run phase0_demo.go
+```
+.ai/
+├── hooks/
+│   ├── session-governor.sh   # UserPromptSubmit hook
+│   └── model-enforcer.sh     # PreToolUse hook
+├── install.sh                # Symlinks hooks to ~/.claude/hooks/
+├── internal/                 # Go IR generator (future codebase indexer)
+└── README.md
 ```
 
-This will:
-1. Generate IR from `testdata/sample-project`
-2. Display parsed structure
-3. Save IR to JSON
-4. Verify byte-identical regeneration (determinism check)
+The Go code (`internal/`) is the foundation for a future codebase indexer — deterministic IR generation and content-addressed hashing for source files. Not used by the hooks.
 
 ---
 
-## v1 Constraints
+## Roadmap
 
-This is v1. The following are **explicitly forbidden**:
+RunEcho is stage A of a three-stage arc:
 
-- Tree-sitter or AST libraries
-- Call graph analysis
-- Python/Go/Rust support
-- Database backend (JSON only)
-- Background daemons
-- Multi-engine routing
-- Telemetry or remote governance
-- Enterprise features
+**A — Session Discipline (now)**
+- Session governor (turn limits, warnings)
+- Model router (keyword-based routing)
+- Model enforcer (PreToolUse gate)
+- Decision persistence via CLAUDE.md rules
 
-Any expansion requires v2 and architecture review.
+**B — Structural Intelligence (next)**
+- Codebase indexer using the Go IR generator
+- IR-diff: detect what changed between sessions, inject only the delta
+- Anti-hallucination via structural grounding (Claude reads IR, not raw files)
+- Context compression: summarize session state into IR snapshot
 
----
+**C — Multi-Agent Orchestrator (future)**
+- Claude-native agent framework built on the IR + governance layer
+- Fingerprint-gated task routing: tasks matched to agents by codebase context
+- Cost-aware orchestration: enforce haiku/sonnet/opus budgets at the pipeline level
+- Session handoff: compress + resume across sessions without context loss
 
-## Determinism Guarantees
-
-1. **Parse Stability**: 100x identical `FileStructure` output
-2. **JSON Marshalling**: 100x byte-identical JSON
-3. **Full Pipeline**: 100x byte-identical IR generation
-4. **Hash Stability**: 100x identical SHA256 output
-5. **Path Normalization**: Windows/Unix/macOS produce identical paths
-6. **Unicode Normalization**: macOS NFD and Linux NFC produce identical output
-7. **RootHash Stability**: Identical codebase state → identical root_hash
-
----
-
-## Upcoming Phases
-
-- **Phase 1**: Deterministic Core Hardening *COMPLETE*
-- **Phase 2**: Execution Fingerprinting Layer
-- **Phase 3**: CLI Interface (Minimal)
-- **Phase 4**: Boundary / Scope Controls
-- **Phase 5**: Engine Adapters
+Each stage is a separate planning session.
 
 ---
 

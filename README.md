@@ -1,8 +1,8 @@
 # RunEcho
 
-**Status:** Hooks Active ✅
+**Status:** Stage B Active ✅
 
-RunEcho is a session governance and model routing layer for Claude Code. It enforces cost-optimal model selection and session discipline via Claude Code hooks.
+RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
 ---
 
@@ -11,6 +11,7 @@ RunEcho is a session governance and model routing layer for Claude Code. It enfo
 - **Session Governor**: Tracks turn count per session. Warns at turn 15, 25, and 35. Tells Claude to wrap up before context degrades and cache costs compound.
 - **Model Router**: Analyzes each prompt and injects routing guidance — haiku for cheap tasks, opus for architecture, full pipeline (haiku→opus→sonnet) for multi-step work.
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
+- **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
 
 Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = brain.**
 
@@ -22,7 +23,7 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-This symlinks `hooks/session-governor.sh` and `hooks/model-enforcer.sh` into `~/.claude/hooks/`.
+This builds the `ai-ir` binary and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
 
 ---
 
@@ -44,6 +45,16 @@ Add to `~/.claude/settings.json`:
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/ir-injector.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -61,6 +72,8 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+**Order matters:** `session-governor.sh` must appear before `ir-injector.sh` in the array. The governor writes the turn count; the injector reads it.
 
 ---
 
@@ -85,6 +98,29 @@ Add to `~/.claude/settings.json`:
 
 ---
 
+## Stage B: IR Injection
+
+Index a project (run from the project root, or pass a path):
+
+```bash
+ai-ir              # indexes current directory → .ai/ir.json
+ai-ir /path/to/project
+```
+
+On the next Claude Code session in that directory, turn 1 will include:
+
+```
+IR CONTEXT [root_hash: abc123456789...]:
+3 files — src/auth.ts, src/user.ts, utils/helpers.js
+Symbols (12): AuthService, UserService, fetchUser, validateToken, ...
+```
+
+Subsequent turns: silent (no injection). Projects without `.ai/ir.json`: silent. Requires `jq`.
+
+Re-run `ai-ir` any time the codebase changes. It performs incremental updates (only re-parses changed files).
+
+---
+
 ## Verify
 
 ```bash
@@ -96,6 +132,15 @@ echo '{"session_id":"test","prompt":"summarize the code"}' | bash hooks/session-
 
 # Enforcer reads state
 cat ~/.claude/hooks/.governor-state/test.route
+
+# IR injector — turn 1 with ir.json present
+mkdir -p ~/.claude/hooks/.governor-state
+echo "1" > ~/.claude/hooks/.governor-state/test-session
+echo '{"session_id":"test-session","prompt":"fix a bug"}' | bash hooks/ir-injector.sh
+
+# IR injector — not turn 1 (should produce no output)
+echo "5" > ~/.claude/hooks/.governor-state/test-session
+echo '{"session_id":"test-session","prompt":"fix a bug"}' | bash hooks/ir-injector.sh
 ```
 
 ---
@@ -104,33 +149,37 @@ cat ~/.claude/hooks/.governor-state/test.route
 
 ```
 .ai/
+├── cmd/
+│   └── ir/
+│       └── main.go           # ai-ir CLI binary (generates .ai/ir.json)
 ├── hooks/
-│   ├── session-governor.sh   # UserPromptSubmit hook
-│   └── model-enforcer.sh     # PreToolUse hook
-├── install.sh                # Symlinks hooks to ~/.claude/hooks/
-├── internal/                 # Go IR generator (future codebase indexer)
+│   ├── session-governor.sh   # UserPromptSubmit hook — turn count + model routing
+│   ├── model-enforcer.sh     # PreToolUse hook — denies wrong-model subagents
+│   └── ir-injector.sh        # UserPromptSubmit hook — injects IR summary on turn 1
+├── install.sh                # Builds ai-ir, symlinks hooks to ~/.claude/hooks/
+├── internal/                 # Go IR generator and parser
+│   ├── ir/                   # IR types, generator, hasher, storage
+│   └── parser/               # JS/TS parser
 └── README.md
 ```
-
-The Go code (`internal/`) is the foundation for a future codebase indexer — deterministic IR generation and content-addressed hashing for source files. Not used by the hooks.
 
 ---
 
 ## Roadmap
 
-RunEcho is stage A of a three-stage arc:
+RunEcho is a three-stage arc:
 
-**A — Session Discipline (now)**
+**A — Session Discipline ✅ done**
 - Session governor (turn limits, warnings)
 - Model router (keyword-based routing)
 - Model enforcer (PreToolUse gate)
 - Decision persistence via CLAUDE.md rules
 
-**B — Structural Intelligence (next)**
-- Codebase indexer using the Go IR generator
-- IR-diff: detect what changed between sessions, inject only the delta
-- Anti-hallucination via structural grounding (Claude reads IR, not raw files)
-- Context compression: summarize session state into IR snapshot
+**B — Structural Intelligence ✅ done (Stage B)**
+- `ai-ir` CLI: generates `.ai/ir.json` (file list + symbols) for any JS/TS project
+- IR injector hook: injects compact codebase summary on session turn 1
+- Incremental updates: only re-parses files whose hash changed
+- Remaining (Stage C): IR-diff, session handoff, context compression
 
 **C — Multi-Agent Orchestrator (future)**
 - Claude-native agent framework built on the IR + governance layer

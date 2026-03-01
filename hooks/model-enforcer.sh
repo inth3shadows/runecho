@@ -42,13 +42,23 @@ case "$ROUTE" in
     fi
     ;;
   opus)
-    # Router said opus — allow opus and haiku (for exploration support), deny nothing
+    # Router said opus — allow opus and haiku, but warn if model not set explicitly.
+    # Claude Code's subagent_type dispatch doesn't require a model param, so the enforcer
+    # can't block it — but we surface it so Claude is aware.
+    if [ "$REQUESTED_MODEL" = "default" ]; then
+      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"additionalContext\":\"MODEL ENFORCER AUDIT: Route was opus but Task called without explicit model parameter. Native subagent_type routing may not use opus. Set model: \\\"opus\\\" on this Task call to comply with routing.\"}}"
+      exit 0
+    fi
     ;;
   pipeline)
-    # Pipeline mode — haiku and opus both allowed
+    # Pipeline mode — haiku and opus both allowed, but warn if model not set.
+    if [ "$REQUESTED_MODEL" = "default" ]; then
+      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"additionalContext\":\"MODEL ENFORCER AUDIT: Route was pipeline (haiku explore → opus reason) but Task called without explicit model parameter. Set model: \\\"haiku\\\" for exploration subagents and model: \\\"opus\\\" for the reasoning subagent.\"}}"
+      exit 0
+    fi
     ;;
   sonnet)
-    # Direct sonnet work — no subagent constraint (shouldn't need subagents, but allow if used)
+    # Direct sonnet work — no subagent constraint
     ;;
 esac
 

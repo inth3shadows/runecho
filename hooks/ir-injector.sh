@@ -21,6 +21,13 @@ if [ "$COUNT" != "1" ]; then
   exit 0
 fi
 
+# Auto-index: run ai-ir on turn 1 if the binary is available.
+# Incremental — only re-parses changed files, so this is typically <1s.
+# Silent on failure; falls through to whatever ir.json exists (or none).
+if command -v ai-ir &>/dev/null; then
+  ai-ir "$PWD" &>/dev/null || true
+fi
+
 # Look for .ai/ir.json in current working directory (project root)
 IR_FILE="$PWD/.ai/ir.json"
 if [ ! -f "$IR_FILE" ]; then

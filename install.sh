@@ -27,31 +27,32 @@ echo "  $HOOK_DIR/model-enforcer.sh -> $SCRIPT_DIR/hooks/model-enforcer.sh"
 ln -sf "$SCRIPT_DIR/hooks/ir-injector.sh" "$HOOK_DIR/ir-injector.sh"
 echo "  $HOOK_DIR/ir-injector.sh -> $SCRIPT_DIR/hooks/ir-injector.sh"
 
+ln -sf "$SCRIPT_DIR/hooks/stop-checkpoint.sh" "$HOOK_DIR/stop-checkpoint.sh"
+echo "  $HOOK_DIR/stop-checkpoint.sh -> $SCRIPT_DIR/hooks/stop-checkpoint.sh"
+
+ln -sf "$SCRIPT_DIR/hooks/session-end.sh" "$HOOK_DIR/session-end.sh"
+echo "  $HOOK_DIR/session-end.sh -> $SCRIPT_DIR/hooks/session-end.sh"
+
 echo ""
 echo "RunEcho hooks installed:"
 ls -la "$HOOK_DIR/session-governor.sh"
 ls -la "$HOOK_DIR/model-enforcer.sh"
 ls -la "$HOOK_DIR/ir-injector.sh"
+ls -la "$HOOK_DIR/stop-checkpoint.sh"
+ls -la "$HOOK_DIR/session-end.sh"
 ls -la "$BIN_DIR/ai-ir"*
 
 echo ""
-echo "Add ir-injector.sh to ~/.claude/settings.json UserPromptSubmit hooks."
-echo "Wire it AFTER session-governor.sh (governor must write turn count first)."
+echo "Add hooks to ~/.claude/settings.json — see README for full config."
 echo ""
-echo "Add this entry to the UserPromptSubmit hooks array:"
+echo "Required settings.json hook events:"
+echo "  UserPromptSubmit: session-governor.sh, ir-injector.sh"
+echo "  PreToolUse (Task): model-enforcer.sh"
+echo "  Stop: stop-checkpoint.sh"
+echo "  SessionEnd: session-end.sh"
 echo ""
-cat <<'EOF'
-    {
-      "matcher": "",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "bash ~/.claude/hooks/ir-injector.sh",
-          "timeout": 5
-        }
-      ]
-    }
-EOF
+echo "Set RUNECHO_CLASSIFIER_KEY in your PowerShell profile for LLM routing:"
+echo '  $env:RUNECHO_CLASSIFIER_KEY = "sk-ant-api03-..."'
 echo ""
 echo "Then index a project:"
 echo "  cd /path/to/project && ai-ir"

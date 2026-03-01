@@ -123,6 +123,49 @@ ai-ir /path/to/project
 
 ---
 
+## Session Handoff
+
+Closes the cross-session continuity gap. At turn 35, the governor instructs Claude to write `.ai/handoff.md`. On the next session's turn 1, the IR injector reads it and injects it after the IR block.
+
+**Triggers:**
+- Auto: governor fires at turn 35 with `ACTION REQUIRED: Write session handoff now.`
+- Manual: type `write handoff` — routes to haiku
+
+**Files:**
+- `.ai/handoff.md` — current handoff (overwritten each session end)
+- `.ai/handoffs/YYYY-MM-DDTHHMM.md` — rotation archive (last 10 kept)
+
+**Next session injection:** Handoff is injected after the IR block on turn 1 if the file is < 7 days old.
+
+**Canonical format:**
+
+```markdown
+# Session Handoff
+**Date:** 2026-03-01T14:30:00-06:00
+**IR snapshot:** a1b2c3d4e5f6
+**Session length:** ~35 turns
+
+## Accomplished
+- [concise bullet per completed task]
+
+## Decisions
+- **What:** ... **Why:** ...
+
+## In Progress
+- [any task left mid-flight]
+
+## Blocked
+- [blockers or missing info]
+
+## Next Steps
+1. [priority-ordered]
+
+## Notes
+- [anything that doesn't fit above]
+```
+
+---
+
 ## Verify
 
 ```bash
@@ -184,11 +227,11 @@ RunEcho is a three-stage arc:
 - Routing audit: enforcer warns when opus/pipeline expected but Task called without model param
 - Routing fixes: opus check before pipeline; 6 new opus patterns (alignment, feasibility, direction, etc.)
 
-**C — Multi-Agent Orchestrator (future)**
-- Claude-native agent framework built on the IR + governance layer
-- Fingerprint-gated task routing: tasks matched to agents by codebase context
-- Cost-aware orchestration: enforce haiku/sonnet/opus budgets at the pipeline level
-- Session handoff: compress + resume across sessions without context loss
+**C — Multi-Agent Orchestrator (in progress)**
+- Session handoff ✅ — compress + resume across sessions without context loss
+- Claude-native agent framework built on the IR + governance layer (future)
+- Fingerprint-gated task routing: tasks matched to agents by codebase context (future)
+- Cost-aware orchestration: enforce haiku/sonnet/opus budgets at the pipeline level (future)
 
 Each stage is a separate planning session.
 

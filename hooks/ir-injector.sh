@@ -58,4 +58,25 @@ echo "IR CONTEXT [root_hash: ${SHORT_HASH}...]:"
 echo "${FILE_COUNT} files — ${FILE_LIST}"
 echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
 
+# --- Session Handoff Injection ---
+HANDOFF_FILE="$PWD/.ai/handoff.md"
+HANDOFF_DIR="$PWD/.ai/handoffs"
+
+if [ -f "$HANDOFF_FILE" ]; then
+  # Rotate: archive before injecting (cp not mv — original stays until Claude overwrites it)
+  mkdir -p "$HANDOFF_DIR" 2>/dev/null
+  TIMESTAMP=$(date '+%Y-%m-%dT%H%M' 2>/dev/null || date '+%Y%m%d%H%M')
+  cp "$HANDOFF_FILE" "$HANDOFF_DIR/${TIMESTAMP}.md" 2>/dev/null || true
+  # Prune: keep last 10
+  ls -t "$HANDOFF_DIR"/*.md 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
+
+  # Staleness gate: only inject if < 7 days old
+  # Use `find -mtime -7` — works in Git Bash on Windows (date -r does NOT)
+  if find "$HANDOFF_FILE" -mtime -7 2>/dev/null | grep -q .; then
+    echo ""
+    echo "PREVIOUS SESSION HANDOFF [$(date -r "$HANDOFF_FILE" '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')]:"
+    cat "$HANDOFF_FILE"
+  fi
+fi
+
 exit 0

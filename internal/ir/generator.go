@@ -13,7 +13,7 @@ import (
 
 // Generator creates and updates IR from source files.
 type Generator struct {
-	parser       parser.Parser
+	parsers      []parser.Parser
 	ignoredPaths map[string]bool
 }
 
@@ -37,10 +37,11 @@ func NewGenerator(config GeneratorConfig) *Generator {
 		ignored[".git"] = true
 		ignored[".cursor"] = true
 		ignored[".vscode"] = true
+		ignored["testdata"] = true
 	}
 
 	return &Generator{
-		parser:       parser.NewJSParser(),
+		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser()},
 		ignoredPaths: ignored,
 	}
 }
@@ -86,7 +87,7 @@ func (g *Generator) Generate(rootPath string) (*IR, error) {
 
 		// Check if file extension is supported
 		ext := filepath.Ext(path)
-		if !g.parser.SupportsExtension(ext) {
+		if !g.supportsExtension(ext) {
 			return nil
 		}
 
@@ -162,7 +163,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, error) {
 		}
 
 		ext := filepath.Ext(path)
-		if !g.parser.SupportsExtension(ext) {
+		if !g.supportsExtension(ext) {
 			return nil
 		}
 
@@ -231,6 +232,26 @@ func normalizePath(relPath string) string {
 	return normalized
 }
 
+// supportsExtension returns true if any registered parser handles this extension.
+func (g *Generator) supportsExtension(ext string) bool {
+	for _, p := range g.parsers {
+		if p.SupportsExtension(ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// parserFor returns the first parser that supports the given extension, or nil.
+func (g *Generator) parserFor(ext string) parser.Parser {
+	for _, p := range g.parsers {
+		if p.SupportsExtension(ext) {
+			return p
+		}
+	}
+	return nil
+}
+
 // parseFile parses a single file and returns its IR.
 func (g *Generator) parseFile(path string) (FileIR, error) {
 	// Read file
@@ -245,8 +266,15 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		return FileIR{}, fmt.Errorf("failed to hash file: %w", err)
 	}
 
+	// Dispatch to the right parser by extension
+	ext := filepath.Ext(path)
+	p := g.parserFor(ext)
+	if p == nil {
+		return FileIR{}, fmt.Errorf("no parser for extension %s", ext)
+	}
+
 	// Parse structure
-	structure, err := g.parser.Parse(string(content))
+	structure, err := p.Parse(string(content))
 	if err != nil {
 		return FileIR{}, fmt.Errorf("failed to parse file: %w", err)
 	}

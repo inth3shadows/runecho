@@ -26,7 +26,7 @@ func main() {
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
 
 	config := ir.GeneratorConfig{
-		IgnoredPaths: []string{"node_modules", "dist", ".git", ".cursor", ".vscode"},
+		IgnoredPaths: []string{"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata"},
 	}
 	generator := ir.NewGenerator(config)
 

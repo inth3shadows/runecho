@@ -75,13 +75,13 @@ Full `~/.claude/settings.json` hook configuration:
 
 ## Profile Switching (Work + Personal)
 
-Claude Code supports one auth method at a time — OAuth (claude.ai) or API key. If you need both a corporate LiteLLM proxy and a personal Claude Pro subscription on the same machine, a naive `claude /logout` before each work session breaks things: `/logout` resets `hasCompletedOnboarding: false` in `~/.claude.json`, causing the login selector to appear on every subsequent launch even with `ANTHROPIC_API_KEY` correctly set.
+Run Claude Code against a corporate LiteLLM proxy and Claude Pro OAuth simultaneously in separate terminals — no conflicts, no login/logout steps.
 
-**The fix:** a PowerShell switcher that atomically swaps `~/.claude/credentials.json` (the OAuth token file) and sets env vars. No manual login/logout steps.
+**How:** `CLAUDE_CONFIG_DIR` points each profile at an isolated config directory. Work gets `~/.claude-work/` (API key, no OAuth token); personal uses `~/.claude/` (OAuth token, no API key). They never share a `credentials.json`.
 
 ```powershell
-claude-profile work      # stashes OAuth token, sets ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
-claude-profile personal  # restores OAuth token, clears env vars
+claude-profile work      # sets ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL + CLAUDE_CONFIG_DIR=~/.claude-work
+claude-profile personal  # clears all three env vars (falls back to ~/.claude)
 ```
 
 Full setup, mechanics, edge cases, and security notes: **[docs/profile-switching.md](docs/profile-switching.md)**

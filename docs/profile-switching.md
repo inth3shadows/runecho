@@ -1,6 +1,6 @@
 # Claude Code Profile Switching (Work + Personal)
 
-How to run Claude Code against two different authentication backends — a corporate LiteLLM proxy and Claude Pro OAuth — on the same machine, switching between them instantly with no manual login/logout steps.
+How to run Claude Code against two different authentication backends — a corporate LiteLLM proxy and Claude Pro OAuth — on the same machine, simultaneously in different terminals, with no manual login/logout steps.
 
 ---
 
@@ -11,32 +11,28 @@ Claude Code supports two auth methods:
 - **OAuth** (`claude /login` → claude.ai) — for Claude Pro/Max/Team subscriptions
 - **API key** (`ANTHROPIC_API_KEY` env var) — for direct Anthropic API or custom proxies (LiteLLM, Bedrock, etc.)
 
-If you need both (personal Pro subscription + corporate LiteLLM), Claude Code detects when both are present simultaneously and refuses to start cleanly:
+If you need both (personal Pro subscription + corporate LiteLLM), Claude Code warns when it sees both simultaneously:
 
 ```
 ⚠ Auth conflict: Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set.
-This may lead to unexpected behavior.
 ```
 
-The naive fix — manually running `claude /logout` before each work session — resets `hasCompletedOnboarding` to `false` in `~/.claude.json`, causing Claude Code to show the login selector on every subsequent launch, even when your API key is correctly set.
+The naive fix — running `claude /logout` before switching — resets `hasCompletedOnboarding: false` in `~/.claude.json`, causing the login selector to appear on every subsequent launch even with `ANTHROPIC_API_KEY` set.
 
 ---
 
-## Root Cause
+## Solution: Isolated Config Directories
 
-Claude Code stores OAuth credentials in **`~/.claude/credentials.json`**.
+Claude Code supports `CLAUDE_CONFIG_DIR` — an env var that redirects where it reads configuration and credentials. By pointing work sessions at `~/.claude-work/` and leaving personal at the default `~/.claude/`, the two are fully isolated:
 
-- `claude /login` → creates the file
-- `claude /logout` → deletes the file and resets `hasCompletedOnboarding: false` in `~/.claude.json`
-- No `credentials.json` + `hasCompletedOnboarding: false` → login selector shown, even if `ANTHROPIC_API_KEY` is set
+- **Work** sessions: `CLAUDE_CONFIG_DIR=~/.claude-work` + `ANTHROPIC_API_KEY` set → no `credentials.json` in scope, no conflict
+- **Personal** sessions: no `CLAUDE_CONFIG_DIR` (default `~/.claude/`) → `credentials.json` in scope, no API key set
 
-The fix is to **swap** the credentials file atomically as part of profile switching, and **patch** `hasCompletedOnboarding` to `true` for API-key mode.
+Both can run simultaneously in separate terminals with zero conflict.
 
 ---
 
-## Solution: PowerShell Profile Switcher
-
-Add this function to your PowerShell profile (`~\Documents\PowerShell\Microsoft.PowerShell_profile.ps1`):
+## PowerShell Switcher
 
 ```powershell
 function claude-profile {
@@ -48,13 +44,10 @@ function claude-profile {
         return
     }
 
-    $credFile   = "$HOME\.claude\credentials.json"
-    $credStash  = "$HOME\.claude\credentials.personal.json"
-    $claudeJson = "$HOME\.claude.json"
-
     switch ($name) {
         "work" {
             $env:ANTHROPIC_BASE_URL = "https://your-litellm-proxy.example.com/"
+            $env:CLAUDE_CONFIG_DIR  = "$HOME\.claude-work"
             $keyFile = "$HOME\.claude\anthropic-work.key"
             if (-not (Test-Path $keyFile)) {
                 Write-Host "ERROR: Work key not found at $keyFile" -ForegroundColor Red
@@ -67,28 +60,12 @@ function claude-profile {
                     (Get-Content $keyFile | ConvertTo-SecureString)
                 )
             )
-            # Stash personal OAuth token so it doesn't conflict with API key
-            if (Test-Path $credFile) {
-                Move-Item $credFile $credStash -Force
-                Write-Host "  (personal credentials stashed)" -ForegroundColor DarkGray
-            }
-            # Ensure Claude Code doesn't show login selector when no credentials.json exists
-            if (Test-Path $claudeJson) {
-                $cfg = Get-Content $claudeJson -Raw | ConvertFrom-Json
-                $cfg.hasCompletedOnboarding = $true
-                $cfg | ConvertTo-Json -Depth 20 | Set-Content $claudeJson
-            }
         }
         "personal" {
             Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
             Remove-Item Env:ANTHROPIC_API_KEY  -ErrorAction SilentlyContinue
-            # Restore personal OAuth token
-            if (Test-Path $credStash) {
-                Move-Item $credStash $credFile -Force
-                Write-Host "  (personal credentials restored)" -ForegroundColor DarkGray
-            } else {
-                Write-Host "  (no stashed credentials — run: claude /login)" -ForegroundColor Yellow
-            }
+            Remove-Item Env:OPENAI_API_KEY     -ErrorAction SilentlyContinue
+            Remove-Item Env:CLAUDE_CONFIG_DIR  -ErrorAction SilentlyContinue
         }
     }
     Write-Host "Claude profile: $name" -ForegroundColor Cyan
@@ -107,40 +84,40 @@ Set-Alias -Name cp-claude -Value claude-profile
 "sk-ant-api03-YOUR-WORK-KEY" | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString | Set-Content "$HOME\.claude\anthropic-work.key"
 ```
 
-The key is encrypted with DPAPI — it can only be decrypted by your Windows user account on this machine.
+Encrypted with Windows DPAPI — only readable by your user account on this machine.
 
-### 2. Create profile stub files
-
-These tell the switcher which profile names are valid. They can also hold profile-specific settings.
+### 2. Create the work config directory
 
 ```powershell
-# ~/.claude/profiles/work.json
-{
-  "model": "claude-sonnet-4-6"
-}
-
-# ~/.claude/profiles/personal.json
-{
-  "model": "sonnet"
-}
+mkdir "$HOME\.claude-work"
+Copy-Item "$HOME\.claude\settings.json" "$HOME\.claude-work\settings.json"
 ```
 
-### 3. Bootstrap personal credentials
+The work config dir needs a `settings.json` (for hooks, model settings, etc.) but no `credentials.json`.
 
-Switch to personal mode and log in once:
+### 3. Create profile stub files
+
+```powershell
+# ~/.claude/profiles/work.json and ~/.claude/profiles/personal.json
+{ "model": "sonnet" }
+```
+
+These tell the switcher which profile names are valid.
+
+### 4. Bootstrap personal credentials (once)
 
 ```powershell
 claude-profile personal
-claude  # then run /login inside Claude Code
+claude  # run /login inside Claude Code
 ```
 
-After `/login`, `~/.claude/credentials.json` exists. Going forward, the switcher stashes and restores it — you never need to `/login` again unless the token expires.
+After `/login`, `~/.claude/credentials.json` exists and persists. The switcher doesn't touch it.
 
-### 4. Verify work mode
+### 5. Verify work mode
 
 ```powershell
 claude-profile work
-claude  # /status should show: Auth token: none, API key: ANTHROPIC_API_KEY, Base URL: your-proxy
+claude  # /status → Settings tab should show API key auth, LiteLLM base URL
 ```
 
 ---
@@ -148,18 +125,16 @@ claude  # /status should show: Auth token: none, API key: ANTHROPIC_API_KEY, Bas
 ## Day-to-Day Usage
 
 ```powershell
-# Start a work session
+# Work terminal
 claude-profile work
-cd C:\Work\projects\my-project
 claude
 
-# Start a personal session
+# Personal terminal (can be open at the same time)
 claude-profile personal
-cd C:\personal_projects\my-project
 claude
 ```
 
-No logout needed. No login screen. The switch is instant.
+No logout needed. No login screen. Simultaneous terminals work cleanly.
 
 ---
 
@@ -168,21 +143,18 @@ No logout needed. No login screen. The switch is instant.
 ```
 claude-profile work
 │
-├── Set $env:ANTHROPIC_BASE_URL  → LiteLLM proxy URL
-├── Set $env:ANTHROPIC_API_KEY   → decrypted from ~/.claude/anthropic-work.key
-├── Move credentials.json        → credentials.personal.json  (stash OAuth token)
-└── Patch ~/.claude.json         → hasCompletedOnboarding: true
+├── Set ANTHROPIC_BASE_URL  → LiteLLM proxy URL
+├── Set ANTHROPIC_API_KEY   → decrypted from ~/.claude/anthropic-work.key
+└── Set CLAUDE_CONFIG_DIR   → ~/.claude-work  (no credentials.json here)
 
 claude-profile personal
 │
-├── Remove $env:ANTHROPIC_BASE_URL
-├── Remove $env:ANTHROPIC_API_KEY
-└── Move credentials.personal.json → credentials.json  (restore OAuth token)
+├── Remove ANTHROPIC_BASE_URL
+├── Remove ANTHROPIC_API_KEY
+└── Remove CLAUDE_CONFIG_DIR  (falls back to ~/.claude, which has credentials.json)
 ```
 
-**Work mode:** no `credentials.json` on disk, `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` in env, `hasCompletedOnboarding: true` → Claude uses API key, routes through proxy, no login screen.
-
-**Personal mode:** `credentials.json` present, no env vars → Claude uses OAuth, routes through claude.ai.
+The config directories never share a `credentials.json`, so there is no auth conflict regardless of how many terminals are open or in what order you switch.
 
 ---
 
@@ -208,32 +180,16 @@ Login method: Claude Pro Account
 
 | Scenario | Behavior |
 |---|---|
-| OAuth token expires | `claude-profile personal` → `claude` → run `/login` once; switcher will stash new token going forward |
-| Work key rotated | Re-run the `ConvertTo-SecureString` store command with new key |
+| OAuth token expires | `claude-profile personal` → run `/login` once inside Claude Code |
+| Work key rotated | Re-run the `ConvertTo-SecureString` store command with the new key |
 | Opened Claude before switching profiles | Restart Claude after switching — env vars are read at launch |
-| `~/.claude.json` doesn't exist | Patch step no-ops silently; login screen may appear once on first work launch |
+| `~/.claude-work/settings.json` missing | Claude Code uses defaults; re-copy from `~/.claude/settings.json` |
 
 ---
 
 ## Security Notes
 
-- **Work API key** is stored encrypted via Windows DPAPI (`ConvertTo-SecureString` / `ConvertFrom-SecureString`). It is not readable by other Windows user accounts.
-- **`credentials.json`** is stored in plaintext by Claude Code itself — this is upstream behavior, not introduced by this setup.
-- Neither the key nor the token is ever written to `settings.json` or any file tracked by git.
-
----
-
-## Why Not Use `settings.json` env Block?
-
-The work docs suggest putting `ANTHROPIC_API_KEY` directly in `~/.claude/settings.json`:
-
-```json
-{ "env": { "ANTHROPIC_API_KEY": "sk-ant-..." } }
-```
-
-This works, but:
-1. The key is in plaintext in a config file
-2. It applies globally — no way to switch profiles without editing the file
-3. Still conflicts with OAuth if you run `/login` for personal use
-
-The PowerShell switcher approach keeps the key encrypted, makes switching instant, and requires zero edits to any config file after initial setup.
+- **Work API key** is stored encrypted via Windows DPAPI. Not readable by other user accounts.
+- **`credentials.json`** is stored in plaintext by Claude Code itself — upstream behavior.
+- Neither the key nor the token is ever written to any file tracked by git.
+- `CLAUDE_CONFIG_DIR` is an officially supported Claude Code environment variable.

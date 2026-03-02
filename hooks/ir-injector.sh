@@ -28,6 +28,17 @@ if command -v ai-ir &>/dev/null; then
   ai-ir "$PWD" &>/dev/null || true
 fi
 
+# Take session-start snapshot (turn 1 only — gate already active above).
+if command -v ai-ir &>/dev/null; then
+  ai-ir snapshot --label=session-start --session="$SESSION_ID" "$PWD" &>/dev/null || true
+fi
+
+# Capture compact structural diff from prior session-end (if any).
+DIFF_LINE=""
+if command -v ai-ir &>/dev/null && [ -f "$PWD/.ai/history.db" ]; then
+  DIFF_LINE=$(ai-ir diff --since=session-end --compact "$PWD" 2>/dev/null || true)
+fi
+
 # Look for .ai/ir.json in current working directory (project root)
 IR_FILE="$PWD/.ai/ir.json"
 if [ ! -f "$IR_FILE" ]; then
@@ -57,6 +68,12 @@ SYMBOL_COUNT=$(jq -r '
 echo "IR CONTEXT [root_hash: ${SHORT_HASH}...]:"
 echo "${FILE_COUNT} files — ${FILE_LIST}"
 echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
+
+# Inject compact diff if there were structural changes since last session-end.
+if [ -n "$DIFF_LINE" ]; then
+  echo ""
+  echo "$DIFF_LINE"
+fi
 
 # --- Session Handoff Injection ---
 HANDOFF_FILE="$PWD/.ai/handoff.md"

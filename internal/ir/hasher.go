@@ -61,3 +61,4 @@ func ComputeRootHash(files map[string]FileIR) string {
 
 	return HashBytes([]byte(builder.String()))
 }
+

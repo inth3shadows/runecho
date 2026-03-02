@@ -12,6 +12,11 @@ testdata/*.json
 !testdata/*.example.json
 .ai/
 
+# Snapshot DB (per-project, not committed)
+.ai/history.db
+.ai/history.db-shm
+.ai/history.db-wal
+
 # IDE / Editor
 .vscode/
 .idea/

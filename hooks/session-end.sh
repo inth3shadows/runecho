@@ -30,7 +30,12 @@ fi
 # Don't overwrite an existing handoff
 [ -f "$HANDOFF_FILE" ] && exit 0
 
-# Nothing to recover from
+# Try ai-session first — reads the full JSONL log for ground-truth facts
+if command -v ai-session &>/dev/null && [ -n "$SESSION_ID_VAL" ]; then
+  ai-session --session="$SESSION_ID_VAL" --out="$HANDOFF_FILE" "$CWD" 2>/dev/null && exit 0
+fi
+
+# Fallback: minimal template from checkpoint.json (ai-session unavailable or failed)
 [ ! -f "$CHECKPOINT_FILE" ] && exit 0
 
 TURN=$(jq -r '.turn // "unknown"' "$CHECKPOINT_FILE" 2>/dev/null || echo "unknown")
@@ -39,35 +44,22 @@ IR_HASH=$(jq -r '.ir_hash // ""' "$CHECKPOINT_FILE" 2>/dev/null || echo "")
 LAST_MSG=$(jq -r '.last_assistant_message // ""' "$CHECKPOINT_FILE" 2>/dev/null || echo "")
 
 cat > "$HANDOFF_FILE" <<EOF
-# Session Handoff (auto-generated on termination)
+# Session Handoff (fallback — ai-session unavailable)
 **Date:** ${TS}
 **IR snapshot:** ${IR_HASH}
 **Session length:** ~${TURN} turns
 **Termination reason:** ${REASON}
 
 ## Accomplished
-- (session ended before handoff was written — check git log for recent changes)
-
-## Decisions
-- unknown
-
-## In Progress
-- unknown — last assistant message (truncated):
-  ${LAST_MSG}
-
-## Blocked
-- unknown
+- (install ai-session for ground-truth handoffs)
+- Last message: ${LAST_MSG}
 
 ## Next Steps
-1. Review recent changes in git log
+1. Review git log for changes made this session
 2. Re-orient with IR context on next session start
 
-## Notes
-- This handoff was auto-generated from checkpoint.json (reason: ${REASON})
-- A Claude-written handoff would have more detail
-
 ## Structural Changes
-${VERIFY_SUMMARY:-"(no session-start snapshot — run ai-ir snapshot --label=session-start)"}
+${VERIFY_SUMMARY:-"(no session-start snapshot)"}
 EOF
 
 exit 0

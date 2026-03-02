@@ -26,7 +26,15 @@
       "Bash(seq 27:*)",
       "Bash(bash:*)",
       "Bash(rm:*)",
-      "Bash(xxd:*)"
+      "Bash(xxd:*)",
+      "WebFetch(domain:www.dolthub.com)",
+      "WebFetch(domain:datastation.multiprocess.io)",
+      "WebFetch(domain:smartscribs.com)",
+      "Bash(./ai-ir.exe verify:*)",
+      "Bash(./ai-ir.exe diff:*)",
+      "Bash(./ai-ir.exe:*)",
+      "Bash(go:*)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)\\)\")"
     ]
   }
 }

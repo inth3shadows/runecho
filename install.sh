@@ -17,6 +17,14 @@ cd "$SCRIPT_DIR"
 go build -o "$BIN_DIR/ai-ir" ./cmd/ir
 echo "  Built: $BIN_DIR/ai-ir"
 
+echo "Building ai-session..."
+go build -o "$BIN_DIR/ai-session" ./cmd/session
+echo "  Built: $BIN_DIR/ai-session"
+
+echo "Building ai-document..."
+go build -o "$BIN_DIR/ai-document" ./cmd/document
+echo "  Built: $BIN_DIR/ai-document"
+
 # Symlink hooks
 ln -sf "$SCRIPT_DIR/hooks/session-governor.sh" "$HOOK_DIR/session-governor.sh"
 echo "  $HOOK_DIR/session-governor.sh -> $SCRIPT_DIR/hooks/session-governor.sh"
@@ -41,6 +49,8 @@ ls -la "$HOOK_DIR/ir-injector.sh"
 ls -la "$HOOK_DIR/stop-checkpoint.sh"
 ls -la "$HOOK_DIR/session-end.sh"
 ls -la "$BIN_DIR/ai-ir"*
+ls -la "$BIN_DIR/ai-session"
+ls -la "$BIN_DIR/ai-document"
 
 echo ""
 echo "Add hooks to ~/.claude/settings.json — see README for full config."

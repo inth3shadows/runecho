@@ -13,7 +13,9 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
 - **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
 - **Stop Checkpoint**: After every Claude response, writes `.ai/checkpoint.json` with turn count, IR hash, and last message. Provides state for failure recovery.
-- **Session End**: On session termination, synthesizes `.ai/handoff.md` from the checkpoint if one wasn't already written. No-ops if Claude already wrote a proper handoff.
+- **Session End**: On session termination, runs a three-tier handoff pipeline: (1) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (2) falls back to minimal checkpoint template if JSONL unavailable, (3) calls `ai-document` to update project docs if structural changes occurred.
+- **Session Synthesizer** (`ai-session`): Reads the Claude Code JSONL session log, extracts ground-truth facts (files edited/created, commands run, token counts, cost, duration), and calls haiku to summarize the session narrative. Produces `.ai/handoff.md` with factual accuracy — no speculation.
+- **Document Generator** (`ai-document`): Auto-generates and updates project documentation (README.md, TECHNICAL.md, USAGE.md) using haiku. Change-gated by IR diff — skips entirely if no structural changes and docs already exist. Work mode generates all three docs; personal/unknown mode generates README only.
 
 Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = brain.**
 
@@ -25,7 +27,13 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds the `ai-ir` binary and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
+Builds three binaries and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
+
+| Binary | Purpose |
+|---|---|
+| `ai-ir` | Indexes codebase → `.ai/ir.json`; manages SQLite snapshot history |
+| `ai-session` | Parses Claude Code JSONL log → ground-truth session handoff |
+| `ai-document` | Auto-generates/updates README.md, TECHNICAL.md, USAGE.md via haiku |
 
 ---
 
@@ -150,12 +158,17 @@ Symbols (12): AuthService, UserService, fetchUser, validateToken, ...
 
 Subsequent turns: silent. Unsupported projects: silent.
 
-To manually force a re-index:
+### ai-ir Subcommands
 
 ```bash
-ai-ir              # current directory
-ai-ir /path/to/project
+ai-ir [root]                              # index/update .ai/ir.json
+ai-ir snapshot [--label=name] [root]      # save IR snapshot to SQLite history
+ai-ir diff [--since=label | id-a id-b]   # structural delta between snapshots
+ai-ir verify [--session=id] [root]        # format diff summary for handoff
+ai-ir log [--n=10] [root]                 # list snapshots with timestamps
 ```
+
+`session-end.sh` calls `snapshot` → `verify` → passes the diff to `ai-document`. Use `diff --since=session-end` to see what changed in the last session.
 
 ---
 
@@ -165,31 +178,67 @@ Closes the cross-session continuity gap.
 
 **Normal path:** at turn 35, the governor instructs Claude to write `.ai/handoff.md`. On the next session's turn 1, the IR injector injects it after the IR block.
 
-**Failure recovery path:** if the session terminates before Claude writes a handoff (crash, kill, early exit), `session-end.sh` synthesizes a minimal `.ai/handoff.md` from `checkpoint.json`. The checkpoint is written after every response by `stop-checkpoint.sh`, so state is never older than one turn.
+**SessionEnd pipeline** (`session-end.sh`):
+1. `ai-ir snapshot` — capture final IR state to SQLite
+2. `ai-ir verify` — compute structural diff summary since last snapshot
+3. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
+4. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
+5. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
 
 **Triggers (Claude-written handoff):**
 - Auto: governor fires at turn 35 with `ACTION REQUIRED: Write session handoff now.`
 - Manual: type `write handoff` — routes to haiku
 
 **Files:**
-- `.ai/handoff.md` — current handoff (written by Claude or synthesized from checkpoint)
-- `.ai/checkpoint.json` — updated after every response; used by session-end.sh for recovery
+- `.ai/handoff.md` — current handoff (from ai-session, Claude, or checkpoint fallback)
+- `.ai/checkpoint.json` — updated after every response; used as fallback recovery state
 
-**Canonical format (Claude-written):**
+**ai-session output format:**
 
 ```markdown
 # Session Handoff
-**Date:** 2026-03-01T14:30:00-06:00
-**IR snapshot:** a1b2c3d4e5f6
-**Session length:** ~35 turns
+**Date:** 2026-03-02 | **Turns:** 35 | **Duration:** 11m18s | **Cost:** ~$1.82
+**Model:** claude-sonnet-4-6 | **Tokens:** 12k in / 40k out / 4019k cache
+
+## Files Changed
+- path/to/file.go (created)
+
+## Commands Run
+- go build ./...
 
 ## Accomplished
 ## Decisions
 ## In Progress
-## Blocked
 ## Next Steps
 ## Notes
 ```
+
+---
+
+## Auto-Generated Documentation
+
+`ai-document` generates and updates project docs using haiku, gated by structural changes.
+
+```bash
+ai-document [root]                         # auto-detect mode, skip if no changes
+ai-document --ir-diff="<diff>" [root]      # use IR diff to update existing docs
+ai-document --mode=work|personal [root]    # override mode detection
+ai-document --dry-run [root]               # preview without writing
+ai-document --force [root]                 # bypass change-gate, regenerate all
+```
+
+**Docs generated:**
+
+| Mode | Docs |
+|---|---|
+| work | README.md, TECHNICAL.md, USAGE.md (parallel, ~2000 token budget each) |
+| personal / unknown | README.md only (sequential, ~800 token budget) |
+
+**Change-gate:** if all managed docs exist and `--ir-diff` is empty, generation is skipped. Pass `--force` to override. The gate prevents unnecessary API calls when nothing structural changed.
+
+**Integration:** `session-end.sh` calls `ai-document --ir-diff="$VERIFY_SUMMARY"` after writing the handoff. Runs in the background, non-fatal.
+
+**Requires:** `RUNECHO_CLASSIFIER_KEY` — same key used by the model router classifier.
 
 ---
 
@@ -198,6 +247,9 @@ Closes the cross-session continuity gap.
 ```bash
 # Hooks installed
 ls -la ~/.claude/hooks/
+
+# Binaries built
+ls -la ~/bin/ai-ir ~/bin/ai-session ~/bin/ai-document
 
 # Governor + classifier fallback (no key = regex fires)
 RUNECHO_CLASSIFIER_KEY="" \
@@ -210,7 +262,19 @@ mkdir -p "$STATE_DIR" && echo "5" > "$STATE_DIR/test-ck"
 echo '{"session_id":"test-ck","cwd":"'$PWD'","last_assistant_message":"done"}' | bash hooks/stop-checkpoint.sh
 cat .ai/checkpoint.json
 
-# SessionEnd synthesize (no existing handoff)
+# ai-session: factual extraction (no API key needed for factual-only mode)
+ai-session --session="$SESSION_ID" .
+cat .ai/handoff.md
+
+# ai-document: dry-run (requires RUNECHO_CLASSIFIER_KEY)
+ai-document --dry-run .
+
+# ai-ir snapshot + diff
+ai-ir snapshot --label=test .
+ai-ir log .
+ai-ir diff --since=test .
+
+# SessionEnd full pipeline
 rm -f .ai/handoff.md
 echo '{"session_id":"test-ck","cwd":"'$PWD'","reason":"other"}' | bash hooks/session-end.sh
 cat .ai/handoff.md
@@ -225,17 +289,25 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 
 ```
 .ai/
-├── cmd/ir/main.go              # ai-ir CLI binary (generates .ai/ir.json)
+├── cmd/
+│   ├── document/main.go        # ai-document — auto-generates project docs via haiku
+│   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
+│   └── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
 ├── hooks/
-│   ├── session-governor.sh     # UserPromptSubmit — turn count + model routing (classifier + regex)
+│   ├── session-governor.sh     # UserPromptSubmit — turn count + model routing
 │   ├── model-enforcer.sh       # PreToolUse — denies wrong-model subagents
 │   ├── ir-injector.sh          # UserPromptSubmit — injects IR summary on turn 1
 │   ├── stop-checkpoint.sh      # Stop — writes .ai/checkpoint.json after each response
-│   └── session-end.sh          # SessionEnd — synthesizes handoff from checkpoint on termination
-├── install.sh                  # Builds ai-ir, symlinks hooks to ~/.claude/hooks/
+│   └── session-end.sh          # SessionEnd — JSONL handoff → checkpoint fallback → doc update
+├── install.sh                  # Builds all binaries, symlinks hooks to ~/.claude/hooks/
 ├── internal/
+│   ├── document/               # doc generation: types, generator, reader, writer
 │   ├── ir/                     # IR types, generator, hasher, storage
-│   └── parser/                 # JS/TS + Go parsers
+│   ├── parser/                 # JS/TS + Go parsers
+│   ├── session/                # session fact extraction, JSONL parser, summarizer, writer
+│   └── snapshot/               # SQLite snapshot store, structural diff engine
+├── docs/
+│   └── profile-switching.md    # work/personal profile setup
 └── README.md
 ```
 
@@ -257,7 +329,10 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - LLM classifier (haiku, 2s timeout) replaces regex as primary router
 - Regex fallback — zero regression on key absence or API failure
 - Stop checkpoint: turn-level state persistence after every response
-- SessionEnd recovery: synthesizes handoff from checkpoint on abnormal termination
+- `ai-session`: ground-truth handoff from Claude Code JSONL log (files, commands, tokens, cost)
+- `ai-ir snapshot/diff/verify`: SQLite snapshot store + structural diff between sessions
+- `ai-document`: change-gated doc generation (README, TECHNICAL.md, USAGE.md) via haiku
+- SessionEnd pipeline: JSONL → checkpoint fallback → doc update
 
 **D — Multi-Agent Orchestrator (future)**
 - Claude-native agent framework built on the IR + governance layer

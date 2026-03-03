@@ -32,7 +32,13 @@ fi
 
 # Try ai-session first — reads the full JSONL log for ground-truth facts
 if command -v ai-session &>/dev/null && [ -n "$SESSION_ID_VAL" ]; then
-  ai-session --session="$SESSION_ID_VAL" --out="$HANDOFF_FILE" "$CWD" 2>/dev/null && exit 0
+  if ai-session --session="$SESSION_ID_VAL" --out="$HANDOFF_FILE" "$CWD" 2>/dev/null; then
+    # ai-document: update project docs, change-gated by IR diff (non-fatal)
+    if command -v ai-document &>/dev/null; then
+      ai-document --ir-diff="$VERIFY_SUMMARY" "$CWD" &>/dev/null || true
+    fi
+    exit 0
+  fi
 fi
 
 # Fallback: minimal template from checkpoint.json (ai-session unavailable or failed)

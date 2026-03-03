@@ -80,6 +80,10 @@ COST_FMT=$(awk -v c="$SESSION_COST" 'BEGIN { printf "~$%.2f", c+0 }')
 COST_WARN="1.00"
 COST_STRONG="3.00"
 COST_STOP="8.00"
+
+# Cost-based routing cap. When session cost >= COST_STOP, opus and pipeline routes are
+# downgraded to sonnet. Set to false to disable (opus always available regardless of cost).
+BLOCK_OPUS_ON_COST=true
 COST_LEVEL=$(awk -v c="$SESSION_COST" -v stop="$COST_STOP" -v strong="$COST_STRONG" -v warn="$COST_WARN" '
   BEGIN {
     if (c+0 >= stop+0) print "stop"
@@ -213,6 +217,16 @@ else
   # No match = Sonnet handles directly (code writing, bug fixes, tests, etc.)
 fi
 
+# --- Cost-Based Routing Cap ---
+# If BLOCK_OPUS_ON_COST=true and session cost >= COST_STOP, downgrade opus/pipeline
+# to sonnet. Prevents continued expensive model dispatch in a costly session.
+if [ "$BLOCK_OPUS_ON_COST" = "true" ] && [ "$COST_LEVEL" = "stop" ]; then
+  if echo "$ROUTE" | grep -qE "(MULTI-STEP PIPELINE|Deep reasoning)"; then
+    ROUTE=""  # Sonnet direct — opus blocked
+    OPUS_BLOCKED_MSG="MODEL ROUTER: Opus/pipeline blocked — session cost ${COST_FMT} exceeds limit. Handling directly as Sonnet. Start a new session to re-enable opus routing."
+  fi
+fi
+
 # --- Write routing state for model-enforcer.sh ---
 ROUTE_FILE="$STATE_DIR/${SESSION_ID}.route"
 if echo "$ROUTE" | grep -q "MULTI-STEP PIPELINE"; then
@@ -226,13 +240,12 @@ else
 fi
 
 # --- Combine Output ---
-if [ -n "$ROUTE" ]; then
-  if [ -n "$OUTPUT" ]; then
-    OUTPUT="$OUTPUT
-$ROUTE"
-  else
-    OUTPUT="$ROUTE"
-  fi
+if [ -n "${OPUS_BLOCKED_MSG:-}" ]; then
+  OUTPUT="${OUTPUT:+$OUTPUT
+}$OPUS_BLOCKED_MSG"
+elif [ -n "$ROUTE" ]; then
+  OUTPUT="${OUTPUT:+$OUTPUT
+}$ROUTE"
 fi
 
 if [ -n "$OUTPUT" ]; then

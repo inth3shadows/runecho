@@ -22,6 +22,7 @@ import (
 //   ai-ir diff [--since=label | id-a id-b] [--compact] [root]
 //   ai-ir log [--n=10] [root]
 //   ai-ir verify [--session=""] [root]
+//   ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -36,6 +37,9 @@ func main() {
 			return
 		case "verify":
 			runVerify(os.Args[2:])
+			return
+		case "churn":
+			runChurn(os.Args[2:])
 			return
 		}
 	}
@@ -320,6 +324,31 @@ func mustLoadIR(root string) *ir.IR {
 		os.Exit(1)
 	}
 	return irData
+}
+
+// runChurn reports file and symbol churn rate across recent snapshots.
+func runChurn(args []string) {
+	fs := flag.NewFlagSet("churn", flag.ExitOnError)
+	n := fs.Int("n", 20, "number of snapshots to analyze")
+	minChanges := fs.Int("min-changes", 2, "minimum diffs a file/symbol must appear in to be considered hot")
+	compact := fs.Bool("compact", false, "single-line compact output")
+	fs.Parse(args)
+
+	root := resolveRoot(fs.Args())
+	db := mustOpenDB(root)
+	defer db.Close()
+
+	report, err := db.Churn(root, *n)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *compact {
+		fmt.Println(snapshot.FormatChurnCompact(report))
+	} else {
+		fmt.Print(snapshot.FormatChurn(report, *minChanges))
+	}
 }
 
 // mustOpenDB opens .ai/history.db from root or exits.

@@ -18,13 +18,13 @@ SESSION_ID_ARG=""
 
 if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/ir.json" ]; then
   ai-ir "$CWD" &>/dev/null || true  # re-index to capture final file state
-  ai-ir snapshot --label=session-end $SESSION_ID_ARG "$CWD" &>/dev/null || true
+  ai-ir snapshot --label=session-end ${SESSION_ID_ARG:+"$SESSION_ID_ARG"} "$CWD" &>/dev/null || true
 fi
 
 # Compute verify summary for embedding in auto-generated handoff.
 VERIFY_SUMMARY=""
 if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/history.db" ]; then
-  VERIFY_SUMMARY=$(ai-ir verify $SESSION_ID_ARG "$CWD" 2>/dev/null || true)
+  VERIFY_SUMMARY=$(ai-ir verify ${SESSION_ID_ARG:+"$SESSION_ID_ARG"} "$CWD" 2>/dev/null || true)
 fi
 
 # Don't overwrite an existing handoff

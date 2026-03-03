@@ -6,9 +6,23 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 
 ---
 
+## Concepts
+
+**Session Governor** — A Claude Code hook (`UserPromptSubmit`) that fires on every user message. Tracks turn count and cumulative session cost, injects warnings when thresholds are crossed, and enforces model routing by injecting routing directives Claude must follow.
+
+**Model Routing** — Classifying a prompt by intent (read, reason, code, multi-step) and telling the LLM which model to use for which subtask. RunEcho injects this guidance *into the LLM's context* so Claude routes itself — distinct from API-level routers that intercept requests before they reach the model.
+
+**Codebase IR (Intermediate Representation)** — A compact, structured index of a project: file list + all exported symbols (functions, types, interfaces, constants). Not a vector embedding. A flat, deterministic fact table computed from AST parsing of JS/TS/Go files and stored as `.ai/ir.json`.
+
+**IR Injection** — Feeding the codebase IR into the LLM's context on session turn 1, before any user task. Claude starts every session knowing what files and symbols exist without having to grep or read files to orient itself. Subsequent turns are silent.
+
+**Session Handoff** — A structured markdown summary written at session end: files changed, commands run, decisions made, next steps. Bridges the gap between Claude Code sessions so context isn't rebuilt from scratch each time.
+
+---
+
 ## What It Does
 
-- **Session Governor**: Tracks turn count per session. Three graduated thresholds: turn 15 = soft nudge ("consider /compact"), turn 25 = strong warning ("finish current task, open new session"), turn 35 = hard stop with ACTION REQUIRED — Claude must write `.ai/handoff.md` immediately, including the current IR snapshot hash. Prevents context degradation and compounding cache costs.
+- **Session Governor**: Tracks turn count and session cost. Thresholds trigger on whichever hits first — turns (15/25/35) or cost ($1/$3/$8). At the hard threshold (turn 35 or $8), opus/pipeline routing is blocked and Claude must write `.ai/handoff.md` immediately including the current IR snapshot hash. Prevents context degradation and compounding cache costs.
 - **Model Router**: Classifies each prompt via a haiku LLM call and injects routing guidance — haiku for cheap tasks, opus for architecture, full pipeline (haiku→opus→sonnet) for multi-step work. Falls back to regex if classifier is unavailable.
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
 - **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
@@ -16,6 +30,10 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Session End**: On session termination, runs a three-tier handoff pipeline: (1) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (2) falls back to minimal checkpoint template if JSONL unavailable, (3) calls `ai-document` to update project docs if structural changes occurred.
 - **Session Synthesizer** (`ai-session`): Reads the Claude Code JSONL session log, extracts ground-truth facts (files edited/created, commands run, token counts, cost, duration), and calls haiku to summarize the session narrative. Produces `.ai/handoff.md` with factual accuracy — no speculation.
 - **Document Generator** (`ai-document`): Auto-generates and updates project documentation (README.md, TECHNICAL.md, USAGE.md) using haiku. Change-gated by IR diff — skips entirely if no structural changes and docs already exist. Work mode generates all three docs; personal/unknown mode generates README only.
+- **Destructive Bash Guard**: PreToolUse[Bash] hook. Hard-denies catastrophic commands (`rm -rf /`, `mkfs`, fork-bombs). Approval-gates dangerous-but-recoverable patterns: `rm -rf`, `git reset --hard`, `DROP TABLE`, pipe-to-shell installs.
+- **Scope Guard**: PreToolUse[Edit|Write] hook. Always blocks writes to settings files, hook files, `.env`, and `*.key`. Optional scope-lock via `.ai/scope-lock.json` — when present, restricts all writes to declared paths only.
+- **Constraint Reinjector**: SessionStart hook (matcher: `compact`). Re-injects active constraints after context compaction so BPB rules and routing directives survive a `/compact`.
+- **Pre-Compact Snapshot**: PreCompact hook. Captures a session state snapshot immediately before compaction so the reinjector has accurate, current data to work from.
 
 Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = brain.**
 
@@ -45,6 +63,12 @@ Full `~/.claude/settings.json` hook configuration:
 {
   "model": "sonnet",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/constraint-reinjector.sh", "timeout": 3 }]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "",
@@ -59,6 +83,20 @@ Full `~/.claude/settings.json` hook configuration:
       {
         "matcher": "Task",
         "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/model-enforcer.sh", "timeout": 5 }]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/destructive-bash-guard.sh", "timeout": 3 }]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/scope-guard.sh", "timeout": 3 }]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/pre-compact-snapshot.sh", "timeout": 3 }]
       }
     ],
     "Stop": [
@@ -132,15 +170,19 @@ Classifier routes first. Regex fires as fallback.
 
 Opus check runs before pipeline — "review the plan" routes to opus, not pipeline.
 
+**Cost cap:** when session cost reaches $8 (`COST_STOP`), opus and pipeline routes are downgraded to sonnet direct. Start a new session to restore opus routing.
+
 ---
 
 ## Session Warnings
 
-| Turn | Message |
-|---|---|
-| 15 | Soft nudge: "Consider wrapping up soon or /compact." |
-| 25 | Strong warning: "Session is long. Finish current task, suggest /compact or new session." |
-| 35 | Hard stop: "Context is degrading. ACTION REQUIRED: write `.ai/handoff.md` now with IR snapshot hash." |
+Triggers on whichever threshold hits first — turn count or session cost.
+
+| Threshold | Turn | Cost | Message |
+|---|---|---|---|
+| Warn | 15 | $1.00 | "Cost rising. Consider wrapping up soon or /compact." |
+| Strong | 25 | $3.00 | "Session is expensive. Finish current task, suggest /compact or new session." |
+| Stop | 35 | $8.00 | "Session limit reached. ACTION REQUIRED: write `.ai/handoff.md` now with IR snapshot hash." Opus/pipeline routing blocked. |
 
 ---
 
@@ -161,11 +203,12 @@ Subsequent turns: silent. Unsupported projects: silent.
 ### ai-ir Subcommands
 
 ```bash
-ai-ir [root]                              # index/update .ai/ir.json
-ai-ir snapshot [--label=name] [root]      # save IR snapshot to SQLite history
-ai-ir diff [--since=label | id-a id-b]   # structural delta between snapshots
-ai-ir verify [--session=id] [root]        # format diff summary for handoff
-ai-ir log [--n=10] [root]                 # list snapshots with timestamps
+ai-ir [root]                                        # index/update .ai/ir.json
+ai-ir snapshot [--label=name] [root]                # save IR snapshot to SQLite history
+ai-ir diff [--since=label | id-a id-b] [root]       # structural delta between snapshots
+ai-ir verify [--session=id] [root]                  # format diff summary for handoff
+ai-ir log [--n=10] [root]                           # list snapshots with timestamps
+ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]  # symbol/file churn rate across sessions
 ```
 
 `session-end.sh` calls `snapshot` → `verify` → passes the diff to `ai-document`. Use `diff --since=session-end` to see what changed in the last session.
@@ -294,11 +337,15 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
 │   └── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
 ├── hooks/
-│   ├── session-governor.sh     # UserPromptSubmit — turn count + model routing
-│   ├── model-enforcer.sh       # PreToolUse — denies wrong-model subagents
-│   ├── ir-injector.sh          # UserPromptSubmit — injects IR summary on turn 1
-│   ├── stop-checkpoint.sh      # Stop — writes .ai/checkpoint.json after each response
-│   └── session-end.sh          # SessionEnd — JSONL handoff → checkpoint fallback → doc update
+│   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing
+│   ├── model-enforcer.sh          # PreToolUse[Task] — denies wrong-model subagents
+│   ├── ir-injector.sh             # UserPromptSubmit — injects IR summary on turn 1
+│   ├── stop-checkpoint.sh         # Stop — writes .ai/checkpoint.json after each response
+│   ├── session-end.sh             # SessionEnd — JSONL handoff → checkpoint fallback → doc update
+│   ├── destructive-bash-guard.sh  # PreToolUse[Bash] — hard deny + approval gate for destructive ops
+│   ├── scope-guard.sh             # PreToolUse[Edit|Write] — protects settings/keys; optional scope-lock
+│   ├── constraint-reinjector.sh   # SessionStart[compact] — re-injects constraints after /compact
+│   └── pre-compact-snapshot.sh    # PreCompact — captures state before compaction
 ├── install.sh                  # Builds all binaries, symlinks hooks to ~/.claude/hooks/
 ├── internal/
 │   ├── document/               # doc generation: types, generator, reader, writer
@@ -308,6 +355,8 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   └── snapshot/               # SQLite snapshot store, structural diff engine
 ├── docs/
 │   └── profile-switching.md    # work/personal profile setup
+├── powershell/
+│   └── claude-profile.ps1      # work/personal profile switcher (copy into $PROFILE)
 └── README.md
 ```
 

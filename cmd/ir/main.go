@@ -48,16 +48,43 @@ func main() {
 		case "validate-claims":
 			runValidateClaims(os.Args[2:])
 			return
+		case "--help", "-h", "help":
+			printUsage()
+			os.Exit(0)
+		case "--version", "-v":
+			fmt.Println("ai-ir dev")
+			os.Exit(0)
+		default:
+			if strings.HasPrefix(os.Args[1], "-") {
+				fmt.Fprintf(os.Stderr, "ai-ir: unknown flag %q\n", os.Args[1])
+				printUsage()
+				os.Exit(1)
+			}
 		}
 	}
 	// Default: index behavior (backward compat).
 	runIndex(os.Args)
 }
 
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "Usage: ai-ir [root-path]")
+	fmt.Fprintln(os.Stderr, "       ai-ir snapshot [--label=manual] [--session=<id>] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir diff [--since=<label>] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir log [--n=10] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir verify [--session=<id>] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir validate-claims --text=<file> [--ir=<path>]")
+}
+
 // runIndex is the original ai-ir [root] behavior.
 func runIndex(args []string) {
 	rootPath := "."
 	if len(args) > 1 {
+		if strings.HasPrefix(args[1], "-") {
+			fmt.Fprintf(os.Stderr, "ai-ir: unknown flag %q\n", args[1])
+			printUsage()
+			os.Exit(1)
+		}
 		rootPath = args[1]
 	}
 
@@ -306,6 +333,10 @@ func runVerify(args []string) {
 func resolveRoot(args []string) string {
 	rootPath := "."
 	if len(args) > 0 {
+		if strings.HasPrefix(args[0], "-") {
+			fmt.Fprintf(os.Stderr, "ai-ir: unexpected flag %q where root path was expected\n", args[0])
+			os.Exit(1)
+		}
 		rootPath = args[0]
 	}
 	abs, err := filepath.Abs(rootPath)

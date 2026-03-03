@@ -31,28 +31,80 @@ if [ -f "$STATE_FILE" ]; then
 else
   COUNT=0
 fi
-COUNT=$((COUNT + 1))
+
+# --- Weighted Turn Increment ---
+# Weight by the PREVIOUS turn's route (the expensive work that just happened).
+# pipeline=5, opus=3, haiku/sonnet=1. Prevents cheap rename sessions and
+# expensive opus-pipeline sessions from looking identical to the governor.
+ROUTE_FILE="$STATE_DIR/${SESSION_ID}.route"
+LAST_ROUTE=$(cat "$ROUTE_FILE" 2>/dev/null || echo "sonnet")
+case "$LAST_ROUTE" in
+  pipeline) WEIGHT=5 ;;
+  opus)     WEIGHT=3 ;;
+  *)        WEIGHT=1 ;;
+esac
+COUNT=$((COUNT + WEIGHT))
 echo "$COUNT" > "$STATE_FILE"
 
 find "$STATE_DIR" -type f -mtime +1 -delete 2>/dev/null || true
 
+# --- Session Cost (from JSONL) ---
+# Read the session's JSONL directly — no network, no external tool.
+# Apply per-model rates: haiku < sonnet < opus.
+SESSION_COST="0"
+JSONL_FILE=$(find "$HOME/.claude/projects" -name "${SESSION_ID}.jsonl" 2>/dev/null | head -1)
+if [ -n "$JSONL_FILE" ] && command -v jq &>/dev/null; then
+  SESSION_COST=$(jq -sr '
+    [.[] | select(.type == "assistant") | select(.message.usage) |
+      .message |
+      { m: .model, u: .usage } |
+      if .m | test("haiku"; "i") then
+        ((.u.input_tokens // 0) * 0.80 +
+         (.u.output_tokens // 0) * 4.0 +
+         (.u.cache_read_input_tokens // 0) * 0.08) / 1000000
+      elif .m | test("opus"; "i") then
+        ((.u.input_tokens // 0) * 15.0 +
+         (.u.output_tokens // 0) * 75.0 +
+         (.u.cache_read_input_tokens // 0) * 1.5) / 1000000
+      else
+        ((.u.input_tokens // 0) * 3.0 +
+         (.u.output_tokens // 0) * 15.0 +
+         (.u.cache_read_input_tokens // 0) * 0.30) / 1000000
+      end
+    ] | add // 0
+  ' "$JSONL_FILE" 2>/dev/null || echo "0")
+fi
+COST_FMT=$(awk -v c="$SESSION_COST" 'BEGIN { printf "~$%.2f", c+0 }')
+
+# Cost thresholds (USD). On Pro these are informational; on API billing they're active controls.
+COST_WARN="1.00"
+COST_STRONG="3.00"
+COST_STOP="8.00"
+COST_LEVEL=$(awk -v c="$SESSION_COST" -v stop="$COST_STOP" -v strong="$COST_STRONG" -v warn="$COST_WARN" '
+  BEGIN {
+    if (c+0 >= stop+0) print "stop"
+    else if (c+0 >= strong+0) print "strong"
+    else if (c+0 >= warn+0) print "warn"
+    else print "ok"
+  }')
+
 OUTPUT=""
 
-# --- Session Length Warnings ---
+# --- Session Warnings (turn + cost, harder signal wins) ---
 WARN_AT=15
 STRONG_WARN_AT=25
 STOP_AT=35
 
-if [ "$COUNT" -ge "$STOP_AT" ]; then
+if [ "$COUNT" -ge "$STOP_AT" ] || [ "$COST_LEVEL" = "stop" ]; then
   IR_HASH=$(jq -r '.root_hash // ""' "$PWD/.ai/ir.json" 2>/dev/null | head -c 12 || echo "unknown")
-  OUTPUT="SESSION GOVERNOR [turn $COUNT/$STOP_AT]: Session is very long — context is degrading and cache reads are compounding. Wrap up current task, summarize what was done, and tell the user to start a new session.
+  OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Session limit reached — context degrading, cost accumulating. Wrap up and start a new session.
 ACTION REQUIRED: Write session handoff now.
   > Create .ai/handoff.md using the canonical format (accomplished, decisions, in-progress, blocked, next steps).
   > IR snapshot hash: ${IR_HASH}"
-elif [ "$COUNT" -ge "$STRONG_WARN_AT" ]; then
-  OUTPUT="SESSION GOVERNOR [turn $COUNT]: Session is long. Finish current task, suggest /compact or new session."
-elif [ "$COUNT" -ge "$WARN_AT" ]; then
-  OUTPUT="SESSION GOVERNOR [turn $COUNT]: Consider wrapping up soon or /compact."
+elif [ "$COUNT" -ge "$STRONG_WARN_AT" ] || [ "$COST_LEVEL" = "strong" ]; then
+  OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Session is expensive. Finish current task, suggest /compact or new session."
+elif [ "$COUNT" -ge "$WARN_AT" ] || [ "$COST_LEVEL" = "warn" ]; then
+  OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Cost rising. Consider wrapping up soon or /compact."
 fi
 
 # --- Model Router ---

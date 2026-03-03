@@ -8,7 +8,7 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 
 ## What It Does
 
-- **Session Governor**: Tracks turn count per session. Warns at turn 15, 25, and 35. Tells Claude to wrap up before context degrades and cache costs compound.
+- **Session Governor**: Tracks turn count per session. Three graduated thresholds: turn 15 = soft nudge ("consider /compact"), turn 25 = strong warning ("finish current task, open new session"), turn 35 = hard stop with ACTION REQUIRED — Claude must write `.ai/handoff.md` immediately, including the current IR snapshot hash. Prevents context degradation and compounding cache costs.
 - **Model Router**: Classifies each prompt via a haiku LLM call and injects routing guidance — haiku for cheap tasks, opus for architecture, full pipeline (haiku→opus→sonnet) for multi-step work. Falls back to regex if classifier is unavailable.
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
 - **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
@@ -138,9 +138,9 @@ Opus check runs before pipeline — "review the plan" routes to opus, not pipeli
 
 | Turn | Message |
 |---|---|
-| 15 | Consider wrapping up or /compact |
-| 25 | Finish current task, suggest new session |
-| 35 | Session degraded — wrap up now, write handoff |
+| 15 | Soft nudge: "Consider wrapping up soon or /compact." |
+| 25 | Strong warning: "Session is long. Finish current task, suggest /compact or new session." |
+| 35 | Hard stop: "Context is degrading. ACTION REQUIRED: write `.ai/handoff.md` now with IR snapshot hash." |
 
 ---
 

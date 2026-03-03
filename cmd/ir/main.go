@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +26,7 @@ import (
 //   ai-ir log [--n=10] [root]
 //   ai-ir verify [--session=""] [root]
 //   ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]
+//   ai-ir validate-claims --text=<file> [--ir=<path>]
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -40,6 +44,9 @@ func main() {
 			return
 		case "churn":
 			runChurn(os.Args[2:])
+			return
+		case "validate-claims":
+			runValidateClaims(os.Args[2:])
 			return
 		}
 	}
@@ -349,6 +356,134 @@ func runChurn(args []string) {
 	} else {
 		fmt.Print(snapshot.FormatChurn(report, *minChanges))
 	}
+}
+
+// runValidateClaims extracts code symbol references from a text file and
+// cross-checks them against the IR. Reports identifiers referenced but not
+// found in the IR (potential hallucinations).
+func runValidateClaims(args []string) {
+	fs := flag.NewFlagSet("validate-claims", flag.ExitOnError)
+	textFile := fs.String("text", "", "path to text file containing assistant message")
+	irPath := fs.String("ir", ".ai/ir.json", "path to ir.json")
+	fs.Parse(args)
+
+	if *textFile == "" {
+		fmt.Fprintln(os.Stderr, "Error: --text=<file> required")
+		os.Exit(1)
+	}
+
+	// Load text.
+	textData, err := os.ReadFile(*textFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot read text file %q: %v\n", *textFile, err)
+		os.Exit(1)
+	}
+	text := string(textData)
+
+	// Load IR symbols.
+	irData, err := ir.Load(*irPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot load IR %q: %v\n", *irPath, err)
+		os.Exit(1)
+	}
+	knownSymbols := make(map[string]bool)
+	for _, fileEntry := range irData.Files {
+		for _, fn := range fileEntry.Functions {
+			knownSymbols[fn] = true
+		}
+		for _, cl := range fileEntry.Classes {
+			knownSymbols[cl] = true
+		}
+	}
+
+	// Extract symbol references from text.
+	refs := extractSymbolRefs(text)
+
+	type Mismatch struct {
+		Ref     string `json:"ref"`
+		Context string `json:"context"`
+	}
+	var mismatches []Mismatch
+	for ref, ctx := range refs {
+		if !knownSymbols[ref] {
+			mismatches = append(mismatches, Mismatch{Ref: ref, Context: ctx})
+		}
+	}
+
+	out := map[string]interface{}{
+		"checked":    len(refs),
+		"mismatches": mismatches,
+	}
+	if mismatches == nil {
+		out["mismatches"] = []Mismatch{}
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(out)
+}
+
+// extractSymbolRefs returns a map of symbol → context snippet from text.
+// Targets: backtick-quoted identifiers, and "func X", "type X", "var X" patterns.
+// Conservative: only flags names with uppercase (CamelCase) or containing underscore+uppercase.
+func extractSymbolRefs(text string) map[string]string {
+	refs := make(map[string]string)
+	lines := bufio.NewScanner(strings.NewReader(text))
+
+	// Patterns
+	backtickRe := regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_]*)`")
+	declRe := regexp.MustCompile(`\b(?:func|type|var|const)\s+([A-Z][A-Za-z0-9_]*)`)
+
+	for lines.Scan() {
+		line := lines.Text()
+
+		for _, m := range backtickRe.FindAllStringSubmatch(line, -1) {
+			sym := m[1]
+			if isCodeSymbol(sym) {
+				if _, seen := refs[sym]; !seen {
+					refs[sym] = truncate(line, 80)
+				}
+			}
+		}
+
+		for _, m := range declRe.FindAllStringSubmatch(line, -1) {
+			sym := m[1]
+			if isCodeSymbol(sym) {
+				if _, seen := refs[sym]; !seen {
+					refs[sym] = truncate(line, 80)
+				}
+			}
+		}
+	}
+	return refs
+}
+
+// isCodeSymbol returns true if the name looks like a code identifier (not a prose word).
+// Requires: CamelCase (has uppercase after first char) OR snake_case with uppercase,
+// AND length > 2 to avoid false positives on short names.
+func isCodeSymbol(name string) bool {
+	if len(name) <= 2 {
+		return false
+	}
+	// Must have at least one uppercase letter beyond position 0, or contain '_'.
+	hasUpper := false
+	hasMixedUnderscore := false
+	for i, r := range name {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			hasUpper = true
+		}
+		if r == '_' {
+			hasMixedUnderscore = true
+		}
+	}
+	return hasUpper || hasMixedUnderscore
+}
+
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // mustOpenDB opens .ai/history.db from root or exits.

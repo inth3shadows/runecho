@@ -25,6 +25,10 @@ echo "Building ai-document..."
 go build -o "$BIN_DIR/ai-document" ./cmd/document
 echo "  Built: $BIN_DIR/ai-document"
 
+echo "Building ai-task..."
+go build -o "$BIN_DIR/ai-task" ./cmd/task
+echo "  Built: $BIN_DIR/ai-task"
+
 # Symlink hooks
 ln -sf "$SCRIPT_DIR/hooks/session-governor.sh" "$HOOK_DIR/session-governor.sh"
 echo "  $HOOK_DIR/session-governor.sh -> $SCRIPT_DIR/hooks/session-governor.sh"
@@ -67,6 +71,7 @@ ls -la "$HOOK_DIR/pre-compact-snapshot.sh"
 ls -la "$BIN_DIR/ai-ir"*
 ls -la "$BIN_DIR/ai-session"
 ls -la "$BIN_DIR/ai-document"
+ls -la "$BIN_DIR/ai-task"
 
 # Validate hooks with ShellCheck if available
 if command -v shellcheck &>/dev/null; then

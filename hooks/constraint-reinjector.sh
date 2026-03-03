@@ -66,4 +66,27 @@ CLAUDE.md rules remain active. BPB v3 enforcement continues.
 === END CONSTRAINT REINSTATEMENT ===
 EOF
 
+# --- IR Re-injection ---
+# Re-inject full IR context so the model knows what files/symbols exist.
+# Uses a flat dump (not relevance-scored) — post-compact we need the full picture.
+# Re-indexes first if ai-ir is available to capture any changes made before compact.
+IR_FILE="$PWD/.ai/ir.json"
+if [ -f "$IR_FILE" ] && command -v jq &>/dev/null; then
+  # Incremental re-index (fast — only parses changed files)
+  if command -v ai-ir &>/dev/null; then
+    ai-ir "$PWD" &>/dev/null || true
+  fi
+
+  SHORT_HASH=$(jq -r '.root_hash // ""' "$IR_FILE" 2>/dev/null | head -c 12)
+  FILE_COUNT=$(jq '.files | length' "$IR_FILE" 2>/dev/null || echo "0")
+  FILE_LIST=$(jq -r '.files | keys | join(", ")' "$IR_FILE" 2>/dev/null || echo "")
+  SYMBOLS=$(jq -r '[.files[].functions[], .files[].classes[]] | unique | sort | join(", ")' "$IR_FILE" 2>/dev/null || echo "")
+  SYMBOL_COUNT=$(jq -r '[.files[].functions[], .files[].classes[]] | unique | length' "$IR_FILE" 2>/dev/null || echo "0")
+
+  echo ""
+  echo "IR CONTEXT [re-injected after compact, root_hash: ${SHORT_HASH}...]:"
+  echo "${FILE_COUNT} files — ${FILE_LIST}"
+  echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
+fi
+
 exit 0

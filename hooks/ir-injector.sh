@@ -53,21 +53,70 @@ fi
 # Parse IR fields
 ROOT_HASH=$(jq -r '.root_hash // ""' "$IR_FILE" 2>/dev/null)
 SHORT_HASH="${ROOT_HASH:0:12}"
-
 FILE_COUNT=$(jq '.files | length' "$IR_FILE" 2>/dev/null || echo "0")
-FILE_LIST=$(jq -r '.files | keys | join(", ")' "$IR_FILE" 2>/dev/null || echo "")
 
-# Collect all symbols: functions + classes across all files, deduplicated and sorted
-SYMBOLS=$(jq -r '
-  [.files[].functions[], .files[].classes[]] | unique | sort | join(", ")
-' "$IR_FILE" 2>/dev/null || echo "")
-SYMBOL_COUNT=$(jq -r '
-  [.files[].functions[], .files[].classes[]] | unique | length
-' "$IR_FILE" 2>/dev/null || echo "0")
+# Feature 3: Relevance-scored IR injection.
+# Scores each file by: prompt word overlap (path=3pts, symbol=2pts) + churn bonus (5pts)
+# + handoff recency bonus (5pts). Top 15 shown with per-file symbols; rest summarized.
+# Fallback to flat dump if PROMPT_WORDS empty or scoring fails.
+PROMPT_WORDS=$(echo "$INPUT" | jq -r '.prompt // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]' \
+  | grep -oE '[a-z_][a-z0-9_]+' | sort -u | tr '\n' '|' | sed 's/|$//')
+CHURN_LIST=$(cat "$PWD/.ai/churn-cache.txt" 2>/dev/null || true)
+HANDOFF_CONTENT=$(cat "$PWD/.ai/handoff.md" 2>/dev/null || true)
 
-echo "IR CONTEXT [root_hash: ${SHORT_HASH}...]:"
-echo "${FILE_COUNT} files — ${FILE_LIST}"
-echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
+SCORED_OK=false
+if [ -n "$PROMPT_WORDS" ]; then
+  SCORED=$(jq -r \
+    --arg words "$PROMPT_WORDS" \
+    --arg churn "$CHURN_LIST" \
+    --arg handoff "$HANDOFF_CONTENT" '
+    .files | to_entries[] |
+    . as $e |
+    ($e.key) as $path |
+    (($e.value.functions // []) + ($e.value.classes // []) | unique | sort) as $syms |
+    (($words | split("|") | map(select(. != ""))) as $wlist |
+      ([$wlist[] | select($path | ascii_downcase | contains(.))] | length * 3) +
+      ([$wlist[] | . as $w | ($syms[] | ascii_downcase) | select(contains($w))] | length * 2) +
+      (if ($churn | length > 0) and ($churn | contains($path)) then 5 else 0 end) +
+      (if ($handoff | length > 0) and ($handoff | contains($path)) then 5 else 0 end)
+    ) as $score |
+    "\($score)|\($path)|\($syms | join(", "))"
+  ' "$IR_FILE" 2>/dev/null | sort -t'|' -k1 -rn) || true
+
+  if [ -n "$SCORED" ]; then
+    SHOWN=$(echo "$SCORED" | head -15)
+    SHOWN_COUNT=$(echo "$SHOWN" | wc -l | tr -d ' ')
+    REST_COUNT=$(echo "$SCORED" | tail -n +16 | grep -c . 2>/dev/null || echo 0)
+
+    echo "IR CONTEXT [root_hash: ${SHORT_HASH}...]:"
+    echo "Symbols in relevant files (${SHOWN_COUNT}/${FILE_COUNT}):"
+    while IFS='|' read -r _score filepath syms; do
+      if [ -n "$syms" ]; then
+        echo "  ${filepath}: ${syms}"
+      else
+        echo "  ${filepath}: (no exported symbols)"
+      fi
+    done <<< "$SHOWN"
+    if [ "$REST_COUNT" -gt 0 ]; then
+      echo "+ ${REST_COUNT} more files (lower relevance, run \`ai-ir log\` for full IR)"
+    fi
+    SCORED_OK=true
+  fi
+fi
+
+# Fallback: flat dump (original behavior — empty prompt, or scoring produced no output)
+if [ "$SCORED_OK" = "false" ]; then
+  FILE_LIST=$(jq -r '.files | keys | join(", ")' "$IR_FILE" 2>/dev/null || echo "")
+  SYMBOLS=$(jq -r '
+    [.files[].functions[], .files[].classes[]] | unique | sort | join(", ")
+  ' "$IR_FILE" 2>/dev/null || echo "")
+  SYMBOL_COUNT=$(jq -r '
+    [.files[].functions[], .files[].classes[]] | unique | length
+  ' "$IR_FILE" 2>/dev/null || echo "0")
+  echo "IR CONTEXT [root_hash: ${SHORT_HASH}...]:"
+  echo "${FILE_COUNT} files — ${FILE_LIST}"
+  echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
+fi
 
 # Inject compact diff if there were structural changes since last session-end.
 if [ -n "$DIFF_LINE" ]; then
@@ -93,6 +142,43 @@ if [ -f "$HANDOFF_FILE" ]; then
     echo ""
     echo "PREVIOUS SESSION HANDOFF [$(date -r "$HANDOFF_FILE" '+%Y-%m-%d' 2>/dev/null || date '+%Y-%m-%d')]:"
     cat "$HANDOFF_FILE"
+  fi
+
+  # --- GUPP Directive (Item 5) ---
+  # Extract next_session_intent from handoff front-matter + first unblocked task.
+  _HANDOFF_INTENT=""
+  if [ -f "$HANDOFF_FILE" ]; then
+    _FM_BLOCK=$(awk 'BEGIN{found=0} /^---$/{found++; next} found==1{print} found==2{exit}' "$HANDOFF_FILE" 2>/dev/null || true)
+    _HANDOFF_INTENT=$(echo "$_FM_BLOCK" | grep '^next_session_intent:' | head -1 \
+      | sed "s/^next_session_intent:[[:space:]]*//" | tr -d "\"'" | sed "s/''/'/g" || true)
+  fi
+
+  _NEXT_TASK=""
+  if command -v ai-task &>/dev/null; then
+    _NEXT_TASK=$(ai-task next 2>/dev/null || true)
+  fi
+
+  if [ -n "$_HANDOFF_INTENT" ] || [ -n "$_NEXT_TASK" ]; then
+    echo ""
+    echo "HANDOFF DIRECTIVE:"
+    [ -n "$_HANDOFF_INTENT" ] && echo "  Prior intent: $_HANDOFF_INTENT"
+    [ -n "$_NEXT_TASK" ] && echo "  Next task: $_NEXT_TASK"
+    echo "  → Acknowledge this context and confirm your plan before proceeding."
+  fi
+fi
+
+# --- Task Queue Injection ---
+# Reads .ai/tasks.json and injects all non-done tasks into context.
+# Claude updates task status (pending → in-progress → done) as work progresses.
+# Missing file or malformed JSON → silently skipped.
+TASK_JSON="$PWD/.ai/tasks.json"
+if command -v jq &>/dev/null && [ -f "$TASK_JSON" ]; then
+  ACTIVE=$(jq '[.tasks[] | select(.status != "done")]' "$TASK_JSON" 2>/dev/null)
+  TASK_COUNT=$(echo "$ACTIVE" | jq 'length' 2>/dev/null || echo 0)
+  if [ "${TASK_COUNT:-0}" -gt 0 ]; then
+    echo ""
+    echo "TASK QUEUE [${TASK_COUNT} active]:"
+    echo "$ACTIVE" | jq -r '.[] | "  [\(.status)] #\(.id): \(.title)\(if .blockedBy then " (blocked by #\(.blockedBy))" else "" end)"'
   fi
 fi
 

@@ -13,11 +13,17 @@ import (
 )
 
 // Usage: ai-session [--session=<id>] [--out=<path>] [project-dir]
+//        ai-session validate [path]
 //
 // Reads the Claude Code JSONL session log and writes a structured handoff.md.
 // Session ID defaults to .ai/checkpoint.json. Output defaults to .ai/handoff.md.
 // Set RUNECHO_CLASSIFIER_KEY to enable haiku narrative summarization.
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "validate" {
+		runValidate(os.Args[2:])
+		return
+	}
+
 	fs := flag.NewFlagSet("ai-session", flag.ExitOnError)
 	sessionID := fs.String("session", "", "Claude Code session ID (default: from .ai/checkpoint.json)")
 	out := fs.String("out", "", "output path for handoff.md (default: .ai/handoff.md)")
@@ -59,8 +65,9 @@ func main() {
 		fatalf("failed to parse session log: %v", err)
 	}
 
-	// IR diff (best-effort — silent on failure)
+	// IR diff + current hash (best-effort — silent on failure)
 	irDiff := runIRDiff(absRoot)
+	irHash := readIRHash(absRoot)
 
 	// Haiku narrative (best-effort — factual-only if key absent or call fails)
 	apiKey := os.Getenv("RUNECHO_CLASSIFIER_KEY")
@@ -74,7 +81,7 @@ func main() {
 	}
 
 	// Write handoff
-	if err := session.WriteHandoff(outPath, fact, summary, irDiff); err != nil {
+	if err := session.WriteHandoff(outPath, fact, summary, irDiff, irHash); err != nil {
 		fatalf("failed to write handoff: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "ai-session: handoff written to %s\n", outPath)
@@ -107,6 +114,167 @@ func runIRDiff(root string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func readIRHash(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, ".ai", "ir.json"))
+	if err != nil {
+		return ""
+	}
+	var ir struct {
+		RootHash string `json:"root_hash"`
+	}
+	if err := json.Unmarshal(data, &ir); err != nil {
+		return ""
+	}
+	if len(ir.RootHash) > 8 {
+		return ir.RootHash[:8]
+	}
+	return ir.RootHash
+}
+
+// runValidate checks a handoff.md for structural correctness.
+// Exit 0 = valid, 1 = warnings, 2 = fatal errors.
+func runValidate(args []string) {
+	path := ".ai/handoff.md"
+	if len(args) > 0 {
+		path = args[0]
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Cannot read %s: %v\n", path, err)
+		os.Exit(2)
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	exitCode := 0
+	warn := func(format string, a ...interface{}) {
+		fmt.Printf("✗ "+format+"\n", a...)
+		if exitCode < 1 {
+			exitCode = 1
+		}
+	}
+	fatal := func(format string, a ...interface{}) {
+		fmt.Printf("✗ "+format+"\n", a...)
+		exitCode = 2
+	}
+	ok := func(format string, a ...interface{}) {
+		fmt.Printf("✓ "+format+"\n", a...)
+	}
+
+	// Check 1: front-matter present
+	if len(lines) < 3 || lines[0] != "---" {
+		fatal("Front-matter missing (file must start with ---)")
+	} else {
+		fmEnd := -1
+		for i := 1; i < len(lines); i++ {
+			if lines[i] == "---" {
+				fmEnd = i
+				break
+			}
+		}
+		if fmEnd < 0 {
+			fatal("Front-matter not closed (missing closing ---)")
+		} else {
+			ok("Front-matter present (lines 1–%d)", fmEnd+1)
+
+			// Check 2: required keys
+			fmBlock := strings.Join(lines[1:fmEnd], "\n")
+			required := []string{"session_id", "ir_hash", "status", "next_session_intent"}
+			allKeys := true
+			for _, k := range required {
+				if !strings.Contains(fmBlock, k+":") {
+					warn("Required front-matter key missing: %s", k)
+					allKeys = false
+				}
+			}
+			if allKeys {
+				ok("Required keys: %s", strings.Join(required, ", "))
+			}
+
+			// Check 3: ir_hash drift
+			currentHash := readIRHash(".")
+			if currentHash != "" {
+				fmHash := extractFMValue(fmBlock, "ir_hash")
+				fmHash = strings.Trim(fmHash, `"'`)
+				if fmHash == "" {
+					warn("ir_hash missing from front-matter")
+				} else if fmHash != currentHash {
+					warn("IR hash mismatch: handoff=%s, current=%s", fmHash, currentHash)
+				} else {
+					ok("IR hash matches current (%s)", currentHash)
+				}
+			}
+
+			// Check 4: tasks_touched IDs exist in tasks.json
+			tasksTouchedRaw := extractFMValue(fmBlock, "tasks_touched")
+			if tasksTouchedRaw != "" && tasksTouchedRaw != "[]" {
+				checkTasksTouched(tasksTouchedRaw, warn, ok)
+			}
+		}
+	}
+
+	// Check 5: required markdown sections
+	requiredSections := []string{"# Session Handoff", "## Files Changed", "## Accomplished", "## Next Steps"}
+	allSections := true
+	for _, sec := range requiredSections {
+		if !strings.Contains(content, sec) {
+			warn("Required section missing: %s", sec)
+			allSections = false
+		}
+	}
+	if allSections {
+		ok("Required sections present")
+	}
+
+	os.Exit(exitCode)
+}
+
+func extractFMValue(fmBlock, key string) string {
+	for _, line := range strings.Split(fmBlock, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, key+":") {
+			return strings.TrimSpace(strings.TrimPrefix(line, key+":"))
+		}
+	}
+	return ""
+}
+
+func checkTasksTouched(raw string, warn, ok func(string, ...interface{})) {
+	tasksPath := ".ai/tasks.json"
+	data, err := os.ReadFile(tasksPath)
+	if err != nil {
+		// tasks.json absent — skip cross-check
+		return
+	}
+	var tasks struct {
+		Tasks []struct {
+			ID string `json:"id"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &tasks); err != nil {
+		return
+	}
+	known := make(map[string]bool)
+	for _, t := range tasks.Tasks {
+		known[t.ID] = true
+	}
+	// Raw is like ["1","2"] — simple string extraction
+	raw = strings.Trim(raw, "[]")
+	refs := strings.Split(raw, ",")
+	missing := false
+	for _, r := range refs {
+		id := strings.Trim(strings.TrimSpace(r), `"'`)
+		if id != "" && !known[id] {
+			warn("tasks_touched references unknown task ID: %s", id)
+			missing = true
+		}
+	}
+	if !missing {
+		ok("tasks_touched IDs valid")
+	}
 }
 
 func fatalf(format string, args ...interface{}) {

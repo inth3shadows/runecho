@@ -33,6 +33,34 @@ fi
 
 ROUTE=$(cat "$ROUTE_FILE" 2>/dev/null || echo "none")
 
+# Item 8: Build model lookup table from .ai/agents/*.yaml persona files.
+# Falls back to hardcoded defaults if no persona files found.
+# Format: "haiku" maps to persona names that use haiku, etc.
+_load_persona_models() {
+  local agents_dir="$PWD/.ai/agents"
+  if [ ! -d "$agents_dir" ]; then
+    return
+  fi
+  # Emit "name=model" pairs by parsing flat YAML key: value lines.
+  for f in "$agents_dir"/*.yaml; do
+    [ -f "$f" ] || continue
+    local name="" model=""
+    while IFS= read -r line; do
+      case "$line" in
+        name:*) name=$(echo "$line" | sed 's/^name:[[:space:]]*//' | tr -d '"' | tr -d "'") ;;
+        model:*) model=$(echo "$line" | sed 's/^model:[[:space:]]*//' | tr -d '"' | tr -d "'") ;;
+      esac
+    done < "$f"
+    [ -n "$name" ] && [ -n "$model" ] && echo "${name}=${model}"
+  done
+}
+
+# Determine if a persona model should override enforcement for this route.
+# Currently unused for routing logic (route is already haiku/opus/sonnet/pipeline)
+# but persona table is available for future subagent-name–based routing.
+# Load once for audit output.
+_PERSONA_TABLE=$(_load_persona_models 2>/dev/null || true)
+
 case "$ROUTE" in
   haiku)
     # Router said haiku — only allow haiku or default (no model specified)

@@ -94,6 +94,20 @@ COST_LEVEL=$(awk -v c="$SESSION_COST" -v stop="$COST_STOP" -v strong="$COST_STRO
 
 OUTPUT=""
 
+# --- IR Delta Warnings (Feature 2) ---
+# If stop-checkpoint.sh detected structural changes since session-start, inject and clear.
+# Stored separately so session warnings below don't overwrite it.
+IR_DELTA_OUTPUT=""
+VERIFY_FILE="$STATE_DIR/${SESSION_ID}.verify-warnings"
+if [ -f "$VERIFY_FILE" ]; then
+  IR_DELTA=$(cat "$VERIFY_FILE" 2>/dev/null)
+  if [ -n "$IR_DELTA" ]; then
+    IR_DELTA_OUTPUT="IR DELTA (since session-start):
+${IR_DELTA}"
+  fi
+  rm -f "$VERIFY_FILE"
+fi
+
 # --- Session Warnings (turn + cost, harder signal wins) ---
 WARN_AT=15
 STRONG_WARN_AT=25
@@ -109,6 +123,17 @@ elif [ "$COUNT" -ge "$STRONG_WARN_AT" ] || [ "$COST_LEVEL" = "strong" ]; then
   OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Session is expensive. Finish current task, suggest /compact or new session."
 elif [ "$COUNT" -ge "$WARN_AT" ] || [ "$COST_LEVEL" = "warn" ]; then
   OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Cost rising. Consider wrapping up soon or /compact."
+fi
+
+# Append IR delta after any session warning (never drop it).
+if [ -n "$IR_DELTA_OUTPUT" ]; then
+  if [ -n "$OUTPUT" ]; then
+    OUTPUT="${OUTPUT}
+
+${IR_DELTA_OUTPUT}"
+  else
+    OUTPUT="$IR_DELTA_OUTPUT"
+  fi
 fi
 
 # --- Model Router ---

@@ -1,22 +1,42 @@
 # RunEcho
 
-**Status:** Stage C Active ✅
+**Status:** Stages A–C Complete ✅ · Milestone 1 (Context Compiler) next
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
 ---
 
-## Concepts
+## Glossary
 
 **Session Governor** — A Claude Code hook (`UserPromptSubmit`) that fires on every user message. Tracks turn count and cumulative session cost, injects warnings when thresholds are crossed, and enforces model routing by injecting routing directives Claude must follow.
 
-**Model Routing** — Classifying a prompt by intent (read, reason, code, multi-step) and telling the LLM which model to use for which subtask. RunEcho injects this guidance *into the LLM's context* so Claude routes itself — distinct from API-level routers that intercept requests before they reach the model.
+**Model Routing** — Classifying a prompt by intent (read, reason, code, multi-step) and directing the LLM to use the appropriate model for each subtask. RunEcho injects this guidance *into the LLM's context* so Claude routes itself — distinct from API-level routers that intercept requests before they reach the model. Haiku classifies; regex is the fallback.
 
-**Codebase IR (Intermediate Representation)** — A compact, structured index of a project: file list + all exported symbols (functions, types, interfaces, constants). Not a vector embedding. A flat, deterministic fact table computed from AST parsing of JS/TS/Go files and stored as `.ai/ir.json`.
+**Cost Model** — The routing principle underlying all model selection: Haiku = eyes (reads, searches, summaries), Sonnet = hands (writing code, direct edits), Opus = brain (architecture, trade-offs, root cause). Cost cap at $8/session downgrades opus/pipeline routes to prevent runaway spend.
 
-**IR Injection** — Feeding the codebase IR into the LLM's context on session turn 1, before any user task. Claude starts every session knowing what files and symbols exist without having to grep or read files to orient itself. Subsequent turns are silent.
+**Codebase IR (Intermediate Representation)** — A compact, structured index of a project: file list + all exported symbols (functions, types, interfaces, constants). Not a vector embedding. A flat, deterministic fact table computed from AST parsing of source files and stored as `.ai/ir.json`. Currently supports JS/TS/Go; extensible via the `Parser` interface.
 
-**Session Handoff** — A structured markdown summary written at session end: files changed, commands run, decisions made, next steps. Bridges the gap between Claude Code sessions so context isn't rebuilt from scratch each time.
+**IR Injection** — Feeding the codebase IR into the LLM's context on session turn 1, before any user task. Claude starts every session knowing what files and symbols exist without reading files to orient itself. Subsequent turns are silent.
+
+**IR Snapshot** — A point-in-time capture of the codebase IR stored in SQLite. Snapshots enable structural diff between sessions — `ai-ir diff` shows exactly which files and symbols were added, removed, or modified.
+
+**IR Hash** — A deterministic SHA-256 hash of the full IR content. Included in handoff files and checkpoints. If the hash in a handoff doesn't match the current `ir.json`, it signals structural drift — the session was summarized against a stale codebase view.
+
+**Session Handoff** — A structured markdown file (`.ai/handoff.md`) written at session end: files changed, commands run, decisions made, next steps. Produced by `ai-session` from ground-truth JSONL facts, not Claude's memory. Bridges the gap between Claude Code sessions so context isn't rebuilt from scratch.
+
+**GUPP (Guided Upstream Priority Protocol)** — The block injected at session turn 1 by `ir-injector.sh` after the IR context. Contains: last session's `next_session_intent` from the handoff front-matter, and the output of `ai-task next`. Tells Claude what it should work on before the user types anything.
+
+**Handoff Front-Matter** — YAML metadata at the top of `.ai/handoff.md`: `session_id`, `ir_hash`, `status`, `tasks_touched`, `files_changed`, `next_session_intent`. Machine-readable; consumed by `constraint-reinjector.sh` and `ai-session validate`.
+
+**Persona Registry** — YAML files in `.ai/agents/` that define model assignments for agent roles (explorer → haiku, implementer → sonnet, architect → opus). `model-enforcer.sh` reads these to validate subagent model choices at PreToolUse time.
+
+**Scope Lock** — An opt-in write restriction for high-stakes sessions. When `.ai/scope-lock.json` is present, `scope-guard.sh` restricts all file writes to the declared paths only. Settings files, hook files, `.env`, and `*.key` are always blocked regardless.
+
+**Context Compaction** — Claude Code's `/compact` mechanism that summarizes and truncates conversation history to free context window space. RunEcho handles this via two hooks: `pre-compact-snapshot.sh` captures state immediately before, and `constraint-reinjector.sh` re-injects routing directives and active constraints after.
+
+**Checkpoint** — A turn-level state snapshot written to `.ai/checkpoint.json` after every Claude response. Contains turn count, IR hash, and last message. Used as fallback recovery state if `ai-session` can't parse the JSONL log.
+
+**Pipeline Route** — A multi-step agent chain for complex tasks: haiku explores the codebase → opus designs the solution → sonnet implements it. Triggered by prompts like "implement feature" or "build from scratch." Blocked when session cost exceeds $8.
 
 ---
 
@@ -45,13 +65,14 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds three binaries and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
+Builds four binaries and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
 | `ai-ir` | Indexes codebase → `.ai/ir.json`; manages SQLite snapshot history |
 | `ai-session` | Parses Claude Code JSONL log → ground-truth session handoff |
 | `ai-document` | Auto-generates/updates README.md, TECHNICAL.md, USAGE.md via haiku |
+| `ai-task` | Persistent task ledger for cross-session work tracking (`.ai/tasks.json`) |
 
 ---
 
@@ -190,7 +211,7 @@ Triggers on whichever threshold hits first — turn count or session cost.
 
 **No manual indexing needed.** `ir-injector.sh` runs `ai-ir` automatically on session turn 1.
 
-On every new Claude Code session in a JS/TS/Go project, turn 1 will include:
+On every new Claude Code session in a project with supported source files (currently JS/TS/Go; extensible via the `Parser` interface), turn 1 will include:
 
 ```
 IR CONTEXT [root_hash: abc123456789...]:
@@ -255,6 +276,25 @@ Closes the cross-session continuity gap.
 ## Next Steps
 ## Notes
 ```
+
+---
+
+## Task Ledger
+
+`ai-task` maintains a persistent, dependency-aware task list at `.ai/tasks.json`. Designed for cross-session work tracking — tasks survive session boundaries and are injected into turn 1 via the GUPP (Guided Upstream Priority Protocol) block in `ir-injector.sh`.
+
+```bash
+ai-task add "<title>" [--blocked-by=<id>]   # append task, status=pending
+ai-task update <id> <status>                 # status ∈ {pending, in-progress, done}
+ai-task list [--status=<s>]                  # tabular; no filter = all non-done
+ai-task next                                 # first unblocked non-done task; exit 1 if none
+```
+
+**Blocking model:** `--blocked-by=<id>` links tasks. `next` skips tasks whose blocker isn't done yet.
+
+**Storage:** atomic write via temp-file rename → no partial writes on crash.
+
+**Integration:** `ir-injector.sh` calls `ai-task next` on session turn 1 and prepends the result to the HANDOFF DIRECTIVE block — Claude starts each session aware of the highest-priority unblocked task.
 
 ---
 
@@ -331,15 +371,16 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 ## Repo Structure
 
 ```
-.ai/
+.
 ├── cmd/
 │   ├── document/main.go        # ai-document — auto-generates project docs via haiku
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
-│   └── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
+│   ├── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
+│   └── task/main.go            # ai-task — persistent task ledger with dependency graph
 ├── hooks/
 │   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing
 │   ├── model-enforcer.sh          # PreToolUse[Task] — denies wrong-model subagents
-│   ├── ir-injector.sh             # UserPromptSubmit — injects IR summary on turn 1
+│   ├── ir-injector.sh             # UserPromptSubmit — injects IR + handoff + next task on turn 1
 │   ├── stop-checkpoint.sh         # Stop — writes .ai/checkpoint.json after each response
 │   ├── session-end.sh             # SessionEnd — JSONL handoff → checkpoint fallback → doc update
 │   ├── destructive-bash-guard.sh  # PreToolUse[Bash] — hard deny + approval gate for destructive ops
@@ -350,9 +391,13 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 ├── internal/
 │   ├── document/               # doc generation: types, generator, reader, writer
 │   ├── ir/                     # IR types, generator, hasher, storage
-│   ├── parser/                 # JS/TS + Go parsers
+│   ├── parser/                 # language parsers (JS/TS, Go); extensible via Parser interface
 │   ├── session/                # session fact extraction, JSONL parser, summarizer, writer
 │   └── snapshot/               # SQLite snapshot store, structural diff engine
+├── .ai/agents/
+│   ├── explorer.yaml           # haiku persona — file reads, search, summarization
+│   ├── implementer.yaml        # sonnet persona — code writing, bug fixes, refactoring
+│   └── architect.yaml          # opus persona — design decisions, trade-off analysis
 ├── docs/
 │   └── profile-switching.md    # work/personal profile setup
 ├── powershell/
@@ -362,31 +407,118 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 
 ---
 
-## Roadmap
+## Completed Stages
 
 **A — Session Discipline ✅**
-- Session governor (turn limits, warnings)
-- Regex model router
-- Model enforcer (PreToolUse gate)
+- Session governor (turn limits + cost warnings)
+- Regex model router + model enforcer PreToolUse gate
+- Destructive bash guard, scope guard
 
 **B — Structural Intelligence ✅**
-- `ai-ir` CLI: generates `.ai/ir.json` for JS/TS/Go projects
-- IR injector: auto-index + inject codebase summary on turn 1
-- Incremental updates, routing audit
+- `ai-ir` CLI: generates `.ai/ir.json` for JS/TS/Go projects (extensible via `Parser` interface)
+- IR injector: auto-index + inject codebase summary on session turn 1
+- IR snapshots in SQLite, structural diff between sessions, symbol/file churn analysis
 
 **C — Intent-Aware Routing + Failure Recovery ✅**
-- LLM classifier (haiku, 2s timeout) replaces regex as primary router
-- Regex fallback — zero regression on key absence or API failure
+- LLM classifier (haiku) replaces regex as primary router; regex fallback on key absence
 - Stop checkpoint: turn-level state persistence after every response
-- `ai-session`: ground-truth handoff from Claude Code JSONL log (files, commands, tokens, cost)
-- `ai-ir snapshot/diff/verify`: SQLite snapshot store + structural diff between sessions
-- `ai-document`: change-gated doc generation (README, TECHNICAL.md, USAGE.md) via haiku
-- SessionEnd pipeline: JSONL → checkpoint fallback → doc update
+- `ai-session`: ground-truth handoff from Claude Code JSONL log (files, commands, tokens, cost, duration)
+- `ai-ir snapshot/diff/verify/churn`: SQLite snapshot store + structural diff
+- `ai-document`: change-gated doc generation via haiku; SessionEnd pipeline
+- `ai-task`: persistent task ledger with dependency graph; GUPP injection on turn 1
+- Persona registry: model assignments in YAML, enforced at PreToolUse time
 
-**D — Multi-Agent Orchestrator (future)**
-- Claude-native agent framework built on the IR + governance layer
-- Fingerprint-gated task routing: tasks matched to agents by codebase context
-- Cost-aware orchestration: enforce haiku/sonnet/opus budgets at pipeline level
+---
+
+## Roadmap
+
+The order reflects dependencies and value. Each milestone is independently useful — the project doesn't need all six to be materially better.
+
+---
+
+### Milestone 1 — Context Compiler
+**Goal:** Replace bash+jq context assembly in `ir-injector.sh` with a single Go binary that composes, scores, and budget-constrains session context.
+
+| Deliverable | Description |
+|---|---|
+| `ai-context` binary | Accepts `--budget=<tokens>` and `--providers=ir,handoff,tasks,churn,git-diff`. Outputs one markdown block. Relevance scoring moves from bash to Go. |
+| `ir-injector.sh` simplification | Reduced to a single binary call + echo. All logic in compiled, testable Go. |
+| Context provider interface | `internal/context/provider.go` — adding a new provider is a Go function, not a bash stanza. |
+
+**Done when:** `ir-injector.sh` is under 20 lines; all context assembly has unit tests; token budget is respected (verified by output length).
+
+---
+
+### Milestone 2 — Session Contracts
+**Goal:** Every session starts with a machine-verifiable scope contract and ends with a pass/fail evaluation against it.
+
+| Deliverable | Description |
+|---|---|
+| `ai-task` scope + verify fields | `--scope="internal/auth/*"` + `--verify="go test ./internal/auth/..."` per task. |
+| Turn-1 contract injection | `SESSION CONTRACT` block in turn 1: task title, success criteria, file scope. Derived from the active task. |
+| Scope drift detection | `session-end.sh` runs `git diff --name-only` vs. task scope. Files outside scope → warning in `progress.jsonl`. |
+
+**Done when:** A session that modifies files outside its task's declared scope produces a visible scope-drift warning carried into the next session's handoff injection.
+
+---
+
+### Milestone 3 — Session Review
+**Goal:** Surface patterns across sessions — stuck tasks, scope drift, cost trends — before starting work.
+
+| Deliverable | Description |
+|---|---|
+| `ai-session review` | Reads `progress.jsonl` + `tasks.json`. Reports stuck tasks (3+ sessions, still not done), cost per task, scope drift frequency. |
+| Trace mode | `--trace` groups entries by task across sessions, showing full lifecycle. |
+| Actionable injection | Injects a `SESSION REVIEW` block on turn 1 only when review surfaces something worth acting on — never noise. |
+
+**Done when:** `ai-session review` on a project with 5+ sessions produces an accurate report. Stuck-task detection is correct.
+
+*Inspired by: OpenTelemetry/Honeycomb (traces, not flat logs)*
+
+---
+
+### Milestone 4 — Pipeline Definitions
+**Goal:** Replace hardcoded pipeline text in `session-governor.sh` with declarative YAML definitions.
+
+| Deliverable | Description |
+|---|---|
+| `.ai/pipelines/*.yaml` format | Stages with model, token budget, and input/output contract. Example: `explore (haiku) → reason (opus) → implement (sonnet)`. |
+| Governor reads definitions | Stage-specific injection text, not monolithic `MULTI-STEP PIPELINE` block. |
+| `ai-pipeline` binary | `ai-pipeline run <name>` validates definition and emits the injection text. Templates only — no orchestration. |
+
+**Done when:** A custom pipeline YAML produces different governor injection than the default. Adding a pipeline is a YAML edit, not a bash edit.
+
+*Inspired by: Dagger (pipelines as typed, composable objects)*
+
+---
+
+### Milestone 5 — MCP Tool Server
+**Goal:** Expose RunEcho capabilities as MCP tools so Claude invokes them directly instead of relying on text injection.
+
+| Deliverable | Description |
+|---|---|
+| `ai-mcp` binary | stdio MCP server (Go) exposing `task/list`, `task/update`, `ir/diff`, `session/review`, `context/compile`. |
+| MCP config in `settings.json` | Claude Code registers `ai-mcp` as a tool server. |
+| Hook consolidation | Bash injection removed for capabilities now available as tools. Governance hooks (governor, enforcer, guards) remain — they must intercept, not serve. |
+
+**Done when:** Claude calls `task/update` as a tool call instead of Bash. The tools appear in Claude's tool list.
+
+*Inspired by: Claude Code's own hooks system extended to MCP; Continue.dev context providers*
+
+---
+
+### Milestone 6 — Orchestration Prototype *(Stage C entry)*
+**Goal:** A single command that decomposes a task into subtasks, assigns models, and produces a multi-session execution plan.
+
+| Deliverable | Description |
+|---|---|
+| `ai-orchestrate <task-id>` | Reads task + pipeline definition + IR. Produces a plan: subtask list with dependencies, model assignments, file scopes. |
+| Subtasks as `ai-task` entries | Each subtask gets `parent_id`, `scope`, and `verify`. Traceable back to the orchestrating task. |
+| Human-in-the-loop execution | Orchestrator produces the plan; the developer executes each subtask as a separate Claude Code session. No autonomous spawning yet. |
+
+**Done when:** `ai-orchestrate 5` produces a concrete, executable multi-session plan. Executing each subtask in separate sessions produces `progress.jsonl` entries tracing back to the parent task.
+
+*Inspired by: Temporal/Inngest (durable execution with explicit checkpoints); full Stage C automation follows after this proves the contracts work)*
 
 ---
 

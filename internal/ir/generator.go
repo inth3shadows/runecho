@@ -41,7 +41,7 @@ func NewGenerator(config GeneratorConfig) *Generator {
 	}
 
 	return &Generator{
-		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser()},
+		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
 		ignoredPaths: ignored,
 	}
 }

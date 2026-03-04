@@ -14,6 +14,7 @@ import (
 
 // Usage: ai-session [--session=<id>] [--out=<path>] [project-dir]
 //        ai-session validate [path]
+//        ai-session review [--trace] [--n=5] [--force] [project-dir]
 //
 // Reads the Claude Code JSONL session log and writes a structured handoff.md.
 // Session ID defaults to .ai/checkpoint.json. Output defaults to .ai/handoff.md.
@@ -21,6 +22,10 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "validate" {
 		runValidate(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "review" {
+		runReview(os.Args[2:])
 		return
 	}
 
@@ -275,6 +280,52 @@ func checkTasksTouched(raw string, warn, ok func(string, ...interface{})) {
 	if !missing {
 		ok("tasks_touched IDs valid")
 	}
+}
+
+// runReview prints a session review report for the given project directory.
+func runReview(args []string) {
+	fs := flag.NewFlagSet("ai-session review", flag.ExitOnError)
+	trace := fs.Bool("trace", false, "group output by task across sessions")
+	n := fs.Int("n", 5, "session window for cost trend")
+	force := fs.Bool("force", false, "print even if not actionable")
+	fs.Parse(args)
+
+	root := "."
+	if rest := fs.Args(); len(rest) > 0 {
+		root = rest[0]
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		fatalf("cannot resolve root %q: %v", root, err)
+	}
+
+	entries, err := session.ReadProgress(absRoot)
+	if err != nil {
+		fatalf("reading progress: %v", err)
+	}
+	faults, err := session.ReadFaults(absRoot)
+	if err != nil {
+		fatalf("reading faults: %v", err)
+	}
+	tasks, err := session.ReadReviewTasks(absRoot)
+	if err != nil {
+		// non-fatal
+		fmt.Fprintf(os.Stderr, "ai-session review: warning: reading tasks: %v\n", err)
+	}
+
+	// Apply session window to entries
+	if *n > 0 && len(entries) > *n {
+		entries = entries[len(entries)-*n:]
+	}
+
+	report := session.BuildReport(entries, faults, tasks)
+
+	if !*force && !session.IsActionable(report) {
+		// Silent when nothing worth surfacing
+		return
+	}
+
+	fmt.Println(session.FormatReport(report, *trace))
 }
 
 func fatalf(format string, args ...interface{}) {

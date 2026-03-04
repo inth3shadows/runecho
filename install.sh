@@ -1,77 +1,121 @@
 #!/bin/bash
-# RunEcho installer — builds binaries and symlinks hooks to ~/.claude/hooks/
+# RunEcho installer — builds binaries, symlinks hooks, and configures ~/.claude/settings.json
 # Run once from the repo root: bash install.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOK_DIR="$HOME/.claude/hooks"
+SETTINGS_FILE="$HOME/.claude/settings.json"
 
 mkdir -p "$HOOK_DIR"
 
-# Build ai-ir binary → ~/bin (already on PATH on this machine)
+# Build binaries → ~/bin
 BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
-echo "Building ai-ir..."
 cd "$SCRIPT_DIR"
-go build -o "$BIN_DIR/ai-ir" ./cmd/ir
-echo "  Built: $BIN_DIR/ai-ir"
 
-echo "Building ai-session..."
-go build -o "$BIN_DIR/ai-session" ./cmd/session
-echo "  Built: $BIN_DIR/ai-session"
+for cmd in ir session document task context; do
+  echo "Building ai-$cmd..."
+  go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
+  echo "  Built: $BIN_DIR/ai-$cmd"
+done
 
-echo "Building ai-document..."
-go build -o "$BIN_DIR/ai-document" ./cmd/document
-echo "  Built: $BIN_DIR/ai-document"
-
-echo "Building ai-task..."
-go build -o "$BIN_DIR/ai-task" ./cmd/task
-echo "  Built: $BIN_DIR/ai-task"
-
-# Symlink hooks
-ln -sf "$SCRIPT_DIR/hooks/session-governor.sh" "$HOOK_DIR/session-governor.sh"
-echo "  $HOOK_DIR/session-governor.sh -> $SCRIPT_DIR/hooks/session-governor.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/model-enforcer.sh" "$HOOK_DIR/model-enforcer.sh"
-echo "  $HOOK_DIR/model-enforcer.sh -> $SCRIPT_DIR/hooks/model-enforcer.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/ir-injector.sh" "$HOOK_DIR/ir-injector.sh"
-echo "  $HOOK_DIR/ir-injector.sh -> $SCRIPT_DIR/hooks/ir-injector.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/stop-checkpoint.sh" "$HOOK_DIR/stop-checkpoint.sh"
-echo "  $HOOK_DIR/stop-checkpoint.sh -> $SCRIPT_DIR/hooks/stop-checkpoint.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/session-end.sh" "$HOOK_DIR/session-end.sh"
-echo "  $HOOK_DIR/session-end.sh -> $SCRIPT_DIR/hooks/session-end.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/destructive-bash-guard.sh" "$HOOK_DIR/destructive-bash-guard.sh"
-echo "  $HOOK_DIR/destructive-bash-guard.sh -> $SCRIPT_DIR/hooks/destructive-bash-guard.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/scope-guard.sh" "$HOOK_DIR/scope-guard.sh"
-echo "  $HOOK_DIR/scope-guard.sh -> $SCRIPT_DIR/hooks/scope-guard.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/constraint-reinjector.sh" "$HOOK_DIR/constraint-reinjector.sh"
-echo "  $HOOK_DIR/constraint-reinjector.sh -> $SCRIPT_DIR/hooks/constraint-reinjector.sh"
-
-ln -sf "$SCRIPT_DIR/hooks/pre-compact-snapshot.sh" "$HOOK_DIR/pre-compact-snapshot.sh"
-echo "  $HOOK_DIR/pre-compact-snapshot.sh -> $SCRIPT_DIR/hooks/pre-compact-snapshot.sh"
-
+# Symlink hooks (including fault-emitter — sourced by governor, stop-checkpoint, session-end)
 echo ""
-echo "RunEcho hooks installed:"
-ls -la "$HOOK_DIR/session-governor.sh"
-ls -la "$HOOK_DIR/model-enforcer.sh"
-ls -la "$HOOK_DIR/ir-injector.sh"
-ls -la "$HOOK_DIR/stop-checkpoint.sh"
-ls -la "$HOOK_DIR/session-end.sh"
-ls -la "$HOOK_DIR/destructive-bash-guard.sh"
-ls -la "$HOOK_DIR/scope-guard.sh"
-ls -la "$HOOK_DIR/constraint-reinjector.sh"
-ls -la "$HOOK_DIR/pre-compact-snapshot.sh"
-ls -la "$BIN_DIR/ai-ir"*
-ls -la "$BIN_DIR/ai-session"
-ls -la "$BIN_DIR/ai-document"
-ls -la "$BIN_DIR/ai-task"
+echo "Symlinking hooks → $HOOK_DIR/"
+for hook in \
+  fault-emitter.sh \
+  session-governor.sh \
+  model-enforcer.sh \
+  ir-injector.sh \
+  stop-checkpoint.sh \
+  session-end.sh \
+  destructive-bash-guard.sh \
+  scope-guard.sh \
+  constraint-reinjector.sh \
+  pre-compact-snapshot.sh; do
+  ln -sf "$SCRIPT_DIR/hooks/$hook" "$HOOK_DIR/$hook"
+  echo "  $hook"
+done
+
+# Configure ~/.claude/settings.json — merge RunEcho hooks (idempotent)
+echo ""
+echo "Configuring $SETTINGS_FILE..."
+
+python3 - <<'PYEOF'
+import json, os, sys
+
+settings_file = os.path.expanduser("~/.claude/settings.json")
+
+runecho_hooks = {
+    "SessionStart": [
+        {"matcher": "compact", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/constraint-reinjector.sh", "timeout": 3}]}
+    ],
+    "UserPromptSubmit": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-governor.sh", "timeout": 5}]},
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/ir-injector.sh", "timeout": 5}]}
+    ],
+    "PreToolUse": [
+        {"matcher": "Task",      "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/model-enforcer.sh", "timeout": 5}]},
+        {"matcher": "Bash",      "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/destructive-bash-guard.sh", "timeout": 3}]},
+        {"matcher": "Edit|Write","hooks": [{"type": "command", "command": "bash ~/.claude/hooks/scope-guard.sh", "timeout": 3}]}
+    ],
+    "PreCompact": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/pre-compact-snapshot.sh", "timeout": 3}]}
+    ],
+    "Stop": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/stop-checkpoint.sh", "timeout": 5}]}
+    ],
+    "SessionEnd": [
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-end.sh", "timeout": 5}]}
+    ]
+}
+
+# Load or create settings
+if os.path.exists(settings_file):
+    with open(settings_file) as f:
+        settings = json.load(f)
+else:
+    settings = {}
+
+# Extract runecho hook commands for dedup check
+def hook_commands(entries):
+    cmds = set()
+    for entry in entries:
+        for h in entry.get("hooks", []):
+            cmds.add(h.get("command", ""))
+    return cmds
+
+existing_hooks = settings.get("hooks", {})
+added = []
+skipped = []
+
+for event, entries in runecho_hooks.items():
+    existing = existing_hooks.get(event, [])
+    existing_cmds = hook_commands(existing)
+    for entry in entries:
+        entry_cmds = hook_commands([entry])
+        if entry_cmds & existing_cmds:
+            skipped.append(next(iter(entry_cmds)))
+        else:
+            existing.append(entry)
+            added.append(next(iter(entry_cmds)))
+    existing_hooks[event] = existing
+
+settings["hooks"] = existing_hooks
+
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+
+if added:
+    for cmd in added:
+        print(f"  Added: {cmd}")
+if skipped:
+    for cmd in skipped:
+        print(f"  Already present: {cmd}")
+print(f"  Settings written: {settings_file}")
+PYEOF
 
 # Validate hooks with ShellCheck if available
 if command -v shellcheck &>/dev/null; then
@@ -84,20 +128,10 @@ else
 fi
 
 echo ""
-echo "Add hooks to ~/.claude/settings.json — see README for full config."
+echo "RunEcho install complete."
 echo ""
-echo "Required settings.json hook events:"
-echo "  SessionStart (compact): constraint-reinjector.sh"
-echo "  UserPromptSubmit: session-governor.sh, ir-injector.sh"
-echo "  PreToolUse (Task): model-enforcer.sh"
-echo "  PreToolUse (Bash): destructive-bash-guard.sh"
-echo "  PreToolUse (Edit|Write): scope-guard.sh"
-echo "  PreCompact: pre-compact-snapshot.sh"
-echo "  Stop: stop-checkpoint.sh"
-echo "  SessionEnd: session-end.sh"
-echo ""
-echo "Set RUNECHO_CLASSIFIER_KEY in your PowerShell profile for LLM routing:"
+echo "Optional: set RUNECHO_CLASSIFIER_KEY in your PowerShell profile for LLM routing:"
 echo '  $env:RUNECHO_CLASSIFIER_KEY = "sk-ant-api03-..."'
 echo ""
-echo "Then index a project:"
+echo "Index a project:"
 echo "  cd /path/to/project && ai-ir"

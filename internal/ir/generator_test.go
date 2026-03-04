@@ -172,9 +172,9 @@ func TestGenerator_Generate_OnlySupportedExtensions(t *testing.T) {
 		t.Fatalf("Generate failed: %v", err)
 	}
 
-	// Should only have 3 files (.js, .ts, .gs)
-	if len(ir.Files) != 3 {
-		t.Errorf("Expected 3 files, got %d", len(ir.Files))
+	// Should only have 4 files (.js, .ts, .gs, .py) — not .txt or .md
+	if len(ir.Files) != 4 {
+		t.Errorf("Expected 4 files, got %d", len(ir.Files))
 		for path := range ir.Files {
 			t.Logf("  Found: %s", path)
 		}

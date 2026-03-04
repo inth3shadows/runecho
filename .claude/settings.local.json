@@ -25,7 +25,12 @@
       "Bash(seq 17:*)",
       "Bash(seq 27:*)",
       "Bash(bash:*)",
-      "Bash(rm:*)",
+      "Bash(rm -rf node_modules:*)",
+      "Bash(rm -rf dist:*)",
+      "Bash(rm -rf build:*)",
+      "Bash(rm -rf tmp:*)",
+      "Bash(rm -rf .tmp:*)",
+      "Bash(rm -f:*)",
       "Bash(xxd:*)",
       "WebFetch(domain:www.dolthub.com)",
       "WebFetch(domain:datastation.multiprocess.io)",
@@ -34,7 +39,20 @@
       "Bash(./ai-ir.exe diff:*)",
       "Bash(./ai-ir.exe:*)",
       "Bash(go:*)",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)\\)\")"
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)\\)\")",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git show:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "WebFetch(domain:openhands.dev)"
     ]
   }
 }

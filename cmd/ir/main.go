@@ -488,25 +488,29 @@ func extractSymbolRefs(text string) map[string]string {
 	return refs
 }
 
-// isCodeSymbol returns true if the name looks like a code identifier (not a prose word).
-// Requires: CamelCase (has uppercase after first char) OR snake_case with uppercase,
-// AND length > 2 to avoid false positives on short names.
+// isCodeSymbol returns true if the name looks like a CamelCase code identifier.
+// Requires mixed case (both upper and lower letters) to avoid false positives on:
+//   - ALL_CAPS shell/env constants (IR_DRIFT, OPUS_BLOCKED)
+//   - snake_case shell functions (emit_fault, validate_claims)
+//   - Python dunders (__all__, __init__)
+//
+// Only CamelCase/PascalCase names like IRProvider, ValidateClaims, FileIR pass.
 func isCodeSymbol(name string) bool {
 	if len(name) <= 2 {
 		return false
 	}
-	// Must have at least one uppercase letter beyond position 0, or contain '_'.
 	hasUpper := false
-	hasMixedUnderscore := false
-	for i, r := range name {
-		if i > 0 && r >= 'A' && r <= 'Z' {
+	hasLower := false
+	for _, r := range name {
+		if r >= 'A' && r <= 'Z' {
 			hasUpper = true
 		}
-		if r == '_' {
-			hasMixedUnderscore = true
+		if r >= 'a' && r <= 'z' {
+			hasLower = true
 		}
 	}
-	return hasUpper || hasMixedUnderscore
+	// Must have both upper and lower to be CamelCase
+	return hasUpper && hasLower
 }
 
 func truncate(s string, n int) string {

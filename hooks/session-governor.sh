@@ -16,6 +16,8 @@
 #     3. Sonnet (base) writes code informed by Opus's output
 #   Subagent results flow back to Sonnet. Sonnet has the full picture.
 
+. "$(dirname "$0")/fault-emitter.sh"
+
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // ""' 2>/dev/null || echo "")
@@ -94,18 +96,29 @@ COST_LEVEL=$(awk -v c="$SESSION_COST" -v stop="$COST_STOP" -v strong="$COST_STRO
 
 OUTPUT=""
 
-# --- IR Delta Warnings (Feature 2) ---
-# If stop-checkpoint.sh detected structural changes since session-start, inject and clear.
-# Stored separately so session warnings below don't overwrite it.
+# --- Pending Fault Signals (from stop-checkpoint.sh between turns) ---
+# IR_DRIFT and HALLUCINATION are queued by emit_fault() in stop-checkpoint.sh.
+# Read, format for injection, then clear the queue.
 IR_DELTA_OUTPUT=""
-VERIFY_FILE="$STATE_DIR/${SESSION_ID}.verify-warnings"
-if [ -f "$VERIFY_FILE" ]; then
-  IR_DELTA=$(cat "$VERIFY_FILE" 2>/dev/null)
-  if [ -n "$IR_DELTA" ]; then
-    IR_DELTA_OUTPUT="IR DELTA (since session-start):
-${IR_DELTA}"
-  fi
-  rm -f "$VERIFY_FILE"
+PENDING_FILE="$STATE_DIR/${SESSION_ID}.pending-faults"
+if [ -f "$PENDING_FILE" ]; then
+  while IFS= read -r line; do
+    sig=$(echo "$line" | jq -r '.signal // ""' 2>/dev/null)
+    ctx=$(echo "$line" | jq -r '.context // ""' 2>/dev/null)
+    val=$(echo "$line" | jq -r '.value // 0' 2>/dev/null)
+    case "$sig" in
+      IR_DRIFT)
+        IR_DELTA_OUTPUT="${IR_DELTA_OUTPUT:+$IR_DELTA_OUTPUT
+}IR DELTA (since session-start):
+${ctx}"
+        ;;
+      HALLUCINATION)
+        IR_DELTA_OUTPUT="${IR_DELTA_OUTPUT:+$IR_DELTA_OUTPUT
+}CLAIM MISMATCH [${val} ref(s)]: ${ctx}"
+        ;;
+    esac
+  done < "$PENDING_FILE"
+  rm -f "$PENDING_FILE"
 fi
 
 # --- Session Warnings (turn + cost, harder signal wins) ---
@@ -119,13 +132,32 @@ if [ "$COUNT" -ge "$STOP_AT" ] || [ "$COST_LEVEL" = "stop" ]; then
 ACTION REQUIRED: Write session handoff now.
   > Create .ai/handoff.md using the canonical format (accomplished, decisions, in-progress, blocked, next steps).
   > IR snapshot hash: ${IR_HASH}"
+  # Emit structured fault signal
+  COST_CENTS=$(awk -v c="$SESSION_COST" 'BEGIN { printf "%d", c * 100 }')
+  if [ "$COST_LEVEL" = "stop" ]; then
+    emit_fault "COST_FATIGUE" "$COST_CENTS" "stop — session cost ${COST_FMT}" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  else
+    emit_fault "TURN_FATIGUE" "$COUNT" "stop — turn $COUNT reached limit" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  fi
 elif [ "$COUNT" -ge "$STRONG_WARN_AT" ] || [ "$COST_LEVEL" = "strong" ]; then
   OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Session is expensive. Finish current task, suggest /compact or new session."
+  COST_CENTS=$(awk -v c="$SESSION_COST" 'BEGIN { printf "%d", c * 100 }')
+  if [ "$COST_LEVEL" = "strong" ]; then
+    emit_fault "COST_FATIGUE" "$COST_CENTS" "strong — session cost ${COST_FMT}" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  else
+    emit_fault "TURN_FATIGUE" "$COUNT" "strong — turn $COUNT" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  fi
 elif [ "$COUNT" -ge "$WARN_AT" ] || [ "$COST_LEVEL" = "warn" ]; then
   OUTPUT="SESSION GOVERNOR [turn $COUNT, $COST_FMT]: Cost rising. Consider wrapping up soon or /compact."
+  COST_CENTS=$(awk -v c="$SESSION_COST" 'BEGIN { printf "%d", c * 100 }')
+  if [ "$COST_LEVEL" = "warn" ]; then
+    emit_fault "COST_FATIGUE" "$COST_CENTS" "warn — session cost ${COST_FMT}" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  else
+    emit_fault "TURN_FATIGUE" "$COUNT" "warn — turn $COUNT" "$PWD" "$SESSION_ID" "$STATE_DIR"
+  fi
 fi
 
-# Append IR delta after any session warning (never drop it).
+# Append pending fault context after any session warning (never drop it).
 if [ -n "$IR_DELTA_OUTPUT" ]; then
   if [ -n "$OUTPUT" ]; then
     OUTPUT="${OUTPUT}
@@ -249,6 +281,8 @@ if [ "$BLOCK_OPUS_ON_COST" = "true" ] && [ "$COST_LEVEL" = "stop" ]; then
   if echo "$ROUTE" | grep -qE "(MULTI-STEP PIPELINE|Deep reasoning)"; then
     ROUTE=""  # Sonnet direct — opus blocked
     OPUS_BLOCKED_MSG="MODEL ROUTER: Opus/pipeline blocked — session cost ${COST_FMT} exceeds limit. Handling directly as Sonnet. Start a new session to re-enable opus routing."
+    COST_CENTS=$(awk -v c="$SESSION_COST" 'BEGIN { printf "%d", c * 100 }')
+    emit_fault "OPUS_BLOCKED" "$COST_CENTS" "cost ${COST_FMT} exceeds limit" "$PWD" "$SESSION_ID" "$STATE_DIR"
   fi
 fi
 

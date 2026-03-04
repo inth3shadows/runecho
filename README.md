@@ -1,8 +1,10 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · Milestone 1 (Context Compiler) next
+**Status:** Stages A–C Complete ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · V2 spike ✅ · next: M5
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
+
+**Fully automated.** After install, RunEcho requires no CLI commands in normal operation. Open Claude Code and work. The hook chain handles everything silently: model routing, IR injection, checkpointing, session synthesis, doc updates. The only user actions are the initial install and profile switching between work/personal accounts.
 
 ---
 
@@ -30,6 +32,8 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 
 **Persona Registry** — YAML files in `.ai/agents/` that define model assignments for agent roles (explorer → haiku, implementer → sonnet, architect → opus). `model-enforcer.sh` reads these to validate subagent model choices at PreToolUse time.
 
+**Session Contract** — A machine-readable scope boundary and success criterion for a work unit. Stored as `.ai/CONTRACT.yaml` (YAML). Fields: `title`, `scope` (list of glob patterns), `verify` (shell command), `assumptions`, `non_goals`, `success`. Authored by `ai-task contract` (tool path) or written directly by Claude (Claude path). The `ContractProvider` reads `CONTRACT.yaml` when present and falls back to the active task's `scope`/`verify` fields.
+
 **Scope Lock** — An opt-in write restriction for high-stakes sessions. When `.ai/scope-lock.json` is present, `scope-guard.sh` restricts all file writes to the declared paths only. Settings files, hook files, `.env`, and `*.key` are always blocked regardless.
 
 **Context Compaction** — Claude Code's `/compact` mechanism that summarizes and truncates conversation history to free context window space. RunEcho handles this via two hooks: `pre-compact-snapshot.sh` captures state immediately before, and `constraint-reinjector.sh` re-injects routing directives and active constraints after.
@@ -47,7 +51,7 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent.
 - **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
 - **Stop Checkpoint**: After every Claude response, writes `.ai/checkpoint.json` with turn count, IR hash, and last message. Provides state for failure recovery.
-- **Session End**: On session termination, runs a three-tier handoff pipeline: (1) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (2) falls back to minimal checkpoint template if JSONL unavailable, (3) calls `ai-document` to update project docs if structural changes occurred.
+- **Session End**: On session termination, runs a five-stage pipeline: (1) scope-drift detection — compares git-changed files vs. the active task's declared scope, emits `SCOPE_DRIFT` fault if files fall outside it, (2) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (3) falls back to minimal checkpoint template if JSONL unavailable, (4) calls `ai-session review` silently — injects a SESSION REVIEW block into the next turn-1 if actionable patterns exist, (5) calls `ai-document` to update project docs if structural changes occurred.
 - **Session Synthesizer** (`ai-session`): Reads the Claude Code JSONL session log, extracts ground-truth facts (files edited/created, commands run, token counts, cost, duration), and calls haiku to summarize the session narrative. Produces `.ai/handoff.md` with factual accuracy — no speculation.
 - **Document Generator** (`ai-document`): Auto-generates and updates project documentation (README.md, TECHNICAL.md, USAGE.md) using haiku. Change-gated by IR diff — skips entirely if no structural changes and docs already exist. Work mode generates all three docs; personal/unknown mode generates README only.
 - **Destructive Bash Guard**: PreToolUse[Bash] hook. Hard-denies catastrophic commands (`rm -rf /`, `mkfs`, fork-bombs). Approval-gates dangerous-but-recoverable patterns: `rm -rf`, `git reset --hard`, `DROP TABLE`, pipe-to-shell installs.
@@ -59,13 +63,29 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 
 ---
 
+## Dependencies
+
+**Required:**
+- Go 1.24+ — build-time only; not needed at runtime after `install.sh`
+- Python 3 — used by `install.sh` to merge hook config into `~/.claude/settings.json`
+- [Claude Code](https://claude.ai/code) — the CLI RunEcho hooks into
+- Claude Pro account or Anthropic API key — for Claude Code authentication
+
+**Optional:**
+- `RUNECHO_CLASSIFIER_KEY` — Anthropic API key for LLM-based model routing. Without it, regex routing fires as fallback. No functional regression.
+- ShellCheck — hook validation during install (`winget install koalaman.shellcheck`)
+
+**Not a dependency:** `ccusage` and similar external cost-tracking tools are not required and are not integrated.
+
+---
+
 ## Install
 
 ```bash
 bash install.sh
 ```
 
-Builds four binaries and symlinks all hooks into `~/.claude/hooks/`. Requires Go in PATH.
+Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
@@ -73,10 +93,13 @@ Builds four binaries and symlinks all hooks into `~/.claude/hooks/`. Requires Go
 | `ai-session` | Parses Claude Code JSONL log → ground-truth session handoff |
 | `ai-document` | Auto-generates/updates README.md, TECHNICAL.md, USAGE.md via haiku |
 | `ai-task` | Persistent task ledger for cross-session work tracking (`.ai/tasks.json`) |
+| `ai-context` | Compiles turn-1 context block (contract + IR + diff + handoff + tasks + review) within a token budget |
 
 ---
 
-## Settings
+## Settings Reference
+
+`install.sh` automatically merges these hooks into `~/.claude/settings.json`. This section is for reference — manual configuration is not required.
 
 Full `~/.claude/settings.json` hook configuration:
 
@@ -211,7 +234,7 @@ Triggers on whichever threshold hits first — turn count or session cost.
 
 **No manual indexing needed.** `ir-injector.sh` runs `ai-ir` automatically on session turn 1.
 
-On every new Claude Code session in a project with supported source files (currently JS/TS/Go; extensible via the `Parser` interface), turn 1 will include:
+On every new Claude Code session in a project with supported source files (currently JS/TS/Go/Python; extensible via the `Parser` interface), turn 1 will include:
 
 ```
 IR CONTEXT [root_hash: abc123456789...]:
@@ -245,9 +268,10 @@ Closes the cross-session continuity gap.
 **SessionEnd pipeline** (`session-end.sh`):
 1. `ai-ir snapshot` — capture final IR state to SQLite
 2. `ai-ir verify` — compute structural diff summary since last snapshot
-3. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
-4. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
-5. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
+3. **Scope-drift detection** (M3) — compare `git diff --name-only HEAD` vs. active task's `scope` glob; emit `SCOPE_DRIFT` fault to `faults.jsonl` for out-of-scope files
+4. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
+5. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
+6. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
 
 **Triggers (Claude-written handoff):**
 - Auto: governor fires at turn 35 with `ACTION REQUIRED: Write session handoff now.`
@@ -283,16 +307,25 @@ Closes the cross-session continuity gap.
 
 `ai-task` maintains a persistent, dependency-aware task list at `.ai/tasks.json`. Designed for cross-session work tracking — tasks survive session boundaries and are injected into turn 1 via the GUPP (Guided Upstream Priority Protocol) block in `ir-injector.sh`.
 
+**Claude drives this during sessions.** When you describe work in conversation, Claude calls `ai-task add` directly. When work completes, Claude calls `ai-task update`. The `ir-injector.sh` hook calls `ai-task next` and `ai-task contract` automatically on session turn 1. No manual CLI invocation needed in normal operation.
+
+The CLI is available for inspection, override, and bootstrapping:
+
 ```bash
-ai-task add "<title>" [--blocked-by=<id>]   # append task, status=pending
+ai-task add "<title>" [--blocked-by=<id>] [--scope=<glob>] [--verify=<cmd>]  # append task, status=pending
 ai-task update <id> <status>                 # status ∈ {pending, in-progress, done}
 ai-task list [--status=<s>]                  # tabular; no filter = all non-done
 ai-task next                                 # first unblocked non-done task; exit 1 if none
+ai-task contract [--task-id=<id>] [root]     # write .ai/CONTRACT.yaml from active (or specified) task
 ```
 
 **Blocking model:** `--blocked-by=<id>` links tasks. `next` skips tasks whose blocker isn't done yet.
 
 **Storage:** atomic write via temp-file rename → no partial writes on crash.
+
+**Fields:** `--scope=<glob>` locks the task to specific file paths (e.g. `internal/auth/*`; comma-separated or newline-separated for multiple). `--verify=<cmd>` sets a shell command run at session end to validate completion. Both fields are injected into the SESSION CONTRACT block on turn 1 and used for scope-drift detection in `session-end.sh`.
+
+**CONTRACT.yaml:** `ai-task contract` generates `.ai/CONTRACT.yaml` from the active task. Claude can also write this file directly — the schema is well-defined (see `internal/contract/types.go`). Supports list-valued `scope`, `assumptions`, `non_goals`, and `success` fields beyond what task flags expose. The `ContractProvider` reads it on every turn 1; absence falls back silently to task-derived output.
 
 **Integration:** `ir-injector.sh` calls `ai-task next` on session turn 1 and prepends the result to the HANDOFF DIRECTIVE block — Claude starts each session aware of the highest-priority unblocked task.
 
@@ -373,25 +406,29 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 ```
 .
 ├── cmd/
+│   ├── context/main.go         # ai-context — compiles session context block (IR + handoff + tasks + diff)
 │   ├── document/main.go        # ai-document — auto-generates project docs via haiku
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
 │   ├── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
 │   └── task/main.go            # ai-task — persistent task ledger with dependency graph
 ├── hooks/
-│   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing
+│   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing + fault emission
 │   ├── model-enforcer.sh          # PreToolUse[Task] — denies wrong-model subagents
-│   ├── ir-injector.sh             # UserPromptSubmit — injects IR + handoff + next task on turn 1
-│   ├── stop-checkpoint.sh         # Stop — writes .ai/checkpoint.json after each response
+│   ├── ir-injector.sh             # UserPromptSubmit — index + snapshot + ai-context injection (20 lines)
+│   ├── fault-emitter.sh           # Sourced by hooks — emit_fault() writes to .ai/faults.jsonl
+│   ├── stop-checkpoint.sh         # Stop — writes .ai/checkpoint.json; emits IR_DRIFT + HALLUCINATION faults
 │   ├── session-end.sh             # SessionEnd — JSONL handoff → checkpoint fallback → doc update
 │   ├── destructive-bash-guard.sh  # PreToolUse[Bash] — hard deny + approval gate for destructive ops
 │   ├── scope-guard.sh             # PreToolUse[Edit|Write] — protects settings/keys; optional scope-lock
 │   ├── constraint-reinjector.sh   # SessionStart[compact] — re-injects constraints after /compact
 │   └── pre-compact-snapshot.sh    # PreCompact — captures state before compaction
-├── install.sh                  # Builds all binaries, symlinks hooks to ~/.claude/hooks/
+├── install.sh                  # Builds all binaries, symlinks hooks, auto-configures ~/.claude/settings.json
 ├── internal/
+│   ├── contract/               # Contract type, YAML parser, validator, FromTask adapter
+│   ├── context/                # context compiler: Provider interface + contract/ir/gitdiff/handoff/tasks/churn/review providers
 │   ├── document/               # doc generation: types, generator, reader, writer
 │   ├── ir/                     # IR types, generator, hasher, storage
-│   ├── parser/                 # language parsers (JS/TS, Go); extensible via Parser interface
+│   ├── parser/                 # language parsers (JS/TS/Go/Python); extensible via Parser interface
 │   ├── session/                # session fact extraction, JSONL parser, summarizer, writer
 │   └── snapshot/               # SQLite snapshot store, structural diff engine
 ├── .ai/agents/
@@ -428,6 +465,25 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - `ai-task`: persistent task ledger with dependency graph; GUPP injection on turn 1
 - Persona registry: model assignments in YAML, enforced at PreToolUse time
 
+**M3 — Session Contracts ✅**
+- `ai-task` `--scope=<glob>` and `--verify=<cmd>` fields per task
+- `SESSION CONTRACT` block injected at turn 1 via `ContractProvider` (scope, title, verify command)
+- Scope-drift detection in `session-end.sh`: git diff vs. task scope → `SCOPE_DRIFT` fault in `faults.jsonl`
+- `DefaultProviders` order: contract, ir, gitdiff, handoff, tasks, review
+
+**M4 — Session Review ✅**
+- `ai-session review [--trace] [--n=5] [--force]` subcommand: reads `progress.jsonl` + `faults.jsonl` + `tasks.json`
+- Reports stuck tasks (3+ sessions, not done), scope drift frequency, cost per session
+- `ReviewProvider` injects `SESSION REVIEW` block at turn 1 only when actionable — silent otherwise
+- `--trace` flag groups entries by task across sessions for full lifecycle view
+
+**V2 Spike — Contract Package ✅**
+- `internal/contract/` package: `Contract` type (list-valued `scope`, `assumptions`, `non_goals`, `success`), YAML parser, validator, `FromTask` adapter
+- `ai-task contract [--task-id=<id>] [root]` subcommand: writes `.ai/CONTRACT.yaml` atomically from the active task
+- `ContractProvider` reads `CONTRACT.yaml` when present; falls back to task-derived; logs validation warnings to stderr
+- Richer SESSION CONTRACT block: multi-line scope, assumptions, non-goals, success criterion
+- Added `gopkg.in/yaml.v3` dependency (validates fit before M5 pipeline definitions)
+
 ---
 
 ## Roadmap
@@ -436,7 +492,21 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 ---
 
-### Milestone 1 — Context Compiler
+### Milestone 1 — Fault Signal Taxonomy
+**Goal:** Formalize the hook chain's ad-hoc warning emissions into a typed, structured signal layer. Decouples fault detection from fault consumption so any downstream (session review, Langfuse, handoff, progress.jsonl) reads from a stable schema.
+
+| Deliverable | Description |
+|---|---|
+| Signal schema | Named signal identifiers: `IR_DRIFT`, `HALLUCINATION`, `TURN_FATIGUE`, `COST_FATIGUE`, `OPUS_BLOCKED`. Each carries `session_id`, `ts`, `value` (numeric), and `context` (string). |
+| `.ai/faults.jsonl` | Append-only fault log per workspace. One JSON line per signal emission. Idempotent by `(session_id, signal, ts)`. |
+| Emission utility | Shared shell function (or Go helper called from hooks) that writes structured JSON to `faults.jsonl`. Replaces inline `echo` + `.verify-warnings` ad-hoc text. |
+| Signal migration | Migrate all 5 existing fault signals in `stop-checkpoint.sh` and `session-governor.sh` to use the new emission path. Remove `.verify-warnings` plain-text format. |
+
+**Done when:** All 5 existing signals emit structured JSON to `faults.jsonl`; `.verify-warnings` is retired; `ai-ir validate-claims` and `ai-ir verify` emit structured output consumed by the emission utility.
+
+---
+
+### Milestone 2 — Context Compiler
 **Goal:** Replace bash+jq context assembly in `ir-injector.sh` with a single Go binary that composes, scores, and budget-constrains session context.
 
 | Deliverable | Description |
@@ -444,12 +514,13 @@ The order reflects dependencies and value. Each milestone is independently usefu
 | `ai-context` binary | Accepts `--budget=<tokens>` and `--providers=ir,handoff,tasks,churn,git-diff`. Outputs one markdown block. Relevance scoring moves from bash to Go. |
 | `ir-injector.sh` simplification | Reduced to a single binary call + echo. All logic in compiled, testable Go. |
 | Context provider interface | `internal/context/provider.go` — adding a new provider is a Go function, not a bash stanza. |
+| Python parser | `internal/parser/python.go` — implements `Parser` interface for `.py` files. Extracts imports, top-level functions, classes, `__all__` exports. Validates the provider interface is general enough for a third language. |
 
-**Done when:** `ir-injector.sh` is under 20 lines; all context assembly has unit tests; token budget is respected (verified by output length).
+**Done when:** `ir-injector.sh` is under 20 lines; all context assembly has unit tests; token budget is respected; Python files appear in IR output.
 
 ---
 
-### Milestone 2 — Session Contracts
+### ~~Milestone 3 — Session Contracts~~ ✅
 **Goal:** Every session starts with a machine-verifiable scope contract and ends with a pass/fail evaluation against it.
 
 | Deliverable | Description |
@@ -462,7 +533,7 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 ---
 
-### Milestone 3 — Session Review
+### ~~Milestone 4 — Session Review~~ ✅
 **Goal:** Surface patterns across sessions — stuck tasks, scope drift, cost trends — before starting work.
 
 | Deliverable | Description |
@@ -475,9 +546,11 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 *Inspired by: OpenTelemetry/Honeycomb (traces, not flat logs)*
 
+> **Optional add-on after M4:** Langfuse integration — wire `faults.jsonl` signals as Langfuse Scores, map `session_id` to Langfuse session traces. Deferred until M1 structured signals exist. Treated as an optional consumer of the fault layer, not a replacement for `ai-session review`.
+
 ---
 
-### Milestone 4 — Pipeline Definitions
+### Milestone 5 — Pipeline Definitions
 **Goal:** Replace hardcoded pipeline text in `session-governor.sh` with declarative YAML definitions.
 
 | Deliverable | Description |
@@ -488,11 +561,13 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 **Done when:** A custom pipeline YAML produces different governor injection than the default. Adding a pipeline is a YAML edit, not a bash edit.
 
+*Prerequisite satisfied:* `gopkg.in/yaml.v3` added and validated in V2 spike.
+
 *Inspired by: Dagger (pipelines as typed, composable objects)*
 
 ---
 
-### Milestone 5 — MCP Tool Server
+### Milestone 6 — MCP Tool Server
 **Goal:** Expose RunEcho capabilities as MCP tools so Claude invokes them directly instead of relying on text injection.
 
 | Deliverable | Description |
@@ -507,7 +582,7 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 ---
 
-### Milestone 6 — Orchestration Prototype *(Stage C entry)*
+### Milestone 7 — Orchestration Prototype *(Stage C entry)*
 **Goal:** A single command that decomposes a task into subtasks, assigns models, and produces a multi-session execution plan.
 
 | Deliverable | Description |
@@ -519,6 +594,70 @@ The order reflects dependencies and value. Each milestone is independently usefu
 **Done when:** `ai-orchestrate 5` produces a concrete, executable multi-session plan. Executing each subtask in separate sessions produces `progress.jsonl` entries tracing back to the parent task.
 
 *Inspired by: Temporal/Inngest (durable execution with explicit checkpoints); full Stage C automation follows after this proves the contracts work)*
+
+---
+
+### Milestone 8 — Outcome Verification Loop
+**Goal:** Close the contract cycle by automatically running each task's `verify` command at session end, recording pass/fail in `progress.jsonl`, and feeding results into the next session's handoff.
+
+| Deliverable | Description |
+|---|---|
+| `session-end.sh` verify runner | After scope-drift detection (M3), runs `task.verify` command if present. Captures exit code, stdout (truncated to 2 KB), and duration. Writes structured result to `progress.jsonl` with `type: "verify"`. |
+| Verify result in handoff injection | `HANDOFF` block includes last verify outcome: `PASS`, `FAIL + summary`, or `SKIPPED (no verify command)`. Next session sees whether the previous session's work actually held. |
+| `ai-task verify <task-id>` | Standalone command to run a task's verify step on demand. Returns structured JSON: `{task_id, status, exit_code, output, duration_ms}`. |
+| Fault signal: `VERIFY_FAIL` | Failed verification emits `VERIFY_FAIL` to `faults.jsonl` (M1 schema). Consecutive failures across sessions on the same task escalate to `TASK_STUCK` signal. |
+
+**Done when:** A session completing a task with `--verify="go test ./pkg/auth/..."` automatically runs it, records the result in `progress.jsonl`, and the next session's handoff injection shows `VERIFY: PASS` or `VERIFY: FAIL — <first failure line>`. A task failing verification 3 sessions in a row emits `TASK_STUCK`.
+
+*Inspired by: Bazel's test result caching + GitHub Actions job summaries (structured outcomes, not just exit codes)*
+
+---
+
+### Milestone 9 — Drift-Aware Re-Planning
+**Goal:** When the IR snapshot changes significantly between sessions, detect which in-progress tasks are affected by the structural drift and surface actionable re-planning signals before work begins.
+
+| Deliverable | Description |
+|---|---|
+| Task impact analysis | Intersects `task.scope` globs with IR diff's changed file set. Tasks with overlap are flagged `DRIFT_AFFECTED` in `faults.jsonl`. |
+| Turn-1 drift injection | When drift-affected tasks exist, the `SESSION CONTRACT` block (M3) includes a `DRIFT ADVISORY` section listing affected tasks, what changed, and whether `verify` commands still reference valid paths. |
+| `ai-task replan <task-id>` | Prints original task scope alongside the IR diff. Suggests scope adjustments (new files in scope, removed files that were in scope). Human confirms or edits. |
+
+**Done when:** After a refactor session moves `internal/auth/` to `pkg/auth/`, the next session working on an auth-scoped task sees a drift advisory naming the moved files. Tasks unaffected by the drift show no advisory.
+
+*Inspired by: Renovate/Dependabot (automated impact detection) + Pants/Buck2 (target-level invalidation from dependency graphs)*
+
+---
+
+### Milestone 10 — Supervised Subtask Execution
+**Goal:** Extend `ai-orchestrate` (M7) from plan-only to plan-and-execute, spawning Claude Code sessions for each subtask with mandatory gates between stages.
+
+| Deliverable | Description |
+|---|---|
+| `ai-orchestrate run <task-id>` | Executes the orchestration plan sequentially. Each subtask spawns a headless `claude` session with scope locked to the subtask's file set. Captures `progress.jsonl` output. |
+| Gate enforcement | Between subtasks: runs `ai-task verify` (M8). `FAIL` → halts pipeline, emits `GATE_FAIL` fault. `PASS` → proceeds. Human override via `--continue-on-fail` (explicit opt-in). |
+| Scope lock | Each spawned session receives `ALLOWED_PATHS` from `task.scope`. Enforcer hook rejects writes outside scope. |
+| Execution manifest | `.ai/orchestrations/<task-id>.jsonl` — one entry per subtask with `{subtask_id, model, start_ts, end_ts, verify_result, cost, files_touched}`. |
+| `--dry-run` | Prints execution plan with estimated cost without spawning. Default mode — `--execute` required to actually run. |
+
+**Done when:** `ai-orchestrate run 5 --execute` runs each subtask in a scoped session, halts on verify failure, and produces an orchestration manifest. Re-running after failure resumes from the failed subtask (idempotent).
+
+*Inspired by: Temporal (durable execution with compensation) + Buildkite (pipeline stages with manual gates)*
+
+---
+
+### Milestone 11 — Session Provenance Export
+**Goal:** Produce a self-contained, machine-readable provenance record for any completed task — the full chain of evidence from planning through verification — suitable for audit, onboarding, and post-mortems.
+
+| Deliverable | Description |
+|---|---|
+| `ai-provenance export <task-id>` | Assembles a single JSON document: task definition, session timeline, IR snapshots at session boundaries, model routing decisions, fault signals, verify outcomes, scope drift events, total cost. |
+| Provenance schema | Versioned JSON schema (`provenance.v1.schema.json`). Fields: `task`, `sessions[]` (each with `model_turns[]`, `files_touched[]`, `faults[]`, `verify`), `ir_snapshots[]`, `cost_summary`, `outcome`. |
+| `--format=markdown` | Renders as structured markdown: Decision Log, Session Timeline, Outcome, Cost Breakdown. Suitable for PR descriptions or post-mortems. |
+| Provenance diff | `ai-provenance diff <task-a> <task-b>` — compares two task records: cost, session count, fault frequency, model distribution. |
+
+**Done when:** `ai-provenance export 5 --format=markdown` on a completed multi-session task produces a document a new team member can read to understand what was done, what the AI chose at each branch point, what failed, and what the final verification result was — without access to the original chat transcripts.
+
+*Inspired by: SLSA provenance (supply chain attestation) + Jupyter execution records (reproducible decision trails)*
 
 ---
 

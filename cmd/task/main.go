@@ -1,10 +1,11 @@
 package main
 
 // Usage:
-//   ai-task add "<title>" [--blocked-by=<id>]   append task, status=pending
+//   ai-task add "<title>" [--blocked-by=<id>] [--scope=<glob>] [--verify=<cmd>]
 //   ai-task update <id> <status>                 status ∈ {pending, in-progress, done}
 //   ai-task list [--status=<s>]                  tabular; no filter = all non-done
 //   ai-task next                                 first unblocked non-done task by id; exit 1 if none
+//   ai-task contract [--task-id=<id>] [root]     write .ai/CONTRACT.yaml from active (or specified) task
 
 import (
 	"encoding/json"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/contract"
 )
 
 const tasksFile = ".ai/tasks.json"
@@ -26,6 +29,8 @@ type Task struct {
 	Added     string `json:"added"`
 	Updated   string `json:"updated"`
 	BlockedBy string `json:"blockedBy,omitempty"`
+	Scope     string `json:"scope,omitempty"`  // glob pattern(s) for allowed file paths
+	Verify    string `json:"verify,omitempty"` // shell command to validate completion
 }
 
 type TaskDB struct {
@@ -47,6 +52,8 @@ func main() {
 		runList(os.Args[2:])
 	case "next":
 		runNext()
+	case "contract":
+		runContract(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "ai-task: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -56,17 +63,21 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  ai-task add \"<title>\" [--blocked-by=<id>]")
+	fmt.Fprintln(os.Stderr, "  ai-task add \"<title>\" [--blocked-by=<id>] [--scope=<glob>] [--verify=<cmd>]")
 	fmt.Fprintln(os.Stderr, "  ai-task update <id> <status>   # pending | in-progress | done")
 	fmt.Fprintln(os.Stderr, "  ai-task list [--status=<s>]")
 	fmt.Fprintln(os.Stderr, "  ai-task next")
+	fmt.Fprintln(os.Stderr, "  ai-task contract [--task-id=<id>] [root]")
 }
 
 // runAdd appends a new pending task.
 func runAdd(args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	blockedBy := fs.String("blocked-by", "", "ID of task that blocks this one")
-	fs.Parse(args)
+	scope := fs.String("scope", "", "glob pattern(s) for allowed file paths, e.g. internal/auth/*")
+	verify := fs.String("verify", "", "shell command to validate completion, e.g. go test ./internal/auth/...")
+	// Go's flag package stops at first non-flag arg, so hoist flag args before positional ones.
+	fs.Parse(hoistFlags(args))
 
 	title := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if title == "" {
@@ -87,6 +98,12 @@ func runAdd(args []string) {
 	}
 	if *blockedBy != "" {
 		t.BlockedBy = *blockedBy
+	}
+	if *scope != "" {
+		t.Scope = *scope
+	}
+	if *verify != "" {
+		t.Verify = *verify
 	}
 	db.Tasks = append(db.Tasks, t)
 	db.Updated = now
@@ -182,8 +199,90 @@ func runNext() {
 	os.Exit(1)
 }
 
-func loadOrInit() TaskDB {
+// runContract generates .ai/CONTRACT.yaml from the active (or specified) task.
+func runContract(args []string) {
+	fs := flag.NewFlagSet("contract", flag.ExitOnError)
+	taskID := fs.String("task-id", "", "ID of task to use (default: active task)")
+	fs.Parse(hoistFlags(args))
+
+	// Optional positional arg overrides project root.
 	root := projectRoot()
+	if len(fs.Args()) > 0 {
+		root = fs.Args()[0]
+	}
+
+	db := loadOrInitAt(root)
+
+	done := make(map[string]bool)
+	for _, t := range db.Tasks {
+		if t.Status == "done" {
+			done[t.ID] = true
+		}
+	}
+
+	var task *Task
+	if *taskID != "" {
+		for i := range db.Tasks {
+			if db.Tasks[i].ID == *taskID {
+				task = &db.Tasks[i]
+				break
+			}
+		}
+		if task == nil {
+			fmt.Fprintf(os.Stderr, "ai-task contract: task #%s not found\n", *taskID)
+			os.Exit(1)
+		}
+	} else {
+		// Find first active unblocked task.
+		for i := range db.Tasks {
+			t := &db.Tasks[i]
+			if t.Status == "done" {
+				continue
+			}
+			if t.BlockedBy != "" && !done[t.BlockedBy] {
+				continue
+			}
+			task = t
+			break
+		}
+	}
+
+	if task == nil {
+		fmt.Fprintln(os.Stderr, "ai-task contract: no active task found (use --task-id to specify)")
+		os.Exit(1)
+	}
+
+	c := contract.FromTask(task.ID, task.Title, task.Scope, task.Verify)
+
+	data, err := contract.Marshal(c)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task contract: marshal failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	outDir := filepath.Join(root, ".ai")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task contract: mkdir failed: %v\n", err)
+		os.Exit(1)
+	}
+	outPath := filepath.Join(outDir, "CONTRACT.yaml")
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task contract: write failed: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task contract: rename failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Contract written to %s\n", outPath)
+}
+
+func loadOrInit() TaskDB {
+	return loadOrInitAt(projectRoot())
+}
+
+func loadOrInitAt(root string) TaskDB {
 	path := filepath.Join(root, tasksFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -249,6 +348,32 @@ func sortByID(tasks []Task) []Task {
 		}
 	}
 	return out
+}
+
+// hoistFlags moves --flag=value and --flag value arguments before positional
+// arguments so that flag.Parse works regardless of argument order.
+func hoistFlags(args []string) []string {
+	var flags, positional []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			// If the flag has no '=' it may consume the next arg as its value.
+			// Check: does the flag registered without '='? We can't know without
+			// the FlagSet at this point, so only consume next arg if it doesn't
+			// start with '-' AND the current flag has no '='.
+			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flags = append(flags, args[i+1])
+				i += 2
+				continue
+			}
+		} else {
+			positional = append(positional, a)
+		}
+		i++
+	}
+	return append(flags, positional...)
 }
 
 // projectRoot walks up from CWD looking for a .ai directory, fallback to CWD.

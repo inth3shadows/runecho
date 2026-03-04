@@ -25,11 +25,27 @@ var systemPrompt = `You are a technical documentation writer. Rules:
 - Be concise. No filler sentences. No "Getting Started is easy!" style padding.
 - If information is insufficient for a section, write a TODO placeholder rather than guessing.`
 
-// tokenBudgets maps (docType, runMode) → maxTokens.
-var tokenBudgets = map[string]map[RunMode]int{
-	"README":    {RunModeCreate: 1000, RunModeUpdate: 600},
-	"TECHNICAL": {RunModeCreate: 2000, RunModeUpdate: 1000},
-	"USAGE":     {RunModeCreate: 2000, RunModeUpdate: 1000},
+// createBudgets maps docType → maxTokens for create mode.
+var createBudgets = map[string]int{
+	"README":    1000,
+	"TECHNICAL": 2000,
+	"USAGE":     2000,
+}
+
+// updateBudget returns a token budget for update mode sized to the existing doc.
+// Estimate: existing bytes / 4 chars-per-token, plus 30% buffer, floor 800, cap 8000 (haiku max is 8192).
+func updateBudget(existing string) int {
+	if len(existing) == 0 {
+		return 800
+	}
+	budget := len(existing)/4*13/10 // × 1.3
+	if budget < 800 {
+		budget = 800
+	}
+	if budget > 8000 {
+		budget = 8000
+	}
+	return budget
 }
 
 // Generate produces docs for all configured DocTypes. Parallel when >1 type.
@@ -84,9 +100,14 @@ func Generate(ctx *ProjectContext, statuses map[string]DocStatus, apiKey string)
 
 func generateDoc(ctx *ProjectContext, docType string, status DocStatus, apiKey string) (string, error) {
 	prompt := buildPrompt(ctx, docType, status)
-	budget := tokenBudgets[docType][status.RunMode]
-	if budget == 0 {
-		budget = 800
+	var budget int
+	if status.RunMode == RunModeUpdate {
+		budget = updateBudget(ExistingDoc(ctx, docType))
+	} else {
+		budget = createBudgets[docType]
+		if budget == 0 {
+			budget = 800
+		}
 	}
 	return callHaiku(systemPrompt, prompt, budget, apiKey)
 }

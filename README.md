@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · V2 spike ✅ · M4.5 ✅ · next: M5
+**Status:** Stages A–C Complete ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · V2 spike ✅ · M4.5 ✅ · M5 ✅ · next: M6
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -85,7 +85,7 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
+Builds six binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
@@ -95,6 +95,7 @@ Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatica
 | `ai-task` | Persistent task ledger for cross-session work tracking (`.ai/tasks.json`) |
 | `ai-context` | Compiles turn-1 context block (contract + IR + diff + handoff + tasks + review) within a token budget |
 | `ai-governor` | Session governor + model router (replaces `session-governor.sh` logic) |
+| `ai-pipeline` | Declarative pipeline definitions — `render` (injection text) + `envelope` (execution records) |
 
 ---
 
@@ -268,9 +269,10 @@ Closes the cross-session continuity gap.
 1. `ai-ir snapshot` — capture final IR state to SQLite
 2. `ai-ir verify` — compute structural diff summary since last snapshot
 3. **Scope-drift detection** (M3) — compare `git diff --name-only HEAD` vs. active task's `scope` glob; emit `SCOPE_DRIFT` fault to `faults.jsonl` for out-of-scope files
-4. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
-5. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
-6. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
+4. **`ai-pipeline envelope`** (M5) — if route was `pipeline`, write an execution record to `.ai/executions.jsonl` (idempotent)
+5. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
+6. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
+7. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
 
 **Triggers (Claude-written handoff):**
 - Auto: governor fires at turn 35 with `ACTION REQUIRED: Write session handoff now.`
@@ -411,7 +413,9 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 ├── cmd/
 │   ├── context/main.go         # ai-context — compiles session context block (IR + handoff + tasks + diff)
 │   ├── document/main.go        # ai-document — auto-generates project docs via haiku
+│   ├── governor/main.go        # ai-governor — session governor + model router
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
+│   ├── pipeline/main.go        # ai-pipeline — declarative pipeline render + envelope subcommands
 │   ├── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
 │   └── task/main.go            # ai-task — persistent task ledger with dependency graph
 ├── hooks/
@@ -430,8 +434,10 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── contract/               # Contract type, YAML parser, validator, FromTask adapter
 │   ├── context/                # context compiler: Provider interface + contract/ir/gitdiff/handoff/tasks/churn/review providers
 │   ├── document/               # doc generation: types, generator, reader, writer
+│   ├── governor/               # session governor logic, model router, fault emission
 │   ├── ir/                     # IR types, generator, hasher, storage
 │   ├── parser/                 # language parsers (JS/TS/Go/Python); extensible via Parser interface
+│   ├── pipeline/               # Pipeline/Stage/Envelope types; Load, RenderText, AppendEnvelope, FaultsForSession
 │   ├── session/                # session fact extraction, JSONL parser, summarizer, writer
 │   └── snapshot/               # SQLite snapshot store, structural diff engine
 ├── .ai/agents/
@@ -500,6 +506,15 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - No more `date +%s%3N` (macOS), `awk`, `jq`, or `curl` in the governor path
 - `install.sh` builds `ai-governor` alongside the other 5 binaries
 
+**M5 — Pipeline Definitions + Execution Envelopes ✅**
+- `internal/pipeline/` package: `Pipeline`, `Stage`, `Envelope`, `StageResult` types; `Load`/`LoadNamed` with `default.yaml` fallback to `DefaultPipeline()`; `RenderText`; `AppendEnvelope` (idempotent by `session_id`); `FaultsForSession`
+- `ai-pipeline render [--pipeline=default] [root]` — prints MODEL ROUTER injection text from YAML definition; output matches hardcoded `RoutePipeline` text for `default.yaml`
+- `ai-pipeline envelope --session=<id> ...` — writes execution record to `.ai/executions.jsonl`; reads `ir_hash_start` from `checkpoint.json` and `ir_hash_end` from `ir.json` if not supplied; idempotent
+- Governor: `getRouteText(cwd, route)` loads pipeline YAML for `RoutePipeline` and renders dynamically; falls back to hardcoded text on load failure (never blocks session)
+- `session-end.sh`: calls `ai-pipeline envelope` after snapshot when `route == pipeline`
+- Pipeline definitions: `.ai/pipelines/*.yaml` — adding a pipeline is a YAML edit, not a bash edit
+- `install.sh` builds `ai-pipeline` alongside the other 6 binaries
+
 ---
 
 ## Roadmap
@@ -566,16 +581,17 @@ The order reflects dependencies and value. Each milestone is independently usefu
 
 ---
 
-### Milestone 5 — Pipeline Definitions
+### ~~Milestone 5 — Pipeline Definitions~~ ✅
 **Goal:** Replace hardcoded pipeline text in `session-governor.sh` with declarative YAML definitions.
 
 | Deliverable | Description |
 |---|---|
 | `.ai/pipelines/*.yaml` format | Stages with model, token budget, and input/output contract. Example: `explore (haiku) → reason (opus) → implement (sonnet)`. |
 | Governor reads definitions | Stage-specific injection text, not monolithic `MULTI-STEP PIPELINE` block. |
-| `ai-pipeline` binary | `ai-pipeline run <name>` validates definition and emits the injection text. Templates only — no orchestration. |
+| `ai-pipeline` binary | `render` + `envelope` subcommands. Definitions validated at load time. |
+| `.ai/executions.jsonl` | Append-only execution record per pipeline-routed session. Idempotent by `session_id`. |
 
-**Done when:** A custom pipeline YAML produces different governor injection than the default. Adding a pipeline is a YAML edit, not a bash edit.
+**Done when:** A custom pipeline YAML produces different governor injection than the default. Adding a pipeline is a YAML edit, not a bash edit. ✅
 
 *Prerequisite satisfied:* `gopkg.in/yaml.v3` added and validated in V2 spike.
 

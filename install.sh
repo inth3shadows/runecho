@@ -15,7 +15,7 @@ BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
-for cmd in ir session document task context governor; do
+for cmd in ir session document task context governor pipeline; do
   echo "Building ai-$cmd..."
   go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
   echo "  Built: $BIN_DIR/ai-$cmd"

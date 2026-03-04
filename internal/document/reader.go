@@ -194,9 +194,9 @@ func readGitLog(root string) string {
 }
 
 func readExistingDocs(root string) (readme, technical, usage string) {
-	readme = readFileTruncated(filepath.Join(root, "README.md"), 5000)
-	technical = readFileTruncated(filepath.Join(root, "TECHNICAL.md"), 5000)
-	usage = readFileTruncated(filepath.Join(root, "USAGE.md"), 5000)
+	readme = readFileTruncated(filepath.Join(root, "README.md"), 40000)
+	technical = readFileTruncated(filepath.Join(root, "TECHNICAL.md"), 40000)
+	usage = readFileTruncated(filepath.Join(root, "USAGE.md"), 40000)
 	return
 }
 

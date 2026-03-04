@@ -153,6 +153,18 @@ if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/ir.json" ]; then
   ai-ir churn --compact --n=20 "$CWD" > "$CWD/.ai/churn-cache.txt" 2>/dev/null || true
 fi
 
+# Write execution envelope for pipeline-routed sessions
+if command -v ai-pipeline >/dev/null 2>&1; then
+  _route=$(cat "$HOME/.claude/hooks/.governor-state/${SESSION_ID_VAL}.route" 2>/dev/null || echo "")
+  if [ "$_route" = "pipeline" ]; then
+    ai-pipeline envelope \
+      --session="$SESSION_ID_VAL" \
+      --pipeline="default" \
+      --status="complete" \
+      "$CWD" 2>/dev/null || true
+  fi
+fi
+
 # Compute verify summary for embedding in auto-generated handoff.
 VERIFY_SUMMARY=""
 if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/history.db" ]; then

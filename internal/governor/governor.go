@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/inth3shadows/runecho/internal/pipeline"
 )
 
 const (
@@ -66,7 +68,7 @@ func Run(inputJSON []byte, classifierKey string) string {
 	_ = WriteRoute(stateDir, input.SessionID, route)
 
 	// --- Assemble Output ---
-	return assembleOutput(warningOutput, irDeltaOutput, opusBlockedMsg, routeText[route])
+	return assembleOutput(warningOutput, irDeltaOutput, opusBlockedMsg, getRouteText(cwd, route))
 }
 
 func buildPendingFaultOutput(stateDir, sessionID string) string {
@@ -171,6 +173,18 @@ func readIRHash(cwd string) string {
 		return ir.RootHash[:12]
 	}
 	return ir.RootHash
+}
+
+// getRouteText returns the injection text for the given route.
+// For RoutePipeline it loads the pipeline definition from disk and renders it.
+// Falls back to the hardcoded routeText[RoutePipeline] if loading fails (never blocks the session).
+func getRouteText(cwd string, route Route) string {
+	if route == RoutePipeline {
+		if p, err := pipeline.Load(cwd); err == nil {
+			return pipeline.RenderText(p)
+		}
+	}
+	return routeText[route]
 }
 
 func assembleOutput(warning, irDelta, opusBlocked, route string) string {

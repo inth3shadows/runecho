@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Constraint Reinjector — SessionStart hook, matcher: compact.
 # Fires after context compaction completes. Re-injects active constraints
 # into the model's context so they survive the compaction boundary.

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Destructive Bash Guard — PreToolUse hook on Bash tool.
 # Intercepts destructive shell commands before execution.
 # Memory-independent: runs on every Bash call regardless of model context.

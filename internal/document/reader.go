@@ -19,7 +19,7 @@ var noiseDirs = map[string]bool{
 func GatherContext(root, irDiff string) (*ProjectContext, error) {
 	pt := detectProjectType(root)
 	name, desc := extractNameDesc(root, pt)
-	mode := detectMode(root)
+	docTypes := loadDocTypes(root)
 
 	readme, technical, usage := readExistingDocs(root)
 	tree := buildFileTree(root)
@@ -36,7 +36,7 @@ func GatherContext(root, irDiff string) (*ProjectContext, error) {
 		ExistingReadme:    readme,
 		ExistingTechnical: technical,
 		ExistingUsage:     usage,
-		Mode:              mode,
+		DocTypes:          docTypes,
 	}
 
 	// Include source files only for create mode (no existing docs)
@@ -48,17 +48,49 @@ func GatherContext(root, irDiff string) (*ProjectContext, error) {
 	return ctx, nil
 }
 
-func detectMode(root string) Mode {
-	norm := strings.ReplaceAll(root, "\\", "/")
-	if strings.HasPrefix(norm, "C:/Users/ericm/Work/projects/") ||
-		strings.HasPrefix(norm, "/c/Users/ericm/Work/projects/") {
-		return ModeWork
+// loadDocTypes resolves the docs list using config hierarchy:
+//  1. {root}/.ai/document.yaml (per-project override)
+//  2. ~/.config/runecho/document.yaml (global user default)
+//  3. Fallback: all three doc types
+func loadDocTypes(root string) []string {
+	if result := parseDocYAML(filepath.Join(root, ".ai", "document.yaml")); len(result) > 0 {
+		return result
 	}
-	if strings.HasPrefix(norm, "C:/Users/ericm/personal_projects/") ||
-		strings.HasPrefix(norm, "/c/Users/ericm/personal_projects/") {
-		return ModePersonal
+	if home, err := os.UserHomeDir(); err == nil {
+		if result := parseDocYAML(filepath.Join(home, ".config", "runecho", "document.yaml")); len(result) > 0 {
+			return result
+		}
 	}
-	return ModeUnknown
+	return []string{"README.md", "TECHNICAL.md", "USAGE.md"}
+}
+
+// parseDocYAML extracts the docs list from a document.yaml file.
+// Returns nil if file is absent or unparseable.
+func parseDocYAML(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var result []string
+	inDocs := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "docs:" {
+			inDocs = true
+			continue
+		}
+		if inDocs {
+			if strings.HasPrefix(trimmed, "- ") {
+				entry := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+				if entry != "" {
+					result = append(result, entry)
+				}
+			} else if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				break
+			}
+		}
+	}
+	return result
 }
 
 func detectProjectType(root string) ProjectType {
@@ -305,12 +337,9 @@ func CheckDocStatus(root string, filenames []string) map[string]DocStatus {
 	return checkDocStatus(root, filenames)
 }
 
-// AllDocFilenames returns the canonical list of doc filenames for a mode.
-func AllDocFilenames(mode Mode) []string {
-	if mode == ModeWork {
-		return []string{"README.md", "TECHNICAL.md", "USAGE.md"}
-	}
-	return []string{"README.md"}
+// AllDocFilenames returns every possible doc filename (for pre-flight status checks).
+func AllDocFilenames() []string {
+	return []string{"README.md", "TECHNICAL.md", "USAGE.md"}
 }
 
 // FormatFileTree is exported for generator use.
@@ -336,18 +365,6 @@ func typeString(pt ProjectType) string {
 // TypeString is exported.
 func TypeString(pt ProjectType) string {
 	return typeString(pt)
-}
-
-// ModeString returns mode as a string for logging.
-func ModeString(m Mode) string {
-	switch m {
-	case ModeWork:
-		return "work"
-	case ModePersonal:
-		return "personal"
-	default:
-		return "unknown"
-	}
 }
 
 // describe returns the description or a fallback.

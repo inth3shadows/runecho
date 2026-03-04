@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · V2 spike ✅ · next: M5
+**Status:** Stages A–C Complete ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · V2 spike ✅ · M4.5 ✅ · next: M5
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -53,7 +53,7 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Stop Checkpoint**: After every Claude response, writes `.ai/checkpoint.json` with turn count, IR hash, and last message. Provides state for failure recovery.
 - **Session End**: On session termination, runs a five-stage pipeline: (1) scope-drift detection — compares git-changed files vs. the active task's declared scope, emits `SCOPE_DRIFT` fault if files fall outside it, (2) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (3) falls back to minimal checkpoint template if JSONL unavailable, (4) calls `ai-session review` silently — injects a SESSION REVIEW block into the next turn-1 if actionable patterns exist, (5) calls `ai-document` to update project docs if structural changes occurred.
 - **Session Synthesizer** (`ai-session`): Reads the Claude Code JSONL session log, extracts ground-truth facts (files edited/created, commands run, token counts, cost, duration), and calls haiku to summarize the session narrative. Produces `.ai/handoff.md` with factual accuracy — no speculation.
-- **Document Generator** (`ai-document`): Auto-generates and updates project documentation (README.md, TECHNICAL.md, USAGE.md) using haiku. Change-gated by IR diff — skips entirely if no structural changes and docs already exist. Work mode generates all three docs; personal/unknown mode generates README only.
+- **Document Generator** (`ai-document`): Auto-generates and updates project documentation using haiku. Which docs are generated is configured via `.ai/document.yaml` (per-project) or `~/.config/runecho/document.yaml` (global); defaults to all three (README.md, TECHNICAL.md, USAGE.md). Change-gated by IR diff — skips entirely if no structural changes and all configured docs already exist.
 - **Destructive Bash Guard**: PreToolUse[Bash] hook. Hard-denies catastrophic commands (`rm -rf /`, `mkfs`, fork-bombs). Approval-gates dangerous-but-recoverable patterns: `rm -rf`, `git reset --hard`, `DROP TABLE`, pipe-to-shell installs.
 - **Scope Guard**: PreToolUse[Edit|Write] hook. Always blocks writes to settings files, hook files, `.env`, and `*.key`. Optional scope-lock via `.ai/scope-lock.json` — when present, restricts all writes to declared paths only.
 - **Constraint Reinjector**: SessionStart hook (matcher: `compact`). Re-injects active constraints after context compaction so BPB rules and routing directives survive a `/compact`.
@@ -85,7 +85,7 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Requires Go in PATH.
+Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
@@ -94,6 +94,7 @@ Builds five binaries, symlinks all hooks into `~/.claude/hooks/`, and automatica
 | `ai-document` | Auto-generates/updates README.md, TECHNICAL.md, USAGE.md via haiku |
 | `ai-task` | Persistent task ledger for cross-session work tracking (`.ai/tasks.json`) |
 | `ai-context` | Compiles turn-1 context block (contract + IR + diff + handoff + tasks + review) within a token budget |
+| `ai-governor` | Session governor + model router (replaces `session-governor.sh` logic) |
 
 ---
 
@@ -334,21 +335,27 @@ ai-task contract [--task-id=<id>] [root]     # write .ai/CONTRACT.yaml from acti
 `ai-document` generates and updates project docs using haiku, gated by structural changes.
 
 ```bash
-ai-document [root]                         # auto-detect mode, skip if no changes
-ai-document --ir-diff="<diff>" [root]      # use IR diff to update existing docs
-ai-document --mode=work|personal [root]    # override mode detection
-ai-document --dry-run [root]               # preview without writing
-ai-document --force [root]                 # bypass change-gate, regenerate all
+ai-document [root]                              # read config, skip if no changes
+ai-document --ir-diff="<diff>" [root]           # use IR diff to update existing docs
+ai-document --docs=README.md,TECHNICAL.md [root] # override configured doc list
+ai-document --dry-run [root]                    # preview without writing
+ai-document --force [root]                      # bypass change-gate, regenerate all
 ```
 
-**Docs generated:**
+**Doc config hierarchy:**
+1. `{root}/.ai/document.yaml` — per-project override
+2. `~/.config/runecho/document.yaml` — global user default
+3. Fallback: all three docs (README.md, TECHNICAL.md, USAGE.md)
 
-| Mode | Docs |
-|---|---|
-| work | README.md, TECHNICAL.md, USAGE.md (parallel, ~2000 token budget each) |
-| personal / unknown | README.md only (sequential, ~800 token budget) |
+Format:
+```yaml
+docs:
+  - README.md
+  - TECHNICAL.md
+  - USAGE.md
+```
 
-**Change-gate:** if all managed docs exist and `--ir-diff` is empty, generation is skipped. Pass `--force` to override. The gate prevents unnecessary API calls when nothing structural changed.
+**Change-gate:** if all configured docs exist and `--ir-diff` is empty, generation is skipped. Pass `--force` to override. The gate prevents unnecessary API calls when nothing structural changed.
 
 **Integration:** `session-end.sh` calls `ai-document --ir-diff="$VERIFY_SUMMARY"` after writing the handoff. Runs in the background, non-fatal.
 
@@ -479,6 +486,19 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - `ContractProvider` reads `CONTRACT.yaml` when present; falls back to task-derived; logs validation warnings to stderr
 - Richer SESSION CONTRACT block: multi-line scope, assumptions, non-goals, success criterion
 - Added `gopkg.in/yaml.v3` dependency (validates fit before M5 pipeline definitions)
+
+**M4.5-A — POSIX Audit + install.sh Symlink Fix ✅**
+- All hook shebangs updated to `#!/usr/bin/env bash`
+- `install.sh`: portable symlink creation (`rm -f` + `ln -s`); `#!/usr/bin/env bash`
+- `scope-guard.sh`: removed unused variable (SC2034); fixed unquoted pattern expansion (SC2295)
+- All hooks pass `shellcheck` with zero warnings
+- `ai-document`: removed hardcoded work/personal path detection; doc list now driven by `.ai/document.yaml` config hierarchy
+
+**M4.5-B — session-governor.sh → Go Binary ✅**
+- `ai-governor` binary (`cmd/governor/`, `internal/governor/`): turn counter, weighted routing, session cost from JSONL, LLM classifier, regex fallback, fault emission — all in typed, testable Go
+- `session-governor.sh` reduced to a 4-line exec wrapper (`exec ai-governor`)
+- No more `date +%s%3N` (macOS), `awk`, `jq`, or `curl` in the governor path
+- `install.sh` builds `ai-governor` alongside the other 5 binaries
 
 ---
 

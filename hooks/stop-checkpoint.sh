@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Stop hook — fires after each Claude response
 # Writes .ai/checkpoint.json with current session state
 # Used by session-end.sh for failure recovery
 
+# shellcheck disable=SC1091
 . "$(dirname "$0")/fault-emitter.sh"
 
 INPUT=$(cat)

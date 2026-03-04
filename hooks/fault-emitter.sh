@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # fault-emitter.sh — sourced by hooks that need to emit fault signals.
 # Do NOT execute directly. Source with: . "$(dirname "$0")/fault-emitter.sh"
 #

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Model Enforcer — PreToolUse hook on Task tool.
 # Ensures subagents use the model dictated by the session governor's routing.
 #

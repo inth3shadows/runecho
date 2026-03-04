@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +18,12 @@ const (
 	apiVersion    = "2023-06-01"
 )
 
-var systemPrompt = "You are a technical documentation writer. Generate clean, accurate markdown for a software project. Use only the provided context — do not invent features not evident in the source. Output raw markdown only, no surrounding code fences."
+var systemPrompt = `You are a technical documentation writer. Rules:
+- Output raw markdown only. No surrounding code fences.
+- Use only the provided context. Do not invent features, flags, or behaviors.
+- Be specific: real command names, real file paths, real flag names from the source.
+- Be concise. No filler sentences. No "Getting Started is easy!" style padding.
+- If information is insufficient for a section, write a TODO placeholder rather than guessing.`
 
 // tokenBudgets maps (docType, runMode) → maxTokens.
 var tokenBudgets = map[string]map[RunMode]int{
@@ -26,27 +32,20 @@ var tokenBudgets = map[string]map[RunMode]int{
 	"USAGE":     {RunModeCreate: 2000, RunModeUpdate: 1000},
 }
 
-// Generate determines which docs to generate and calls haiku in parallel (work) or sequentially (personal).
-// Returns error only if apiKey is empty.
-func Generate(ctx *ProjectContext, statuses map[string]DocStatus, apiKey string) (*DocSet, error) {
+// Generate produces docs for all configured DocTypes. Parallel when >1 type.
+func Generate(ctx *ProjectContext, statuses map[string]DocStatus, apiKey string) (DocSet, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("RUNECHO_CLASSIFIER_KEY not set")
 	}
 
-	docTypes := []string{"README"}
-	if ctx.Mode == ModeWork {
-		docTypes = []string{"README", "TECHNICAL", "USAGE"}
-	}
+	result := make(DocSet, len(ctx.DocTypes))
 
-	results := make(map[string]string, len(docTypes))
-
-	if ctx.Mode == ModeWork {
-		// Parallel generation for work mode
+	if len(ctx.DocTypes) > 1 {
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		for _, dt := range docTypes {
-			dt := dt
-			fn := DocFilename(dt)
+		for _, fn := range ctx.DocTypes {
+			fn := fn
+			dt := strings.TrimSuffix(fn, ".md")
 			st := statuses[fn]
 			if st.DirtyGit {
 				fmt.Fprintf(os.Stderr, "ai-document: warning: %s has uncommitted changes, skipping\n", fn)
@@ -57,34 +56,30 @@ func Generate(ctx *ProjectContext, statuses map[string]DocStatus, apiKey string)
 				defer wg.Done()
 				content, err := generateDoc(ctx, dt, st, apiKey)
 				if err != nil {
-					fmt.Printf("warning: ai-document: %s generation failed: %v\n", dt, err)
+					fmt.Fprintf(os.Stderr, "ai-document: warning: %s generation failed: %v\n", dt, err)
 					return
 				}
 				mu.Lock()
-				results[dt] = content
+				result[fn] = content
 				mu.Unlock()
 			}()
 		}
 		wg.Wait()
-	} else {
-		// Sequential for personal/unknown
-		fn := DocFilename("README")
+	} else if len(ctx.DocTypes) == 1 {
+		fn := ctx.DocTypes[0]
+		dt := strings.TrimSuffix(fn, ".md")
 		st := statuses[fn]
 		if !st.DirtyGit {
-			content, err := generateDoc(ctx, "README", st, apiKey)
+			content, err := generateDoc(ctx, dt, st, apiKey)
 			if err != nil {
-				fmt.Printf("warning: ai-document: README generation failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "ai-document: warning: %s generation failed: %v\n", dt, err)
 			} else {
-				results["README"] = content
+				result[fn] = content
 			}
 		}
 	}
 
-	return &DocSet{
-		Readme:    results["README"],
-		Technical: results["TECHNICAL"],
-		Usage:     results["USAGE"],
-	}, nil
+	return result, nil
 }
 
 func generateDoc(ctx *ProjectContext, docType string, status DocStatus, apiKey string) (string, error) {
@@ -98,50 +93,209 @@ func generateDoc(ctx *ProjectContext, docType string, status DocStatus, apiKey s
 
 func buildPrompt(ctx *ProjectContext, docType string, status DocStatus) string {
 	var sb strings.Builder
-
-	sectionInstructions := map[string]string{
-		"README":    "Sections: project name, 1-2 sentence description, Quick Start, What It Does (bullets). If work project, add links to TECHNICAL.md and USAGE.md at the bottom.",
-		"TECHNICAL": "Sections: Architecture, Components, Data Flow, Configuration, Dependencies, Troubleshooting.",
-		"USAGE":     "Sections: Prerequisites, Installation, Commands (with examples), FAQ.",
-	}
-
 	if status.RunMode == RunModeUpdate {
-		existing := ExistingDoc(ctx, docType)
-		sb.WriteString(fmt.Sprintf("PROJECT: %s (%s)\n\n", ctx.Name, TypeString(ctx.Type)))
-		sb.WriteString("CHANGES THIS SESSION (structural diff):\n")
-		sb.WriteString(ctx.IRDiff)
-		sb.WriteString("\n\nCURRENT ")
-		sb.WriteString(docType)
-		sb.WriteString(":\n")
-		sb.WriteString(existing)
-		sb.WriteString("\n\nUpdate the documentation above to reflect the session changes. ")
-		sb.WriteString("Only modify sections affected by the changes. Preserve accurate existing content.\n")
-		sb.WriteString(sectionInstructions[docType])
+		buildUpdatePrompt(&sb, ctx, docType)
 	} else {
-		// Create mode
-		sb.WriteString(fmt.Sprintf("PROJECT: %s (%s)\n", ctx.Name, TypeString(ctx.Type)))
-		sb.WriteString(fmt.Sprintf("DESCRIPTION: %s\n\n", Describe(ctx)))
-		sb.WriteString("FILE TREE:\n")
-		sb.WriteString(FormatFileTree(ctx.FileTree))
-		sb.WriteString("\n")
-		if len(ctx.SourceFiles) > 0 {
-			sb.WriteString("\nKEY SOURCE FILES:\n")
-			for _, sf := range ctx.SourceFiles {
-				sb.WriteString(fmt.Sprintf("--- %s ---\n", sf.Path))
-				sb.WriteString(sf.Content)
-				sb.WriteString("\n")
-			}
-		}
-		if ctx.RecentCommits != "" {
-			sb.WriteString("\nGIT LOG (last 10):\n")
-			sb.WriteString(ctx.RecentCommits)
-			sb.WriteString("\n")
-		}
-		sb.WriteString(fmt.Sprintf("\nGenerate %s for this project.\n", docType))
-		sb.WriteString(sectionInstructions[docType])
+		buildCreatePrompt(&sb, ctx, docType)
+	}
+	return sb.String()
+}
+
+func buildCreatePrompt(sb *strings.Builder, ctx *ProjectContext, docType string) {
+	sb.WriteString(fmt.Sprintf("PROJECT: %s (%s)\n", ctx.Name, TypeString(ctx.Type)))
+	if ctx.Description != "" {
+		sb.WriteString(fmt.Sprintf("DESCRIPTION: %s\n", ctx.Description))
 	}
 
-	return sb.String()
+	sb.WriteString("\nFILE TREE:\n")
+	sb.WriteString(FormatFileTree(ctx.FileTree))
+	sb.WriteString("\n")
+
+	if len(ctx.SourceFiles) > 0 {
+		sb.WriteString("\nKEY SOURCE FILES:\n")
+		for _, sf := range ctx.SourceFiles {
+			sb.WriteString(fmt.Sprintf("--- %s ---\n%s\n", sf.Path, sf.Content))
+		}
+	}
+
+	if ctx.RecentCommits != "" {
+		sb.WriteString(fmt.Sprintf("\nGIT LOG (last 10):\n%s\n", ctx.RecentCommits))
+	}
+
+	companions := companionDocInfo(ctx, docType)
+
+	switch docType {
+	case "README":
+		sb.WriteString(`
+Generate README.md.
+
+Structure:
+# {Project Name}
+
+One sentence: what this is and why it exists.
+
+## Quick Start
+Exact install/build commands for a new user. Use real paths and commands from the source.
+
+## What It Does
+- Bullet per key capability. Each bullet: what the feature does, not how.
+
+## Commands
+Table or list of CLI commands with 1-line description each. Only include commands evident in the source.
+` + companions + `
+Keep it under 80 lines. No badges, no shields, no license section unless evident in source.`)
+
+	case "TECHNICAL":
+		sb.WriteString(`
+Generate TECHNICAL.md.
+
+Structure:
+# Technical Architecture
+
+## Overview
+2-3 sentences: what the system does and its design philosophy.
+
+## Architecture
+ASCII diagram showing major components and data flow. Use box-drawing characters.
+Example format:
+` + "```" + `
+[component] ---> [component] ---> [output]
+     |                |
+     v                v
+  [store]         [store]
+` + "```" + `
+
+## Components
+For each package/module in the source tree:
+- **{name}** — 1-line responsibility. Key types/functions if evident.
+
+## Data Flow
+Numbered steps: what happens when the primary operation runs. Be specific about file paths and data formats.
+
+## Configuration
+Table of config files, env vars, and their purposes. Only what's evident in source.
+
+## Dependencies
+List external dependencies with version and purpose. Read from go.mod/package.json/etc.
+
+Keep it under 150 lines. Prioritize accuracy over completeness.`)
+
+	case "USAGE":
+		sb.WriteString(`
+Generate USAGE.md.
+
+Structure:
+# Usage Guide
+
+## Prerequisites
+Exact versions, tools, env vars required. Be specific (e.g., "Go 1.24+", not "Go").
+
+## Installation
+Step-by-step commands. Copy-pasteable. Include build commands if applicable.
+
+## Commands
+For EACH command binary or subcommand evident in source:
+### {command name}
+Purpose (1 line).
+` + "```" + `
+{command} [flags] [args]
+` + "```" + `
+Flags:
+- ` + "`--flag`" + ` — description (default: value)
+
+Example:
+` + "```sh" + `
+{real example with real args}
+` + "```" + `
+
+## Common Workflows
+3-5 numbered workflows showing how commands chain together for real tasks.
+
+## Environment Variables
+Table: name, required/optional, description.
+
+Keep it under 150 lines. Every example must use real command names and flags from the source.`)
+	}
+}
+
+func buildUpdatePrompt(sb *strings.Builder, ctx *ProjectContext, docType string) {
+	sb.WriteString(fmt.Sprintf("PROJECT: %s (%s)\n", ctx.Name, TypeString(ctx.Type)))
+
+	sb.WriteString("\nCHANGES THIS SESSION:\n")
+	sb.WriteString(ctx.IRDiff)
+	sb.WriteString("\n")
+
+	existing := ExistingDoc(ctx, docType)
+	sb.WriteString(fmt.Sprintf("\nCURRENT %s.md:\n%s\n", docType, existing))
+
+	companions := companionDocInfo(ctx, docType)
+
+	switch docType {
+	case "README":
+		sb.WriteString(`
+TASK: Update README.md to reflect the changes above.
+
+Rules:
+- Only modify sections affected by the structural changes.
+- If a new command or feature was added, add it to the appropriate section.
+- If a symbol was removed, remove references to it.
+- Preserve all accurate existing content verbatim.
+- Do not rewrite sections unrelated to the changes.
+- Output the COMPLETE updated file, not a partial diff.
+` + companions)
+
+	case "TECHNICAL":
+		sb.WriteString(`
+TASK: Update TECHNICAL.md to reflect the changes above.
+
+Rules:
+- If new files/packages appear in the diff, add them to Components.
+- If data flow changed, update the Data Flow section.
+- If the architecture diagram is affected, update it.
+- Preserve all accurate existing content verbatim.
+- Do not rewrite sections unrelated to the changes.
+- Output the COMPLETE updated file, not a partial diff.`)
+
+	case "USAGE":
+		sb.WriteString(`
+TASK: Update USAGE.md to reflect the changes above.
+
+Rules:
+- If new commands or flags appear in the diff, add them with examples.
+- If commands were removed, remove their sections.
+- If command behavior changed, update the description and examples.
+- Preserve all accurate existing content verbatim.
+- Do not rewrite sections unrelated to the changes.
+- Output the COMPLETE updated file, not a partial diff.`)
+	}
+}
+
+// companionDocInfo returns a cross-linking hint for README prompts.
+func companionDocInfo(ctx *ProjectContext, docType string) string {
+	if docType != "README" {
+		return ""
+	}
+	companions := make(map[string]bool)
+	if ctx.ExistingTechnical != "" {
+		companions["TECHNICAL.md"] = true
+	}
+	if ctx.ExistingUsage != "" {
+		companions["USAGE.md"] = true
+	}
+	for _, dt := range ctx.DocTypes {
+		if dt == "TECHNICAL.md" || dt == "USAGE.md" {
+			companions[dt] = true
+		}
+	}
+	if len(companions) == 0 {
+		return ""
+	}
+	var names []string
+	for c := range companions {
+		names = append(names, c)
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("\nAdd a \"See Also\" section at the bottom linking to: %s.", strings.Join(names, ", "))
 }
 
 func callHaiku(systemP, userP string, maxTokens int, apiKey string) (string, error) {

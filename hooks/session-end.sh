@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # SessionEnd hook — fires on session termination (normal or abnormal)
 # If .ai/handoff.md doesn't exist, synthesizes a minimal one from .ai/checkpoint.json
 # If handoff already exists, leave it alone (Claude wrote a proper one)
 
+# shellcheck disable=SC1091
 . "$(dirname "$0")/fault-emitter.sh"
 
 INPUT=$(cat)

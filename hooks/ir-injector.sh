@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # IR Injector — UserPromptSubmit hook. On turn 1: index, snapshot, inject context.
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")

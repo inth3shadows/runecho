@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Scope Guard — PreToolUse hook on Edit and Write tools.
 # Enforces per-project file write restrictions via .ai/scope-lock.json.
 # Opt-in: if scope-lock.json does not exist, everything is allowed.
@@ -14,7 +14,6 @@
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // ""' 2>/dev/null || echo "")
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -77,7 +76,7 @@ DENIED_PATTERNS=$(jq -r '.denied_patterns // [] | .[]' "$SCOPE_LOCK" 2>/dev/null
 
 # Compute path relative to CWD for scope checking
 CWD_NORM=$(echo "$PWD" | sed 's|\\|/|g' | tr '[:upper:]' '[:lower:]')
-REL_PATH="${FILE_NORM#$CWD_NORM/}"
+REL_PATH="${FILE_NORM#"$CWD_NORM"/}"
 # If path didn't start with CWD, use as-is
 [ "$REL_PATH" = "$FILE_NORM" ] && REL_PATH="$FILE_NORM"
 

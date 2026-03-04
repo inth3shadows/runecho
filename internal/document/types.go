@@ -1,13 +1,5 @@
 package document
 
-type Mode int
-
-const (
-	ModePersonal Mode = iota
-	ModeWork
-	ModeUnknown // treat as personal
-)
-
 type ProjectType string
 
 const (
@@ -38,7 +30,7 @@ type ProjectContext struct {
 	ExistingTechnical string
 	ExistingUsage     string
 	SourceFiles       []SourceFile // up to 3 key files, 150 lines each (create mode only)
-	Mode              Mode
+	DocTypes          []string     // filenames to generate: e.g. ["README.md"] or ["README.md","TECHNICAL.md","USAGE.md"]
 }
 
 type SourceFile struct {
@@ -46,11 +38,8 @@ type SourceFile struct {
 	Content string
 }
 
-type DocSet struct {
-	Readme    string // empty = skip write
-	Technical string
-	Usage     string
-}
+// DocSet maps doc filename → generated content. Empty string = skip write.
+type DocSet map[string]string
 
 // DocStatus tracks what should happen to each doc file.
 type DocStatus struct {

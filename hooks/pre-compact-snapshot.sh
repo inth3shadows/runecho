@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Pre-Compact Snapshot — PreCompact hook.
 # Captures session state before context compaction destroys it.
 # This state is read by constraint-reinjector.sh after compaction.

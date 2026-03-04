@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # RunEcho installer — builds binaries, symlinks hooks, and configures ~/.claude/settings.json
 # Run once from the repo root: bash install.sh
 
@@ -15,7 +15,7 @@ BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
-for cmd in ir session document task context; do
+for cmd in ir session document task context governor; do
   echo "Building ai-$cmd..."
   go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
   echo "  Built: $BIN_DIR/ai-$cmd"
@@ -35,7 +35,7 @@ for hook in \
   scope-guard.sh \
   constraint-reinjector.sh \
   pre-compact-snapshot.sh; do
-  ln -sf "$SCRIPT_DIR/hooks/$hook" "$HOOK_DIR/$hook"
+  rm -f "$HOOK_DIR/$hook" && ln -s "$SCRIPT_DIR/hooks/$hook" "$HOOK_DIR/$hook"
   echo "  $hook"
 done
 

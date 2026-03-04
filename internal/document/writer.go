@@ -7,39 +7,22 @@ import (
 )
 
 // Write persists generated docs to disk. No git operations — caller commits when ready.
-// personal/unknown: writes README.md only (if not dirty)
-// work: writes README.md, TECHNICAL.md, USAGE.md (each skipped if dirty or empty)
-func Write(root string, docs *DocSet, statuses map[string]DocStatus, mode Mode) error {
-	type docEntry struct {
-		filename string
-		content  string
-	}
-
-	entries := []docEntry{
-		{"README.md", docs.Readme},
-	}
-	if mode == ModeWork {
-		entries = append(entries,
-			docEntry{"TECHNICAL.md", docs.Technical},
-			docEntry{"USAGE.md", docs.Usage},
-		)
-	}
-
-	for _, e := range entries {
-		st := statuses[e.filename]
+// Skips any doc that is dirty in git or has empty content.
+func Write(root string, docs DocSet, statuses map[string]DocStatus) error {
+	for fn, content := range docs {
+		st := statuses[fn]
 		if st.DirtyGit {
-			fmt.Fprintf(os.Stderr, "ai-document: warning: %s has uncommitted changes, skipping\n", e.filename)
+			fmt.Fprintf(os.Stderr, "ai-document: warning: %s has uncommitted changes, skipping\n", fn)
 			continue
 		}
-		if e.content == "" {
+		if content == "" {
 			continue
 		}
-		path := filepath.Join(root, e.filename)
-		if err := writeFile(path, e.content); err != nil {
-			fmt.Fprintf(os.Stderr, "ai-document: warning: failed to write %s: %v\n", e.filename, err)
+		path := filepath.Join(root, fn)
+		if err := writeFile(path, content); err != nil {
+			fmt.Fprintf(os.Stderr, "ai-document: warning: failed to write %s: %v\n", fn, err)
 		}
 	}
-
 	return nil
 }
 

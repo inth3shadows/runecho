@@ -69,10 +69,10 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 - Go 1.24+ — build-time only; not needed at runtime after `install.sh`
 - Python 3 — used by `install.sh` to merge hook config into `~/.claude/settings.json`
 - [Claude Code](https://claude.ai/code) — the CLI RunEcho hooks into
-- Claude Pro account or Anthropic API key — for Claude Code authentication
+- **Claude Code Pro (or higher)** — hooks require a paid Claude Code plan; free tier does not support the hooks API
+- `RUNECHO_CLASSIFIER_KEY` — Anthropic API key used by the model router classifier and `ai-document`. Set once in your PowerShell profile (see [Classifier Setup](#classifier-setup))
 
 **Optional:**
-- `RUNECHO_CLASSIFIER_KEY` — Anthropic API key for LLM-based model routing. Without it, regex routing fires as fallback. No functional regression.
 - ShellCheck — hook validation during install (`winget install koalaman.shellcheck`)
 
 **Not a dependency:** `ccusage` and similar external cost-tracking tools are not required and are not integrated.
@@ -180,9 +180,7 @@ Full setup, mechanics, edge cases, and security notes: **[docs/profile-switching
 
 ## Classifier Setup
 
-The model router uses a haiku LLM call to classify prompt intent — more accurate than regex on nuanced prompts.
-
-**Requires** `RUNECHO_CLASSIFIER_KEY` — a dedicated Anthropic API key. Set it once in your PowerShell profile:
+The model router and `ai-document` both require `RUNECHO_CLASSIFIER_KEY` — a dedicated Anthropic API key. Set it once in your PowerShell profile:
 
 ```powershell
 # Store key (run once):
@@ -353,8 +351,6 @@ ai-document --force [root]                 # bypass change-gate, regenerate all
 **Change-gate:** if all managed docs exist and `--ir-diff` is empty, generation is skipped. Pass `--force` to override. The gate prevents unnecessary API calls when nothing structural changed.
 
 **Integration:** `session-end.sh` calls `ai-document --ir-diff="$VERIFY_SUMMARY"` after writing the handoff. Runs in the background, non-fatal.
-
-**Requires:** `RUNECHO_CLASSIFIER_KEY` — same key used by the model router classifier.
 
 ---
 

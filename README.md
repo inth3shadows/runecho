@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · F3 ✅ · F4 ✅ · F5 ✅ · next: F6 — schema stabilization
+**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · F3 ✅ · F4 ✅ · F5 ✅ · F6 ✅ · F7 ✅ · next: F8 — local result cache
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -97,6 +97,7 @@ Builds six binaries, symlinks all hooks into `~/.claude/hooks/`, and automatical
 | `ai-governor` | Session governor + model router (replaces `session-governor.sh` logic) |
 | `ai-pipeline` | Declarative pipeline definitions — `render` (injection text) + `envelope` (execution records) |
 | `ai-session-end` | Session-end orchestration pipeline (replaces `session-end.sh` logic) |
+| `ai-provenance` | Session provenance export — task timeline, faults, verify outcomes, cost |
 
 ---
 
@@ -614,31 +615,22 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
-### F6 — Schema Stabilization
+### F6 — Schema Stabilization ✅
 
-**Goal:** Canonical Go types for all five JSONL data files in a shared package. Currently `ProgressEntry` and `VerifyEntry` live in `internal/session`; `Task`/`TaskDB` live in `cmd/task` (fixed by F1); `FaultEntry` and `Envelope` are not in any shared package. Provenance (F7) needs to join all five.
-
-| Deliverable | Description |
-|---|---|
-| `internal/schema/` package | Canonical types: `ProgressEntry`, `VerifyEntry`, `FaultEntry`, `Envelope`, `Task` — one package, all consumers import it |
-| Migration | `internal/session`, `internal/pipeline`, `internal/governor` updated to use `internal/schema` types |
-| Schema versioning | Each type carries a `SchemaVersion string` field. Readers skip lines with unknown versions rather than failing. |
+**Completed.** `internal/schema/` contains canonical types for all five `.ai/` data files: `FaultEntry` + `DriftFaultEntry` (`faults.jsonl`), `ProgressEntry` + `ScopeDrift` (`progress.jsonl`), `VerifyEntry` (`results.jsonl`), `Envelope` + `StageResult` (`executions.jsonl`), `ClassifierEntry` (`classifier.jsonl`). All consumers (`internal/session`, `internal/pipeline`, `internal/governor`, `internal/sessionend`) migrated. No duplicate struct definitions.
 
 **Done when:** `go build ./...` passes with all types in `internal/schema`; no duplicated struct definitions across packages.
 
 ---
 
-### F7 — Session Provenance Export
+### F7 — Session Provenance Export ✅
 
-**Goal:** `ai-provenance export <task-id>` produces a complete, machine-readable execution record for any task — full chain of evidence from planning through verification. Pure consumer of F1–F6; build last.
+**Completed.** `internal/provenance/provenance.go` is a pure consumer of all five `.ai/` data files. `cmd/provenance/main.go` exposes two subcommands: `export <task-id>` and `list`. `install.sh` builds 9 binaries.
 
-| Deliverable | Description |
+| Subcommand | Description |
 |---|---|
-| `ai-provenance export <task-id>` | Assembles single JSON document: task definition, session timeline, IR snapshots at boundaries, routing decisions, fault signals, verify outcomes, scope drift events, total cost |
-| `--format=markdown` | Structured markdown: Decision Log, Session Timeline, Outcome, Cost Breakdown. Suitable for PR descriptions or post-mortems. |
-| `ai-provenance diff <task-a> <task-b>` | Compare two task records: cost, session count, fault frequency, model distribution |
-
-**Done when:** `ai-provenance export <id> --format=markdown` on a completed multi-session task produces a document readable without access to the original chat transcript.
+| `ai-provenance export <task-id> [--json]` | Task definition + session timeline (turns, cost, IR hashes, drift, faults, verify outcome). Text default; `--json` for machine-readable output. |
+| `ai-provenance list [--json]` | All tasks that have at least one recorded session, with session count and total cost. |
 
 *Inspired by: SLSA provenance (supply chain attestation), Jupyter execution records*
 

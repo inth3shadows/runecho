@@ -7,26 +7,16 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 const FaultsFile = ".ai/faults.jsonl"
 
-// DriftEntry is written to .ai/faults.jsonl with Signal="DRIFT_AFFECTED"
-// when IR structural changes intersect a task's scope globs.
-type DriftEntry struct {
-	Signal    string   `json:"signal"`
-	TaskID    string   `json:"task_id"`
-	TaskTitle string   `json:"task_title"`
-	Scope     string   `json:"scope"`
-	Files     []string `json:"files"`
-	SessionID string   `json:"session_id"`
-	Timestamp string   `json:"timestamp"`
-}
-
 // CheckDrift intersects changedFiles with all non-done tasks that have scopes.
-// Returns one DriftEntry per affected task (files that match any scope glob).
-func CheckDrift(tasks []Task, changedFiles []string) []DriftEntry {
-	var results []DriftEntry
+// Returns one schema.DriftFaultEntry per affected task (files that match any scope glob).
+func CheckDrift(tasks []Task, changedFiles []string) []schema.DriftFaultEntry {
+	var results []schema.DriftFaultEntry
 	for _, t := range tasks {
 		if t.Status == "done" || t.Scope == "" {
 			continue
@@ -39,7 +29,7 @@ func CheckDrift(tasks []Task, changedFiles []string) []DriftEntry {
 			}
 		}
 		if len(matched) > 0 {
-			results = append(results, DriftEntry{
+			results = append(results, schema.DriftFaultEntry{
 				Signal:    "DRIFT_AFFECTED",
 				TaskID:    t.ID,
 				TaskTitle: t.Title,
@@ -51,9 +41,9 @@ func CheckDrift(tasks []Task, changedFiles []string) []DriftEntry {
 	return results
 }
 
-// AppendDriftFaults appends DriftEntry records to .ai/faults.jsonl under root.
+// AppendDriftFaults appends schema.DriftFaultEntry records to .ai/faults.jsonl under root.
 // Idempotent: skips entries where (task_id, session_id) already exists in the file.
-func AppendDriftFaults(root string, entries []DriftEntry, sessionID string) error {
+func AppendDriftFaults(root string, entries []schema.DriftFaultEntry, sessionID string) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -71,7 +61,7 @@ func AppendDriftFaults(root string, entries []DriftEntry, sessionID string) erro
 			if line == "" {
 				continue
 			}
-			var e DriftEntry
+			var e schema.DriftFaultEntry
 			if json.Unmarshal([]byte(line), &e) == nil && e.Signal == "DRIFT_AFFECTED" {
 				existing[e.TaskID+"|"+e.SessionID] = true
 			}
@@ -105,7 +95,7 @@ func AppendDriftFaults(root string, entries []DriftEntry, sessionID string) erro
 
 // LoadDriftFaults reads all DRIFT_AFFECTED entries from .ai/faults.jsonl for the given taskID.
 // Returns entries sorted chronologically (file order). Returns nil if the file doesn't exist.
-func LoadDriftFaults(root, taskID string) ([]DriftEntry, error) {
+func LoadDriftFaults(root, taskID string) ([]schema.DriftFaultEntry, error) {
 	faultsPath := filepath.Join(root, FaultsFile)
 	data, err := os.ReadFile(faultsPath)
 	if os.IsNotExist(err) {
@@ -115,13 +105,13 @@ func LoadDriftFaults(root, taskID string) ([]DriftEntry, error) {
 		return nil, fmt.Errorf("read faults file: %w", err)
 	}
 
-	var results []DriftEntry
+	var results []schema.DriftFaultEntry
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		var e DriftEntry
+		var e schema.DriftFaultEntry
 		if json.Unmarshal([]byte(line), &e) == nil && e.Signal == "DRIFT_AFFECTED" && e.TaskID == taskID {
 			results = append(results, e)
 		}

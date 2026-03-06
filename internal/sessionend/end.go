@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/schema"
 	"github.com/inth3shadows/runecho/internal/session"
 	"github.com/inth3shadows/runecho/internal/task"
 )
@@ -101,8 +102,8 @@ func parseEvent(input []byte) event {
 
 // detectScopeDrift implements Stage 1.
 // Returns the active task (may be nil) and a ScopeDrift value.
-func detectScopeDrift(cwd, sid string) (*task.Task, session.ScopeDrift) {
-	defaultDrift := session.ScopeDrift{Drifted: false, Files: []string{}, TaskScope: ""}
+func detectScopeDrift(cwd, sid string) (*task.Task, schema.ScopeDrift) {
+	defaultDrift := schema.ScopeDrift{Drifted: false, Files: []string{}, TaskScope: ""}
 
 	db, err := task.Load(cwd)
 	if err != nil {
@@ -147,7 +148,7 @@ func detectScopeDrift(cwd, sid string) (*task.Task, session.ScopeDrift) {
 
 	// Emit SCOPE_DRIFT fault.
 	summary := strings.Join(driftFiles, ",")
-	_ = session.AppendFault(cwd, session.FaultEntry{
+	_ = session.AppendFault(cwd, schema.FaultEntry{
 		Signal:    "SCOPE_DRIFT",
 		SessionID: sid,
 		Value:     float64(len(driftFiles)),
@@ -155,7 +156,7 @@ func detectScopeDrift(cwd, sid string) (*task.Task, session.ScopeDrift) {
 		Ts:        now(),
 	})
 
-	return activeTask, session.ScopeDrift{
+	return activeTask, schema.ScopeDrift{
 		Drifted:   true,
 		Files:     driftFiles,
 		TaskScope: activeTask.Scope,
@@ -288,7 +289,7 @@ func runVerify(cwd, sid string, activeTask *task.Task) *bool {
 		return &v
 	case 1:
 		v := false
-		_ = session.AppendFault(cwd, session.FaultEntry{
+		_ = session.AppendFault(cwd, schema.FaultEntry{
 			Signal:    "VERIFY_FAIL",
 			SessionID: sid,
 			Value:     1,
@@ -429,8 +430,8 @@ func fallbackVerify(s string) string {
 }
 
 // appendProgress builds and appends a ProgressEntry from available data.
-func appendProgress(cwd, sid, handoffPath, checkpointPath string, drift session.ScopeDrift, cost float64, verifyPassed *bool) error {
-	e := session.ProgressEntry{
+func appendProgress(cwd, sid, handoffPath, checkpointPath string, drift schema.ScopeDrift, cost float64, verifyPassed *bool) error {
+	e := schema.ProgressEntry{
 		SessionID:   sid,
 		Timestamp:   now(),
 		CostUSD:     cost,
@@ -464,7 +465,7 @@ func appendProgress(cwd, sid, handoffPath, checkpointPath string, drift session.
 }
 
 // parseFrontMatter reads status, tasks_touched, files_changed, turns from handoff YAML front-matter.
-func parseFrontMatter(content string, e *session.ProgressEntry) {
+func parseFrontMatter(content string, e *schema.ProgressEntry) {
 	// Find the front-matter block between the first two "---" lines.
 	lines := strings.Split(content, "\n")
 	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {

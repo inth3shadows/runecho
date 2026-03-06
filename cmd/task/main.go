@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/contract"
+	"github.com/inth3shadows/runecho/internal/schema"
 	"github.com/inth3shadows/runecho/internal/session"
 	"github.com/inth3shadows/runecho/internal/task"
 )
@@ -362,7 +363,7 @@ func runVerify(args []string) {
 		}
 	}
 
-	entry := session.VerifyEntry{
+	entry := schema.VerifyEntry{
 		TaskID:    taskID,
 		SessionID: sid,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),

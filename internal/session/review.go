@@ -8,41 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/inth3shadows/runecho/internal/schema"
 )
-
-// ProgressEntry is one JSONL record in .ai/progress.jsonl.
-type ProgressEntry struct {
-	SessionID    string     `json:"session_id"`
-	Timestamp    string     `json:"timestamp"`
-	Turns        int        `json:"turns"`
-	CostUSD      float64    `json:"cost_usd"`
-	IRHashStart  string     `json:"ir_hash_start"`
-	IRHashEnd    string     `json:"ir_hash_end"`
-	FilesChanged int        `json:"files_changed"`
-	TasksTouched []string   `json:"tasks_touched"`
-	HandoffPath  string     `json:"handoff_path"`
-	Status       string     `json:"status"`
-	ScopeDrift   ScopeDrift `json:"scope_drift"`
-	VerifyPassed *bool      `json:"verify_passed,omitempty"` // nil = not run
-	VerifyCmd    string     `json:"verify_cmd,omitempty"`    // populated from results.jsonl
-}
-
-// ScopeDrift captures scope violation metadata from a session.
-type ScopeDrift struct {
-	Drifted   bool     `json:"drifted"`
-	Files     []string `json:"files"`
-	TaskScope string   `json:"task_scope"`
-	TaskID    string   `json:"task_id"`
-}
-
-// FaultEntry is one JSONL record in .ai/faults.jsonl.
-type FaultEntry struct {
-	Signal    string  `json:"signal"`
-	SessionID string  `json:"session_id"`
-	Ts        string  `json:"ts"`
-	Value     float64 `json:"value"`
-	Context   string  `json:"context"`
-}
 
 // ReviewTask is a minimal task descriptor used for review analysis.
 // Kept local to avoid importing cmd/task (main package).
@@ -62,7 +30,7 @@ type StuckTask struct {
 
 // ReviewReport is the aggregated result of session analysis.
 type ReviewReport struct {
-	Sessions     []ProgressEntry
+	Sessions     []schema.ProgressEntry
 	StuckTasks   []StuckTask
 	CostTrend    []float64      // last 5 sessions
 	TotalCost    float64
@@ -72,7 +40,7 @@ type ReviewReport struct {
 
 // ReadProgress reads .ai/progress.jsonl, deduplicates by session_id, tolerates partial lines.
 // Returns nil slice (not an error) if the file does not exist.
-func ReadProgress(workspace string) ([]ProgressEntry, error) {
+func ReadProgress(workspace string) ([]schema.ProgressEntry, error) {
 	path := filepath.Join(workspace, ".ai", "progress.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
@@ -84,14 +52,14 @@ func ReadProgress(workspace string) ([]ProgressEntry, error) {
 	defer f.Close()
 
 	seen := make(map[string]bool)
-	var entries []ProgressEntry
+	var entries []schema.ProgressEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		var e ProgressEntry
+		var e schema.ProgressEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			fmt.Fprintf(os.Stderr, "review: skipping malformed progress line: %v\n", err)
 			continue
@@ -108,7 +76,7 @@ func ReadProgress(workspace string) ([]ProgressEntry, error) {
 
 	// Join with results.jsonl to populate VerifyPassed + VerifyCmd (keyed by session_id).
 	verifyEntries, _ := ReadVerify(workspace) // non-fatal if missing
-	verifyBySession := make(map[string]VerifyEntry, len(verifyEntries))
+	verifyBySession := make(map[string]schema.VerifyEntry, len(verifyEntries))
 	for _, ve := range verifyEntries {
 		verifyBySession[ve.SessionID] = ve
 	}
@@ -125,7 +93,7 @@ func ReadProgress(workspace string) ([]ProgressEntry, error) {
 
 // ReadFaults reads .ai/faults.jsonl, tolerates partial lines.
 // Returns nil slice (not an error) if the file does not exist.
-func ReadFaults(workspace string) ([]FaultEntry, error) {
+func ReadFaults(workspace string) ([]schema.FaultEntry, error) {
 	path := filepath.Join(workspace, ".ai", "faults.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
@@ -136,14 +104,14 @@ func ReadFaults(workspace string) ([]FaultEntry, error) {
 	}
 	defer f.Close()
 
-	var entries []FaultEntry
+	var entries []schema.FaultEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		var e FaultEntry
+		var e schema.FaultEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			fmt.Fprintf(os.Stderr, "review: skipping malformed fault line: %v\n", err)
 			continue
@@ -175,7 +143,7 @@ func ReadReviewTasks(workspace string) ([]ReviewTask, error) {
 
 // BuildReport aggregates sessions, faults, and tasks into a ReviewReport.
 // stuck = task not done AND appears in tasks_touched across 3+ distinct sessions.
-func BuildReport(entries []ProgressEntry, faults []FaultEntry, tasks []ReviewTask) ReviewReport {
+func BuildReport(entries []schema.ProgressEntry, faults []schema.FaultEntry, tasks []ReviewTask) ReviewReport {
 	r := ReviewReport{
 		Sessions:     entries,
 		FaultSummary: make(map[string]int),
@@ -299,7 +267,7 @@ func FormatReport(r ReviewReport, trace bool) string {
 	if trace {
 		sb.WriteString(fmt.Sprintf("SESSION REVIEW [trace — %d sessions]\n", len(r.Sessions)))
 		// Group sessions by task ID
-		taskSessions := make(map[string][]ProgressEntry)
+		taskSessions := make(map[string][]schema.ProgressEntry)
 		for _, e := range r.Sessions {
 			if len(e.TasksTouched) == 0 {
 				taskSessions["(untagged)"] = append(taskSessions["(untagged)"], e)

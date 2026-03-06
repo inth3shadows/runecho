@@ -7,23 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-)
 
-// VerifyEntry records one verify run for a task in a session.
-// Stored append-only in .ai/results.jsonl, deduplicated by TaskID+SessionID.
-type VerifyEntry struct {
-	TaskID    string `json:"task_id"`
-	SessionID string `json:"session_id"`
-	Timestamp string `json:"timestamp"`
-	Cmd       string `json:"cmd"`
-	Passed    bool   `json:"passed"`
-	ExitCode  int    `json:"exit_code"`
-	Output    string `json:"output"` // max 500 chars, combined stderr+stdout
-}
+	"github.com/inth3shadows/runecho/internal/schema"
+)
 
 // AppendVerify appends e to <root>/.ai/results.jsonl.
 // Idempotent: skips if task_id+session_id already present.
-func AppendVerify(root string, e VerifyEntry) error {
+func AppendVerify(root string, e schema.VerifyEntry) error {
 	existing, err := ReadVerify(root)
 	if err != nil {
 		return err
@@ -54,7 +44,7 @@ func AppendVerify(root string, e VerifyEntry) error {
 
 // ReadVerify reads all entries from <root>/.ai/results.jsonl.
 // Returns nil (not error) if file doesn't exist.
-func ReadVerify(root string) ([]VerifyEntry, error) {
+func ReadVerify(root string) ([]schema.VerifyEntry, error) {
 	path := filepath.Join(root, ".ai", "results.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
@@ -65,14 +55,14 @@ func ReadVerify(root string) ([]VerifyEntry, error) {
 	}
 	defer f.Close()
 
-	var entries []VerifyEntry
+	var entries []schema.VerifyEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		var e VerifyEntry
+		var e schema.VerifyEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			fmt.Fprintf(os.Stderr, "verify: skipping malformed line: %v\n", err)
 			continue

@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 // AppendProgress appends one JSONL line to <root>/.ai/progress.jsonl.
 // Idempotent: skips if session_id already present in the file.
-func AppendProgress(root string, e ProgressEntry) error {
+func AppendProgress(root string, e schema.ProgressEntry) error {
 	ledger := filepath.Join(root, ".ai", "progress.jsonl")
 
 	// Idempotency guard
@@ -52,7 +54,7 @@ func AppendProgress(root string, e ProgressEntry) error {
 // AppendFault appends one JSONL line to <root>/.ai/faults.jsonl.
 // Also writes to the governor pending-faults file for VERIFY_FAIL signals
 // so the governor can inject the fault into Claude's context on the next turn.
-func AppendFault(root string, e FaultEntry) error {
+func AppendFault(root string, e schema.FaultEntry) error {
 	faultsFile := filepath.Join(root, ".ai", "faults.jsonl")
 	if err := os.MkdirAll(filepath.Dir(faultsFile), 0755); err != nil {
 		return err

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 const (
@@ -110,21 +112,20 @@ func logClassification(prompt string, route Route, latencyMS int64, stateDir str
 	if stateDir == "" {
 		return
 	}
-	src := "classifier"
 	routeStr := string(route)
 	if callErr != nil || route == "" {
 		routeStr = ""
 	}
 
-	entry := map[string]any{
-		"ts":         time.Now().UTC().Format(time.RFC3339),
-		"prompt":     prompt,
-		"route":      routeStr,
-		"source":     src,
-		"latency_ms": latencyMS,
+	entry := schema.ClassifierEntry{
+		Ts:        time.Now().UTC().Format(time.RFC3339),
+		Prompt:    prompt,
+		Route:     routeStr,
+		Source:    "classifier",
+		LatencyMS: latencyMS,
 	}
 	if callErr != nil {
-		entry["error"] = callErr.Error()
+		entry.Error = callErr.Error()
 	}
 
 	line, err := json.Marshal(entry)

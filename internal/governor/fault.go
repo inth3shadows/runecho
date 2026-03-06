@@ -6,16 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-)
 
-type faultEntry struct {
-	Signal    FaultSignal `json:"signal"`
-	Value     int         `json:"value"`
-	Context   string      `json:"context"`
-	Workspace string      `json:"workspace"`
-	SessionID string      `json:"session_id"`
-	Timestamp string      `json:"ts"`
-}
+	"github.com/inth3shadows/runecho/internal/schema"
+)
 
 // EmitFault appends a structured fault signal to {workspace}/.ai/faults.jsonl.
 // Mirrors the emit_fault() function in fault-emitter.sh.
@@ -23,13 +16,13 @@ func EmitFault(signal FaultSignal, value int, ctx, workspace, sessionID string) 
 	faultsFile := filepath.Join(workspace, ".ai", "faults.jsonl")
 	_ = os.MkdirAll(filepath.Dir(faultsFile), 0o755)
 
-	entry := faultEntry{
-		Signal:    signal,
-		Value:     value,
+	entry := schema.FaultEntry{
+		Signal:    string(signal),
+		Value:     float64(value),
 		Context:   ctx,
 		Workspace: workspace,
 		SessionID: sessionID,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Ts:        time.Now().UTC().Format(time.RFC3339),
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {

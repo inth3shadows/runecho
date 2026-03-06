@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 // AppendEnvelope appends env to .ai/executions.jsonl.
 // Idempotent: no-op if session_id already present.
-func AppendEnvelope(root string, env Envelope) error {
+func AppendEnvelope(root string, env schema.Envelope) error {
 	path := filepath.Join(root, ".ai", "executions.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("pipeline: envelope mkdir: %w", err)
@@ -37,7 +39,7 @@ func AppendEnvelope(root string, env Envelope) error {
 }
 
 // ReadEnvelopes reads all envelopes from .ai/executions.jsonl.
-func ReadEnvelopes(root string) ([]Envelope, error) {
+func ReadEnvelopes(root string) ([]schema.Envelope, error) {
 	path := filepath.Join(root, ".ai", "executions.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
@@ -48,14 +50,14 @@ func ReadEnvelopes(root string) ([]Envelope, error) {
 	}
 	defer f.Close()
 
-	var out []Envelope
+	var out []schema.Envelope
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
-		var e Envelope
+		var e schema.Envelope
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			continue // skip malformed lines
 		}

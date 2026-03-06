@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/pipeline"
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 func main() {
@@ -101,9 +102,9 @@ func runEnvelope(args []string) {
 	}
 
 	// Build StageResults (CostUSD = 0.0 in M5).
-	stages := make([]pipeline.StageResult, len(p.Stages))
+	stages := make([]schema.StageResult, len(p.Stages))
 	for i, s := range p.Stages {
-		stages[i] = pipeline.StageResult{
+		stages[i] = schema.StageResult{
 			StageID: s.ID,
 			Model:   s.Model,
 		}
@@ -115,7 +116,7 @@ func runEnvelope(args []string) {
 		faults = []string{}
 	}
 
-	env := pipeline.Envelope{
+	env := schema.Envelope{
 		SessionID:   *sessionID,
 		Pipeline:    *pipelineName,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),

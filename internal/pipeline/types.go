@@ -17,25 +17,3 @@ type Stage struct {
 	Description string `yaml:"description,omitempty"`
 }
 
-// Envelope records the execution of a pipeline-routed session.
-type Envelope struct {
-	SessionID   string        `json:"session_id"`
-	Pipeline    string        `json:"pipeline"`
-	Timestamp   string        `json:"timestamp"`
-	IRHashStart string        `json:"ir_hash_start"`
-	IRHashEnd   string        `json:"ir_hash_end"`
-	CostUSD     float64       `json:"cost_usd"`
-	DurationMS  int64         `json:"duration_ms"`
-	Stages      []StageResult `json:"stages"`
-	Faults      []string      `json:"faults"`  // signal names from faults.jsonl for this session
-	Status      string        `json:"status"`  // "complete" | "abandoned"
-}
-
-// StageResult records the outcome of one stage within an Envelope.
-type StageResult struct {
-	StageID  string  `json:"stage_id"`
-	Model    string  `json:"model"`
-	CostUSD  float64 `json:"cost_usd"`  // 0.0 in M5, populated in M7
-	Skipped  bool    `json:"skipped"`
-	VerifyOK *bool   `json:"verify_ok"` // nil = not run
-}

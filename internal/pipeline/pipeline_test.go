@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/pipeline"
+	"github.com/inth3shadows/runecho/internal/schema"
 )
 
 // --- Validate ---
@@ -163,14 +164,14 @@ func TestRenderText_CustomPipeline(t *testing.T) {
 
 // --- AppendEnvelope (idempotency) ---
 
-func makeEnvelope(sessionID string) pipeline.Envelope {
-	return pipeline.Envelope{
+func makeEnvelope(sessionID string) schema.Envelope {
+	return schema.Envelope{
 		SessionID: sessionID,
 		Pipeline:  "default",
 		Timestamp: "2026-01-01T00:00:00Z",
 		Status:    "complete",
 		Faults:    []string{},
-		Stages:    []pipeline.StageResult{},
+		Stages:    []schema.StageResult{},
 	}
 }
 

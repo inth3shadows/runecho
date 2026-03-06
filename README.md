@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · F3 ✅ · next: F4 — session-end.sh → Go
+**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · F3 ✅ · F4 ✅ · F5 ✅ · next: F6 — schema stabilization
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -51,7 +51,7 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Model Enforcer**: PreToolUse hook that denies subagents using the wrong model. If the router said haiku, Claude can't spawn an opus subagent. Agent tool calls (which carry `subagent_type` but no `model` param) are audited rather than enforced — they're logged and allowed through.
 - **IR Injector**: On session turn 1, reads `.ai/ir.json` and injects a compact codebase summary — file list + all symbols. Claude starts every session knowing what exists without reading files to orient itself.
 - **Stop Checkpoint**: After every Claude response, writes `.ai/checkpoint.json` with turn count, IR hash, and last message. Provides state for failure recovery.
-- **Session End**: On session termination, runs a five-stage pipeline: (1) scope-drift detection — compares git-changed files vs. the active task's declared scope, emits `SCOPE_DRIFT` fault if files fall outside it, (2) `ai-session` parses the Claude Code JSONL log for ground-truth facts, (3) falls back to minimal checkpoint template if JSONL unavailable, (4) calls `ai-session review` silently — injects a SESSION REVIEW block into the next turn-1 if actionable patterns exist, (5) calls `ai-document` to update project docs if structural changes occurred.
+- **Session End**: On session termination, `ai-session-end` runs a seven-stage pipeline: (1) scope-drift detection — compares git-changed files vs. the active task's declared scope, emits `SCOPE_DRIFT` fault if files fall outside it, (2) IR re-index + snapshot + churn cache update, (3) pipeline envelope write if route=pipeline, (4) task verify — emits `VERIFY_FAIL` fault on failure, (5) IR structural diff summary, (6) `ai-session` parses the Claude Code JSONL log for ground-truth facts with `ai-document` update in background, (7) falls back to minimal checkpoint template if JSONL unavailable. `session-end.sh` is now a 4-line exec wrapper identical to `session-governor.sh`.
 - **Session Synthesizer** (`ai-session`): Reads the Claude Code JSONL session log, extracts ground-truth facts (files edited/created, commands run, token counts, cost, duration), and calls haiku to summarize the session narrative. Produces `.ai/handoff.md` with factual accuracy — no speculation.
 - **Document Generator** (`ai-document`): Auto-generates and updates project documentation using haiku. Which docs are generated is configured via `.ai/document.yaml` (per-project) or `~/.config/runecho/document.yaml` (global); defaults to all three (README.md, TECHNICAL.md, USAGE.md). Change-gated by IR diff — skips entirely if no structural changes and all configured docs already exist.
 - **Destructive Bash Guard**: PreToolUse[Bash] hook. Hard-denies catastrophic commands (`rm -rf /`, `mkfs`, fork-bombs). Approval-gates dangerous-but-recoverable patterns: `rm -rf`, `git reset --hard`, `DROP TABLE`, pipe-to-shell installs.
@@ -96,6 +96,7 @@ Builds six binaries, symlinks all hooks into `~/.claude/hooks/`, and automatical
 | `ai-context` | Compiles turn-1 context block (contract + IR + diff + handoff + tasks + review) within a token budget |
 | `ai-governor` | Session governor + model router (replaces `session-governor.sh` logic) |
 | `ai-pipeline` | Declarative pipeline definitions — `render` (injection text) + `envelope` (execution records) |
+| `ai-session-end` | Session-end orchestration pipeline (replaces `session-end.sh` logic) |
 
 ---
 
@@ -265,14 +266,14 @@ Closes the cross-session continuity gap.
 
 **Normal path:** at turn 35, the governor instructs Claude to write `.ai/handoff.md`. On the next session's turn 1, the IR injector injects it after the IR block.
 
-**SessionEnd pipeline** (`session-end.sh`):
-1. `ai-ir snapshot` — capture final IR state to SQLite
-2. `ai-ir verify` — compute structural diff summary since last snapshot
-3. **Scope-drift detection** (M3) — compare `git diff --name-only HEAD` vs. active task's `scope` glob; emit `SCOPE_DRIFT` fault to `faults.jsonl` for out-of-scope files
-4. **`ai-pipeline envelope`** (M5) — if route was `pipeline`, write an execution record to `.ai/executions.jsonl` (idempotent)
-5. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff with real facts: files edited, commands run, token counts, cost, duration
-6. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
-7. **`ai-document`** — if IR diff exists, update project docs via haiku (non-fatal, runs in background)
+**SessionEnd pipeline** (`ai-session-end` binary, `session-end.sh` is a 4-line exec wrapper):
+1. **Scope-drift detection** — compare `git diff --name-only HEAD` vs. active task's `scope` glob; emit `SCOPE_DRIFT` fault to `faults.jsonl` for out-of-scope files
+2. **IR snapshot** — re-index codebase, `ai-ir snapshot --label=session-end`, update `churn-cache.txt`
+3. **Pipeline envelope** — if route was `pipeline`, write execution record to `.ai/executions.jsonl` (idempotent)
+4. **Task verify** — run active task's `verify` command; emit `VERIFY_FAIL` fault on failure (exit 1); exit 2 = no verify cmd
+5. **IR verify summary** — `ai-ir verify` captures structural diff since last snapshot
+6. **`ai-session`** (primary) — parse Claude Code JSONL log → ground-truth handoff; fire `ai-document` in background; append `progress.jsonl` record; validate handoff schema
+7. **Checkpoint fallback** — if `ai-session` fails or JSONL unavailable, synthesize minimal handoff from `checkpoint.json`
 
 **Triggers (Claude-written handoff):**
 - Auto: governor fires at turn 35 with `ACTION REQUIRED: Write session handoff now.`
@@ -318,6 +319,8 @@ ai-task update <id> <status>                 # status ∈ {pending, in-progress,
 ai-task list [--status=<s>]                  # tabular; no filter = all non-done
 ai-task next                                 # first unblocked non-done task; exit 1 if none
 ai-task contract [--task-id=<id>] [root]     # write .ai/CONTRACT.yaml from active (or specified) task
+ai-task drift-check [--session=<id>] [root]  # intersect IR snapshot diff with task scopes; emit DRIFT_AFFECTED faults
+ai-task replan <id> [root]                   # print task scope + IR diff + DRIFT_AFFECTED faults for review
 ```
 
 **Blocking model:** `--blocked-by=<id>` links tasks. `next` skips tasks whose blocker isn't done yet.
@@ -417,6 +420,7 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
 │   ├── pipeline/main.go        # ai-pipeline — declarative pipeline render + envelope subcommands
 │   ├── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
+│   ├── session-end/main.go     # ai-session-end — session-end orchestration pipeline
 │   └── task/main.go            # ai-task — persistent task ledger with dependency graph
 ├── hooks/
 │   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing + fault emission
@@ -438,7 +442,8 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── ir/                     # IR types, generator, hasher, storage
 │   ├── parser/                 # language parsers (JS/TS/Go/Python); extensible via Parser interface
 │   ├── pipeline/               # Pipeline/Stage/Envelope types; Load, RenderText, AppendEnvelope, FaultsForSession
-│   ├── session/                # session fact extraction, JSONL parser, summarizer, writer
+│   ├── session/                # session fact extraction, JSONL parser, summarizer, writer; progress + fault writers; drift check
+│   ├── sessionend/             # session-end orchestration (all 7 stages); replaces session-end.sh logic
 │   └── snapshot/               # SQLite snapshot store, structural diff engine
 ├── .ai/agents/
 │   ├── explorer.yaml           # haiku persona — file reads, search, summarization
@@ -529,12 +534,29 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - Compact flat dump: directory-grouped summary (~64% reduction) vs. former path list + all-symbols blob
 - `maxShown` 15 → 10; noise-only entries suppressed
 
-**M8 — Outcome Verification Loop ✅** *(completed out of order; F-series numbering below)*
+**M8 — Outcome Verification Loop ✅**
 - `internal/session/verify.go`: `VerifyEntry` type, `AppendVerify`/`ReadVerify` — append-only `.ai/results.jsonl`, idempotent by `(task_id, session_id)`
 - `ai-task verify <id> [--session=<sid>] [root]` — runs task's `verify` command, writes structured result to `results.jsonl`; exit 0/1/2
-- `session-end.sh`: runs verify on active task at session end; emits `VERIFY_FAIL` fault signal on failure
-- `fault-emitter.sh`: added `SCOPE_DRIFT` and `VERIFY_FAIL` to signal taxonomy
 - `internal/session/review.go`: joins `progress.jsonl` entries with `results.jsonl` to surface verify outcome per session
+
+**F4 — Migrate `session-end.sh` → Go (`ai-session-end`) ✅**
+- `internal/sessionend/end.go`: all 7 stages ported — scope drift, IR snapshot, pipeline envelope, verify, handoff generation, progress ledger, checkpoint fallback
+- `internal/session/progress.go`: `AppendProgress` + `AppendFault` — idempotent JSONL writers for `progress.jsonl` and `faults.jsonl`
+- `cmd/session-end/main.go`: thin entrypoint (reads stdin, calls `sessionend.Run`)
+- `hooks/session-end.sh` reduced to 4-line `exec ai-session-end` wrapper; `install.sh` now builds 8 binaries
+
+**F5 — Drift-Aware Task Advisory ✅**
+- `internal/task/drift.go`: `CheckDrift` (glob intersection with `**` support), `AppendDriftFaults` (idempotent by task_id+session_id), `LoadDriftFaults`
+- `internal/session/drift_check.go`: `RunDriftCheck` — diffs last 2 IR snapshots, intersects changed files with task scopes, emits `DRIFT_AFFECTED` faults
+- `internal/context/contract.go`: `DRIFT ADVISORY` section injected into SESSION CONTRACT at turn 1 when `DRIFT_AFFECTED` faults exist for active task
+- `cmd/task/main.go`: `ai-task drift-check` + `ai-task replan <id>` subcommands
+
+**ir.go + install.sh bug fixes ✅**
+- Import propagation: index-based loop fixes stale-score break (was single-hop only)
+- `buildImportIndex`: root-level files (`filepath.Dir == "."`) indexed by filename stem, not unreachable `"."` key
+- `propagationThreshold`: `1.0 → 3.0` — stops near-universal propagation noise
+- `resolveImport`: removed unreachable `len(parts) == 0` dead guard
+- `install.sh`: explicit Python-not-found error + Windows Store stub detection (exit 9)
 
 ---
 
@@ -550,7 +572,7 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 **MCP deferred.** The value of an MCP tool server is exposing a stable API. Building it before the data model (types, schema) is stable means versioning pain. Requeued after F6 (schema stabilization).
 
-**session-end.sh complexity ceiling.** At 251 lines it already handles verify, scope-drift, handoff generation, fault emission, pipeline envelope, and doc update. Before F5 and F6 add more consumers of session-end data, migrate to a Go binary (F4). The pattern is proven — `session-governor.sh` → `ai-governor` was the same move.
+**session-end.sh migration complete (F4).** `ai-session-end` is the 8th binary. `session-end.sh` is now a 4-line exec wrapper — same pattern as `session-governor.sh` → `ai-governor`. All session-end logic is typed, testable Go in `internal/sessionend/`.
 
 ---
 
@@ -580,38 +602,15 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
-### F4 — Migrate `session-end.sh` → Go (`ai-session-end`) ← **START HERE**
+### F4 — Migrate `session-end.sh` → Go (`ai-session-end`) ✅
 
-**Goal:** Replace the 251-line bash orchestrator with a typed, testable Go binary. Same behavior, better foundation for F5/F6 which need programmatic access to session-end logic.
-
-**Why now:** Every new feature (drift advisory, schema joins, provenance hooks) wants to run at session end. Adding them to bash means more fragile string handling and untestable logic. The `ai-governor` migration proved the pattern works.
-
-| Deliverable | Description |
-|---|---|
-| `cmd/session-end/main.go` | Reads session-end event JSON from stdin; orchestrates: scope-drift → verify → handoff → progress → fault emission → pipeline envelope → doc update |
-| `session-end.sh` → 4-line wrapper | `exec ai-session-end` — identical to how `session-governor.sh` works now |
-| `internal/session/end.go` | Core logic package, fully unit-testable |
-| Parity test | Run old and new side-by-side on a real session; compare `progress.jsonl` and `handoff.md` output |
-
-**Done when:** `session-end.sh` is under 10 lines; all session-end logic has unit tests; parity verified against bash version.
+**Completed.** `internal/sessionend/end.go` implements all 7 stages. `session-end.sh` is a 4-line exec wrapper. `install.sh` builds 8 binaries. All session-end logic is typed, testable Go.
 
 ---
 
-### F5 — Drift-Aware Task Advisory
+### F5 — Drift-Aware Task Advisory ✅
 
-**Goal:** When IR structural changes intersect active task scopes between sessions, surface a `DRIFT_AFFECTED` advisory at turn 1. The model starts the session knowing which tasks need re-evaluation — without the developer having to notice the drift manually.
-
-**Requires:** F1 (task types importable), F3 (IR shape stable post-compression).
-
-| Deliverable | Description |
-|---|---|
-| Task impact analysis | Intersect `task.scope` globs with IR diff changed-file set. Tasks with overlap → `DRIFT_AFFECTED` fault in `faults.jsonl` |
-| Turn-1 advisory injection | `SESSION CONTRACT` block gains a `DRIFT ADVISORY` section when affected tasks exist: lists tasks, changed files, whether `verify` paths are still valid |
-| `ai-task replan <id>` | Prints task scope alongside the IR diff. Human confirms or adjusts. No automatic mutation. |
-
-**Done when:** After moving `internal/session/` to `internal/session/v2/`, the next session on a session-scoped task sees a drift advisory naming the moved package. Unaffected tasks show no advisory.
-
-*Inspired by: Renovate/Dependabot (automated impact detection), Pants/Buck2 (target-level invalidation)*
+**Completed.** `internal/task/drift.go` intersects IR snapshot diffs with task scopes. `internal/session/drift_check.go` runs at session end via `ai-task drift-check`. `DRIFT_AFFECTED` faults are emitted to `faults.jsonl`. `ContractProvider` injects a `DRIFT ADVISORY` block into SESSION CONTRACT at turn 1 when faults exist. `ai-task replan <id>` prints scope + IR diff for human review.
 
 ---
 

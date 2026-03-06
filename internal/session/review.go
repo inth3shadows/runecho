@@ -23,6 +23,8 @@ type ProgressEntry struct {
 	HandoffPath  string     `json:"handoff_path"`
 	Status       string     `json:"status"`
 	ScopeDrift   ScopeDrift `json:"scope_drift"`
+	VerifyPassed *bool      `json:"verify_passed,omitempty"` // nil = not run
+	VerifyCmd    string     `json:"verify_cmd,omitempty"`    // populated from results.jsonl
 }
 
 // ScopeDrift captures scope violation metadata from a session.
@@ -100,7 +102,25 @@ func ReadProgress(workspace string) ([]ProgressEntry, error) {
 		seen[e.SessionID] = true
 		entries = append(entries, e)
 	}
-	return entries, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// Join with results.jsonl to populate VerifyPassed + VerifyCmd (keyed by session_id).
+	verifyEntries, _ := ReadVerify(workspace) // non-fatal if missing
+	verifyBySession := make(map[string]VerifyEntry, len(verifyEntries))
+	for _, ve := range verifyEntries {
+		verifyBySession[ve.SessionID] = ve
+	}
+	for i := range entries {
+		if ve, ok := verifyBySession[entries[i].SessionID]; ok {
+			passed := ve.Passed
+			entries[i].VerifyPassed = &passed
+			entries[i].VerifyCmd = ve.Cmd
+		}
+	}
+
+	return entries, nil
 }
 
 // ReadFaults reads .ai/faults.jsonl, tolerates partial lines.

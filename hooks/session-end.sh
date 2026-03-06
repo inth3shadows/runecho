@@ -15,7 +15,7 @@ SESSION_ID_VAL=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "
 # _append_progress_record: write one JSONL line to .ai/progress.jsonl.
 # Idempotent: skips if session_id already present in the file.
 _append_progress_record() {
-  local cwd="$1" sid="$2" handoff="$3" checkpoint="$4" scope_drift_json="$5" cost_usd="${6:-0}"
+  local cwd="$1" sid="$2" handoff="$3" checkpoint="$4" scope_drift_json="$5" cost_usd="${6:-0}" verify_passed="${7:-}"
   local ledger="$cwd/.ai/progress.jsonl"
 
   # Idempotency guard
@@ -71,11 +71,13 @@ _append_progress_record() {
     --arg handoff_path "$handoff" \
     --arg status "$fm_status" \
     --argjson scope_drift "$scope_drift_json" \
+    --arg verify_passed "$verify_passed" \
     '{session_id:$sid, timestamp:$ts, turns:$turns, cost_usd:$cost,
       ir_hash_start:$ir_start, ir_hash_end:$ir_end,
       files_changed:$files_count, tasks_touched:$tasks_touched,
       handoff_path:$handoff_path, status:$status,
-      scope_drift:$scope_drift}' \
+      scope_drift:$scope_drift}
+    | if $verify_passed != "" then . + {verify_passed: ($verify_passed == "true")} else . end' \
     >> "$ledger" 2>/dev/null || true
 }
 
@@ -165,6 +167,21 @@ if command -v ai-pipeline >/dev/null 2>&1; then
   fi
 fi
 
+# Run verify command for active task — emit VERIFY_FAIL fault on failure (M8)
+_VERIFY_PASSED=""
+if command -v ai-task &>/dev/null && [ -n "$_ACTIVE_TASK_ID" ]; then
+  _verify_exit=0
+  ai-task verify "$_ACTIVE_TASK_ID" ${SESSION_ID_VAL:+"--session=$SESSION_ID_VAL"} "$CWD" 2>/dev/null
+  _verify_exit=$?
+  if [ "$_verify_exit" = "0" ]; then
+    _VERIFY_PASSED="true"
+  elif [ "$_verify_exit" = "1" ]; then
+    _VERIFY_PASSED="false"
+    emit_fault "VERIFY_FAIL" "1" "task $_ACTIVE_TASK_ID verify failed" "$CWD" "${SESSION_ID_VAL:-unknown}"
+  fi
+  # exit 2 = no verify cmd; leave _VERIFY_PASSED empty
+fi
+
 # Compute verify summary for embedding in auto-generated handoff.
 VERIFY_SUMMARY=""
 if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/history.db" ]; then
@@ -172,7 +189,7 @@ if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/history.db" ]; then
 fi
 
 # Don't overwrite an existing handoff
-[ -f "$HANDOFF_FILE" ] && _append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON" && exit 0
+[ -f "$HANDOFF_FILE" ] && _append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON" "" "$_VERIFY_PASSED" && exit 0
 
 # Try ai-session first — reads the full JSONL log for ground-truth facts
 if command -v ai-session &>/dev/null && [ -n "$SESSION_ID_VAL" ]; then
@@ -187,7 +204,7 @@ if command -v ai-session &>/dev/null && [ -n "$SESSION_ID_VAL" ]; then
     fi
 
     # Progress Ledger — append JSONL record to .ai/progress.jsonl
-    _append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON" "$_COST"
+    _append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON" "$_COST" "$_VERIFY_PASSED"
 
     # Validate handoff schema (warn on exit 1, abort on exit 2)
     if command -v ai-session &>/dev/null; then
@@ -229,6 +246,6 @@ cat > "$HANDOFF_FILE" <<EOF
 ${VERIFY_SUMMARY:-"(no session-start snapshot)"}
 EOF
 
-_append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON"
+_append_progress_record "$CWD" "$SESSION_ID_VAL" "$HANDOFF_FILE" "$CHECKPOINT_FILE" "$SCOPE_DRIFT_JSON" "" "$_VERIFY_PASSED"
 
 exit 0

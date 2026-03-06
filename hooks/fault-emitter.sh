@@ -9,7 +9,7 @@
 # Usage:
 #   emit_fault <SIGNAL> <value> <context> <workspace_dir> <session_id> [state_dir]
 #
-# Signals: IR_DRIFT, HALLUCINATION, TURN_FATIGUE, COST_FATIGUE, OPUS_BLOCKED
+# Signals: IR_DRIFT, HALLUCINATION, TURN_FATIGUE, COST_FATIGUE, OPUS_BLOCKED, SCOPE_DRIFT, VERIFY_FAIL
 # value:   numeric (change count, turn count, cost in cents, etc.)
 # context: short human-readable string
 
@@ -41,7 +41,7 @@ emit_fault() {
   # TURN_FATIGUE, COST_FATIGUE, OPUS_BLOCKED are emitted inline by the governor
   # and don't need separate queuing (they're already in the output block).
   case "$signal" in
-    IR_DRIFT|HALLUCINATION)
+    IR_DRIFT|HALLUCINATION|VERIFY_FAIL)
       local pending_file="$state_dir/${session_id}.pending-faults"
       printf '%s\n' "$(jq -n \
         --arg signal "$signal" \

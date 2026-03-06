@@ -34,7 +34,8 @@ for hook in \
   destructive-bash-guard.sh \
   scope-guard.sh \
   constraint-reinjector.sh \
-  pre-compact-snapshot.sh; do
+  pre-compact-snapshot.sh \
+  contract-sync.sh; do
   rm -f "$HOOK_DIR/$hook" && ln -s "$SCRIPT_DIR/hooks/$hook" "$HOOK_DIR/$hook"
   echo "  $hook"
 done
@@ -54,7 +55,8 @@ runecho_hooks = {
     ],
     "UserPromptSubmit": [
         {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-governor.sh", "timeout": 5}]},
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/ir-injector.sh", "timeout": 5}]}
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/ir-injector.sh", "timeout": 5}]},
+        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/contract-sync.sh", "timeout": 3}]}
     ],
     "PreToolUse": [
         {"matcher": "Task",      "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/model-enforcer.sh", "timeout": 5}]},

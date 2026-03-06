@@ -7,6 +7,7 @@ package main
 //   ai-task next                                 first unblocked non-done task by id; exit 1 if none
 //   ai-task contract [--task-id=<id>] [root]     write .ai/CONTRACT.yaml from active (or specified) task
 //   ai-task verify <id> [--session=<sid>] [root] run task.Verify, write .ai/results.jsonl; exit 0/1/2
+//   ai-task sync [--quiet]                       create task from .ai/CONTRACT.yaml if not already present
 
 import (
 	"bytes"
@@ -43,6 +44,8 @@ func main() {
 		runContract(os.Args[2:])
 	case "verify":
 		runVerify(os.Args[2:])
+	case "sync":
+		runSync(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "ai-task: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -58,6 +61,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  ai-task next")
 	fmt.Fprintln(os.Stderr, "  ai-task contract [--task-id=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "  ai-task verify <id> [--session=<sid>] [root]")
+	fmt.Fprintln(os.Stderr, "  ai-task sync [--quiet]")
 }
 
 // mustLoad loads the task DB from root, exiting on error.
@@ -367,6 +371,58 @@ func runVerify(args []string) {
 	if !passed {
 		os.Exit(1)
 	}
+}
+
+// runSync reads .ai/CONTRACT.yaml and creates a pending task if no non-done task
+// with the same title already exists. Idempotent: safe to call every turn.
+func runSync(args []string) {
+	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+	quiet := fs.Bool("quiet", false, "suppress output when no action is taken")
+	fs.Parse(args)
+
+	root := projectRoot()
+	c, err := contract.Parse(filepath.Join(root, ".ai", "CONTRACT.yaml"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task sync: %v\n", err)
+		os.Exit(1)
+	}
+	if c == nil {
+		return // no CONTRACT.yaml — nothing to do
+	}
+	if c.Title == "" {
+		fmt.Fprintln(os.Stderr, "ai-task sync: CONTRACT.yaml missing title")
+		os.Exit(1)
+	}
+
+	db := mustLoad(root)
+
+	// Idempotency: skip if a non-done task with this title already exists.
+	for _, t := range db.Tasks {
+		if t.Status != "done" && t.Title == c.Title {
+			if !*quiet {
+				fmt.Printf("TASK SYNC: already exists #%s — %s\n", t.ID, t.Title)
+			}
+			return
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	nextID := fmt.Sprintf("%d", task.MaxID(db.Tasks)+1)
+	t := task.Task{
+		ID:      nextID,
+		Status:  "pending",
+		Title:   c.Title,
+		Added:   now,
+		Updated: now,
+		Verify:  c.Verify,
+	}
+	if len(c.Scope) > 0 {
+		t.Scope = strings.Join(c.Scope, ",")
+	}
+	db.Tasks = append(db.Tasks, t)
+	db.Updated = now
+	mustSave(root, db)
+	fmt.Printf("TASK SYNC: created #%s from CONTRACT.yaml — %s\n", nextID, c.Title)
 }
 
 // hoistFlags moves --flag=value and --flag value arguments before positional

@@ -109,8 +109,8 @@ func formatContract(c *contract.Contract) string {
 		sb.WriteString(fmt.Sprintf("%-13s%s\n", "Verify:", c.Verify))
 	}
 
-	if c.Success != "" {
-		sb.WriteString(fmt.Sprintf("%-13s%s\n", "Success:", c.Success))
+	for _, s := range c.Success {
+		sb.WriteString(fmt.Sprintf("%-13s%s\n", "Success:", s))
 	}
 
 	for _, a := range c.Assumptions {

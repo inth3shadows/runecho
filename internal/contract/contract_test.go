@@ -35,7 +35,7 @@ func TestRoundTrip_ListScope(t *testing.T) {
 		Verify:      "go test ./internal/auth/...",
 		Assumptions: []string{"JWT is acceptable"},
 		NonGoals:    []string{"OAuth integration"},
-		Success:     "All auth tests pass",
+		Success:     []string{"All auth tests pass"},
 	}
 	got := roundTripYAML(t, orig)
 

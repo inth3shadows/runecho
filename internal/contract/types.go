@@ -9,5 +9,5 @@ type Contract struct {
 	Verify      string   `yaml:"verify"`                 // shell command to validate completion
 	Assumptions []string `yaml:"assumptions,omitempty"`  // explicit assumptions
 	NonGoals    []string `yaml:"non_goals,omitempty"`    // explicitly out of scope
-	Success     string   `yaml:"success,omitempty"`      // human-readable success criterion
+	Success     []string `yaml:"success,omitempty"`      // measurable success criteria
 }

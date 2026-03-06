@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · next: F1 — extract `internal/task` package
+**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · next: F3 — token cost compression
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -515,6 +515,13 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 - Pipeline definitions: `.ai/pipelines/*.yaml` — adding a pipeline is a YAML edit, not a bash edit
 - `install.sh` builds `ai-pipeline` alongside the other 6 binaries
 
+**F1 — Extract `internal/task` Package ✅**
+- `Task`, `TaskDB`, `Load`, `Save`, `MaxID`, `SortByID` in `internal/task/task.go`
+- All binaries import from `internal/task`; task type no longer trapped in `cmd/task/main.go`
+
+**F2 — Contract → Task Auto-Wire ✅**
+- `ai-task sync [--quiet]` creates task from `.ai/CONTRACT.yaml` if no match exists (idempotent by title)
+
 **M8 — Outcome Verification Loop ✅** *(completed out of order; F-series numbering below)*
 - `internal/session/verify.go`: `VerifyEntry` type, `AppendVerify`/`ReadVerify` — append-only `.ai/results.jsonl`, idempotent by `(task_id, session_id)`
 - `ai-task verify <id> [--session=<sid>] [root]` — runs task's `verify` command, writes structured result to `results.jsonl`; exit 0/1/2
@@ -534,59 +541,36 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ### Architectural Notes (2026-03-06)
 
-**Key structural gap identified:** `Task` type is defined as a local struct inside `cmd/task/main.go`. No other package can import it. This means `internal/session`, `internal/context`, and `internal/governor` cannot join task data with sessions, IR, or faults. Drift detection, cross-session review enrichment, and provenance all require this join. **F1 fixes this before anything else.**
-
 **MCP deferred.** The value of an MCP tool server is exposing a stable API. Building it before the data model (types, schema) is stable means versioning pain. Requeued after F6 (schema stabilization).
 
 **session-end.sh complexity ceiling.** At 251 lines it already handles verify, scope-drift, handoff generation, fault emission, pipeline envelope, and doc update. Before F5 and F6 add more consumers of session-end data, migrate to a Go binary (F4). The pattern is proven — `session-governor.sh` → `ai-governor` was the same move.
 
 ---
 
-### F1 — Extract `internal/task` Package ← **START HERE**
+### F1 — Extract `internal/task` Package ✅
 
-**Goal:** Move `Task`/`TaskDB` types out of `cmd/task/main.go` and into `internal/task/types.go` so every binary can import them.
-
-**Why foundational:** Without this, `internal/session/review.go` can't join progress entries with tasks, the context compiler can't score tasks by IR relevance, drift detection can't read task scopes, and provenance can't assemble task-centric records. Everything downstream is blocked or must duplicate the type.
-
-| Deliverable | Description |
-|---|---|
-| `internal/task/types.go` | `Task`, `TaskDB`, `TaskStatus` types extracted from `cmd/task/main.go` |
-| `cmd/task/main.go` updated | Imports `internal/task`; zero behavior change |
-| Load/save helpers | `LoadTasks(root string)`, `SaveTasks(root string, db TaskDB)` moved to `internal/task/store.go` |
-
-**Done when:** `go build ./...` passes; `internal/session` and `internal/context` can import `internal/task` without circular deps.
-
-**Effort:** ~1 hour. Zero behavior change.
+**Completed.** `Task`, `TaskDB`, and storage helpers live in `internal/task/task.go`. All binaries import from `github.com/inth3shadows/runecho/internal/task`. `go build ./...` passes; no circular deps.
 
 ---
 
-### F2 — Contract → Task Auto-Wire
+### F2 — Contract → Task Auto-Wire ✅
 
-**Goal:** When a session starts with `CONTRACT.yaml` present, ensure a corresponding task entry exists in `tasks.json` automatically. Eliminates the manual `ai-task add` step that is never done consistently.
-
-**Why now:** The verify loop (M8), drift advisory (F5), and session review (M4) all depend on tasks being populated. Currently `ai-task list` returns empty on every project. The system cannot make routing or drift decisions on empty data.
-
-| Deliverable | Description |
-|---|---|
-| Auto-create logic | `ir-injector.sh` (or a new turn-1 hook): if `CONTRACT.yaml` exists and no matching task exists, call `ai-task add` with contract title + scope + verify |
-| Idempotency | Match on title; skip if task already exists. Never create duplicates. |
-| `ai-task sync-contract [root]` | Explicit subcommand for the same logic; callable manually or from hooks |
-
-**Done when:** Opening Claude Code in a project with `CONTRACT.yaml` automatically results in a task entry. `ai-task next` returns the contract's task without any manual steps.
+**Completed.** `ai-task sync [--quiet]` creates a task from `.ai/CONTRACT.yaml` if no matching task exists (idempotent by title). Callable from hooks or manually.
 
 ---
 
-### F3 — Token Cost Compression
+### F3 — Token Cost Compression + Context Relevance Scoring ← **START HERE**
 
-**Goal:** IR currently dumps full symbol lists. Compress to signatures, types, and call relationships so turn-1 token cost drops materially while model focus improves.
+**Goal:** IR currently dumps full symbol lists. Compress to signatures and call relationships so turn-1 token cost drops materially. Add a relevance scorer inside `ai-context` that ranks providers by task scope + file churn so only high-signal context is injected.
 
-**Why now:** Direct cost/speed lever. This changes the shape of IR output — do it before F5 (drift advisory) and F7 (provenance) build consumers against the IR format.
+**Why now:** Direct cost/speed lever. This changes the shape of IR output — do it before F5 (drift advisory) and F7 (provenance) build consumers against the IR format. Relevance scoring is a natural companion pass: same data, same budget constraint.
 
 | Deliverable | Description |
 |---|---|
-| IR summarization mode | `ai-ir` new flag `--summary` or `ai-context` compression pass: emit `func Name(args) ReturnType` signatures instead of full symbol metadata |
-| Call graph extraction | Where parsers support it (Go, JS), emit top-level call relationships as edges: `{caller, callee}`. Enables the model to reason about impact without reading files. |
-| Token budget enforcement | `ai-context --budget=<n>` already exists; wire compressed IR as the default provider output |
+| IR summarization mode | `ai-ir` flag `--summary` or `ai-context` compression pass: emit `func Name(args) ReturnType` signatures instead of full symbol metadata |
+| Call graph extraction | Where parsers support it (Go, JS), emit top-level call relationships as edges: `{caller, callee}`. Enables impact reasoning without file reads. |
+| Context relevance scorer | BM25-style scorer in `ai-context`: score each provider's output against active task scope globs + recently churned files; trim low-signal output before budget enforcement |
+| Token budget enforcement | `ai-context --budget=<n>` already exists; wire compressed IR + scored providers as default output |
 | Benchmarks | Before/after token counts for a representative project. Target: ≥40% reduction in IR block size. |
 
 **Done when:** Turn-1 IR block for this repo is ≥40% smaller than current output. `ai-session review` confirms no increase in file-read tool calls (proxy for model disorientation).
@@ -658,7 +642,27 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
+### F8 — Local Result Cache
+
+**Goal:** Hash `(ir_snapshot_id + prompt_hash + model)` → reuse result for identical analysis tasks. Avoid repeated model calls when inputs haven't changed.
+
+**Why after F7:** Only pays off once orchestration exists and identical analysis tasks run repeatedly. Building a cache before you have repeated callers is premature optimization.
+
+| Deliverable | Description |
+|---|---|
+| sqlite cache table | Key `(ir_hash, prompt_hash, model)` → `result TEXT, created_at`. One table in existing sqlite db — no new dep. |
+| Cache read/write in `ai-context` | Before calling the model, check cache. On miss, call and write result. TTL: invalidate on IR hash change. |
+| `ai-context --no-cache` | Escape hatch to bypass for debugging. |
+
+**Done when:** Identical `ai-context compile` calls on unchanged IR return cached result; `ai-ir diff` output changing invalidates the cache.
+
+---
+
 ### Deferred
+
+**Fast-Loop CLI (`just`)** — a `justfile` in the repo root with a `run` recipe (`ai-context compile && ai-pipeline exec && ai-task verify`) gives a single `just run` entry point. Not a Go binary. `winget install Casey.Just`. Add after F3 when the context/pipeline commands are stable.
+
+**model-enforcer.sh bug** — the enforcer reads `.model` from `tool_input`, but the Agent tool schema doesn't expose a `model` parameter, so Claude Code strips it before the hook sees it. Every Agent call resolves to `"default"` and gets blocked when route is `opus`. Fix: check `tool_name == "Agent"` separately, or cross-reference the agent's `subagent_type` against the persona registry instead of reading `.model`.
 
 **MCP Tool Server** — expose RunEcho capabilities as MCP tools (task/list, ir/diff, session/review, context/compile). Deferred until F6 schema stabilization. Building an API before the data model is stable means versioning pain. High value but not foundational.
 

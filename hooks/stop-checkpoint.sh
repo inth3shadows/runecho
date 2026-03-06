@@ -6,6 +6,13 @@
 # shellcheck disable=SC1091
 . "$(dirname "$0")/fault-emitter.sh"
 
+# POSIX-portable timeout: macOS lacks GNU timeout; gtimeout (coreutils) is the Mac equivalent.
+_timeout() {
+  if command -v timeout &>/dev/null; then timeout "$@"
+  elif command -v gtimeout &>/dev/null; then gtimeout "$@"
+  else shift; "$@"; fi  # no timeout available — run without time limit
+}
+
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 CWD=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null)
@@ -33,7 +40,7 @@ jq -n \
 # Emits IR_DRIFT fault if structural changes detected; cleared on next governor turn.
 if command -v ai-ir &>/dev/null; then
   ai-ir "$CWD" &>/dev/null || true  # incremental re-index
-  VERIFY=$(timeout 3 ai-ir verify --session="$SESSION_ID" "$CWD" 2>/dev/null || true)
+  VERIFY=$(_timeout 3 ai-ir verify --session="$SESSION_ID" "$CWD" 2>/dev/null || true)
   if [ -n "$VERIFY" ]; then
     CHANGE_COUNT=$(echo "$VERIFY" | grep -c '.' 2>/dev/null || echo 1)
     emit_fault "IR_DRIFT" "$CHANGE_COUNT" "$VERIFY" "$CWD" "$SESSION_ID" "$STATE_DIR"
@@ -47,7 +54,7 @@ if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/ir.json" ]; then
   if [ -n "$_LAST_MSG" ]; then
     _CLAIM_TMP=$(mktemp 2>/dev/null || echo "/tmp/runecho-claims-$$")
     echo "$_LAST_MSG" > "$_CLAIM_TMP"
-    _CLAIM_OUT=$(timeout 5 ai-ir validate-claims \
+    _CLAIM_OUT=$(_timeout 5 ai-ir validate-claims \
       --text="$_CLAIM_TMP" --ir="$CWD/.ai/ir.json" 2>/dev/null || true)
     rm -f "$_CLAIM_TMP"
     if [ -n "$_CLAIM_OUT" ]; then

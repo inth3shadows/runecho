@@ -33,6 +33,15 @@ fi
 
 ROUTE=$(cat "$ROUTE_FILE" 2>/dev/null || echo "none")
 
+# Agent tool calls carry subagent_type but no model parameter in their schema.
+# Claude Code strips model from Agent calls before the hook sees it, so REQUESTED_MODEL
+# is always "default" — enforcing here causes false denials. Allow + audit.
+SUBAGENT_TYPE=$(echo "$TOOL_INPUT" | jq -r '.subagent_type // ""' 2>/dev/null || true)
+if [ -n "$SUBAGENT_TYPE" ]; then
+  echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"additionalContext\":\"MODEL ENFORCER AUDIT: Agent call (subagent_type=$SUBAGENT_TYPE) — model param schema-stripped, cannot enforce. Route: $ROUTE.\"}}"
+  exit 0
+fi
+
 # Item 8: Build model lookup table from .ai/agents/*.yaml persona files.
 # Falls back to hardcoded defaults if no persona files found.
 # Format: "haiku" maps to persona names that use haiku, etc.

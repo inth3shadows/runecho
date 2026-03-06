@@ -126,14 +126,21 @@ if command -v shellcheck &>/dev/null; then
   shellcheck "$SCRIPT_DIR"/hooks/*.sh && echo "  All hooks passed." || echo "  ShellCheck warnings found — review before deploying."
 else
   echo ""
-  echo "ShellCheck not found — skipping hook validation (install: winget install koalaman.shellcheck)"
+  case "$(uname -s)" in
+    Darwin) echo "ShellCheck not found — skipping hook validation (install: brew install shellcheck)" ;;
+    Linux)  echo "ShellCheck not found — skipping hook validation (install: apt install shellcheck / dnf install ShellCheck)" ;;
+    *)      echo "ShellCheck not found — skipping hook validation (install: winget install koalaman.shellcheck)" ;;
+  esac
 fi
 
 echo ""
 echo "RunEcho install complete."
 echo ""
-echo "Optional: set RUNECHO_CLASSIFIER_KEY in your PowerShell profile for LLM routing:"
-echo '  $env:RUNECHO_CLASSIFIER_KEY = "sk-ant-api03-..."'
+echo "Optional: set RUNECHO_CLASSIFIER_KEY for LLM routing:"
+case "$(uname -s)" in
+  Darwin|Linux) echo '  export RUNECHO_CLASSIFIER_KEY="sk-ant-api03-..."  # add to ~/.bashrc or ~/.zshrc' ;;
+  *)            echo '  $env:RUNECHO_CLASSIFIER_KEY = "sk-ant-api03-..."  # add to PowerShell profile' ;;
+esac
 echo ""
 echo "Index a project:"
 echo "  cd /path/to/project && ai-ir"

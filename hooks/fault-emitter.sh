@@ -27,7 +27,7 @@ emit_fault() {
   # Append to workspace audit log
   local faults_file="$workspace/.ai/faults.jsonl"
   mkdir -p "$workspace/.ai" 2>/dev/null
-  printf '%s\n' "$(jq -n \
+  printf '%s\n' "$(jq -cn \
     --arg signal "$signal" \
     --arg session_id "$session_id" \
     --arg ts "$ts" \
@@ -43,7 +43,7 @@ emit_fault() {
   case "$signal" in
     IR_DRIFT|HALLUCINATION|VERIFY_FAIL)
       local pending_file="$state_dir/${session_id}.pending-faults"
-      printf '%s\n' "$(jq -n \
+      printf '%s\n' "$(jq -cn \
         --arg signal "$signal" \
         --argjson value "${value:-0}" \
         --arg context "$context" \

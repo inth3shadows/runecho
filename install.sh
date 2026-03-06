@@ -44,7 +44,7 @@ done
 echo ""
 echo "Configuring $SETTINGS_FILE..."
 
-python3 - <<'PYEOF'
+"${PYTHON3:=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}" - <<'PYEOF'
 import json, os, sys
 
 settings_file = os.path.expanduser("~/.claude/settings.json")

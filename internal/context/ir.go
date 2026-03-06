@@ -88,21 +88,21 @@ func (p *IRProvider) Provide(req Request) (Result, error) {
 	if len(promptWords) > 0 {
 		// Sort descending to find top scorers
 		sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-		propagationThreshold := 1.0
+		propagationThreshold := 3.0
 		scoreMap := make(map[string]int, len(scored))
 		for i := range scored {
 			scoreMap[scored[i].path] = i
 		}
-		for _, sf := range scored {
-			if sf.score < propagationThreshold {
+		for idx := range scored {
+			if scored[idx].score < propagationThreshold {
 				break
 			}
-			fileIR := data.Files[sf.path]
+			fileIR := data.Files[scored[idx].path]
 			for _, imp := range fileIR.Imports {
 				targets := resolveImport(imp, importIndex)
 				for _, target := range targets {
-					if idx, ok := scoreMap[target]; ok && target != sf.path {
-						scored[idx].score += 2
+					if tidx, ok := scoreMap[target]; ok && target != scored[idx].path {
+						scored[tidx].score += 2
 					}
 				}
 			}
@@ -215,12 +215,15 @@ func buildTermDF(data *ir.IR) map[string]int {
 func buildImportIndex(data *ir.IR) map[string][]string {
 	idx := make(map[string][]string)
 	for path := range data.Files {
-		dir := filepath.ToSlash(filepath.Dir(path))
-		parts := strings.Split(dir, "/")
-		if len(parts) > 0 {
-			seg := parts[len(parts)-1]
-			idx[seg] = append(idx[seg], path)
+		dir := filepath.Dir(path)
+		var seg string
+		if dir == "." {
+			seg = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		} else {
+			parts := strings.Split(filepath.ToSlash(dir), "/")
+			seg = parts[len(parts)-1]
 		}
+		idx[seg] = append(idx[seg], path)
 	}
 	return idx
 }
@@ -229,9 +232,6 @@ func buildImportIndex(data *ir.IR) map[string][]string {
 // e.g., "github.com/foo/bar/internal/task" → last segment "task" → lookup in importIndex
 func resolveImport(imp string, importIndex map[string][]string) []string {
 	parts := strings.Split(imp, "/")
-	if len(parts) == 0 {
-		return nil
-	}
 	seg := parts[len(parts)-1]
 	return importIndex[seg]
 }

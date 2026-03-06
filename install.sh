@@ -15,7 +15,7 @@ BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
-for cmd in ir session document task context governor pipeline; do
+for cmd in ir session document task context governor pipeline session-end; do
   echo "Building ai-$cmd..."
   go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
   echo "  Built: $BIN_DIR/ai-$cmd"
@@ -44,7 +44,17 @@ done
 echo ""
 echo "Configuring $SETTINGS_FILE..."
 
-"${PYTHON3:=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}" - <<'PYEOF'
+PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+if [ -z "$PYTHON" ]; then
+  echo "install.sh: ERROR: Python 3 not found. Install Python 3 and re-run." >&2
+  exit 1
+fi
+# Verify python isn't a Windows Store stub (exits 9 rather than running Python)
+if ! "$PYTHON" -c "import sys; sys.exit(0)" 2>/dev/null; then
+  echo "install.sh: ERROR: Python at '$PYTHON' is not functional (Windows Store stub?). Install Python 3 from python.org." >&2
+  exit 1
+fi
+"$PYTHON" - <<'PYEOF'
 import json, os, sys
 
 settings_file = os.path.expanduser("~/.claude/settings.json")

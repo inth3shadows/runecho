@@ -2,12 +2,14 @@ package main
 
 // Usage:
 //   ai-task add "<title>" [--blocked-by=<id>] [--scope=<glob>] [--verify=<cmd>]
-//   ai-task update <id> <status>                 status ∈ {pending, in-progress, done}
-//   ai-task list [--status=<s>]                  tabular; no filter = all non-done
-//   ai-task next                                 first unblocked non-done task by id; exit 1 if none
-//   ai-task contract [--task-id=<id>] [root]     write .ai/CONTRACT.yaml from active (or specified) task
-//   ai-task verify <id> [--session=<sid>] [root] run task.Verify, write .ai/results.jsonl; exit 0/1/2
-//   ai-task sync [--quiet]                       create task from .ai/CONTRACT.yaml if not already present
+//   ai-task update <id> <status>                         status ∈ {pending, in-progress, done}
+//   ai-task list [--status=<s>]                          tabular; no filter = all non-done
+//   ai-task next                                         first unblocked non-done task by id; exit 1 if none
+//   ai-task contract [--task-id=<id>] [root]             write .ai/CONTRACT.yaml from active (or specified) task
+//   ai-task verify <id> [--session=<sid>] [root]         run task.Verify, write .ai/results.jsonl; exit 0/1/2
+//   ai-task sync [--quiet]                               create task from .ai/CONTRACT.yaml if not already present
+//   ai-task drift-check [--session=<id>] [root]          intersect IR changes with task scopes; emit DRIFT_AFFECTED faults
+//   ai-task replan <id> [root]                           print task scope + current IR diff + DRIFT_AFFECTED faults
 
 import (
 	"bytes"
@@ -46,6 +48,10 @@ func main() {
 		runVerify(os.Args[2:])
 	case "sync":
 		runSync(os.Args[2:])
+	case "drift-check":
+		runDriftCheck(os.Args[2:])
+	case "replan":
+		runReplan(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "ai-task: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -62,6 +68,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  ai-task contract [--task-id=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "  ai-task verify <id> [--session=<sid>] [root]")
 	fmt.Fprintln(os.Stderr, "  ai-task sync [--quiet]")
+	fmt.Fprintln(os.Stderr, "  ai-task drift-check [--session=<id>] [root]")
+	fmt.Fprintln(os.Stderr, "  ai-task replan <id> [root]")
 }
 
 // mustLoad loads the task DB from root, exiting on error.
@@ -445,6 +453,106 @@ func hoistFlags(args []string) []string {
 		i++
 	}
 	return append(flags, positional...)
+}
+
+// runDriftCheck intersects the two most recent IR snapshots' changed files with
+// active task scopes and appends DRIFT_AFFECTED faults to .ai/faults.jsonl.
+func runDriftCheck(args []string) {
+	fs := flag.NewFlagSet("drift-check", flag.ExitOnError)
+	sessionID := fs.String("session", "", "session ID for deduplication (default: CLAUDE_SESSION_ID env)")
+	fs.Parse(hoistFlags(args))
+
+	root := projectRoot()
+	if len(fs.Args()) > 0 {
+		root = fs.Args()[0]
+	}
+
+	sid := *sessionID
+	if sid == "" {
+		sid = os.Getenv("CLAUDE_SESSION_ID")
+		if sid == "" {
+			sid = fmt.Sprintf("drift-%d", time.Now().Unix())
+		}
+	}
+
+	if err := session.RunDriftCheck(root, sid); err != nil {
+		fmt.Fprintf(os.Stderr, "ai-task drift-check: %v\n", err)
+		// Exit 0 — drift check failures must not block the session.
+	}
+}
+
+// runReplan prints a task's scope/verify alongside the current IR diff and any
+// DRIFT_AFFECTED faults. Never fails loudly — exits 0 in all cases.
+func runReplan(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "ai-task replan: requires <id>")
+		os.Exit(1)
+	}
+	taskID := args[0]
+
+	root := projectRoot()
+	if len(args) > 1 {
+		root = args[1]
+	}
+
+	db := mustLoad(root)
+	var t *task.Task
+	for i := range db.Tasks {
+		if db.Tasks[i].ID == taskID {
+			t = &db.Tasks[i]
+			break
+		}
+	}
+	if t == nil {
+		fmt.Fprintf(os.Stderr, "ai-task replan: task #%s not found\n", taskID)
+		os.Exit(1)
+	}
+
+	fmt.Printf("TASK #%s: %s\n", t.ID, t.Title)
+	fmt.Printf("Status: %s\n", t.Status)
+	if t.Scope != "" {
+		fmt.Printf("Scope:  %s\n", t.Scope)
+	} else {
+		fmt.Println("Scope:  (none)")
+	}
+	if t.Verify != "" {
+		fmt.Printf("Verify: %s\n", t.Verify)
+	}
+	fmt.Println()
+
+	// Run ai-ir diff --since=session-start and print output.
+	cmd := exec.Command("ai-ir", "diff", "--since=session-start", root)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		// Not fatal — may have no session-start snapshot.
+		if buf.Len() == 0 {
+			fmt.Println("IR DIFF: (no session-start snapshot found)")
+		} else {
+			fmt.Print(buf.String())
+		}
+	} else {
+		if buf.Len() == 0 {
+			fmt.Println("IR DIFF: (no changes since session-start)")
+		} else {
+			fmt.Print(buf.String())
+		}
+	}
+	fmt.Println()
+
+	// Print DRIFT_AFFECTED faults for this task.
+	faults, err := task.LoadDriftFaults(root, taskID)
+	if err != nil || len(faults) == 0 {
+		fmt.Println("DRIFT FAULTS: none")
+	} else {
+		fmt.Printf("DRIFT FAULTS (%d):\n", len(faults))
+		for _, f := range faults {
+			fmt.Printf("  session=%s files=%s\n", f.SessionID, strings.Join(f.Files, ", "))
+		}
+	}
+	fmt.Println()
+	fmt.Println("Confirm scope is still valid. Edit tasks.json directly to update scope/verify fields.")
 }
 
 // projectRoot walks up from CWD looking for a .ai directory, fallback to CWD.

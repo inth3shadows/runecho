@@ -64,6 +64,9 @@ func Run(input []byte) error {
 	// --- Stage 5: IR verify summary ---
 	verifySummary := runIRVerify(cwd, sid)
 
+	// Spawn ai-document as detached background process — always runs every session end.
+	runAIDocument(cwd, verifySummary)
+
 	// --- Stage 6: Handoff generation (primary path) ---
 	// If handoff already exists, skip generation and just record progress.
 	if fileExists(handoffPath) {
@@ -75,9 +78,6 @@ func Run(input []byte) error {
 	if sid != "" {
 		cost, ok := tryAISession(cwd, sid, handoffPath)
 		if ok {
-			// Background: ai-document update (non-fatal, fire-and-forget)
-			go runAIDocument(cwd, verifySummary)
-
 			_ = appendProgress(cwd, sid, handoffPath, checkpointPath, scopeDrift, cost, verifyPassed)
 
 			// Validate handoff (warn only)
@@ -353,7 +353,8 @@ func extractCost(s string) float64 {
 	return f
 }
 
-// runAIDocument runs ai-document in the background (fire-and-forget).
+// runAIDocument spawns ai-document as a detached background process.
+// Using Start() without Wait() so the child survives parent exit on Windows.
 func runAIDocument(cwd, verifySummary string) {
 	if !commandExists("ai-document") {
 		return
@@ -363,7 +364,9 @@ func runAIDocument(cwd, verifySummary string) {
 		args = append(args, "--ir-diff="+verifySummary)
 	}
 	args = append(args, cwd)
-	_ = exec.Command("ai-document", args...).Run()
+	cmd := exec.Command("ai-document", args...)
+	_ = cmd.Start()
+	// Deliberately no Wait() — detached, fire-and-forget.
 }
 
 // runValidate runs `ai-session validate <path>` and logs any warnings to stderr.

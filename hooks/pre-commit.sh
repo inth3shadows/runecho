@@ -25,9 +25,12 @@ fi
 "$PYTHON" - <<'PYEOF'
 import json, subprocess, sys, os, fnmatch
 
-# Ensure ~/bin is in PATH so ai-task is found in subprocesses
+# Ensure ~/bin is in PATH so ai-task is found in subprocesses (Git Bash home)
 _home = os.environ.get("HOME", os.path.expanduser("~"))
-os.environ["PATH"] = _home + "/bin" + os.pathsep + os.environ.get("PATH", "")
+# On Windows via Git Bash, HOME may be /c/Users/... — resolve to real Windows path
+import pathlib
+_home_path = pathlib.Path(_home).expanduser()
+os.environ["PATH"] = str(_home_path / "bin") + os.pathsep + os.environ.get("PATH", "")
 
 tasks_file = ".ai/tasks.json"
 staged = subprocess.check_output(["git", "diff", "--cached", "--name-only"]).decode().splitlines()
@@ -56,6 +59,19 @@ def matches_scope(staged_files, scope):
                 return True
     return False
 
+import re
+
+def safe_tid(tid):
+    """Task IDs must be alphanumeric + hyphen only — reject anything else."""
+    return bool(re.match(r'^[a-zA-Z0-9\-]+$', str(tid)))
+
+def safe_verify(verify):
+    """Verify commands must not contain shell metacharacters that enable injection."""
+    # Allow: word chars, spaces, hyphens, forward slashes, dots, underscores, equals, quotes
+    # Deny: semicolons, pipes, backticks, $(...), &&, ||, redirects, newlines
+    bad = re.search(r'[;&|`$\n<>]|\$\(|&&|\|\|', verify)
+    return bad is None
+
 for task in tasks:
     if task.get("status") not in ("pending", "in-progress"):
         continue
@@ -65,13 +81,25 @@ for task in tasks:
     scope = task.get("scope", "").strip()
     tid = task["id"]
 
+    # Security: validate task ID and verify command before executing
+    if not safe_tid(tid):
+        print(f"[pre-commit] SKIP #{tid} — unsafe task ID rejected", file=sys.stderr)
+        continue
+    if not safe_verify(verify):
+        print(f"[pre-commit] SKIP #{tid} — verify command contains unsafe chars, refusing shell execution", file=sys.stderr)
+        continue
+
     if not matches_scope(staged, scope):
         continue
 
+    # verify is validated above (no shell metacharacters) — shell=True is safe here
+    # and required for PATH resolution on Windows (go, shellcheck, etc.)
+    # cwd=None inherits the process working directory (avoids POSIX path issues on Windows)
     result = subprocess.run(
-        verify, shell=True, capture_output=True, text=True, cwd=os.getcwd()
+        verify, shell=True, capture_output=True, text=True
     )
     if result.returncode == 0:
+        # tid is validated alphanumeric-only above — safe to interpolate here
         subprocess.run(f"ai-task update {tid} done", shell=True, check=False, capture_output=True)
         closed.append(tid)
         title = task.get("title", tid)[:60]
@@ -81,5 +109,6 @@ for task in tasks:
         print(f"[pre-commit] #{tid} verify failed — not closed ({title})", file=sys.stderr)
 
 if closed:
-    subprocess.run(["git", "add", ".ai/tasks.json"], check=False)
+    # git is always in PATH from the hook environment
+    subprocess.run("git add .ai/tasks.json", shell=True, check=False)
 PYEOF

@@ -23,8 +23,14 @@ log_decision() {
   local decision="$1" pattern="$2"
   local ts
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+  # Warn on stderr if jq is unavailable — audit entry would be silently lost otherwise
+  if ! command -v jq &>/dev/null; then
+    echo "[destructive-bash-guard] WARNING: jq not found — audit log entry dropped for decision=$decision" >&2
+    return
+  fi
   echo "{\"ts\":\"$ts\",\"session\":\"$SESSION_ID\",\"hook\":\"destructive-bash-guard\",\"decision\":\"$decision\",\"pattern\":$(echo "$pattern" | jq -Rs .),\"command\":$(echo "$COMMAND" | jq -Rs .)}" \
-    >> "$STATE_DIR/safety-audit.jsonl" 2>/dev/null || true
+    >> "$STATE_DIR/safety-audit.jsonl" 2>/dev/null || \
+    echo "[destructive-bash-guard] WARNING: failed to write audit log entry" >&2
 }
 
 deny() {
@@ -76,11 +82,11 @@ if echo "$CMD_NORM" | grep -qE ':\(\)\{.*:\|:'; then
   deny "Fork bomb pattern detected." "fork-bomb"
 fi
 
-# git push --force to main/master
-if echo "$CMD_NORM" | grep -qE 'git[[:space:]]+push[[:space:]]+.*--force[[:space:]]+.*\b(main|master)\b'; then
+# git push --force to main/master (flag before or after branch name)
+if echo "$CMD_NORM" | grep -qE 'git[[:space:]]+push[[:space:]]+.*(--force|-f\b).*\b(main|master)\b'; then
   deny "Force push to main/master is blocked." "git-force-push-main"
 fi
-if echo "$CMD_NORM" | grep -qE 'git[[:space:]]+push[[:space:]]+-f[[:space:]]+.*\b(main|master)\b'; then
+if echo "$CMD_NORM" | grep -qE 'git[[:space:]]+push[[:space:]]+.*\b(main|master)\b.*(--force|-f\b)'; then
   deny "Force push to main/master is blocked." "git-force-push-main"
 fi
 
@@ -124,7 +130,7 @@ if echo "$CMD_NORM" | grep -qE '\b(drop[[:space:]]+table|truncate[[:space:]]+(ta
 fi
 
 # Pipe-to-shell patterns (remote code execution)
-if echo "$CMD_NORM" | grep -qE '(curl|wget)[[:space:]].*[|][[:space:]]*(bash|sh|zsh|python|node)|eval[[:space:]]*"\$\(curl'; then
+if echo "$CMD_NORM" | grep -qE '(curl|wget)[[:space:]].*[|][[:space:]]*(bash|sh|zsh|python3?|node(\.exe)?|ruby|perl|php|pwsh|bun|deno)|eval[[:space:]]*"\$\(curl'; then
   ask "Pipe-to-shell or eval-curl pattern detected. Confirm this is from a trusted source." "pipe-to-shell"
 fi
 

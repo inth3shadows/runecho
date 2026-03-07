@@ -49,9 +49,21 @@ if echo "$FILE_NORM" | grep -qE '\.claude/settings|\.claude-work/settings'; then
   deny "Claude settings files (.claude/settings*.json) cannot be modified. They define hook enforcement rules."
 fi
 
-# Protect hook scripts themselves
+# Protect hook scripts themselves — match both ~/.claude/hooks/ paths and
+# repo-side hooks/ dir (which is symlinked to ~/.claude/hooks/ in this project).
+# Also resolve symlinks: if FILE_PATH is a symlink into ~/.claude/hooks/, catch it.
+REAL_PATH=$(realpath "$FILE_PATH" 2>/dev/null || echo "$FILE_PATH")
+REAL_NORM=$(echo "$REAL_PATH" | sed 's|\\|/|g' | tr '[:upper:]' '[:lower:]')
 if echo "$FILE_NORM" | grep -qE '(\.claude/hooks/|\.claude-work/hooks/).*\.(sh|json)$'; then
   deny "Claude hook files cannot be modified mid-session. Changes take effect only after session restart with user review."
+fi
+if echo "$REAL_NORM" | grep -qE '(\.claude/hooks/|\.claude-work/hooks/).*\.(sh|json)$'; then
+  deny "Claude hook files cannot be modified mid-session (symlink resolved to hook dir). Changes take effect only after session restart with user review."
+fi
+# Also protect the repo-side hooks/ directory directly (catches edits before symlink resolution)
+CWD_NORM_SG=$(echo "$PWD" | sed 's|\\|/|g' | tr '[:upper:]' '[:lower:]')
+if echo "$FILE_NORM" | grep -qE "^${CWD_NORM_SG}/hooks/.*\.(sh|json)$"; then
+  deny "Repo-side hooks/ directory is symlinked to ~/.claude/hooks/ — cannot be modified mid-session."
 fi
 
 # Protect credential and key files

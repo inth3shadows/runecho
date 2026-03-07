@@ -54,11 +54,16 @@ fi
 if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/ir.json" ]; then
   _LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || true)
   if [ -n "$_LAST_MSG" ]; then
-    _CLAIM_TMP=$(mktemp 2>/dev/null || echo "/tmp/runecho-claims-$$")
-    echo "$_LAST_MSG" > "$_CLAIM_TMP"
-    _CLAIM_OUT=$(_timeout 5 ai-ir validate-claims \
-      --text="$_CLAIM_TMP" --ir="$CWD/.ai/ir.json" 2>/dev/null || true)
-    rm -f "$_CLAIM_TMP"
+    # Always use mktemp — no PID-based fallback (prevents symlink attack on shared systems)
+    _CLAIM_TMP=$(mktemp 2>/dev/null) || { echo "[stop-checkpoint] mktemp failed, skipping claim validation" >&2; _CLAIM_TMP=""; }
+    if [ -z "$_CLAIM_TMP" ]; then
+      _CLAIM_OUT=""
+    else
+      echo "$_LAST_MSG" > "$_CLAIM_TMP"
+      _CLAIM_OUT=$(_timeout 5 ai-ir validate-claims \
+        --text="$_CLAIM_TMP" --ir="$CWD/.ai/ir.json" 2>/dev/null || true)
+      rm -f "$_CLAIM_TMP"
+    fi
     if [ -n "$_CLAIM_OUT" ]; then
       _MISMATCH_COUNT=$(echo "$_CLAIM_OUT" | jq '.mismatches | length' 2>/dev/null || echo 0)
       if [ "${_MISMATCH_COUNT:-0}" -gt 0 ]; then

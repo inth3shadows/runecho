@@ -24,6 +24,15 @@ emit_fault() {
   local ts
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
 
+  # Validate value is numeric — fall back to 0 rather than silently dropping the fault
+  local safe_value
+  if [[ "${value:-0}" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+    safe_value="${value}"
+  else
+    safe_value=0
+    echo "[fault-emitter] WARNING: non-numeric value '${value}' for signal ${signal} — coerced to 0" >&2
+  fi
+
   # Append to workspace audit log
   local faults_file="$workspace/.ai/faults.jsonl"
   mkdir -p "$workspace/.ai" 2>/dev/null
@@ -31,25 +40,23 @@ emit_fault() {
     --arg signal "$signal" \
     --arg session_id "$session_id" \
     --arg ts "$ts" \
-    --argjson value "${value:-0}" \
+    --argjson value "${safe_value}" \
     --arg context "$context" \
     '{signal: $signal, session_id: $session_id, ts: $ts, value: $value, context: $context}'
-  )" >> "$faults_file" 2>/dev/null || true
+  )" >> "$faults_file" 2>/dev/null || \
+    echo "[fault-emitter] WARNING: failed to write fault entry signal=${signal}" >&2
 
   # Queue for context injection on next governor turn
-  # IR_DRIFT and HALLUCINATION come from stop-checkpoint.sh (between turns);
-  # TURN_FATIGUE, COST_FATIGUE, OPUS_BLOCKED are emitted inline by the governor
-  # and don't need separate queuing (they're already in the output block).
-  # HOOK_FAILURE queued so it surfaces in the next turn's context.
   case "$signal" in
     IR_DRIFT|HALLUCINATION|VERIFY_FAIL|HOOK_FAILURE)
       local pending_file="$state_dir/${session_id}.pending-faults"
       printf '%s\n' "$(jq -cn \
         --arg signal "$signal" \
-        --argjson value "${value:-0}" \
+        --argjson value "${safe_value}" \
         --arg context "$context" \
         '{signal: $signal, value: $value, context: $context}'
-      )" >> "$pending_file" 2>/dev/null || true
+      )" >> "$pending_file" 2>/dev/null || \
+        echo "[fault-emitter] WARNING: failed to queue pending fault signal=${signal}" >&2
       ;;
   esac
 }

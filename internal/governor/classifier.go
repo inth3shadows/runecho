@@ -188,7 +188,7 @@ func logClassification(prompt string, route Route, latencyMS int64, stateDir str
 
 	entry := schema.ClassifierEntry{
 		Ts:        time.Now().UTC().Format(time.RFC3339),
-		Prompt:    prompt,
+		Prompt:    PromptFingerprint(prompt), // store fingerprint only — not raw prompt text
 		Route:     routeStr,
 		Source:    source,
 		LatencyMS: latencyMS,
@@ -204,7 +204,7 @@ func logClassification(prompt string, route Route, latencyMS int64, stateDir str
 	}
 
 	logFile := filepath.Join(stateDir, "classifier-log.jsonl")
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // owner-only: contains prompt fingerprints
 	if err != nil {
 		return
 	}

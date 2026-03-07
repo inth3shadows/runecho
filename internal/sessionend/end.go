@@ -114,7 +114,7 @@ func detectScopeDrift(cwd, sid string) (*task.Task, schema.ScopeDrift) {
 	var activeTask *task.Task
 	for i := range db.Tasks {
 		t := &db.Tasks[i]
-		if t.Status == "done" || t.BlockedBy != "" {
+		if t.Status == "done" || len(t.BlockedBy) > 0 {
 			continue
 		}
 		if t.Scope != "" {

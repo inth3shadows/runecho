@@ -12,14 +12,52 @@ import (
 const TasksFile = ".ai/tasks.json"
 
 type Task struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Title     string `json:"title"`
-	Added     string `json:"added"`
-	Updated   string `json:"updated"`
-	BlockedBy string `json:"blockedBy,omitempty"`
-	Scope     string `json:"scope,omitempty"`  // glob pattern(s) for allowed file paths
-	Verify    string `json:"verify,omitempty"` // shell command to validate completion
+	ID        string   `json:"id"`
+	Status    string   `json:"status"`
+	Title     string   `json:"title"`
+	Added     string   `json:"added"`
+	Updated   string   `json:"updated"`
+	BlockedBy []string `json:"blockedBy,omitempty"`
+	Scope     string   `json:"scope,omitempty"`  // glob pattern(s) for allowed file paths
+	Verify    string   `json:"verify,omitempty"` // shell command to validate completion
+}
+
+// UnmarshalJSON handles backward compat where blockedBy may be a string or []string.
+func (t *Task) UnmarshalJSON(data []byte) error {
+	type TaskAlias Task
+	var aux struct {
+		TaskAlias
+		BlockedBy json.RawMessage `json:"blockedBy"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*t = Task(aux.TaskAlias)
+	if len(aux.BlockedBy) > 0 && string(aux.BlockedBy) != "null" {
+		var sl []string
+		if err := json.Unmarshal(aux.BlockedBy, &sl); err == nil {
+			t.BlockedBy = sl
+		} else {
+			var s string
+			if err := json.Unmarshal(aux.BlockedBy, &s); err != nil {
+				return fmt.Errorf("blockedBy: expected string or []string")
+			}
+			if s != "" {
+				t.BlockedBy = []string{s}
+			}
+		}
+	}
+	return nil
+}
+
+// IsBlocked reports whether all of t's dependencies are satisfied (done).
+func (t Task) IsBlocked(done map[string]bool) bool {
+	for _, dep := range t.BlockedBy {
+		if !done[dep] {
+			return true
+		}
+	}
+	return false
 }
 
 type TaskDB struct {

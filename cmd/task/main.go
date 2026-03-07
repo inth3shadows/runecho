@@ -14,6 +14,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -118,7 +120,7 @@ func runAdd(args []string) {
 		Updated: now,
 	}
 	if *blockedBy != "" {
-		t.BlockedBy = *blockedBy
+		t.BlockedBy = strings.Split(*blockedBy, ",")
 	}
 	if *scope != "" {
 		t.Scope = *scope
@@ -186,8 +188,8 @@ func runList(args []string) {
 			continue
 		}
 		blocked := ""
-		if t.BlockedBy != "" {
-			blocked = fmt.Sprintf(" (blocked by #%s)", t.BlockedBy)
+		if len(t.BlockedBy) > 0 {
+			blocked = fmt.Sprintf(" (blocked by #%s)", strings.Join(t.BlockedBy, ","))
 		}
 		fmt.Printf("%-5s  %-12s  %s%s\n", t.ID, t.Status, t.Title, blocked)
 	}
@@ -209,7 +211,7 @@ func runNext() {
 		if t.Status == "done" {
 			continue
 		}
-		if t.BlockedBy != "" && !done[t.BlockedBy] {
+		if t.IsBlocked(done) {
 			continue
 		}
 		fmt.Printf("#%s: %s [%s]\n", t.ID, t.Title, t.Status)
@@ -256,7 +258,7 @@ func runContract(args []string) {
 			if candidate.Status == "done" {
 				continue
 			}
-			if candidate.BlockedBy != "" && !done[candidate.BlockedBy] {
+			if candidate.IsBlocked(done) {
 				continue
 			}
 			t = candidate
@@ -363,6 +365,10 @@ func runVerify(args []string) {
 	combined := stdoutBuf.String() + stderrBuf.String()
 	output := truncate(combined)
 
+	// Compute hash of full combined output (before truncation).
+	h := sha256.Sum256([]byte(combined))
+	outputHash := hex.EncodeToString(h[:])
+
 	sid := *sessionID
 	if sid == "" {
 		sid = os.Getenv("CLAUDE_SESSION_ID")
@@ -371,16 +377,31 @@ func runVerify(args []string) {
 		}
 	}
 
+	// Write full output to sidecar file.
+	var outputPath string
+	if combined != "" {
+		sidecarDir := filepath.Join(root, ".ai", "verify-output")
+		if err := os.MkdirAll(sidecarDir, 0755); err == nil {
+			sidecarName := fmt.Sprintf("%s-%s.txt", taskID, sid)
+			sidecarPath := filepath.Join(sidecarDir, sidecarName)
+			if err := os.WriteFile(sidecarPath, []byte(combined), 0644); err == nil {
+				outputPath = filepath.Join(".ai", "verify-output", sidecarName)
+			}
+		}
+	}
+
 	entry := schema.VerifyEntry{
-		TaskID:    taskID,
-		SessionID: sid,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Cmd:       t.Verify,
-		Passed:    passed,
-		ExitCode:  exitCode,
-		Output:    output,
-		Stdout:    stdoutStr,
-		Stderr:    stderrStr,
+		TaskID:     taskID,
+		SessionID:  sid,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Cmd:        t.Verify,
+		Passed:     passed,
+		ExitCode:   exitCode,
+		Output:     output,
+		Stdout:     stdoutStr,
+		Stderr:     stderrStr,
+		OutputHash: outputHash,
+		OutputPath: outputPath,
 	}
 	if err := session.AppendVerify(root, entry); err != nil {
 		fmt.Fprintf(os.Stderr, "ai-task verify: failed to write results: %v\n", err)

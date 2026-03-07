@@ -1,7 +1,6 @@
 package context
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,14 +73,8 @@ func (p *ContractProvider) fromActiveTask(workspace string) (*contract.Contract,
 // fromActiveTaskWithID reads tasks.json and derives a contract from the active task,
 // also returning the task ID for drift advisory lookup.
 func (p *ContractProvider) fromActiveTaskWithID(workspace string) (*contract.Contract, string, error) {
-	tasksFile := filepath.Join(workspace, ".ai", "tasks.json")
-	data, err := os.ReadFile(tasksFile)
+	db, err := task.Load(workspace)
 	if err != nil {
-		return nil, "", nil
-	}
-
-	var db taskDB
-	if err := json.Unmarshal(data, &db); err != nil {
 		return nil, "", nil
 	}
 
@@ -97,7 +90,7 @@ func (p *ContractProvider) fromActiveTaskWithID(workspace string) (*contract.Con
 		if t.Status == "done" {
 			continue
 		}
-		if t.BlockedBy != "" && !done[t.BlockedBy] {
+		if t.IsBlocked(done) {
 			continue
 		}
 		if t.Scope == "" && t.Verify == "" {

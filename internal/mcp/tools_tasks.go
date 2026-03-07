@@ -91,7 +91,7 @@ func handleTaskNext(workspace string, params json.RawMessage) (string, error) {
 
 	sorted := task.SortByID(db.Tasks)
 	for _, t := range sorted {
-		if t.Status == "todo" && t.BlockedBy == "" {
+		if t.Status == "todo" && len(t.BlockedBy) == 0 {
 			data, err := json.Marshal(map[string]any{"found": true, "task": t})
 			if err != nil {
 				return "", err

@@ -1,6 +1,6 @@
 # RunEcho
 
-**F1–F7 complete · 9 binaries · next: F8 — local result cache**
+**F1–F7 complete · Enhancements 1–6 complete · 9 binaries · next: F8 — local result cache**
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -570,12 +570,12 @@ Candidates identified through codebase review and architecture analysis. Priorit
 
 | Priority | Name | Effort | Value driver |
 |---|---|---|---|
-| 1 | Hook Reliability Gate | S | Fixes active pain — silent hook failures |
-| 2 | Hook Latency Telemetry | S | Makes hook performance visible; pairs with #1 |
-| 3 | Classifier Route Caching | S | Saves 0.5–1s per turn; LRU cache for haiku routes |
-| 4 | Claude Code Skills Integration | S | Zero-code DX win — slash commands for every binary |
-| 5 | Context Window Pressure Detection | S | Prevents silent context failure mid-task |
-| 6 | Fault-Driven Test Generation | S | Closes verify loop — injects failure context for next session |
+| 1 ✅ | Hook Reliability Gate | S | Fixes active pain — silent hook failures |
+| 2 ✅ | Hook Latency Telemetry | S | Makes hook performance visible; pairs with #1 |
+| 3 ✅ | Classifier Route Caching | S | Saves 0.5–1s per turn; LRU cache for haiku routes |
+| 4 ✅ | Claude Code Skills Integration | S | Zero-code DX win — slash commands for every binary |
+| 5 ✅ | Context Window Pressure Detection | S | Prevents silent context failure mid-task |
+| 6 ✅ | Fault-Driven Test Generation | S | Closes verify loop — injects failure context for next session |
 | 7 | MCP Tool Server | M | Highest leverage — structured LLM-native interface |
 | 8 | Cost Attribution per Hook/Task | M | Unblocks F8 targeting; makes costs actionable |
 | 9 | Classifier Feedback Loop | M | Self-improving routing accuracy |

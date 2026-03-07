@@ -554,7 +554,7 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 **Fast-Loop CLI (`just`)** — a `justfile` in the repo root with a `run` recipe (`ai-context compile && ai-pipeline exec && ai-task verify`) gives a single `just run` entry point. Not a Go binary. `winget install Casey.Just`. Add after F3 when the context/pipeline commands are stable.
 
-**MCP Tool Server** — expose RunEcho capabilities as MCP tools (task/list, ir/diff, session/review, context/compile). F6 schema stabilization is complete — the original blocker is resolved. New `internal/mcp/` + `cmd/mcp-server/`. No changes to existing binaries.
+**MCP Tool Server** ✅ — `internal/mcp/` + `cmd/mcp-server/`. 7 tools: `runecho_task_list`, `runecho_task_next`, `runecho_task_update`, `runecho_session_status`, `runecho_fault_list`, `runecho_provenance_export`, `runecho_context_compile`. Registered in `~/.claude/settings.json` via `install.sh`.
 
 **Orchestration Prototype** *(Stage C entry)* — `ai-orchestrate <task-id>` decomposes a task into subtasks with model assignments and file scopes. Requires MCP or equivalent stable tool interface. Deferred.
 
@@ -576,7 +576,7 @@ Candidates identified through codebase review and architecture analysis. Priorit
 | 4 ✅ | Claude Code Skills Integration | S | Zero-code DX win — slash commands for every binary |
 | 5 ✅ | Context Window Pressure Detection | S | Prevents silent context failure mid-task |
 | 6 ✅ | Fault-Driven Test Generation | S | Closes verify loop — injects failure context for next session |
-| 7 | MCP Tool Server | M | Highest leverage — structured LLM-native interface |
+| 7 ✅ | MCP Tool Server | M | Highest leverage — structured LLM-native interface |
 | 8 | Cost Attribution per Hook/Task | M | Unblocks F8 targeting; makes costs actionable |
 | 9 | Classifier Feedback Loop | M | Self-improving routing accuracy |
 | 10 | Multi-Session Trend Analysis | M | Early warning on efficiency degradation |
@@ -641,11 +641,13 @@ Touches: `internal/sessionend/stages.go` (capture verify stderr), `internal/cont
 
 ---
 
-### 7. MCP Tool Server — M
+### 7. MCP Tool Server — M ✅
 
-Expose RunEcho capabilities as MCP tools so Claude Code can call `task/list`, `ir/diff`, `context/compile`, `session/review` natively — structured JSON I/O, no shell parsing. F6 schema stabilization is complete. New `internal/mcp/` + `cmd/mcp-server/`. No changes to existing binaries.
+MCP stdio server (`ai-mcp-server`) exposes 7 RunEcho tools to Claude Code natively — structured JSON I/O, no shell parsing, no subagent spawning. JSON-RPC 2.0 over stdin/stdout; ~250 lines of stdlib, no external deps.
 
-Touches: new `internal/mcp/`, `cmd/mcp-server/main.go`; read-only query APIs on `internal/ir/`, `internal/task/`, `internal/context/`, `internal/session/`.
+**Tools:** `runecho_task_list`, `runecho_task_next`, `runecho_task_update`, `runecho_session_status`, `runecho_fault_list`, `runecho_provenance_export`, `runecho_context_compile`.
+
+**Files added:** `internal/mcp/` (protocol, registry, server, 4 tool files, tests), `cmd/mcp-server/main.go`. `install.sh` builds the binary and registers `mcpServers.runecho` in `~/.claude/settings.json`.
 
 ---
 

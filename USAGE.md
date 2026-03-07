@@ -23,7 +23,7 @@ See [README.md](README.md) for classifier setup and profile switching instructio
 bash install.sh
 ```
 
-Builds all 9 binaries to `~/bin/`, symlinks hooks into `~/.claude/hooks/`, and merges hook configuration into `~/.claude/settings.json`. Safe to re-run after updates.
+Builds all 10 binaries to `~/bin/`, symlinks hooks into `~/.claude/hooks/`, and merges hook configuration + `mcpServers.runecho` into `~/.claude/settings.json`. Safe to re-run after updates.
 
 ---
 
@@ -119,6 +119,32 @@ Exports full execution records for any task.
 ai-provenance export <task-id> [--json]              # task timeline: turns, cost, IR hashes, faults, verify
 ai-provenance list [--json]                          # all tasks with recorded sessions and total cost
 ```
+
+---
+
+### ai-mcp-server
+
+MCP stdio server — exposes all RunEcho capabilities as Claude-native tools. Registered automatically in `~/.claude/settings.json` by `install.sh`; Claude Code starts it on demand.
+
+```bash
+# Manual smoke test (two JSON lines out; second contains result.tools with 7 entries)
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
+  | ai-mcp-server --workspace /path/to/project
+```
+
+Available tools:
+
+| Tool | Description |
+|---|---|
+| `runecho_task_list` | List tasks, optionally filtered by status |
+| `runecho_task_next` | Next unblocked todo task (lowest ID) |
+| `runecho_task_update` | Mark a task done / in-progress / blocked |
+| `runecho_session_status` | Fault count + most recent progress entry |
+| `runecho_fault_list` | Faults filtered by session ID or signal |
+| `runecho_provenance_export` | Full task timeline (sessions, cost, faults, verify) |
+| `runecho_context_compile` | Fresh IR+task context block (same as `ai-context`) |
+
+All tools accept an optional `workspace` param to override the server's default project root.
 
 ---
 

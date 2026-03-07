@@ -15,7 +15,7 @@ BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
-for cmd in ir session document task context governor pipeline session-end provenance; do
+for cmd in ir session document task context governor pipeline session-end provenance mcp-server; do
   echo "Building ai-$cmd..."
   go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
   echo "  Built: $BIN_DIR/ai-$cmd"
@@ -127,6 +127,21 @@ for event, entries in runecho_hooks.items():
     existing_hooks[event] = existing
 
 settings["hooks"] = existing_hooks
+
+# Register MCP server (idempotent)
+mcp_entry = {
+    "type": "stdio",
+    "command": os.path.expanduser("~/bin/ai-mcp-server"),
+    "args": ["--workspace", os.getcwd()],
+    "env": {}
+}
+existing_mcp = settings.get("mcpServers", {})
+if "runecho" not in existing_mcp:
+    existing_mcp["runecho"] = mcp_entry
+    settings["mcpServers"] = existing_mcp
+    print("  Added: mcpServers.runecho")
+else:
+    print("  Already present: mcpServers.runecho")
 
 with open(settings_file, "w") as f:
     json.dump(settings, f, indent=2)

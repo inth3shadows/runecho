@@ -161,6 +161,24 @@ if skipped:
 print(f"  Settings written: {settings_file}")
 PYEOF
 
+# Install git pre-commit hook (wrapper → versioned script, avoids symlink issues on Windows)
+echo ""
+echo "Installing git pre-commit hook..."
+GIT_DIR=$(git -C "$SCRIPT_DIR" rev-parse --git-dir 2>/dev/null || true)
+if [ -n "$GIT_DIR" ]; then
+  GIT_HOOK_DIR="$GIT_DIR/hooks"
+  mkdir -p "$GIT_HOOK_DIR"
+  # Write a wrapper that delegates to the versioned hook script
+  cat > "$GIT_HOOK_DIR/pre-commit" <<HOOKEOF
+#!/usr/bin/env bash
+exec bash "$SCRIPT_DIR/hooks/pre-commit.sh" "\$@"
+HOOKEOF
+  chmod +x "$GIT_HOOK_DIR/pre-commit"
+  echo "  pre-commit → $GIT_HOOK_DIR/pre-commit (wrapper → hooks/pre-commit.sh)"
+else
+  echo "  WARNING: not a git repo — skipping git pre-commit hook"
+fi
+
 # Validate hooks with ShellCheck if available
 if command -v shellcheck &>/dev/null; then
   echo ""

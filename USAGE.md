@@ -1,127 +1,203 @@
-# Usage Guide
+# RunEcho Usage Guide
+
+RunEcho is fully automated in normal operation. After `install.sh`, open Claude Code and work — the hook chain handles model routing, IR injection, checkpointing, and session synthesis silently. No CLI commands are required day-to-day.
+
+This guide covers manual CLI usage, verification, and advanced workflows.
+
+---
 
 ## Prerequisites
 
-- **Go** 1.24+
-- **Claude Code Pro** (required for ai-ir and ai-document)
-- **Environment variables:**
-  - `RUNECHO_CLASSIFIER_KEY` (required)
-  - `CLAUDE_API_KEY` (required for Claude API calls)
-  - `BLOCK_OPUS_ON_COST` (optional, set to `true` to enforce cost caps)
+- Go 1.24+ (build-time only)
+- Python 3 (install only — merges hook config into `~/.claude/settings.json`)
+- Claude Code Pro or higher (hooks API requires paid plan)
+- `RUNECHO_CLASSIFIER_KEY` — Anthropic API key for model routing and doc generation
 
-## Installation
+See [README.md](README.md) for classifier setup and profile switching instructions.
 
-```sh
-git clone <repo>
-cd runecho
-./install.sh
+---
+
+## Install
+
+```bash
+bash install.sh
 ```
 
-Build binaries:
-```sh
-go build -o ai-ir ./cmd/ir
-go build -o document ./cmd/document
-go build -o ai-document ./cmd/document
-```
+Builds all 9 binaries to `~/bin/`, symlinks hooks into `~/.claude/hooks/`, and merges hook configuration into `~/.claude/settings.json`. Safe to re-run after updates.
 
-Install hooks:
-```sh
-./install.sh
-```
+---
 
-## Commands
+## Binaries
 
 ### ai-ir
-Ingest and route IR (intermediate representation) logs through Claude models.
 
-```
-ai-ir [flags] <root-path>
-```
+Indexes a codebase into `.ai/ir.json` and manages SQLite snapshot history.
 
-Flags:
-- `--churn` — emit IR churn metrics and exit
-- `--classifier-key` — override `RUNECHO_CLASSIFIER_KEY`
-
-Example:
-```sh
-ai-ir ./logs
-ai-ir --churn ./session.jsonl
-```
-
-### document
-Process and compile contextual documentation.
-
-```
-document [flags] <input-path>
-```
-
-Flags:
-- `--output` — write to file (default: stdout)
-
-Example:
-```sh
-document ./docs --output compiled.md
+```bash
+ai-ir [root]                                         # index/update .ai/ir.json
+ai-ir snapshot [--label=name] [root]                 # save snapshot to SQLite
+ai-ir diff [--since=label | id-a id-b] [root]        # structural delta between snapshots
+ai-ir verify [--session=id] [root]                   # format diff summary for handoff
+ai-ir log [--n=10] [root]                            # list snapshots with timestamps
+ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]  # symbol/file churn rate
 ```
 
 ### ai-session
-Ground-truth session handoff from Claude Code JSONL.
 
-```
-ai-session <session-file>
+Parses a Claude Code JSONL session log and writes a ground-truth `.ai/handoff.md`.
+
+```bash
+ai-session --session=<session-id> [root]
+ai-session validate [root]                           # validate handoff front-matter schema
 ```
 
-Example:
-```sh
-ai-session session.jsonl
+### ai-document
+
+Auto-generates and updates project documentation using haiku. Change-gated by IR diff.
+
+```bash
+ai-document [root]                                   # generate/update docs (skips if no changes)
+ai-document --ir-diff="<diff>" [root]                # use IR diff string
+ai-document --docs=README.md,TECHNICAL.md [root]     # override configured doc list
+ai-document --dry-run [root]                         # preview without writing
+ai-document --force [root]                           # bypass change-gate, regenerate all
+```
+
+### ai-task
+
+Persistent task ledger with dependency graph. Claude drives this during sessions; CLI is for inspection and override.
+
+```bash
+ai-task add "<title>" [--blocked-by=<id>] [--scope=<glob>] [--verify=<cmd>]
+ai-task update <id> <status>                         # status: pending | in-progress | done
+ai-task list [--status=<s>]                          # tabular; no filter = all non-done
+ai-task next                                         # first unblocked non-done task
+ai-task contract [--task-id=<id>] [root]             # write .ai/CONTRACT.yaml from active task
+ai-task drift-check [--session=<id>] [root]          # intersect IR diff with task scopes
+ai-task replan <id> [root]                           # print scope + IR diff + faults for review
+ai-task sync [--quiet]                               # create task from CONTRACT.yaml if missing
 ```
 
 ### ai-context
-Compile context from source tree and constraints.
 
-```
-ai-context [flags] <project-root>
+Compiles the turn-1 context block (contract + IR + diff + handoff + tasks + review) within a token budget.
+
+```bash
+ai-context [root]
 ```
 
-Example:
-```sh
-ai-context ./myproject
+### ai-governor
+
+Session governor and model router. Normally invoked by `session-governor.sh`; can be called directly for testing.
+
+```bash
+ai-governor [root]
 ```
+
+### ai-pipeline
+
+Declarative pipeline definitions.
+
+```bash
+ai-pipeline render [--name=<pipeline>] [root]        # print injection text for a pipeline
+ai-pipeline envelope [--session=<id>] [root]         # write execution record to executions.jsonl
+```
+
+### ai-session-end
+
+Session-end orchestration pipeline (7 stages). Normally invoked by `session-end.sh`; can be called directly.
+
+```bash
+ai-session-end [root]
+```
+
+### ai-provenance
+
+Exports full execution records for any task.
+
+```bash
+ai-provenance export <task-id> [--json]              # task timeline: turns, cost, IR hashes, faults, verify
+ai-provenance list [--json]                          # all tasks with recorded sessions and total cost
+```
+
+---
 
 ## Common Workflows
 
-1. **Initialize a session:**
-   ```sh
-   ai-session ./session.jsonl
-   ai-context ./project-root
-   ```
+### Verify install
 
-2. **Emit and route IR logs:**
-   ```sh
-   ai-ir ./logs
-   ai-ir --churn ./logs
-   ```
+```bash
+# Hooks installed
+ls -la ~/.claude/hooks/
 
-3. **Generate documentation:**
-   ```sh
-   document ./docs --output dist/guide.md
-   ```
+# Binaries built
+ls -la ~/bin/ai-ir ~/bin/ai-session ~/bin/ai-document ~/bin/ai-task
 
-4. **Monitor session cost (with governor):**
-   ```sh
-   export BLOCK_OPUS_ON_COST=true
-   ai-ir ./session.jsonl
-   ```
+# Governor classifier fallback (no key = regex fires)
+RUNECHO_CLASSIFIER_KEY="" \
+  echo '{"session_id":"test","prompt":"architect the system"}' | bash hooks/session-governor.sh
+# Expected output includes: "Deep reasoning task" (opus via regex)
+```
 
-5. **Review and compact snapshot:**
-   ```sh
-   ./hooks/pre-compact-snapshot.sh
-   ./hooks/session-end.sh
-   ```
+### Inspect current IR
+
+```bash
+ai-ir .
+ai-ir log .
+ai-ir diff --since=session-end .
+```
+
+### Review session provenance
+
+```bash
+ai-provenance list
+ai-provenance export <task-id>
+```
+
+### Manually trigger session end
+
+```bash
+echo '{"session_id":"<id>","cwd":"'$PWD'","reason":"other"}' | bash hooks/session-end.sh
+cat .ai/handoff.md
+```
+
+### Force-regenerate documentation
+
+```bash
+ai-document --force .
+```
+
+### Inspect task state
+
+```bash
+ai-task list
+ai-task next
+```
+
+---
 
 ## Environment Variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
-| `RUNECHO_CLASSIFIER_KEY` | Yes | Classification API key |
-| `CLAUDE_API_KEY` | Yes | Claude API authentication |
-| `BLOCK_OPUS_ON_COST` | No | Set to `true` to cap Opus routing by cost |
+|---|---|---|
+| `RUNECHO_CLASSIFIER_KEY` | Yes | Anthropic API key for model router classifier and `ai-document` |
+
+Set once in your PowerShell profile — see [README.md § Classifier Setup](README.md#classifier-setup).
+
+**Fallback:** if unset, the classifier returns empty and the regex router fires. No routing regression.
+
+---
+
+## Data Files (`.ai/`)
+
+| File | Written by | Purpose |
+|---|---|---|
+| `ir.json` | `ai-ir` | Current codebase IR snapshot |
+| `handoff.md` | `ai-session`, session-end fallback | Cross-session continuity |
+| `checkpoint.json` | `stop-checkpoint.sh` | Turn-level recovery state |
+| `tasks.json` | `ai-task` | Persistent task ledger |
+| `CONTRACT.yaml` | `ai-task contract`, Claude | Active session scope boundary |
+| `faults.jsonl` | `fault-emitter.sh` | Typed fault signals (IR_DRIFT, SCOPE_DRIFT, etc.) |
+| `progress.jsonl` | `ai-session` | Per-session progress records |
+| `results.jsonl` | `ai-session-end` | Task verify outcomes |
+| `executions.jsonl` | `ai-pipeline envelope` | Pipeline execution records |

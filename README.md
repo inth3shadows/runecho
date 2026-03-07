@@ -1,6 +1,6 @@
 # RunEcho
 
-**Status:** Stages A–C Complete ✅ · M1–M5 ✅ · M8 (verify loop) ✅ · F1 ✅ · F2 ✅ · F3 ✅ · F4 ✅ · F5 ✅ · F6 ✅ · F7 ✅ · next: F8 — local result cache
+**F1–F7 complete · 9 binaries · next: F8 — local result cache**
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -58,6 +58,7 @@ RunEcho is a session governance, model routing, and structural grounding layer f
 - **Scope Guard**: PreToolUse[Edit|Write] hook. Always blocks writes to settings files, hook files, `.env`, and `*.key`. Optional scope-lock via `.ai/scope-lock.json` — when present, restricts all writes to declared paths only.
 - **Constraint Reinjector**: SessionStart hook (matcher: `compact`). Re-injects active constraints after context compaction so BPB rules and routing directives survive a `/compact`.
 - **Pre-Compact Snapshot**: PreCompact hook. Captures a session state snapshot immediately before compaction so the reinjector has accurate, current data to work from.
+- **Provenance Export** (`ai-provenance`): Assembles a full execution record for any task by joining `.ai/progress.jsonl`, `.ai/faults.jsonl`, `.ai/results.jsonl`, and `.ai/tasks.json`. `export <task-id>` produces a session timeline with turns, cost, IR hashes, drift flags, fault signals, and verify outcomes. `list` shows all tasks with recorded sessions and total cost.
 
 Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = brain.**
 
@@ -85,7 +86,7 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds six binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
+Builds nine binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
@@ -125,6 +126,10 @@ Full `~/.claude/settings.json` hook configuration:
       {
         "matcher": "",
         "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/ir-injector.sh", "timeout": 5 }]
+      },
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/contract-sync.sh", "timeout": 3 }]
       }
     ],
     "PreToolUse": [
@@ -420,16 +425,18 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── governor/main.go        # ai-governor — session governor + model router
 │   ├── ir/main.go              # ai-ir — indexes codebase, manages snapshot history
 │   ├── pipeline/main.go        # ai-pipeline — declarative pipeline render + envelope subcommands
+│   ├── provenance/main.go      # ai-provenance — task provenance export (sessions, faults, verify, cost)
 │   ├── session/main.go         # ai-session — parses JSONL log → ground-truth handoff
 │   ├── session-end/main.go     # ai-session-end — session-end orchestration pipeline
 │   └── task/main.go            # ai-task — persistent task ledger with dependency graph
 ├── hooks/
 │   ├── session-governor.sh        # UserPromptSubmit — turn count + model routing + fault emission
 │   ├── model-enforcer.sh          # PreToolUse[Task] — denies wrong-model subagents
-│   ├── ir-injector.sh             # UserPromptSubmit — index + snapshot + ai-context injection (20 lines)
+│   ├── ir-injector.sh             # UserPromptSubmit — index + snapshot + ai-context injection
+│   ├── contract-sync.sh           # UserPromptSubmit — syncs CONTRACT.yaml task to tasks.json
 │   ├── fault-emitter.sh           # Sourced by hooks — emit_fault() writes to .ai/faults.jsonl
 │   ├── stop-checkpoint.sh         # Stop — writes .ai/checkpoint.json; emits IR_DRIFT + HALLUCINATION faults
-│   ├── session-end.sh             # SessionEnd — JSONL handoff → checkpoint fallback → doc update
+│   ├── session-end.sh             # SessionEnd — 4-line exec wrapper for ai-session-end
 │   ├── destructive-bash-guard.sh  # PreToolUse[Bash] — hard deny + approval gate for destructive ops
 │   ├── scope-guard.sh             # PreToolUse[Edit|Write] — protects settings/keys; optional scope-lock
 │   ├── constraint-reinjector.sh   # SessionStart[compact] — re-injects constraints after /compact
@@ -443,9 +450,12 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 │   ├── ir/                     # IR types, generator, hasher, storage
 │   ├── parser/                 # language parsers (JS/TS/Go/Python); extensible via Parser interface
 │   ├── pipeline/               # Pipeline/Stage/Envelope types; Load, RenderText, AppendEnvelope, FaultsForSession
+│   ├── provenance/             # task provenance assembler: Export, List, FormatText
+│   ├── schema/                 # canonical Go types for all .ai/ JSONL files (FaultEntry, ProgressEntry, VerifyEntry, Envelope, ClassifierEntry)
 │   ├── session/                # session fact extraction, JSONL parser, summarizer, writer; progress + fault writers; drift check
 │   ├── sessionend/             # session-end orchestration (all 7 stages); replaces session-end.sh logic
-│   └── snapshot/               # SQLite snapshot store, structural diff engine
+│   ├── snapshot/               # SQLite snapshot store, structural diff engine
+│   └── task/                   # Task, TaskDB, Load, Save, MaxID, SortByID — shared task types
 ├── .ai/agents/
 │   ├── explorer.yaml           # haiku persona — file reads, search, summarization
 │   ├── implementer.yaml        # sonnet persona — code writing, bug fixes, refactoring
@@ -459,108 +469,6 @@ rm -f .ai/handoff.md .ai/checkpoint.json "$STATE_DIR/test-ck"
 
 ---
 
-## Completed Stages
-
-**A — Session Discipline ✅**
-- Session governor (turn limits + cost warnings)
-- Regex model router + model enforcer PreToolUse gate
-- Destructive bash guard, scope guard
-
-**B — Structural Intelligence ✅**
-- `ai-ir` CLI: generates `.ai/ir.json` for JS/TS/Go projects (extensible via `Parser` interface)
-- IR injector: auto-index + inject codebase summary on session turn 1
-- IR snapshots in SQLite, structural diff between sessions, symbol/file churn analysis
-
-**C — Intent-Aware Routing + Failure Recovery ✅**
-- LLM classifier (haiku) replaces regex as primary router; regex fallback on key absence
-- Stop checkpoint: turn-level state persistence after every response
-- `ai-session`: ground-truth handoff from Claude Code JSONL log (files, commands, tokens, cost, duration)
-- `ai-ir snapshot/diff/verify/churn`: SQLite snapshot store + structural diff
-- `ai-document`: change-gated doc generation via haiku; SessionEnd pipeline
-- `ai-task`: persistent task ledger with dependency graph; GUPP injection on turn 1
-- Persona registry: model assignments in YAML, enforced at PreToolUse time
-
-**M3 — Session Contracts ✅**
-- `ai-task` `--scope=<glob>` and `--verify=<cmd>` fields per task
-- `SESSION CONTRACT` block injected at turn 1 via `ContractProvider` (scope, title, verify command)
-- Scope-drift detection in `session-end.sh`: git diff vs. task scope → `SCOPE_DRIFT` fault in `faults.jsonl`
-- `DefaultProviders` order: contract, ir, gitdiff, handoff, tasks, review
-
-**M4 — Session Review ✅**
-- `ai-session review [--trace] [--n=5] [--force]` subcommand: reads `progress.jsonl` + `faults.jsonl` + `tasks.json`
-- Reports stuck tasks (3+ sessions, not done), scope drift frequency, cost per session
-- `ReviewProvider` injects `SESSION REVIEW` block at turn 1 only when actionable — silent otherwise
-- `--trace` flag groups entries by task across sessions for full lifecycle view
-
-**V2 Spike — Contract Package ✅**
-- `internal/contract/` package: `Contract` type (list-valued `scope`, `assumptions`, `non_goals`, `success`), YAML parser, validator, `FromTask` adapter
-- `ai-task contract [--task-id=<id>] [root]` subcommand: writes `.ai/CONTRACT.yaml` atomically from the active task
-- `ContractProvider` reads `CONTRACT.yaml` when present; falls back to task-derived; logs validation warnings to stderr
-- Richer SESSION CONTRACT block: multi-line scope, assumptions, non-goals, success criterion
-- Added `gopkg.in/yaml.v3` dependency (validates fit before M5 pipeline definitions)
-
-**M4.5-A — POSIX Audit + install.sh Symlink Fix ✅**
-- All hook shebangs updated to `#!/usr/bin/env bash`
-- `install.sh`: portable symlink creation (`rm -f` + `ln -s`); `#!/usr/bin/env bash`
-- `scope-guard.sh`: removed unused variable (SC2034); fixed unquoted pattern expansion (SC2295)
-- All hooks pass `shellcheck` with zero warnings
-- `ai-document`: removed hardcoded work/personal path detection; doc list now driven by `.ai/document.yaml` config hierarchy
-
-**M4.5-B — session-governor.sh → Go Binary ✅**
-- `ai-governor` binary (`cmd/governor/`, `internal/governor/`): turn counter, weighted routing, session cost from JSONL, LLM classifier, regex fallback, fault emission — all in typed, testable Go
-- `session-governor.sh` reduced to a 4-line exec wrapper (`exec ai-governor`)
-- No more `date +%s%3N` (macOS), `awk`, `jq`, or `curl` in the governor path
-- `install.sh` builds `ai-governor` alongside the other 5 binaries
-
-**M5 — Pipeline Definitions + Execution Envelopes ✅**
-- `internal/pipeline/` package: `Pipeline`, `Stage`, `Envelope`, `StageResult` types; `Load`/`LoadNamed` with `default.yaml` fallback to `DefaultPipeline()`; `RenderText`; `AppendEnvelope` (idempotent by `session_id`); `FaultsForSession`
-- `ai-pipeline render [--pipeline=default] [root]` — prints MODEL ROUTER injection text from YAML definition; output matches hardcoded `RoutePipeline` text for `default.yaml`
-- `ai-pipeline envelope --session=<id> ...` — writes execution record to `.ai/executions.jsonl`; reads `ir_hash_start` from `checkpoint.json` and `ir_hash_end` from `ir.json` if not supplied; idempotent
-- Governor: `getRouteText(cwd, route)` loads pipeline YAML for `RoutePipeline` and renders dynamically; falls back to hardcoded text on load failure (never blocks session)
-- `session-end.sh`: calls `ai-pipeline envelope` after snapshot when `route == pipeline`
-- Pipeline definitions: `.ai/pipelines/*.yaml` — adding a pipeline is a YAML edit, not a bash edit
-- `install.sh` builds `ai-pipeline` alongside the other 6 binaries
-
-**F1 — Extract `internal/task` Package ✅**
-- `Task`, `TaskDB`, `Load`, `Save`, `MaxID`, `SortByID` in `internal/task/task.go`
-- All binaries import from `internal/task`; task type no longer trapped in `cmd/task/main.go`
-
-**F2 — Contract → Task Auto-Wire ✅**
-- `ai-task sync [--quiet]` creates task from `.ai/CONTRACT.yaml` if no match exists (idempotent by title)
-
-**F3 — Token Cost Compression + Context Relevance Scoring ✅**
-- IDF-weighted file scorer in `internal/context/ir.go` (replaces flat +2/+3 weights)
-- Import propagation: files imported by high-scoring files get +2 bonus (call graph edges)
-- Test-symbol filter: `Test*`/`Benchmark*`/`Example*` stripped from display output
-- Compact flat dump: directory-grouped summary (~64% reduction) vs. former path list + all-symbols blob
-- `maxShown` 15 → 10; noise-only entries suppressed
-
-**M8 — Outcome Verification Loop ✅**
-- `internal/session/verify.go`: `VerifyEntry` type, `AppendVerify`/`ReadVerify` — append-only `.ai/results.jsonl`, idempotent by `(task_id, session_id)`
-- `ai-task verify <id> [--session=<sid>] [root]` — runs task's `verify` command, writes structured result to `results.jsonl`; exit 0/1/2
-- `internal/session/review.go`: joins `progress.jsonl` entries with `results.jsonl` to surface verify outcome per session
-
-**F4 — Migrate `session-end.sh` → Go (`ai-session-end`) ✅**
-- `internal/sessionend/end.go`: all 7 stages ported — scope drift, IR snapshot, pipeline envelope, verify, handoff generation, progress ledger, checkpoint fallback
-- `internal/session/progress.go`: `AppendProgress` + `AppendFault` — idempotent JSONL writers for `progress.jsonl` and `faults.jsonl`
-- `cmd/session-end/main.go`: thin entrypoint (reads stdin, calls `sessionend.Run`)
-- `hooks/session-end.sh` reduced to 4-line `exec ai-session-end` wrapper; `install.sh` now builds 8 binaries
-
-**F5 — Drift-Aware Task Advisory ✅**
-- `internal/task/drift.go`: `CheckDrift` (glob intersection with `**` support), `AppendDriftFaults` (idempotent by task_id+session_id), `LoadDriftFaults`
-- `internal/session/drift_check.go`: `RunDriftCheck` — diffs last 2 IR snapshots, intersects changed files with task scopes, emits `DRIFT_AFFECTED` faults
-- `internal/context/contract.go`: `DRIFT ADVISORY` section injected into SESSION CONTRACT at turn 1 when `DRIFT_AFFECTED` faults exist for active task
-- `cmd/task/main.go`: `ai-task drift-check` + `ai-task replan <id>` subcommands
-
-**ir.go + install.sh bug fixes ✅**
-- Import propagation: index-based loop fixes stale-score break (was single-hop only)
-- `buildImportIndex`: root-level files (`filepath.Dir == "."`) indexed by filename stem, not unreachable `"."` key
-- `propagationThreshold`: `1.0 → 3.0` — stops near-universal propagation noise
-- `resolveImport`: removed unreachable `len(parts) == 0` dead guard
-- `install.sh`: explicit Python-not-found error + Windows Store stub detection (exit 9)
-
----
-
 ## Roadmap
 
 Priority order reflects load-bearing dependencies, not feature preference. Each milestone either unblocks the next or delivers direct cost/speed/quality value on its own.
@@ -569,17 +477,9 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
-### Architectural Notes (2026-03-06)
-
-**MCP deferred.** The value of an MCP tool server is exposing a stable API. Building it before the data model (types, schema) is stable means versioning pain. Requeued after F6 (schema stabilization).
-
-**session-end.sh migration complete (F4).** `ai-session-end` is the 8th binary. `session-end.sh` is now a 4-line exec wrapper — same pattern as `session-governor.sh` → `ai-governor`. All session-end logic is typed, testable Go in `internal/sessionend/`.
-
----
-
 ### F1 — Extract `internal/task` Package ✅
 
-**Completed.** `Task`, `TaskDB`, and storage helpers live in `internal/task/task.go`. All binaries import from `github.com/inth3shadows/runecho/internal/task`. `go build ./...` passes; no circular deps.
+**Completed.** Moved `Task`, `TaskDB`, `Load`, `Save`, `MaxID`, `SortByID` out of `cmd/task/main.go` into `internal/task/`. Zero behavior change. Unblocked F2, F5, and F7 by giving all packages a shared import path for task types.
 
 ---
 
@@ -619,8 +519,6 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 **Completed.** `internal/schema/` contains canonical types for all five `.ai/` data files: `FaultEntry` + `DriftFaultEntry` (`faults.jsonl`), `ProgressEntry` + `ScopeDrift` (`progress.jsonl`), `VerifyEntry` (`results.jsonl`), `Envelope` + `StageResult` (`executions.jsonl`), `ClassifierEntry` (`classifier.jsonl`). All consumers (`internal/session`, `internal/pipeline`, `internal/governor`, `internal/sessionend`) migrated. No duplicate struct definitions.
 
-**Done when:** `go build ./...` passes with all types in `internal/schema`; no duplicated struct definitions across packages.
-
 ---
 
 ### F7 — Session Provenance Export ✅
@@ -656,7 +554,7 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 **Fast-Loop CLI (`just`)** — a `justfile` in the repo root with a `run` recipe (`ai-context compile && ai-pipeline exec && ai-task verify`) gives a single `just run` entry point. Not a Go binary. `winget install Casey.Just`. Add after F3 when the context/pipeline commands are stable.
 
-**MCP Tool Server** — expose RunEcho capabilities as MCP tools (task/list, ir/diff, session/review, context/compile). Deferred until F6 schema stabilization. Building an API before the data model is stable means versioning pain. High value but not foundational.
+**MCP Tool Server** — expose RunEcho capabilities as MCP tools (task/list, ir/diff, session/review, context/compile). F6 schema stabilization is complete — the original blocker is resolved. New `internal/mcp/` + `cmd/mcp-server/`. No changes to existing binaries.
 
 **Orchestration Prototype** *(Stage C entry)* — `ai-orchestrate <task-id>` decomposes a task into subtasks with model assignments and file scopes. Requires MCP or equivalent stable tool interface. Deferred.
 
@@ -666,6 +564,199 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
+## Enhancement Backlog
+
+Candidates identified through codebase review and architecture analysis. Prioritized by impact-to-effort ratio. Effort: S = hours, M = 1–3 days, L = 1 week+.
+
+| Priority | Name | Effort | Value driver |
+|---|---|---|---|
+| 1 | Hook Reliability Gate | S | Fixes active pain — silent hook failures |
+| 2 | Hook Latency Telemetry | S | Makes hook performance visible; pairs with #1 |
+| 3 | Classifier Route Caching | S | Saves 0.5–1s per turn; LRU cache for haiku routes |
+| 4 | Claude Code Skills Integration | S | Zero-code DX win — slash commands for every binary |
+| 5 | Context Window Pressure Detection | S | Prevents silent context failure mid-task |
+| 6 | Fault-Driven Test Generation | S | Closes verify loop — injects failure context for next session |
+| 7 | MCP Tool Server | M | Highest leverage — structured LLM-native interface |
+| 8 | Cost Attribution per Hook/Task | M | Unblocks F8 targeting; makes costs actionable |
+| 9 | Classifier Feedback Loop | M | Self-improving routing accuracy |
+| 10 | Multi-Session Trend Analysis | M | Early warning on efficiency degradation |
+| 11 | Drift-Aware IR Caching | M | O(changed files) re-indexing; 5–10x faster on large repos |
+| 12 | Hook Test Suite + Simulation Harness | M | Regression safety net for the weakest layer |
+| 13 | Symbol Stability Index | S | Low effort; surfaces architectural debt proactively |
+| 14 | Git Pre-Commit IR Validation | S | Structural integrity enforcement at commit time |
+| 15 | Language Parser Extensions (Rust + Java) | M | Extends IR coverage; write-once, high polish |
+| 16 | Symbol Provenance Lineage | M | Tracks which task introduced each symbol; `ai-ir symbol-lineage` |
+| 17 | Prompt Quality Anomaly Detector | M | Detects circular exploration before turns are wasted |
+| 18 | Cross-Project IR Federation | M | Monorepo symbol search across package boundaries |
+| 19 | Symbol-Level IR Diff + Impact Analysis | L | Next-level drift detection; feeds context scoring |
+| 20 | Semantic Handoff Search + Replay | L | Searchable knowledge base from ground-truth handoffs |
+
+---
+
+### 1. Hook Reliability Gate — S
+
+Add a `HOOK_FAILURE` fault signal + timeout/recovery wrapper so sessions continue when hooks fail. Today a 5s timeout stalls the entire session; hooks fail silently on jq parse errors or missing binaries. Recovery queues faults for next turn and logs which binary failed.
+
+Touches: `internal/schema/faults.go` (new signal), `internal/governor/fault.go`, all shell hooks (retry wrapper).
+
+---
+
+### 2. Hook Latency Telemetry — S
+
+Record each hook's execution time, exit code, and output size in `.ai/hooks.jsonl`. Emit `HOOK_SLOW` and `HOOK_FAILED` fault signals when hooks exceed thresholds. Makes the invisible hook chain observable — currently there's no way to know which hook is adding latency to turn 1.
+
+Touches: `hooks/fault-emitter.sh` (add `emit_hook_latency()`), all hooks (wrap with timing), new `HookEntry` type in `internal/schema/`.
+
+---
+
+### 3. Classifier Route Caching — S
+
+LRU cache for haiku classification results, keyed by prompt fingerprint. Cache hits skip the 0.5–1s API call and return the route instantly. Most sessions see 15–20 structurally similar prompts. Track hit rate in `classifier-log.jsonl` via a `cache_hit` field.
+
+Touches: `internal/governor/classifier.go` (add `PromptFingerprint()`, cache get/set), `internal/governor/state.go` (persist cache in state dir), `internal/schema/classifier.go` (extend with `cache_hit`).
+
+---
+
+### 4. Claude Code Skills Integration — S
+
+Ship RunEcho as a set of Claude Code skills — YAML files in `~/.claude/skills/` that users invoke as `/ai-review`, `/ai-cost`, `/ai-scope`, `/ai-drift`, `/ai-classify`. Each skill wraps an existing binary call with natural-language framing. No code changes to existing binaries; install.sh symlinks them.
+
+Touches: new `skills/` directory with YAML files, `install.sh` (add symlink step).
+
+---
+
+### 5. Context Window Pressure Detection — S
+
+Measure remaining context capacity by tracking cumulative token usage and projected future turns. Emit `WINDOW_PRESSURE` fault when free space falls below threshold (10% default). Early warning allows preemptive `/compact` before quality degrades silently mid-task.
+
+Touches: `internal/governor/cost.go`, `internal/governor/fault.go`, `internal/schema/faults.go`.
+
+---
+
+### 6. Fault-Driven Test Generation — S
+
+When `VERIFY_FAIL` is emitted at session end, capture the verify command's stderr and git diff summary, then inject a `TEST_FAILURE_ADVISORY` block into the next session's context. Haiku can generate minimal failing test cases or reproduction steps without re-diagnosing from scratch.
+
+Touches: `internal/sessionend/stages.go` (capture verify stderr), `internal/context/` (new `VerifyFailureProvider`), `internal/schema/results.go` (extend VerifyEntry with `Stderr`, `Stdout`).
+
+---
+
+### 7. MCP Tool Server — M
+
+Expose RunEcho capabilities as MCP tools so Claude Code can call `task/list`, `ir/diff`, `context/compile`, `session/review` natively — structured JSON I/O, no shell parsing. F6 schema stabilization is complete. New `internal/mcp/` + `cmd/mcp-server/`. No changes to existing binaries.
+
+Touches: new `internal/mcp/`, `cmd/mcp-server/main.go`; read-only query APIs on `internal/ir/`, `internal/task/`, `internal/context/`, `internal/session/`.
+
+---
+
+### 8. Cost Attribution per Hook/Task — M
+
+Tag session costs by hook and task so `ai-provenance export` shows breakdowns: "$0.30 on IR indexing, $0.40 on doc gen." Currently cost is a session-level lump sum. Identifies outliers and targets optimization work.
+
+Touches: `internal/schema/progress.go` (add `CostBreakdown map[string]float64`), `internal/session/writer.go`, `internal/governor/cost.go`, `cmd/provenance/main.go`.
+
+---
+
+### 9. Classifier Feedback Loop — M
+
+Post-session, read verify outcomes and handoff quality to score whether the routing classification was correct. Accumulate per-route accuracy in `classifier-log.jsonl`. Adjust confidence thresholds over time; emit `CLASSIFIER_DRIFT` fault when accuracy degrades.
+
+Touches: `internal/governor/classifier.go`, `internal/schema/classifier.go`, `internal/session/review.go`.
+
+---
+
+### 10. Multi-Session Trend Analysis — M
+
+Aggregate `progress.jsonl` across 10+ sessions to compute moving averages (cost/session, turns/task, file churn/session). Emit `TREND_ALERT` fault when a metric exceeds ±20% of its 5-session average. Detects efficiency degradation before it compounds.
+
+Touches: `internal/session/review.go`, `internal/governor/fault.go`, `internal/schema/progress.go`.
+
+---
+
+### 11. Drift-Aware IR Caching — M
+
+Cache parsed IR results per file, keyed by content hash. Incremental re-indexing skips unchanged files — O(changed) instead of O(all). On large repos, turn-1 `ai-ir` runs drop from seconds to milliseconds. Invalidate on `git diff` detecting changes to a file.
+
+Touches: `internal/ir/generator.go` (add `FileHashCache`, `incrementalParse()`), `internal/ir/types.go` (extend IR with hash metadata), `internal/snapshot/` (git hash as cache invalidation signal).
+
+---
+
+### 12. Hook Test Suite + Simulation Harness — M
+
+Zero hook tests exist. Add a Go test driver that simulates Claude Code hook inputs (mock `.ai/` structure, fixture sessions) and validates fault output, turn counter increment, and route persistence. Catches regressions in 2 min vs. 20-min manual session cycles.
+
+Touches: new `hooks/test/` fixtures, `cmd/hooks-test/main.go`, refactor hook logic into `internal/hooks/` thin wrappers.
+
+---
+
+### 13. Symbol Stability Index — S
+
+Track each symbol's churn rate across IR snapshot history. Flag high-churn symbols (refactored 5+ times) and inject a `CHURN ADVISORY` block into SESSION CONTRACT when the active task's scope touches them. Surfaces architectural debt proactively.
+
+Touches: `internal/snapshot/churn.go`, `internal/schema/progress.go`, `internal/context/review_provider.go`.
+
+---
+
+### 14. Git Pre-Commit IR Validation — S
+
+Install a `.git/hooks/pre-commit` that runs `ai-ir verify` and blocks commits when structural diff exceeds configured thresholds — new exports without task records, symbol deletion without scope tracking. Transforms RunEcho from session observer to structural integrity enforcer.
+
+Touches: `install.sh` (add git hook symlink), new `scripts/pre-commit`.
+
+---
+
+### 15. Language Parser Extensions (Rust + Java) — M
+
+Add AST-based parsers for `.rs` and `.java` to extend IR coverage beyond JS/TS/Go/Python. Parsers are write-once; no schema changes. Register via the existing `Parser` interface in `NewGenerator()`.
+
+Touches: `internal/parser/rust.go`, `internal/parser/java.go`, `internal/ir/generator.go`.
+
+---
+
+### 16. Symbol Provenance Lineage — M
+
+Track which task and session introduced each symbol (function, type, constant). Link symbol definitions to their task ID and verify outcome. New `ai-ir symbol-lineage <symbol>` subcommand enables "who introduced this?" analysis — saves 10+ minutes of git archaeology per multi-session debugging incident.
+
+Touches: `internal/ir/types.go` (extend Symbol with `IntroducedBy`, `VerifyStatus`), `internal/snapshot/diff.go` (compute provenance), `cmd/ir/main.go` (new subcommand).
+
+---
+
+### 17. Prompt Quality Anomaly Detector — M
+
+Analyze `classifier-log.jsonl` and session progress to detect anomalous prompt patterns — circular exploration, rapid successive similar queries, very short/long prompts with low semantic diversity. Emit `PROMPT_ANOMALY` fault to surface debugging loops before they waste 5–10 turns.
+
+Touches: new `internal/anomaly/detector.go`, `internal/governor/fault.go`, `internal/schema/classifier.go`.
+
+---
+
+### 18. Cross-Project IR Federation — M
+
+Index linked projects (monorepo or workspace) into a single federated IR with namespace prefixes, enabling symbol search across package boundaries. Surfaces symbols from all linked projects in a single injection — eliminates "missing symbol" issues in multi-repo work.
+
+Touches: `internal/ir/generator.go`, `internal/ir/storage.go`, `internal/context/ir.go`, `.ai/ir.json` schema.
+
+---
+
+### 19. Symbol-Level IR Diff + Impact Analysis — L
+
+`ai-ir diff` shows which files changed. This adds which files *reference* changed symbols — import-graph propagation for scope validation and context relevance. `DRIFT_AFFECTED` faults become symbol-aware, not just file-aware. Context relevance scoring in `internal/context/ir.go` gets a boost for files that reference changed symbols.
+
+Touches: `internal/snapshot/snapshot.go`, `internal/ir/`, `internal/task/drift.go`, `internal/context/ir.go`.
+
+---
+
+### 20. Semantic Handoff Search + Replay — L
+
+Index all `.ai/handoff.md` files across sessions into SQLite FTS (TF-IDF). Allow Claude to query similar past sessions (`/ai-review search "auth refactor"`) to surface what worked before. Reframes handoffs from one-shot summaries to a searchable knowledge base — the data already exists and is ground-truth.
+
+Touches: new `internal/search/semantic.go`, `internal/snapshot/db.go` (add FTS table), `cmd/session/main.go`.
+
+---
+
+*Inspired by: Temporal (durable execution), Dagger (typed pipeline objects), Taskfile (DAG task deps), SLSA provenance (supply chain attestation), Jupyter execution records*
+
+---
+
 ## License
 
-TBD
+MIT — see [LICENSE](LICENSE)

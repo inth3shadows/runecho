@@ -23,8 +23,12 @@ fi
 
 for cmd in ir session document task context governor pipeline session-end provenance mcp-server; do
   echo "Building ai-$cmd..."
-  go build -o "$BIN_DIR/ai-$cmd$EXE" "./cmd/$cmd"
-  echo "  Built: $BIN_DIR/ai-$cmd$EXE"
+  if go build -a -o "$BIN_DIR/ai-$cmd$EXE" "./cmd/$cmd" 2>/tmp/_runecho_build_err; then
+    echo "  Built: $BIN_DIR/ai-$cmd$EXE"
+  else
+    echo "  WARNING: ai-$cmd build failed (binary may be in use — restart and re-run install.sh):"
+    sed 's/^/    /' /tmp/_runecho_build_err
+  fi
 done
 
 # Symlink hooks (including fault-emitter — sourced by governor, stop-checkpoint, session-end)
@@ -61,14 +65,13 @@ done
 echo ""
 echo "Configuring $SETTINGS_FILE..."
 
-PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+PYTHON=""
+for _py in python3 python py; do
+  _candidate=$(command -v "$_py" 2>/dev/null) || continue
+  "$_candidate" -c "import sys; sys.exit(0)" 2>/dev/null && PYTHON="$_candidate" && break
+done
 if [ -z "$PYTHON" ]; then
-  echo "install.sh: ERROR: Python 3 not found. Install Python 3 and re-run." >&2
-  exit 1
-fi
-# Verify python isn't a Windows Store stub (exits 9 rather than running Python)
-if ! "$PYTHON" -c "import sys; sys.exit(0)" 2>/dev/null; then
-  echo "install.sh: ERROR: Python at '$PYTHON' is not functional (Windows Store stub?). Install Python 3 from python.org." >&2
+  echo "install.sh: ERROR: No functional Python 3 found (python3/python/py all failed or are Windows Store stubs). Install Python 3 from python.org." >&2
   exit 1
 fi
 "$PYTHON" - <<'PYEOF'

@@ -68,12 +68,7 @@ func Run(input []byte) error {
 	runAIDocument(cwd, verifySummary)
 
 	// --- Stage 6: Handoff generation (primary path) ---
-	// If handoff already exists, skip generation and just record progress.
-	if fileExists(handoffPath) {
-		_ = appendProgress(cwd, sid, handoffPath, checkpointPath, scopeDrift, 0, verifyPassed)
-		return nil
-	}
-
+	// Always regenerate — handoff.md is a per-session artifact, not a persistent document.
 	// Try ai-session first.
 	if sid != "" {
 		cost, ok := tryAISession(cwd, sid, handoffPath)

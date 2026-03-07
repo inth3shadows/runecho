@@ -76,7 +76,7 @@ run_with_fault_guard() {
   "$@"
   local exit_code=$?
   local elapsed_s=$(( SECONDS - start_s ))
-  HOOK_LATENCY_MS=$(( elapsed_s * 1000 ))
+  local _latency_ms=$(( elapsed_s * 1000 ))
 
   if [ "$exit_code" -ne 0 ]; then
     emit_fault "HOOK_FAILURE" 1 \

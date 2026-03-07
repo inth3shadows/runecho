@@ -15,10 +15,16 @@ BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
+# On Windows (Git Bash), Go needs explicit .exe to be found by native process spawners
+EXE=""
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || -n "$WINDIR" ]]; then
+  EXE=".exe"
+fi
+
 for cmd in ir session document task context governor pipeline session-end provenance mcp-server; do
   echo "Building ai-$cmd..."
-  go build -o "$BIN_DIR/ai-$cmd" "./cmd/$cmd"
-  echo "  Built: $BIN_DIR/ai-$cmd"
+  go build -o "$BIN_DIR/ai-$cmd$EXE" "./cmd/$cmd"
+  echo "  Built: $BIN_DIR/ai-$cmd$EXE"
 done
 
 # Symlink hooks (including fault-emitter — sourced by governor, stop-checkpoint, session-end)

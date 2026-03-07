@@ -52,7 +52,9 @@
       "Bash(git pull:*)",
       "Bash(git checkout:*)",
       "Bash(git switch:*)",
-      "WebFetch(domain:openhands.dev)"
+      "WebFetch(domain:openhands.dev)",
+      "Bash(grep:*)",
+      "mcp__runecho__runecho_task_list"
     ]
   }
 }

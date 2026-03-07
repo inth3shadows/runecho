@@ -1,6 +1,6 @@
 # RunEcho
 
-**F1–F7 complete · Enhancements 1–6 complete · 9 binaries · next: F8 — local result cache**
+**F1–F9 complete · 10 binaries · [CHANGELOG](CHANGELOG.md) · next: F10 — local result cache**
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -86,7 +86,7 @@ Together these enforce the cost model: **Haiku = eyes, Sonnet = hands, Opus = br
 bash install.sh
 ```
 
-Builds nine binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
+Builds ten binaries, symlinks all hooks into `~/.claude/hooks/`, and automatically merges the RunEcho hook configuration into `~/.claude/settings.json`. Idempotent — safe to re-run after updates. Uses `#!/usr/bin/env bash` and `rm -f` + `ln -s` for portable symlink creation on macOS/Linux. Requires Go in PATH.
 
 | Binary | Purpose |
 |---|---|
@@ -99,6 +99,7 @@ Builds nine binaries, symlinks all hooks into `~/.claude/hooks/`, and automatica
 | `ai-pipeline` | Declarative pipeline definitions — `render` (injection text) + `envelope` (execution records) |
 | `ai-session-end` | Session-end orchestration pipeline (replaces `session-end.sh` logic) |
 | `ai-provenance` | Session provenance export — task timeline, faults, verify outcomes, cost |
+| `ai-mcp-server` | MCP (Model Context Protocol) stdio server — 7 tools for Claude-native RunEcho access |
 
 ---
 
@@ -534,15 +535,27 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
-### F8 — Local Result Cache
+### F8 — Infrastructure Hardening ✅
 
-**Goal:** Hash `(ir_snapshot_id + prompt_hash + model)` → reuse result for identical analysis tasks. Avoid repeated model calls when inputs haven't changed.
+**Completed.** Six cross-cutting improvements shipped as a single batch: Hook Reliability Gate (`HOOK_FAILURE` fault + `run_with_fault_guard()`), Hook Latency Telemetry (`HookEntry` schema, `HOOK_SLOW`/`HOOK_FAILED` signals), Classifier Route Caching (64-entry LRU, 30-min TTL), Skills Integration (5 skills in `~/.claude/skills/`), Context Window Pressure (`WINDOW_PRESSURE` fault at 90% of 200k token limit), and Fault-Driven Test Generation (`Stdout`/`Stderr` on `VerifyEntry`, `VerifyFailureProvider`).
 
-**Why after F7:** Only pays off once orchestration exists and identical analysis tasks run repeatedly. Building a cache before you have repeated callers is premature optimization.
+---
+
+### F9 — MCP Tool Server ✅
+
+**Completed.** `internal/mcp/` + `cmd/mcp-server/`. JSON-RPC 2.0 stdio server. 7 tools: `runecho_task_list`, `runecho_task_next`, `runecho_task_update`, `runecho_session_status`, `runecho_fault_list`, `runecho_provenance_export`, `runecho_context_compile`. Registered in `~/.claude/settings.json` via `install.sh`. 10 binaries total.
+
+---
+
+### F10 — Local Result Cache
+
+**Goal:** Hash `(ir_hash + prompt_hash + model + task_id)` → reuse result for identical analysis tasks. Avoid repeated model calls when inputs haven't changed. `task_id` in the key prevents cross-task collisions.
+
+**Prerequisites:** complete — `output_hash`/`output_path` on `VerifyEntry`, `BlockedBy []string` on `Task` (commit `98ab949`).
 
 | Deliverable | Description |
 |---|---|
-| sqlite cache table | Key `(ir_hash, prompt_hash, model)` → `result TEXT, created_at`. One table in existing sqlite db — no new dep. |
+| sqlite cache table | Key `(ir_hash, prompt_hash, model, task_id)` → `result TEXT, created_at`. One table in existing sqlite db — no new dep. |
 | Cache read/write in `ai-context` | Before calling the model, check cache. On miss, call and write result. TTL: invalidate on IR hash change. |
 | `ai-context --no-cache` | Escape hatch to bypass for debugging. |
 
@@ -553,8 +566,6 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 ### Deferred
 
 **Fast-Loop CLI (`just`)** — a `justfile` in the repo root with a `run` recipe (`ai-context compile && ai-pipeline exec && ai-task verify`) gives a single `just run` entry point. Not a Go binary. `winget install Casey.Just`. Add after F3 when the context/pipeline commands are stable.
-
-**MCP Tool Server** ✅ — `internal/mcp/` + `cmd/mcp-server/`. 7 tools: `runecho_task_list`, `runecho_task_next`, `runecho_task_update`, `runecho_session_status`, `runecho_fault_list`, `runecho_provenance_export`, `runecho_context_compile`. Registered in `~/.claude/settings.json` via `install.sh`.
 
 **Orchestration Prototype** *(Stage C entry)* — `ai-orchestrate <task-id>` decomposes a task into subtasks with model assignments and file scopes. Requires MCP or equivalent stable tool interface. Deferred.
 
@@ -756,6 +767,22 @@ Touches: new `internal/search/semantic.go`, `internal/snapshot/db.go` (add FTS t
 ---
 
 *Inspired by: Temporal (durable execution), Dagger (typed pipeline objects), Taskfile (DAG task deps), SLSA provenance (supply chain attestation), Jupyter execution records*
+
+---
+
+## Companion Tools
+
+**Codeshot** — manual code execution companion. Extracts code blocks from Claude sessions and emits clickable OSC 8 terminal links for one-click staging and execution. Works standalone; designed to coexist with RunEcho.
+
+| RunEcho does | Codeshot does |
+|---|---|
+| Governs what Claude does autonomously | Gives the user a clean path when safeguards block Claude |
+| Stop hook: `stop-checkpoint.sh` | Stop hook: extracts code blocks, emits OSC 8 links |
+| Writes `faults.jsonl`, `progress.jsonl`, `tasks.json` | Optionally emits `USER_EXEC` signal to `faults.jsonl` if RunEcho is present |
+
+**Hook coexistence:** Claude Code supports multiple Stop hooks. Codeshot's installer appends its hook alongside `stop-checkpoint.sh` — no conflict.
+
+**Optional RunEcho signal:** If `.ai/faults.jsonl` exists, Codeshot emits a `USER_EXEC` event when a code block is staged. This gives `ai-provenance` visibility into manual human actions alongside autonomous agent actions.
 
 ---
 

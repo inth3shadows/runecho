@@ -26,9 +26,10 @@ type ProjectContext struct {
 	FileTree          []string    // relative paths, depth 2, excludes noise dirs
 	RecentCommits     string      // git log --oneline -10
 	IRDiff            string      // VERIFY_SUMMARY passed in from hook (may be empty)
-	ExistingReadme    string      // empty if file doesn't exist
-	ExistingTechnical string
-	ExistingUsage     string
+	ExistingReadme     string // empty if file doesn't exist
+	ExistingTechnical  string
+	ExistingUsage      string
+	ExistingChangelog  string
 	SourceFiles       []SourceFile // up to 3 key files, 150 lines each (create mode only)
 	DocTypes          []string     // filenames to generate: e.g. ["README.md"] or ["README.md","TECHNICAL.md","USAGE.md"]
 }

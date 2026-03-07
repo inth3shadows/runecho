@@ -30,6 +30,7 @@ var createBudgets = map[string]int{
 	"README":    1000,
 	"TECHNICAL": 2000,
 	"USAGE":     2000,
+	"CHANGELOG": 2000,
 }
 
 // updateBudget returns a token budget for update mode sized to the existing doc.
@@ -236,6 +237,40 @@ Example:
 Table: name, required/optional, description.
 
 Keep it under 150 lines. Every example must use real command names and flags from the source.`)
+
+	case "CHANGELOG":
+		sb.WriteString(`
+Generate CHANGELOG.md.
+
+Naming convention: F = feature milestone, M = infrastructure milestone. Commits follow conventional format (feat:, fix:, docs:, chore:, refactor:).
+
+Structure:
+# Changelog
+
+Brief intro line (1 sentence: what convention is used).
+
+---
+
+## [Unreleased]
+List known next milestones with brief goal descriptions.
+
+---
+
+## [{label}] — {title}
+**Commit:** {sha if known} | **Binary:** {binary if applicable}
+
+1-2 sentence description. What was added, what it enables.
+
+Key deliverables as a table or bullet list if >2 items.
+
+---
+(one section per F/M label, most recent first)
+
+Rules:
+- Use only commits visible in the git log. Do not invent history.
+- Each section: label, title, commit SHA, 1-2 sentence description.
+- If multiple commits belong to one milestone, group them.
+- Keep it under 100 lines total.`)
 	}
 }
 
@@ -288,6 +323,18 @@ Rules:
 - Preserve all accurate existing content verbatim.
 - Do not rewrite sections unrelated to the changes.
 - Output the COMPLETE updated file, not a partial diff.`)
+
+	case "CHANGELOG":
+		sb.WriteString(`
+TASK: Prepend a new entry to CHANGELOG.md for the changes above.
+
+Rules:
+- Read the IR diff and recent git commits to determine what changed.
+- If the changes map to a new F/M milestone, create a new ## [{label}] section.
+- If the changes are minor fixes, add to an existing [Unreleased] section or create one.
+- Use the commit SHA from the git log as the commit reference.
+- Do NOT rewrite or reorder existing entries.
+- Output the COMPLETE updated file with the new entry at the top (after the header).`)
 	}
 }
 

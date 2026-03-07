@@ -21,7 +21,7 @@ func GatherContext(root, irDiff string) (*ProjectContext, error) {
 	name, desc := extractNameDesc(root, pt)
 	docTypes := loadDocTypes(root)
 
-	readme, technical, usage := readExistingDocs(root)
+	readme, technical, usage, changelog := readExistingDocs(root)
 	tree := buildFileTree(root)
 	commits := readGitLog(root)
 
@@ -36,6 +36,7 @@ func GatherContext(root, irDiff string) (*ProjectContext, error) {
 		ExistingReadme:    readme,
 		ExistingTechnical: technical,
 		ExistingUsage:     usage,
+		ExistingChangelog: changelog,
 		DocTypes:          docTypes,
 	}
 
@@ -193,10 +194,11 @@ func readGitLog(root string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func readExistingDocs(root string) (readme, technical, usage string) {
+func readExistingDocs(root string) (readme, technical, usage, changelog string) {
 	readme = readFileTruncated(filepath.Join(root, "README.md"), 40000)
 	technical = readFileTruncated(filepath.Join(root, "TECHNICAL.md"), 40000)
 	usage = readFileTruncated(filepath.Join(root, "USAGE.md"), 40000)
+	changelog = readFileTruncated(filepath.Join(root, "CHANGELOG.md"), 20000)
 	return
 }
 
@@ -315,6 +317,8 @@ func docFilename(docType string) string {
 		return "TECHNICAL.md"
 	case "USAGE":
 		return "USAGE.md"
+	case "CHANGELOG":
+		return "CHANGELOG.md"
 	default:
 		return "README.md"
 	}
@@ -327,6 +331,8 @@ func existingDoc(ctx *ProjectContext, docType string) string {
 		return ctx.ExistingTechnical
 	case "USAGE":
 		return ctx.ExistingUsage
+	case "CHANGELOG":
+		return ctx.ExistingChangelog
 	default:
 		return ctx.ExistingReadme
 	}

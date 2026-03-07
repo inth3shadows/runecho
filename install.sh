@@ -40,6 +40,17 @@ for hook in \
   echo "  $hook"
 done
 
+# Symlink skills → ~/.claude/skills/
+SKILL_DIR="$HOME/.claude/skills"
+mkdir -p "$SKILL_DIR"
+echo ""
+echo "Symlinking skills → $SKILL_DIR/"
+for skill_src in "$SCRIPT_DIR"/skills/*/; do
+  skill_name="$(basename "$skill_src")"
+  rm -rf "$SKILL_DIR/$skill_name" && ln -s "$skill_src" "$SKILL_DIR/$skill_name"
+  echo "  $skill_name"
+done
+
 # Configure ~/.claude/settings.json — merge RunEcho hooks (idempotent)
 echo ""
 echo "Configuring $SETTINGS_FILE..."

@@ -10,8 +10,14 @@
 # Even if the model ignores this text, PreToolUse hooks still enforce the rules.
 # This is defense-in-depth: reminder + immutable enforcement.
 
+# shellcheck disable=SC1091
+. "$(dirname "$0")/fault-emitter.sh"
+
+_hook_start=$SECONDS
+
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+WORKSPACE="${PWD}"
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 STATE_DIR="$CONFIG_DIR/hooks/.governor-state"
@@ -88,5 +94,8 @@ if [ -f "$IR_FILE" ] && command -v jq &>/dev/null; then
   echo "${FILE_COUNT} files — ${FILE_LIST}"
   echo "Symbols (${SYMBOL_COUNT}): ${SYMBOLS}"
 fi
+
+_hook_latency_ms=$(( (SECONDS - _hook_start) * 1000 ))
+emit_hook_latency "constraint-reinjector" "$SESSION_ID" "0" "$_hook_latency_ms" "0" "$WORKSPACE" "$STATE_DIR"
 
 exit 0

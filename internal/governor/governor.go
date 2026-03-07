@@ -42,6 +42,19 @@ func Run(inputJSON []byte, classifierKey string) string {
 	costFmt := FormatCost(cost)
 	costLevel := CostLevel(cost)
 
+	// --- Context Window Pressure ---
+	windowPressureMsg := ""
+	if tokensUsed, pressure := WindowPressure(input.SessionID); pressure {
+		pct := (tokensUsed * 100) / MaxContextTokens
+		EmitFault(FaultWindowPressure, pct,
+			fmt.Sprintf("%d/%d tokens used", tokensUsed, MaxContextTokens),
+			cwd, input.SessionID)
+		windowPressureMsg = fmt.Sprintf(
+			"SESSION GOVERNOR [window]: Context window at %d%% capacity (%d/%d tokens). Consider /compact or starting a new session.",
+			pct, tokensUsed, MaxContextTokens,
+		)
+	}
+
 	// --- Pending Fault Signals ---
 	irDeltaOutput := buildPendingFaultOutput(stateDir, input.SessionID)
 
@@ -68,7 +81,7 @@ func Run(inputJSON []byte, classifierKey string) string {
 	_ = WriteRoute(stateDir, input.SessionID, route)
 
 	// --- Assemble Output ---
-	return assembleOutput(warningOutput, irDeltaOutput, opusBlockedMsg, getRouteText(cwd, route))
+	return assembleOutput(warningOutput, irDeltaOutput, windowPressureMsg, opusBlockedMsg, getRouteText(cwd, route))
 }
 
 func buildPendingFaultOutput(stateDir, sessionID string) string {
@@ -187,10 +200,13 @@ func getRouteText(cwd string, route Route) string {
 	return routeText[route]
 }
 
-func assembleOutput(warning, irDelta, opusBlocked, route string) string {
+func assembleOutput(warning, irDelta, windowPressure, opusBlocked, route string) string {
 	var parts []string
 	if warning != "" {
 		parts = append(parts, warning)
+	}
+	if windowPressure != "" {
+		parts = append(parts, windowPressure)
 	}
 	if irDelta != "" {
 		parts = append(parts, irDelta)

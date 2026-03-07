@@ -332,11 +332,11 @@ func runVerify(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var buf bytes.Buffer
+	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "bash", "-c", t.Verify)
 	cmd.Dir = root
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	runErr := cmd.Run()
 	passed := runErr == nil
@@ -350,10 +350,18 @@ func runVerify(args []string) {
 		}
 	}
 
-	output := buf.String()
-	if len(output) > 500 {
-		output = output[:500]
+	truncate := func(s string) string {
+		if len(s) > 500 {
+			return s[:500]
+		}
+		return s
 	}
+
+	stdoutStr := truncate(stdoutBuf.String())
+	stderrStr := truncate(stderrBuf.String())
+	// Combined output for backward-compat Output field.
+	combined := stdoutBuf.String() + stderrBuf.String()
+	output := truncate(combined)
 
 	sid := *sessionID
 	if sid == "" {
@@ -371,6 +379,8 @@ func runVerify(args []string) {
 		Passed:    passed,
 		ExitCode:  exitCode,
 		Output:    output,
+		Stdout:    stdoutStr,
+		Stderr:    stderrStr,
 	}
 	if err := session.AppendVerify(root, entry); err != nil {
 		fmt.Fprintf(os.Stderr, "ai-task verify: failed to write results: %v\n", err)

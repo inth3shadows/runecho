@@ -2,16 +2,68 @@ package governor
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/schema"
 )
+
+const cacheMaxSize = 64
+const cacheTTL = 30 * time.Minute
+
+type cacheEntry struct {
+	route Route
+	ts    time.Time
+}
+
+var (
+	classifierCache     = make(map[string]cacheEntry, cacheMaxSize)
+	classifierCacheMu   sync.Mutex
+	classifierCacheKeys []string // insertion-order list for LRU eviction
+)
+
+// PromptFingerprint returns a 16-hex-char key derived from the first 200 chars of prompt.
+func PromptFingerprint(prompt string) string {
+	p := prompt
+	if len(p) > 200 {
+		p = p[:200]
+	}
+	h := sha256.Sum256([]byte(p))
+	return hex.EncodeToString(h[:])[:16]
+}
+
+func cacheGet(fingerprint string) (Route, bool) {
+	classifierCacheMu.Lock()
+	defer classifierCacheMu.Unlock()
+	e, ok := classifierCache[fingerprint]
+	if !ok {
+		return "", false
+	}
+	if time.Since(e.ts) > cacheTTL {
+		return "", false
+	}
+	return e.route, true
+}
+
+func cacheSet(fingerprint string, route Route) {
+	classifierCacheMu.Lock()
+	defer classifierCacheMu.Unlock()
+	if len(classifierCacheKeys) >= cacheMaxSize {
+		evict := classifierCacheKeys[0]
+		classifierCacheKeys = classifierCacheKeys[1:]
+		delete(classifierCache, evict)
+	}
+	classifierCache[fingerprint] = cacheEntry{route: route, ts: time.Now()}
+	classifierCacheKeys = append(classifierCacheKeys, fingerprint)
+}
 
 const (
 	classifierModel   = "claude-haiku-4-5-20251001"
@@ -28,6 +80,7 @@ Respond with JSON only: {"route":"haiku|sonnet|opus|pipeline"}`
 
 // Classify calls the haiku LLM to classify prompt intent.
 // Returns ("", 0) if the key is absent, the call fails, or the result is invalid.
+// Cache hits skip the API call; results are cached for 30 minutes (max 64 entries).
 func Classify(prompt, apiKey, stateDir string) (Route, int64) {
 	if apiKey == "" {
 		return "", 0
@@ -38,11 +91,22 @@ func Classify(prompt, apiKey, stateDir string) (Route, int64) {
 		prompt200 = prompt200[:200]
 	}
 
+	fingerprint := PromptFingerprint(prompt200)
+
+	if cached, ok := cacheGet(fingerprint); ok {
+		logClassification(prompt200, cached, 0, stateDir, nil, true)
+		return cached, 0
+	}
+
 	start := time.Now()
 	route, err := classifyCall(prompt200, apiKey)
 	latencyMS := time.Since(start).Milliseconds()
 
-	logClassification(prompt200, route, latencyMS, stateDir, err)
+	if err == nil {
+		cacheSet(fingerprint, route)
+	}
+
+	logClassification(prompt200, route, latencyMS, stateDir, err, false)
 
 	if err != nil {
 		return "", latencyMS
@@ -108,7 +172,7 @@ func classifyCall(prompt, apiKey string) (Route, error) {
 	}
 }
 
-func logClassification(prompt string, route Route, latencyMS int64, stateDir string, callErr error) {
+func logClassification(prompt string, route Route, latencyMS int64, stateDir string, callErr error, cacheHit bool) {
 	if stateDir == "" {
 		return
 	}
@@ -117,12 +181,18 @@ func logClassification(prompt string, route Route, latencyMS int64, stateDir str
 		routeStr = ""
 	}
 
+	source := "classifier"
+	if cacheHit {
+		source = "cache"
+	}
+
 	entry := schema.ClassifierEntry{
 		Ts:        time.Now().UTC().Format(time.RFC3339),
 		Prompt:    prompt,
 		Route:     routeStr,
-		Source:    "classifier",
+		Source:    source,
 		LatencyMS: latencyMS,
+		CacheHit:  cacheHit,
 	}
 	if callErr != nil {
 		entry.Error = callErr.Error()

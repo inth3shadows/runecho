@@ -6,8 +6,9 @@ import (
 
 // DefaultProviders is the ordered list used when --providers is not specified.
 // contract runs first so Claude sees scope constraints before IR context.
+// verify_failure runs late so any TEST_FAILURE_ADVISORY appears after task context.
 // review goes last — only injects when actionable, short-circuits silently otherwise.
-var DefaultProviders = []string{"contract", "ir", "gitdiff", "handoff", "tasks", "review"}
+var DefaultProviders = []string{"contract", "ir", "gitdiff", "handoff", "tasks", "verify_failure", "review"}
 
 // Compiler assembles context blocks from multiple providers within a token budget.
 type Compiler struct {
@@ -24,6 +25,7 @@ func NewCompiler() *Compiler {
 		&HandoffProvider{},
 		&TasksProvider{},
 		&ChurnProvider{},
+		&VerifyFailureProvider{},
 		&ReviewProvider{},
 	} {
 		c.providers[p.Name()] = p

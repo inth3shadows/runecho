@@ -6,6 +6,8 @@
 # shellcheck disable=SC1091
 . "$(dirname "$0")/fault-emitter.sh"
 
+_hook_start=$SECONDS
+
 # POSIX-portable timeout: macOS lacks GNU timeout; gtimeout (coreutils) is the Mac equivalent.
 _timeout() {
   if command -v timeout &>/dev/null; then timeout "$@"
@@ -68,5 +70,8 @@ if command -v ai-ir &>/dev/null && [ -f "$CWD/.ai/ir.json" ]; then
     fi
   fi
 fi
+
+_hook_latency_ms=$(( (SECONDS - _hook_start) * 1000 ))
+emit_hook_latency "stop-checkpoint" "$SESSION_ID" "0" "$_hook_latency_ms" "0" "$CWD" "$STATE_DIR"
 
 exit 0

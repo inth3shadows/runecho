@@ -5,9 +5,15 @@
 #
 # PreCompact has no decision control — side-effects only.
 
+# shellcheck disable=SC1091
+. "$(dirname "$0")/fault-emitter.sh"
+
+_hook_start=$SECONDS
+
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 TRIGGER=$(echo "$INPUT" | jq -r '.trigger // "unknown"' 2>/dev/null || echo "unknown")
+WORKSPACE="${PWD}"
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 STATE_DIR="$CONFIG_DIR/hooks/.governor-state"
@@ -71,5 +77,8 @@ jq -n \
     scope_lock_active: $scope_lock,
     scope_summary: $scope_summary
   }' > "$SNAPSHOT_FILE" 2>/dev/null || true
+
+_hook_latency_ms=$(( (SECONDS - _hook_start) * 1000 ))
+emit_hook_latency "pre-compact-snapshot" "$SESSION_ID" "0" "$_hook_latency_ms" "0" "$WORKSPACE" "$STATE_DIR"
 
 exit 0

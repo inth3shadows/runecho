@@ -37,7 +37,11 @@ var routeText = map[Route]string{
 type FaultSignal string
 
 const (
-	FaultTurnFatigue  FaultSignal = "TURN_FATIGUE"
-	FaultCostFatigue  FaultSignal = "COST_FATIGUE"
-	FaultOpusBlocked  FaultSignal = "OPUS_BLOCKED"
+	FaultTurnFatigue    FaultSignal = "TURN_FATIGUE"
+	FaultCostFatigue    FaultSignal = "COST_FATIGUE"
+	FaultOpusBlocked    FaultSignal = "OPUS_BLOCKED"
+	FaultHookFailure    FaultSignal = "HOOK_FAILURE"
+	FaultHookSlow       FaultSignal = "HOOK_SLOW"
+	FaultHookFailed     FaultSignal = "HOOK_FAILED"
+	FaultWindowPressure FaultSignal = "WINDOW_PRESSURE"
 )

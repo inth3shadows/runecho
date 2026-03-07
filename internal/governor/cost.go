@@ -116,3 +116,65 @@ func CostLevel(cost float64) string {
 func CostCents(cost float64) int {
 	return int(math.Round(cost * 100))
 }
+
+// MaxContextTokens is Claude's context window size.
+const MaxContextTokens = 200_000
+
+// windowPressureThreshold is the fraction at which WINDOW_PRESSURE fires.
+const windowPressureThreshold = 0.90
+
+// TokensUsed returns cumulative input+output token count for the session.
+// Does not count cache reads (those are replays, not new context).
+func TokensUsed(sessionID string) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0
+	}
+
+	dirs := []string{filepath.Join(home, ".claude", "projects")}
+	if cfg := os.Getenv("CLAUDE_CONFIG_DIR"); cfg != "" {
+		dirs = append(dirs, filepath.Join(cfg, "projects"))
+	}
+
+	var jsonlFile string
+	for _, dir := range dirs {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*", sessionID+".jsonl"))
+		if len(matches) > 0 {
+			jsonlFile = matches[0]
+			break
+		}
+	}
+	if jsonlFile == "" {
+		return 0
+	}
+
+	f, err := os.Open(jsonlFile)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	var total int
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	for scanner.Scan() {
+		var entry sessionUsage
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "assistant" || entry.Message == nil || entry.Message.Usage == nil {
+			continue
+		}
+		u := entry.Message.Usage
+		total += u.InputTokens + u.OutputTokens
+	}
+	return total
+}
+
+// WindowPressure returns (tokensUsed, pressure). pressure is true when
+// tokensUsed >= MaxContextTokens * windowPressureThreshold.
+func WindowPressure(sessionID string) (int, bool) {
+	used := TokensUsed(sessionID)
+	threshold := int(float64(MaxContextTokens) * windowPressureThreshold)
+	return used, used >= threshold
+}

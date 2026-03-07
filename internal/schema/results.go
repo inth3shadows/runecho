@@ -9,5 +9,7 @@ type VerifyEntry struct {
 	Cmd       string `json:"cmd"`
 	Passed    bool   `json:"passed"`
 	ExitCode  int    `json:"exit_code"`
-	Output    string `json:"output"` // max 500 chars, combined stderr+stdout
+	Output    string `json:"output"`           // max 500 chars, combined stderr+stdout (kept for compat)
+	Stdout    string `json:"stdout,omitempty"` // max 500 chars
+	Stderr    string `json:"stderr,omitempty"` // max 500 chars
 }

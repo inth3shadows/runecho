@@ -8,5 +8,6 @@ type ClassifierEntry struct {
 	Route     string `json:"route"`
 	Source    string `json:"source"`
 	LatencyMS int64  `json:"latency_ms"`
+	CacheHit  bool   `json:"cache_hit,omitempty"`
 	Error     string `json:"error,omitempty"`
 }

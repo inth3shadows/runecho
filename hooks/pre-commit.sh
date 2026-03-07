@@ -15,20 +15,24 @@ STAGED=$(git diff --cached --name-only 2>/dev/null || true)
 
 command -v ai-task >/dev/null 2>&1 || { echo "[pre-commit] ai-task not found — skipping task auto-close" >&2; exit 0; }
 
-# Detect python3 (skip Windows Store stub which exits non-zero without running)
-PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+# Detect Python — on Windows, 'py' (launcher) works where 'python3' is a Store stub
+PYTHON=$(command -v py 2>/dev/null || command -v python 2>/dev/null || command -v python3 2>/dev/null || true)
 if [ -z "$PYTHON" ] || ! "$PYTHON" -c "import sys; sys.exit(0)" 2>/dev/null; then
-  echo "[pre-commit] python3 not found or non-functional — skipping task auto-close" >&2
+  echo "[pre-commit] python not found or non-functional — skipping task auto-close" >&2
   exit 0
 fi
 
 "$PYTHON" - <<'PYEOF'
 import json, subprocess, sys, os, fnmatch
 
+# Ensure ~/bin is in PATH so ai-task is found in subprocesses
+_home = os.environ.get("HOME", os.path.expanduser("~"))
+os.environ["PATH"] = _home + "/bin" + os.pathsep + os.environ.get("PATH", "")
+
 tasks_file = ".ai/tasks.json"
 staged = subprocess.check_output(["git", "diff", "--cached", "--name-only"]).decode().splitlines()
 
-with open(tasks_file) as f:
+with open(tasks_file, encoding="utf-8") as f:
     data = json.load(f)
 
 tasks = data if isinstance(data, list) else data.get("tasks", [])
@@ -68,7 +72,7 @@ for task in tasks:
         verify, shell=True, capture_output=True, text=True, cwd=os.getcwd()
     )
     if result.returncode == 0:
-        subprocess.run(["ai-task", "update", tid, "done"], check=False, capture_output=True)
+        subprocess.run(f"ai-task update {tid} done", shell=True, check=False, capture_output=True)
         closed.append(tid)
         title = task.get("title", tid)[:60]
         print(f"[pre-commit] ✓ #{tid} closed — {title}", file=sys.stderr)

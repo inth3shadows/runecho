@@ -9,15 +9,20 @@ Each entry: F/M label · commit SHA · binary (if new) · what changed and why.
 
 ## [Unreleased]
 
-### F10 — Local Result Cache
-**Prerequisites:** complete (F10-pre, commit `98ab949`)
+---
 
-**Cache key:** `(ir_hash, prompt_hash, model, task_id)` — `task_id` required to prevent cross-task collisions
+## [F10] — Local Result Cache
 
-**Deliverables:**
-- SQLite cache table in `.ai/history.db` — no new dependency
-- Cache read/write in `ai-context compile`; TTL invalidation on IR hash change
-- `ai-context --no-cache` escape hatch
+**Commit:** pending | **No new binary**
+
+**What shipped:**
+- `internal/schema/ai_result_cache.go` — `AIResultCacheEntry` canonical type
+- `internal/context/ai_result_cache.go` — `AIResultCache`: SQLite-backed cache with `OpenAIResultCache`, `Get`, `Put`, `Invalidate`, `Close`; 24h TTL; WAL+NORMAL pragmas; auto-evicts on open
+- `internal/context/ai_result_cache_test.go` — 5 tests: PutGet, KeyIsolation, Invalidate, TTLExpiry, Upsert
+
+**Cache key:** `(ir_hash, prompt_hash, model, task_id)` — `task_id` required to prevent cross-task collisions; `ir_hash` is primary freshness signal
+
+**Not yet wired:** `ai-context compile` integration and `--no-cache` escape hatch are future work (require pipeline exec scaffolding first).
 
 ---
 

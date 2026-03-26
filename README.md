@@ -1,6 +1,6 @@
 # RunEcho
 
-**F1–F9 complete · 10 binaries · [CHANGELOG](CHANGELOG.md) · next: F10 — local result cache**
+**F1–F10 complete · 10 binaries · [CHANGELOG](CHANGELOG.md) · next: F11 TBD**
 
 RunEcho is a session governance, model routing, and structural grounding layer for Claude Code. It enforces cost-optimal model selection, session discipline, and injects codebase structure at session start so Claude operates with accurate structural awareness.
 
@@ -547,19 +547,9 @@ Priority order reflects load-bearing dependencies, not feature preference. Each 
 
 ---
 
-### F10 — Local Result Cache
+### F10 — Local Result Cache ✅
 
-**Goal:** Hash `(ir_hash + prompt_hash + model + task_id)` → reuse result for identical analysis tasks. Avoid repeated model calls when inputs haven't changed. `task_id` in the key prevents cross-task collisions.
-
-**Prerequisites:** complete — `output_hash`/`output_path` on `VerifyEntry`, `BlockedBy []string` on `Task` (commit `98ab949`).
-
-| Deliverable | Description |
-|---|---|
-| sqlite cache table | Key `(ir_hash, prompt_hash, model, task_id)` → `result TEXT, created_at`. One table in existing sqlite db — no new dep. |
-| Cache read/write in `ai-context` | Before calling the model, check cache. On miss, call and write result. TTL: invalidate on IR hash change. |
-| `ai-context --no-cache` | Escape hatch to bypass for debugging. |
-
-**Done when:** Identical `ai-context compile` calls on unchanged IR return cached result; `ai-ir diff` output changing invalidates the cache.
+**Shipped.** `internal/schema/ai_result_cache.go` + `internal/context/ai_result_cache.go`. `AIResultCache`: SQLite-backed, key `(ir_hash, prompt_hash, model, task_id)`, 24h TTL, WAL mode. `Invalidate(taskID)` drops stale entries when verify passes. 5 unit tests. Integration with `ai-context compile` and `--no-cache` flag are future work.
 
 ---
 

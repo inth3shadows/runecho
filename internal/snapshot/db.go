@@ -27,11 +27,37 @@ func Open(path string) (*DB, error) {
 		conn.Close()
 		return nil, err
 	}
+	if err := db.integrityCheck(); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	if err := db.migrate(); err != nil {
 		conn.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+// integrityCheck runs PRAGMA quick_check (cheaper than integrity_check, sufficient
+// for catching corruption on open). Durability guarantee: never serve a corrupt DB.
+func (db *DB) integrityCheck() error {
+	var result string
+	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
+		return fmt.Errorf("quick_check: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity check failed: %s", result)
+	}
+	return nil
+}
+
+// BackupTo writes an atomic, consistent single-file backup using VACUUM INTO.
+// The destination must not already exist (SQLite requirement).
+func (db *DB) BackupTo(path string) error {
+	if _, err := db.conn.Exec("VACUUM INTO ?", path); err != nil {
+		return fmt.Errorf("vacuum into %q: %w", path, err)
+	}
+	return nil
 }
 
 func (db *DB) setPragmas() error {
@@ -47,7 +73,49 @@ func (db *DB) setPragmas() error {
 	return nil
 }
 
+// migration brings the schema from version N to N+1, where N is its index in the
+// migrations slice. Each runs in its own transaction; user_version is bumped only
+// on commit, so a partial upgrade can never leave a torn schema.
+type migration func(*sql.Tx) error
+
+var migrations = []migration{
+	migrateV1, // 0 → 1: baseline snapshots/files/symbols
+	migrateV2, // 1 → 2: central-store repos registry + snapshots.repo_id
+}
+
+// SchemaVersion is the latest schema version this binary understands.
+var SchemaVersion = len(migrations)
+
 func (db *DB) migrate() error {
+	var current int
+	if err := db.conn.QueryRow("PRAGMA user_version").Scan(&current); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	if current > len(migrations) {
+		return fmt.Errorf("db schema version %d is newer than this binary supports (%d); upgrade runecho", current, len(migrations))
+	}
+	for v := current; v < len(migrations); v++ {
+		tx, err := db.conn.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %w", v+1, err)
+		}
+		if err := migrations[v](tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migrate to v%d: %w", v+1, err)
+		}
+		// PRAGMA user_version cannot be parameterized; v+1 is a trusted loop index.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version %d: %w", v+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", v+1, err)
+		}
+	}
+	return nil
+}
+
+func migrateV1(tx *sql.Tx) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS snapshots (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,10 +147,34 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)`,
 	}
+	return execAll(tx, stmts)
+}
 
+// migrateV2 introduces the central-store repos registry. snapshots.repo_id is the
+// stable identity spine: a repo keeps its id across path moves, and all reads scope
+// by repo_id instead of the root path string. Existing rows get repo_id=NULL (the
+// central store starts empty, so there are none in practice).
+func migrateV2(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS repos (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			name         TEXT NOT NULL UNIQUE,
+			path         TEXT NOT NULL UNIQUE,
+			file_cap     INTEGER NOT NULL DEFAULT 0,
+			enrolled_at  TEXT NOT NULL,
+			last_indexed TEXT,
+			parse_errors INTEGER NOT NULL DEFAULT 0
+		)`,
+		`ALTER TABLE snapshots ADD COLUMN repo_id INTEGER REFERENCES repos(id)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_repo ON snapshots(repo_id)`,
+	}
+	return execAll(tx, stmts)
+}
+
+func execAll(tx *sql.Tx, stmts []string) error {
 	for _, s := range stmts {
-		if _, err := db.conn.Exec(s); err != nil {
-			return fmt.Errorf("migrate: %w", err)
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("exec %q: %w", s, err)
 		}
 	}
 	return nil

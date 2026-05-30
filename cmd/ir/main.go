@@ -145,13 +145,18 @@ func runSnapshot(args []string) {
 
 	root := resolveRoot(fs.Args())
 	irData := mustLoadIR(root)
-	db := mustOpenDB(root)
+	db := mustOpenDB()
 	defer db.Close()
 
-	id, err := db.SaveSnapshot(*sessionID, *label, root, irData)
+	repoID := resolveRepoForWrite(db, root)
+	id, err := db.SaveSnapshot(repoID, *sessionID, *label, root, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	// Record the capture point (self-observing: last_indexed staleness).
+	if err := db.TouchRepo(repoID, time.Now(), 0); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	shortHash := irData.RootHash
 	if len(shortHash) > 12 {
@@ -170,7 +175,7 @@ func runDiff(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(positionalAfterFlags(fs.Args()))
-	db := mustOpenDB(root)
+	db := mustOpenDB()
 	defer db.Close()
 
 	var result snapshot.DiffResult
@@ -178,7 +183,12 @@ func runDiff(args []string) {
 	if *since != "" {
 		// --since mode: A = last snapshot by label, B = live ir.json.
 		_ = sessionID // future: filter by session if needed
-		meta, err := db.GetLatestByLabel(root, *since)
+		repoID := lookupRepoID(db, root)
+		if repoID < 0 {
+			fmt.Fprintf(os.Stderr, "Repo %q is not enrolled (no snapshots yet)\n", root)
+			os.Exit(0)
+		}
+		meta, err := db.GetLatestByLabel(repoID, *since)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -245,10 +255,15 @@ func runLog(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	db := mustOpenDB(root)
+	db := mustOpenDB()
 	defer db.Close()
 
-	metas, err := db.List(root, *n)
+	repoID := lookupRepoID(db, root)
+	if repoID < 0 {
+		fmt.Println("No snapshots found.")
+		return
+	}
+	metas, err := db.List(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -283,8 +298,15 @@ func runVerify(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	db := mustOpenDB(root)
+	db := mustOpenDB()
 	defer db.Close()
+
+	repoID := lookupRepoID(db, root)
+	if repoID < 0 {
+		fmt.Println("No session-start snapshot found.")
+		fmt.Println("Run: ai-ir snapshot --label=session-start")
+		os.Exit(0)
+	}
 
 	var meta *snapshot.SnapshotMeta
 	var err error
@@ -292,7 +314,7 @@ func runVerify(args []string) {
 	if *sessionID != "" {
 		// Find session-start for this specific session.
 		// GetLatestByLabel doesn't filter by session, so we use List and filter.
-		metas, listErr := db.List(root, 100)
+		metas, listErr := db.List(repoID, 100)
 		if listErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", listErr)
 			os.Exit(1)
@@ -304,7 +326,7 @@ func runVerify(args []string) {
 			}
 		}
 	} else {
-		meta, err = db.GetLatestByLabel(root, "session-start")
+		meta, err = db.GetLatestByLabel(repoID, "session-start")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -373,10 +395,15 @@ func runChurn(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	db := mustOpenDB(root)
+	db := mustOpenDB()
 	defer db.Close()
 
-	report, err := db.Churn(root, *n)
+	repoID := lookupRepoID(db, root)
+	if repoID < 0 {
+		fmt.Println("No snapshots found.")
+		return
+	}
+	report, err := db.Churn(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -521,18 +548,81 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// mustOpenDB opens .ai/history.db from root or exits.
-func mustOpenDB(root string) *snapshot.DB {
-	aiDir := filepath.Join(root, ".ai")
-	if err := os.MkdirAll(aiDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create .ai dir: %v\n", err)
-		os.Exit(1)
+// runechoDir resolves the central store directory: $RUNECHO_HOME if set
+// (isolation/testing seam), else ~/.runecho.
+func runechoDir() (string, error) {
+	if h := os.Getenv("RUNECHO_HOME"); h != "" {
+		return h, nil
 	}
-	dbPath := filepath.Join(aiDir, "history.db")
-	db, err := snapshot.Open(dbPath)
+	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to open snapshot DB: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".runecho"), nil
+}
+
+// mustOpenDB opens the central snapshot store (~/.runecho/history.db) or exits.
+// History is centralized so the oracle serves all enrolled repos from one
+// durable, integrity-checked store; the working ir.json stays repo-local.
+func mustOpenDB() *snapshot.DB {
+	dir, err := runechoDir()
+	if err != nil {
+		fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fatal(fmt.Errorf("create %s: %w", dir, err))
+	}
+	db, err := snapshot.Open(filepath.Join(dir, "history.db"))
+	if err != nil {
+		fatal(fmt.Errorf("open snapshot DB: %w", err))
 	}
 	return db
+}
+
+// resolveRepoForWrite returns the repo_id for root, auto-enrolling on first write
+// (snapshot). Name defaults to the path basename, disambiguated with a numeric
+// suffix on collision; use `repo add --name` for a chosen label (Stage 2).
+func resolveRepoForWrite(db *snapshot.DB, root string) int64 {
+	repo, err := db.GetRepoByPath(root)
+	if err != nil {
+		fatal(err)
+	}
+	if repo != nil {
+		return repo.ID
+	}
+	base := filepath.Base(root)
+	name := base
+	for i := 2; ; i++ {
+		existing, err := db.GetRepoByName(name)
+		if err != nil {
+			fatal(err)
+		}
+		if existing == nil {
+			break
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+	}
+	id, err := db.EnrollRepo(name, root, 0)
+	if err != nil {
+		fatal(err)
+	}
+	return id
+}
+
+// lookupRepoID returns the repo_id for root, or -1 if never enrolled. Read
+// commands treat -1 as "no history for this repo".
+func lookupRepoID(db *snapshot.DB, root string) int64 {
+	repo, err := db.GetRepoByPath(root)
+	if err != nil {
+		fatal(err)
+	}
+	if repo == nil {
+		return -1
+	}
+	return repo.ID
+}
+
+func fatal(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
 }

@@ -180,6 +180,39 @@ func execAll(tx *sql.Tx, stmts []string) error {
 	return nil
 }
 
+// HealthInfo summarizes store-wide health (self-observing guarantee).
+type HealthInfo struct {
+	SchemaVersion int    `json:"schema_version"`
+	Integrity     string `json:"integrity"` // "ok" or the failure detail
+	RepoCount     int    `json:"repo_count"`
+}
+
+// Health reports schema version, integrity (live quick_check), and repo count.
+func (db *DB) Health() (HealthInfo, error) {
+	var h HealthInfo
+	if err := db.conn.QueryRow("PRAGMA user_version").Scan(&h.SchemaVersion); err != nil {
+		return h, fmt.Errorf("read user_version: %w", err)
+	}
+	var qc string
+	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&qc); err != nil {
+		return h, fmt.Errorf("quick_check: %w", err)
+	}
+	h.Integrity = qc
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM repos").Scan(&h.RepoCount); err != nil {
+		return h, fmt.Errorf("count repos: %w", err)
+	}
+	return h, nil
+}
+
+// CountSnapshots returns the number of snapshots stored for repoID.
+func (db *DB) CountSnapshots(repoID int64) (int, error) {
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM snapshots WHERE repo_id = ?`, repoID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count snapshots: %w", err)
+	}
+	return n, nil
+}
+
 // Close closes the underlying connection.
 func (db *DB) Close() error {
 	return db.conn.Close()

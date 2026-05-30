@@ -1,165 +1,136 @@
-# Technical Architecture
+# Technical Reference: RunEcho
 
-## Overview
+## Architecture
 
-RunEcho is a Go-based session governance and model routing layer for Claude Code. It enforces cost-optimal model selection, injects codebase structure into session context, and produces durable execution records. Seven binaries, ten hooks, and one shared state directory compose a fully automated pipeline that fires on every Claude Code session without user intervention.
-
-## Binary Inventory
-
-| Binary | Package | Role |
-|--------|---------|------|
-| `ai-ir` | `cmd/ir` | Indexes source files → `.ai/ir.json`; manages SQLite snapshot history; structural diff |
-| `ai-session` | `cmd/session` | Parses Claude Code JSONL log → ground-truth handoff (files, commands, cost, tokens) |
-| `ai-document` | `cmd/document` | Generates/updates README.md, TECHNICAL.md, USAGE.md via haiku; change-gated |
-| `ai-task` | `cmd/task` | Persistent task ledger (`.ai/tasks.json`); dependency graph; CONTRACT.yaml generation |
-| `ai-context` | `cmd/context` | Compiles turn-1 context block within a token budget; Provider interface |
-| `ai-governor` | `cmd/governor` | Session governor + model router; called from `session-governor.sh` |
-| `ai-pipeline` | `cmd/pipeline` | Declarative pipeline render + execution envelope recording |
-
-## Hook Chain
-
-All hooks are bash scripts in `hooks/`, symlinked to `~/.claude/hooks/`.
-
-| Hook | Event | Timeout | Role |
-|------|-------|---------|------|
-| `session-governor.sh` | UserPromptSubmit | 5s | Exec wrapper → `ai-governor`; injects turn/cost/routing text |
-| `ir-injector.sh` | UserPromptSubmit | 5s | Runs `ai-ir`; calls `ai-context` for full turn-1 context block |
-| `model-enforcer.sh` | PreToolUse[Task] | 5s | Denies Task tool calls using wrong model vs. route decision |
-| `destructive-bash-guard.sh` | PreToolUse[Bash] | 3s | Hard-denies `rm -rf /`, fork-bombs, `mkfs`; approval-gates `rm -rf`, DDL drops |
-| `scope-guard.sh` | PreToolUse[Edit\|Write] | 3s | Always blocks settings/hooks/env/key files; enforces `.ai/scope-lock.json` when present |
-| `stop-checkpoint.sh` | Stop | 5s | Writes `.ai/checkpoint.json`; queues `IR_DRIFT` + `HALLUCINATION` pending-fault signals |
-| `session-end.sh` | SessionEnd | 5s | Re-index → snapshot → scope-drift → envelope → ai-session → ai-document pipeline |
-| `constraint-reinjector.sh` | SessionStart[compact] | 3s | Re-injects routing directives + active constraints after `/compact` |
-| `pre-compact-snapshot.sh` | PreCompact | 3s | Captures state snapshot immediately before compaction |
-| `fault-emitter.sh` | (sourced) | — | Shared `emit_fault()` function; appends structured JSON to `.ai/faults.jsonl` |
-
-## Internal Packages
-
-### `internal/governor`
-Session governor logic extracted to Go for testability. Key responsibilities:
-- **Turn counter** — per-session increment in `.governor-state/{session_id}.turns`
-- **Session cost** — reads `~/.claude/projects/.../\*.jsonl` for cumulative USD cost
-- **LLM classifier** — haiku call to classify prompt intent; writes log to `.governor-state/classifier-log.jsonl`
-- **Regex fallback** — keyword matching when classifier key absent
-- **Fault emission** — `EmitFault()` writes structured JSON to `.ai/faults.jsonl` (mirrors `fault-emitter.sh`)
-- **Route persistence** — writes route decision to `.governor-state/{session_id}.route`
-- **Pipeline integration** — calls `pipeline.Load(cwd)` + `pipeline.RenderText(p)` for `RoutePipeline`; falls back to hardcoded text on error
-
-### `internal/pipeline`
-Declarative pipeline system added in M5.
-
-**Types:** `Pipeline` (name, description, stages), `Stage` (id, model, token_budget, scope, verify, description), `Envelope` (session execution record), `StageResult` (per-stage outcome).
-
-**Loader:** `Load(root)` reads `.ai/pipelines/default.yaml`; falls back to `DefaultPipeline()` if missing. `LoadNamed(root, name)` for named pipelines. Calls `Validate()` on load.
-
-**Renderer:** `RenderText(p)` produces MODEL ROUTER injection text from stage definitions. Model labels: haiku → "haiku subagents", opus → "opus subagent", sonnet → "you, Sonnet".
-
-**Envelope:** `AppendEnvelope(root, env)` appends to `.ai/executions.jsonl`; idempotent by `session_id`. `FaultsForSession(root, sessionID)` reads `faults.jsonl` and returns deduplicated signal names for the session.
-
-**Validate:** enforces non-empty name, at least one stage, each stage has id and valid model (haiku/sonnet/opus).
-
-### `internal/ir`
-AST-based codebase indexer. Produces `.ai/ir.json`: file list + all exported symbols (functions, types, interfaces, constants, variables). Extensible via `Parser` interface (`internal/parser/`). Currently supports JS/TS, Go, Python. IR hash is SHA-256 of full content — deterministic.
-
-### `internal/snapshot`
-SQLite-backed snapshot store. One record per `ai-ir snapshot` call. `diff` computes structural delta between two snapshots: added/removed/modified files and symbols. Used by `ai-ir verify` to produce a diff summary for `session-end.sh`.
-
-### `internal/context`
-Context compiler with `Provider` interface. `DefaultProviders` order: contract → ir → gitdiff → handoff → tasks → churn → review. Each provider returns a `Block` (header + content + token estimate). Compiler applies budget constraint; providers exceeding budget are truncated or dropped.
-
-### `internal/contract`
-`Contract` type with list-valued fields (`scope`, `assumptions`, `non_goals`, `success`). YAML serialization via `gopkg.in/yaml.v3`. `FromTask()` builds a minimal contract from task fields. `Validate()` checks required fields. `ContractProvider` reads `.ai/CONTRACT.yaml`; falls back to task-derived output.
-
-### `internal/session`
-Reads Claude Code JSONL logs from `~/.claude/projects/.../*.jsonl`. Extracts ground-truth facts: files edited/created (Edit/Write tool calls), commands run (Bash calls), token counts and cost (usage fields), duration. Calls haiku to summarize session narrative. Writes `.ai/handoff.md` with front-matter (YAML between `---` delimiters).
-
-### `internal/document`
-Generates project docs using haiku. `DocStatus` tracks whether each doc needs create or update. Token budget for update mode scales with existing doc size (bytes/4 × 1.3, floor 800, cap 8000). Change-gated: skips if all configured docs exist and IR diff is empty.
-
-## State Layout
+RunEcho is a small Go program built around one idea: a **deterministic structural
+fact table** for source code, plus durable history of it, queryable by humans
+(CLI) and by AI agents (MCP).
 
 ```
-~/.claude/hooks/.governor-state/
-  {session_id}.turns          # turn counter (plain integer)
-  {session_id}.route          # last route decision ("haiku"|"sonnet"|"opus"|"pipeline")
-  {session_id}.pending-faults # queued IR_DRIFT/HALLUCINATION signals (JSONL)
-  classifier-log.jsonl        # LLM classifier call log
-
-{project}/.ai/
-  ir.json                     # current codebase IR (file list + symbols + root_hash)
-  history.db                  # SQLite snapshot store
-  faults.jsonl                # append-only fault signal log
-  progress.jsonl              # append-only session progress records
-  executions.jsonl            # append-only pipeline execution envelopes (M5)
-  handoff.md                  # last session handoff (front-matter + narrative)
-  checkpoint.json             # last-response state (turn, ir_hash, last_message)
-  tasks.json                  # task ledger
-  CONTRACT.yaml               # active session contract (scope, success criteria)
-  churn-cache.txt             # top-N churn files (written at session-end for turn-1 injection)
-  pipelines/
-    default.yaml              # pipeline definition (optional; falls back to DefaultPipeline())
-  agents/
-    explorer.yaml             # haiku persona
-    implementer.yaml          # sonnet persona
-    architect.yaml            # opus persona
+                 ┌─────────────┐
+  source files ─▶│  parser     │  per-language: imports/functions/classes/exports
+                 └──────┬──────┘
+                        ▼
+                 ┌─────────────┐
+                 │  ir         │  IR{Version, RootHash, Files{path: {Hash, ...}}}
+                 │  (hashed)   │  deterministic SHA-256 root hash
+                 └──────┬──────┘
+                        ▼
+                 ┌─────────────────────────────┐
+                 │  snapshot (central store)   │  ~/.runecho/history.db (SQLite/WAL)
+                 │  repos · snapshots · files  │  versioned schema, integrity-checked
+                 │  · symbols                  │
+                 └──────┬───────────────┬──────┘
+                        │               │
+           runecho-ir (CLI)      runecho-mcp (stdio MCP)
 ```
 
-## Fault Signal Schema
+Key design decisions:
 
-All faults written to `.ai/faults.jsonl` by `EmitFault()` (Go) or `emit_fault()` (bash):
+- **Determinism over fuzziness.** No embeddings, no similarity. The IR is a flat,
+  sorted, hashable fact table. "Same code → byte-identical IR" is a tested
+  guarantee, which is what lets an agent trust the answer.
+- **One central store, not per-repo DBs.** A single `~/.runecho/history.db` holds
+  every enrolled repo's history. One integrity boundary, one backup, atomic
+  cross-repo queries.
+- **Stable repo identity.** Snapshots carry a `repo_id` foreign key to a `repos`
+  table, so a repo keeps its identity (and history) even if its path moves. Reads
+  scope by `repo_id`, never by the volatile root-path string.
+- **The oracle never answers from a cache.** `runecho-mcp` and the CLI's
+  `snapshot`/`diff`/`verify` build a *fresh* IR on every call. `.ai/ir.json` is
+  only an incremental working artifact maintained by `runecho-ir index`.
 
-```json
-{"signal":"IR_DRIFT","value":3,"context":"3 files changed","workspace":"/path","session_id":"abc","ts":"2026-01-01T00:00:00Z"}
+## File Descriptions
+
+| Path | Role | Depends on |
+|---|---|---|
+| `internal/parser/{go,js,python}.go` | Extract top-level structure per language via the `Parser` interface | — (leaf) |
+| `internal/ir/generator.go` | Walk a tree, parse files, build IR; `Generate` (full) and `Update` (incremental, hash-gated) | `parser` |
+| `internal/ir/hasher.go` | `HashFile`, `HashBytes`, `ComputeRootHash` (sorted `path:hash` pairs → SHA-256) | — |
+| `internal/ir/storage.go` | Canonical JSON marshal (sorted) + `Save`/`Load` of `.ai/ir.json` | — |
+| `internal/snapshot/db.go` | `Open` (pragmas, `quick_check`, migrations), versioned `migrate`, `Health`, `BackupTo` | `ir` |
+| `internal/snapshot/registry.go` | `repos` table CRUD: `EnrollRepo`, `GetRepoBy*`, `ListRepos`, `TouchRepo`, `PurgeRepo` | — |
+| `internal/snapshot/snapshot.go` | `SaveSnapshot`, `List`, `GetByID`, `GetLatestByLabel` (all repo-scoped) | `ir` |
+| `internal/snapshot/diff.go` | `Diff`, `DiffLive`, formatters | — |
+| `internal/snapshot/churn.go` | `Churn` over the last N snapshots | — |
+| `internal/mcp/server.go` | Minimal stdio JSON-RPC 2.0 MCP server | — |
+| `internal/mcp/tools_oracle.go` | The five oracle tools, wired to `ir` + `snapshot` | `ir`, `snapshot` |
+| `cmd/runecho-ir/main.go` | CLI entrypoint and subcommand dispatch | `ir`, `snapshot` |
+| `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
+
+## The MCP Oracle Tools
+
+All tools are read-only and resolve a repo by its enrolled **name**. The server
+speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`).
+
+| Tool | Args | Returns |
+|---|---|---|
+| `structure` | `repo` | Files + symbols of the live IR, with counts |
+| `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) | Structural drift; default is latest snapshot vs live |
+| `hash` | `repo` | Deterministic root hash + file count |
+| `status` | `repo` | last-indexed, staleness, parse errors, snapshot count, latest stored hash, file cap |
+| `health` | — | Schema version, live integrity check, repo count, db path |
+
+A `diff` with explicit `a`/`b` rejects snapshot ids that belong to a different
+repo — diffs never cross repo boundaries.
+
+## Storage Schema
+
+SQLite at `~/.runecho/history.db` (override dir with `RUNECHO_HOME`). Schema
+version is tracked in `PRAGMA user_version`; migrations run in order inside
+transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
+
+- `repos(id, name UNIQUE, path UNIQUE, file_cap, enrolled_at, last_indexed, parse_errors)`
+- `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
+- `files(id, snapshot_id → snapshots, path, content_hash)`
+- `symbols(id, file_id → files, name, kind)`
+
+WAL is enabled; the connection pool is capped to a single connection, so writes
+and reads are serialized — there are no torn reads (verified by a `-race`
+concurrency test). `Open` runs `PRAGMA quick_check` and refuses a corrupt or
+newer-than-supported database.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RUNECHO_HOME` | `~/.runecho` | Directory for `history.db` and backups (isolation / testing seam) |
+| `RUNECHO_BIN_DIR` | `~/.local/bin` | Install target used by `install.sh` |
+| `RUNECHO_GUARD_SKIP` | — | Reserved for a future commit-guard bypass |
+
+## Deployment
+
+This is a local developer tool, not a service.
+
+```bash
+bash install.sh                              # build both binaries → $RUNECHO_BIN_DIR
+claude mcp add runecho -- ~/.local/bin/runecho-mcp   # register with Claude Code
+# Codex: add [mcp_servers.runecho] command = "~/.local/bin/runecho-mcp" to ~/.codex/config.toml
 ```
 
-| Signal | Emitted by | Meaning |
-|--------|-----------|---------|
-| `IR_DRIFT` | `stop-checkpoint.sh` | Files changed since session-start snapshot |
-| `HALLUCINATION` | `stop-checkpoint.sh` | Claude referenced a symbol not in IR |
-| `TURN_FATIGUE` | `ai-governor` | Turn threshold crossed (15/25/35) |
-| `COST_FATIGUE` | `ai-governor` | Cost threshold crossed ($1/$3/$8) |
-| `OPUS_BLOCKED` | `ai-governor` | Opus/pipeline downgraded due to cost cap |
-| `SCOPE_DRIFT` | `session-end.sh` | Files changed outside task's declared scope |
+Rollback: `claude mcp remove runecho`, delete the Codex block, and remove the
+binaries from `$RUNECHO_BIN_DIR`. The store at `~/.runecho/` is untouched by
+uninstall and can be deleted separately.
 
-## Pipeline Execution Flow
+## Maintenance Commands
 
-```
-UserPromptSubmit
-  ├── session-governor.sh → ai-governor
-  │     ├── classifyOrRoute() → Route
-  │     ├── if RoutePipeline: pipeline.Load(cwd) → pipeline.RenderText()
-  │     └── assembleOutput() → injection text → Claude context
-  └── ir-injector.sh → ai-context → IR + contract + handoff + tasks block
-
-[Claude session runs]
-
-Stop (each turn)
-  └── stop-checkpoint.sh → checkpoint.json + pending-faults
-
-SessionEnd
-  └── session-end.sh
-        ├── ai-ir (re-index + snapshot + churn-cache)
-        ├── scope-drift detection → faults.jsonl
-        ├── ai-pipeline envelope (if route=pipeline) → executions.jsonl
-        ├── ai-session → handoff.md + progress.jsonl
-        └── ai-document → README.md / TECHNICAL.md / USAGE.md
+```bash
+go build ./... && go vet ./... && go test ./...   # full verification
+go test -race ./internal/snapshot/                # concurrency safety
+go test -run=x -fuzz=FuzzJSParser ./internal/parser   # parser fuzzing
+runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
+runecho-ir repo list                              # enrolled repos + index state
 ```
 
-## Cost Model
+## Known Limitations
 
-| Model | Role | Trigger |
-|-------|------|---------|
-| Haiku | Eyes: search, read, summarize, classify | Cheap tasks; also used for LLM classification |
-| Sonnet | Hands: code writing, bug fixes, direct edits | Default; handles all non-delegated work |
-| Opus | Brain: architecture, trade-offs, root cause | Complex reasoning; blocked above $8/session |
-| Pipeline | All three in sequence | Multi-step implementation (haiku explore → opus design → sonnet implement) |
-
-## Key Design Decisions
-
-**Why inject routing text into Claude's context rather than intercept API calls?** Claude Code routes requests through the API itself; there is no interception point at the application layer. Injecting routing directives into the LLM's context causes Claude to route itself — the model follows its own instructions. This works because Claude Code executes Task tool calls according to the `model` parameter, and the governor's injected text tells Claude which model to use.
-
-**Why Go binaries rather than bash scripts?** Bash scripts are hard to test, have edge cases on different shells and OS versions, and accumulate complexity silently. Go gives typed data structures, unit tests, and cross-platform builds. Hooks remain bash (10–30 lines each) as exec wrappers — they handle the Claude Code protocol (stdin/stdout/exit codes) and delegate all logic to Go.
-
-**Why append-only JSONL for fault signals, progress, and envelopes?** JSONL files are human-readable, grep-able, and trivially appendable without parsing the entire file. Idempotency guards (session_id substring search before write) prevent duplicates without requiring a database.
-
-**Why `DefaultPipeline()` as a fallback rather than requiring the YAML file?** The governor must never block a session. If `.ai/pipelines/default.yaml` is absent or malformed, `Load()` returns a valid in-memory pipeline identical to the hardcoded `routeText[RoutePipeline]`. The fallback chain is: YAML file → DefaultPipeline() → hardcoded string (governor error path only).
+- **Languages:** Go, JS/TS, Python only. Parsers are regex/AST-shallow — top-level
+  symbols, not nested scopes.
+- **File cap is advisory.** `repo add --cap N` is recorded and a warning is logged
+  when a repo exceeds it, but indexing is not yet truncated (enforcement needs a
+  generator change). Coverage is reported honestly; it is never silently capped.
+- **Single-connection store.** Correct and torn-read-free, but reads do not run
+  concurrently with writes. Fine at single-operator scale; not built for many
+  concurrent indexers.
+- **`coverage %`** is not computed (the generator does not yet count skipped vs
+  supported files); `status` reports indexed file count and parse errors instead.

@@ -4,3 +4,11 @@
 *.json  text eol=lf
 *.mod   text eol=lf
 *.sum   text eol=lf
+
+# Source extensions the IR parser hashes (js.go: .js/.ts/.gs, python.go: .py).
+# Content is hashed verbatim, so pin LF to keep root_hash deterministic across
+# OS — a CRLF checkout would otherwise hash differently. See HashFile (F6).
+*.js    text eol=lf
+*.ts    text eol=lf
+*.gs    text eol=lf
+*.py    text eol=lf

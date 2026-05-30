@@ -75,7 +75,7 @@ func main() {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: runecho-ir [root-path]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir snapshot [--label=manual] [--session=<id>] [root]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir diff [--since=<label>] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir diff [--since=<label>] [--compact] [--json] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
@@ -362,6 +362,7 @@ func runDiff(args []string) {
 	since := fs.String("since", "", "diff since latest snapshot with this label vs live ir.json")
 	sessionID := fs.String("session", "", "filter by session ID (used with --since)")
 	compact := fs.Bool("compact", false, "single-line compact output")
+	asJSON := fs.Bool("json", false, "machine-readable JSON (parity with the MCP diff tool)")
 	fs.Parse(args)
 
 	root := resolveRoot(positionalAfterFlags(fs.Args()))
@@ -434,12 +435,22 @@ func runDiff(args []string) {
 		}
 	}
 
-	if *compact {
+	switch {
+	case *asJSON:
+		// Same shape as the MCP `diff` oracle tool (snapshot.DiffPayload), so a
+		// machine consumer like the harness gate parses one stable contract.
+		out, err := json.MarshalIndent(snapshot.DiffPayload(result), "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(out))
+	case *compact:
 		line := snapshot.FormatCompact(result)
 		if line != "" {
 			fmt.Println(line)
 		}
-	} else {
+	default:
 		fmt.Print(snapshot.FormatFull(result))
 	}
 }

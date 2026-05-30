@@ -181,6 +181,12 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	// Reject a half-specified pair: with only one of a/b the request would
+	// silently fall through to latest-vs-live and answer a different question.
+	if (a.A != nil) != (a.B != nil) {
+		return "", fmt.Errorf("diff requires both `a` and `b` snapshot ids together, or neither")
+	}
+
 	var result snapshot.DiffResult
 
 	switch {

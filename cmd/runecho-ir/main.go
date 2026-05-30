@@ -421,6 +421,12 @@ func runDiff(args []string) {
 			fmt.Fprintf(os.Stderr, "Snapshot %d not found\n", idB)
 			os.Exit(1)
 		}
+		// A diff must never cross repo boundaries (parity with the MCP oracle's
+		// scopedSnapshot). RepoID 0 means an unowned/legacy snapshot — refuse it.
+		if metaA.RepoID == 0 || metaA.RepoID != metaB.RepoID {
+			fmt.Fprintf(os.Stderr, "Refusing cross-repo diff: snapshots %d and %d are not in the same enrolled repo\n", idA, idB)
+			os.Exit(1)
+		}
 		result, err = db.Diff(*metaA, *metaB)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -117,3 +117,15 @@ func TestOracleUnenrolledRepoErrors(t *testing.T) {
 		t.Fatal("expected error for unenrolled repo")
 	}
 }
+
+// F3: a half-specified pair (only `a`, no `b`) must error, not silently fall
+// through to latest-vs-live and answer a different question.
+func TestOracleDiffPartialPairErrors(t *testing.T) {
+	o, name, _ := newOracleRepo(t)
+	if _, err := o.diff([]byte(`{"repo":"` + name + `","a":1}`)); err == nil {
+		t.Error("diff with only `a` should error, got success")
+	}
+	if _, err := o.diff([]byte(`{"repo":"` + name + `","b":2}`)); err == nil {
+		t.Error("diff with only `b` should error, got success")
+	}
+}

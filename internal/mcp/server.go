@@ -65,33 +65,78 @@ func (s *Server) Register(t Tool) {
 	s.tools[t.Name] = t
 }
 
+// maxRequestBytes bounds a single JSON-RPC request frame. A larger frame is
+// answered with one error and then dropped — an oversized (or malformed-huge)
+// message must never take the oracle down or wedge the stream.
+const maxRequestBytes = 10 * 1024 * 1024
+
 // Serve reads newline-delimited JSON-RPC requests from in and writes responses
-// to out until EOF. Notifications (no id) are processed without a reply.
+// to out until EOF. Notifications (no id) are processed without a reply. The
+// loop is resilient: oversized frames, parse errors, and tool panics are all
+// reported and serving continues.
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	// Allow large request lines (tool args); responses are written directly.
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	r := bufio.NewReaderSize(in, 64*1024)
 	enc := json.NewEncoder(out)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var req request
-		if err := json.Unmarshal(line, &req); err != nil {
-			_ = enc.Encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"),
-				Error: &rpcError{Code: -32700, Message: "parse error"}})
-			continue
-		}
-		resp, reply := s.handle(req)
-		if reply {
-			if err := enc.Encode(resp); err != nil {
-				return fmt.Errorf("write response: %w", err)
+	for {
+		line, tooLong, err := readFrame(r, maxRequestBytes)
+
+		switch {
+		case tooLong:
+			_ = enc.Encode(errFrame(-32600, "request too large"))
+		case len(bytes.TrimSpace(line)) == 0:
+			// blank line (or clean EOF) — nothing to do
+		default:
+			var req request
+			if e := json.Unmarshal(line, &req); e != nil {
+				_ = enc.Encode(errFrame(-32700, "parse error"))
+				break
+			}
+			resp, reply := s.handle(req)
+			if reply {
+				if e := enc.Encode(resp); e != nil {
+					return fmt.Errorf("write response: %w", e)
+				}
 			}
 		}
+
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
 	}
-	return scanner.Err()
+}
+
+// readFrame reads one newline-delimited frame. If the frame exceeds max bytes it
+// is discarded up to the next newline and tooLong is reported, so a giant line
+// never overflows memory or kills the loop. The returned err is io.EOF when the
+// stream ended (line may still hold a final, newline-less frame).
+func readFrame(r *bufio.Reader, max int) (line []byte, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, e := r.ReadSlice('\n')
+		if !tooLong {
+			if len(buf)+len(chunk) > max {
+				tooLong = true
+				buf = nil // stop accumulating; we won't parse an oversized frame
+			} else {
+				buf = append(buf, chunk...) // copy before the next ReadSlice reuses the buffer
+			}
+		}
+		if e == bufio.ErrBufferFull {
+			continue // line longer than the reader buffer; keep draining to '\n'
+		}
+		return buf, tooLong, e
+	}
+}
+
+// errFrame builds an id-less JSON-RPC error response (used before a request id
+// is known: parse errors and oversized frames).
+func errFrame(code int, msg string) response {
+	return response{JSONRPC: "2.0", ID: json.RawMessage("null"),
+		Error: &rpcError{Code: code, Message: msg}}
 }
 
 // handle dispatches one request. The bool is false for notifications (no reply).
@@ -165,13 +210,24 @@ func (s *Server) callTool(id, params json.RawMessage) (response, bool) {
 	if !ok {
 		return s.errResp(id, -32602, "unknown tool: "+p.Name), true
 	}
-	text, err := t.Handler(p.Arguments)
+	text, err := invoke(t, p.Arguments)
 	if err != nil {
 		// Tool-level failure: MCP convention is a result with isError=true so the
 		// model sees the message, not a JSON-RPC transport error.
 		return s.ok(id, toolResult(err.Error(), true)), true
 	}
 	return s.ok(id, toolResult(text, false)), true
+}
+
+// invoke runs a tool handler, converting a panic into an error. The serve loop
+// has no other recovery, so one misbehaving tool must not crash the oracle.
+func invoke(t Tool, args json.RawMessage) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("tool %q panicked: %v", t.Name, r)
+		}
+	}()
+	return t.Handler(args)
 }
 
 func toolResult(text string, isErr bool) map[string]any {

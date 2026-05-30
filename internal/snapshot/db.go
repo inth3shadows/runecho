@@ -65,6 +65,11 @@ func (db *DB) setPragmas() error {
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=NORMAL",
+		// Wait up to 5s for a competing writer instead of failing immediately
+		// with "database is locked" — MaxOpenConns(1) only serializes in-process,
+		// so a second runecho process (CLI write vs. MCP first-run migrate) can
+		// still contend for the write lock.
+		"PRAGMA busy_timeout=5000",
 	} {
 		if _, err := db.conn.Exec(p); err != nil {
 			return fmt.Errorf("pragma %q: %w", p, err)

@@ -9,9 +9,9 @@ import (
 	"github.com/inth3shadows/runecho/internal/ir"
 )
 
-// SaveSnapshot persists a full IR snapshot in a single transaction.
-// Returns the new snapshot ID.
-func (db *DB) SaveSnapshot(sessionID, label, root string, irData *ir.IR) (int64, error) {
+// SaveSnapshot persists a full IR snapshot in a single transaction, scoped to
+// repoID (the stable repo identity). Returns the new snapshot ID.
+func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *ir.IR) (int64, error) {
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
@@ -20,8 +20,8 @@ func (db *DB) SaveSnapshot(sessionID, label, root string, irData *ir.IR) (int64,
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
-		`INSERT INTO snapshots (session_id, label, timestamp, root, root_hash) VALUES (?, ?, ?, ?, ?)`,
-		sessionID, label, ts, root, irData.RootHash,
+		`INSERT INTO snapshots (repo_id, session_id, label, timestamp, root, root_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		repoID, sessionID, label, ts, root, irData.RootHash,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert snapshot: %w", err)
@@ -87,17 +87,17 @@ func (db *DB) SaveSnapshot(sessionID, label, root string, irData *ir.IR) (int64,
 	return snapshotID, nil
 }
 
-// GetLatestByLabel returns the most recent snapshot for root with the given label.
+// GetLatestByLabel returns the most recent snapshot for repoID with the given label.
 // Returns nil, nil if no matching snapshot exists.
-func (db *DB) GetLatestByLabel(root, label string) (*SnapshotMeta, error) {
+func (db *DB) GetLatestByLabel(repoID int64, label string) (*SnapshotMeta, error) {
 	row := db.conn.QueryRow(
-		`SELECT s.id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
+		`SELECT s.id, s.repo_id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
 		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
 		 FROM snapshots s
-		 WHERE s.root = ? AND s.label = ?
+		 WHERE s.repo_id = ? AND s.label = ?
 		 ORDER BY s.timestamp DESC
 		 LIMIT 1`,
-		root, label,
+		repoID, label,
 	)
 	return scanMeta(row)
 }
@@ -105,7 +105,7 @@ func (db *DB) GetLatestByLabel(root, label string) (*SnapshotMeta, error) {
 // GetByID returns a snapshot by its primary key.
 func (db *DB) GetByID(id int64) (*SnapshotMeta, error) {
 	row := db.conn.QueryRow(
-		`SELECT s.id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
+		`SELECT s.id, s.repo_id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
 		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
 		 FROM snapshots s
 		 WHERE s.id = ?`,
@@ -114,16 +114,16 @@ func (db *DB) GetByID(id int64) (*SnapshotMeta, error) {
 	return scanMeta(row)
 }
 
-// List returns the n most recent snapshots for root (all labels).
-func (db *DB) List(root string, n int) ([]SnapshotMeta, error) {
+// List returns the n most recent snapshots for repoID (all labels).
+func (db *DB) List(repoID int64, n int) ([]SnapshotMeta, error) {
 	rows, err := db.conn.Query(
-		`SELECT s.id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
+		`SELECT s.id, s.repo_id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
 		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
 		 FROM snapshots s
-		 WHERE s.root = ?
+		 WHERE s.repo_id = ?
 		 ORDER BY s.timestamp DESC
 		 LIMIT ?`,
-		root, n,
+		repoID, n,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
@@ -190,26 +190,36 @@ func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta,
 
 // scanMeta scans a single *sql.Row into a SnapshotMeta.
 func scanMeta(row *sql.Row) (*SnapshotMeta, error) {
-	var m SnapshotMeta
-	var tsStr string
-	err := row.Scan(&m.ID, &m.SessionID, &m.Label, &tsStr, &m.Root, &m.RootHash, &m.FileCount)
+	m, err := scanMetaCols(row.Scan)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan snapshot: %w", err)
 	}
-	m.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
-	return &m, nil
+	return m, nil
 }
 
 // scanMetaRow scans a *sql.Rows row into a SnapshotMeta.
 func scanMetaRow(rows *sql.Rows) (*SnapshotMeta, error) {
-	var m SnapshotMeta
-	var tsStr string
-	if err := rows.Scan(&m.ID, &m.SessionID, &m.Label, &tsStr, &m.Root, &m.RootHash, &m.FileCount); err != nil {
+	m, err := scanMetaCols(rows.Scan)
+	if err != nil {
 		return nil, fmt.Errorf("scan snapshot row: %w", err)
 	}
+	return m, nil
+}
+
+// scanMetaCols scans the standard snapshot column order (id, repo_id, session_id,
+// label, timestamp, root, root_hash, file_count) via the given Scan closure.
+// repo_id is nullable for legacy (pre-central-store) rows.
+func scanMetaCols(scan func(...any) error) (*SnapshotMeta, error) {
+	var m SnapshotMeta
+	var tsStr string
+	var repoID sql.NullInt64
+	if err := scan(&m.ID, &repoID, &m.SessionID, &m.Label, &tsStr, &m.Root, &m.RootHash, &m.FileCount); err != nil {
+		return nil, err
+	}
+	m.RepoID = repoID.Int64
 	m.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
 	return &m, nil
 }

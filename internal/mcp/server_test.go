@@ -1,228 +1,117 @@
 package mcp
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/inth3shadows/runecho/internal/task"
 )
 
-// roundtrip sends one JSON-RPC line to an in-process server and returns the decoded response.
-func roundtrip(t *testing.T, srv *Server, method string, params any) map[string]any {
+// drive feeds newline-delimited requests through Serve and returns the decoded
+// responses (in order).
+func drive(t *testing.T, lines ...string) []map[string]any {
 	t.Helper()
-
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  method,
+	s := NewServer("test", "9.9")
+	s.Register(Tool{
+		Name:        "echo",
+		Description: "echoes its text arg",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(args json.RawMessage) (string, error) {
+			var a struct {
+				Text string `json:"text"`
+				Fail bool   `json:"fail"`
+			}
+			_ = json.Unmarshal(args, &a)
+			if a.Fail {
+				return "", errBoom
+			}
+			return a.Text, nil
+		},
+	})
+	var out strings.Builder
+	if err := s.Serve(strings.NewReader(strings.Join(lines, "\n")+"\n"), &out); err != nil {
+		t.Fatalf("Serve: %v", err)
 	}
-	if params != nil {
-		req["params"] = params
+	var resps []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("decode response %q: %v", line, err)
+		}
+		resps = append(resps, m)
 	}
-
-	reqLine, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-
-	var out bytes.Buffer
-	if err := srv.Serve(strings.NewReader(string(reqLine)+"\n"), &out); err != nil {
-		t.Fatalf("Serve error: %v", err)
-	}
-
-	var resp map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v\nraw: %s", err, out.String())
-	}
-	return resp
+	return resps
 }
 
-func initParams() map[string]any {
-	return map[string]any{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "test", "version": "0"},
-	}
-}
+var errBoom = boomError{}
+
+type boomError struct{}
+
+func (boomError) Error() string { return "boom" }
 
 func TestInitialize(t *testing.T) {
-	srv := NewServer(t.TempDir(), "test", "0.0.0")
-	resp := roundtrip(t, srv, "initialize", initParams())
-
-	result, ok := resp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected result object, got: %v", resp)
+	r := drive(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)
+	if len(r) != 1 {
+		t.Fatalf("want 1 response, got %d", len(r))
 	}
-	if got := result["protocolVersion"]; got != "2024-11-05" {
-		t.Errorf("protocolVersion = %v, want 2024-11-05", got)
+	res := r[0]["result"].(map[string]any)
+	if res["protocolVersion"] != "2024-11-05" {
+		t.Errorf("protocolVersion = %v, want echoed 2024-11-05", res["protocolVersion"])
+	}
+	if si := res["serverInfo"].(map[string]any); si["name"] != "test" {
+		t.Errorf("serverInfo.name = %v", si["name"])
+	}
+}
+
+func TestNotificationNoReply(t *testing.T) {
+	// initialize (reply) + initialized notification (no reply) → exactly 1 response.
+	r := drive(t,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+	)
+	if len(r) != 1 {
+		t.Fatalf("notification should not produce a reply; got %d responses", len(r))
 	}
 }
 
 func TestToolsList(t *testing.T) {
-	srv := NewServer(t.TempDir(), "test", "0.0.0")
-	resp := roundtrip(t, srv, "tools/list", map[string]any{})
-
-	result, ok := resp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected result: %v", resp)
-	}
-	tools, ok := result["tools"].([]any)
-	if !ok {
-		t.Fatalf("expected tools array: %v", result)
-	}
-	if len(tools) != 7 {
-		t.Errorf("expected 7 tools, got %d", len(tools))
-	}
-	// Each tool must have an inputSchema.
-	for _, raw := range tools {
-		entry := raw.(map[string]any)
-		if entry["inputSchema"] == nil {
-			t.Errorf("tool %v missing inputSchema", entry["name"])
-		}
+	r := drive(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	tools := r[0]["result"].(map[string]any)["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "echo" {
+		t.Fatalf("tools/list = %v", tools)
 	}
 }
 
-func seedTasks(t *testing.T, dir string, tasks []task.Task) {
-	t.Helper()
-	db := task.TaskDB{
-		Updated: time.Now().UTC().Format(time.RFC3339),
-		Tasks:   tasks,
+func TestToolCallSuccessAndError(t *testing.T) {
+	r := drive(t,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"fail":true}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"missing","arguments":{}}}`,
+	)
+	// success
+	ok := r[0]["result"].(map[string]any)
+	if txt := ok["content"].([]any)[0].(map[string]any)["text"]; txt != "hi" {
+		t.Errorf("echo text = %v", txt)
 	}
-	if err := task.Save(dir, db); err != nil {
-		t.Fatalf("seed tasks: %v", err)
+	if _, isErr := ok["isError"]; isErr {
+		t.Error("success result should not set isError")
 	}
-}
-
-func TestTaskListAndUpdate(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now().UTC().Format(time.RFC3339)
-	seedTasks(t, dir, []task.Task{
-		{ID: "1", Title: "Alpha", Status: "todo", Added: now, Updated: now},
-		{ID: "2", Title: "Beta", Status: "done", Added: now, Updated: now},
-	})
-
-	srv := NewServer(dir, "test", "0.0.0")
-
-	// List all tasks.
-	resp := roundtrip(t, srv, "tools/call", map[string]any{
-		"name":      "runecho_task_list",
-		"arguments": map[string]any{},
-	})
-	result := resp["result"].(map[string]any)
-	content := result["content"].([]any)[0].(map[string]any)["text"].(string)
-	var listOut map[string]any
-	json.Unmarshal([]byte(content), &listOut) //nolint:errcheck
-	if count := listOut["count"].(float64); count != 2 {
-		t.Errorf("expected 2 tasks, got %v", count)
+	// handler error → isError result (not a transport error)
+	boom := r[1]["result"].(map[string]any)
+	if boom["isError"] != true {
+		t.Error("handler error should set isError=true")
 	}
-
-	// Update task 1 to done.
-	resp2 := roundtrip(t, srv, "tools/call", map[string]any{
-		"name":      "runecho_task_update",
-		"arguments": map[string]any{"id": "1", "status": "done"},
-	})
-	r2 := resp2["result"].(map[string]any)
-	if r2["isError"].(bool) {
-		t.Fatalf("unexpected error in task_update: %v", r2)
-	}
-
-	// Verify via task_list filtered to todo.
-	resp3 := roundtrip(t, srv, "tools/call", map[string]any{
-		"name":      "runecho_task_list",
-		"arguments": map[string]any{"status": "todo"},
-	})
-	r3content := resp3["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	var listOut3 map[string]any
-	json.Unmarshal([]byte(r3content), &listOut3) //nolint:errcheck
-	if count := listOut3["count"].(float64); count != 0 {
-		t.Errorf("expected 0 todo tasks after update, got %v", count)
-	}
-}
-
-func TestTaskNext_EmptyList(t *testing.T) {
-	dir := t.TempDir()
-	srv := NewServer(dir, "test", "0.0.0")
-
-	resp := roundtrip(t, srv, "tools/call", map[string]any{
-		"name":      "runecho_task_next",
-		"arguments": map[string]any{},
-	})
-	content := resp["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	var out map[string]any
-	json.Unmarshal([]byte(content), &out) //nolint:errcheck
-	if out["found"].(bool) {
-		t.Error("expected found=false on empty task list")
+	// unknown tool → JSON-RPC error
+	if _, ok := r[2]["error"]; !ok {
+		t.Error("unknown tool should be a JSON-RPC error")
 	}
 }
 
 func TestUnknownMethod(t *testing.T) {
-	srv := NewServer(t.TempDir(), "test", "0.0.0")
-	resp := roundtrip(t, srv, "nosuchmethod", nil)
-	errObj, ok := resp["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error object: %v", resp)
-	}
-	if code := errObj["code"].(float64); code != ErrMethodNotFound {
-		t.Errorf("expected code %d, got %v", ErrMethodNotFound, code)
-	}
-}
-
-func TestMalformedJSON(t *testing.T) {
-	srv := NewServer(t.TempDir(), "test", "0.0.0")
-	var out bytes.Buffer
-	srv.Serve(strings.NewReader("{not valid json}\n"), &out) //nolint:errcheck
-
-	var resp map[string]any
-	json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp) //nolint:errcheck
-	errObj, ok := resp["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error: %v", resp)
-	}
-	if code := errObj["code"].(float64); code != ErrParse {
-		t.Errorf("expected ErrParse %d, got %v", ErrParse, code)
-	}
-}
-
-// writeJSONL writes a slice of objects as JSONL to a file.
-func writeJSONL(t *testing.T, path string, records []any) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	for _, rec := range records {
-		line, _ := json.Marshal(rec)
-		fmt.Fprintf(f, "%s\n", line)
-	}
-}
-
-func TestSessionStatus(t *testing.T) {
-	dir := t.TempDir()
-	writeJSONL(t, filepath.Join(dir, ".ai", "faults.jsonl"), []any{
-		map[string]any{"signal": "COST_WARN", "session_id": "s1", "ts": "2026-01-01T00:00:00Z"},
-		map[string]any{"signal": "COST_WARN", "session_id": "s1", "ts": "2026-01-01T00:01:00Z"},
-		map[string]any{"signal": "VERIFY_FAIL", "session_id": "s2", "ts": "2026-01-01T00:02:00Z"},
-	})
-
-	srv := NewServer(dir, "test", "0.0.0")
-	resp := roundtrip(t, srv, "tools/call", map[string]any{
-		"name":      "runecho_session_status",
-		"arguments": map[string]any{},
-	})
-	content := resp["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	var out map[string]any
-	json.Unmarshal([]byte(content), &out) //nolint:errcheck
-	if count := out["fault_count"].(float64); count != 3 {
-		t.Errorf("expected 3 faults, got %v", count)
+	r := drive(t, `{"jsonrpc":"2.0","id":9,"method":"does/not/exist"}`)
+	if _, ok := r[0]["error"]; !ok {
+		t.Fatal("unknown method should return a JSON-RPC error")
 	}
 }

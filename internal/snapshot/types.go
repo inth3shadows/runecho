@@ -32,6 +32,7 @@ type ChurnReport struct {
 // SnapshotMeta describes a stored IR snapshot (no file/symbol data).
 type SnapshotMeta struct {
 	ID        int64
+	RepoID    int64
 	SessionID string
 	Label     string
 	Timestamp time.Time

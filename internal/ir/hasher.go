@@ -10,6 +10,11 @@ import (
 )
 
 // HashFile computes SHA256 hash of a file and returns it as lowercase hex string.
+//
+// Content is hashed verbatim, including line endings: the same source checked
+// out with CRLF hashes differently than with LF. Path keys are OS-normalized
+// (see normalizePath) but byte content is not, so cross-OS golden-hash fixtures
+// must pin a single line-ending convention (e.g. .gitattributes `-text`).
 func HashFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

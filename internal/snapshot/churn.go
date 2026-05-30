@@ -6,16 +6,19 @@ import (
 	"strings"
 )
 
-// Churn computes file and symbol churn across the last n snapshots for root.
+// Churn computes file and symbol churn across the last n snapshots for repoID.
 // Returns an empty ChurnReport (no error) when fewer than 2 snapshots exist.
-func (db *DB) Churn(root string, n int) (ChurnReport, error) {
-	metas, err := db.List(root, n)
+func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
+	metas, err := db.List(repoID, n)
 	if err != nil {
 		return ChurnReport{}, fmt.Errorf("list snapshots: %w", err)
 	}
 
 	if len(metas) < 2 {
-		report := ChurnReport{Root: root, SnapshotCount: len(metas)}
+		report := ChurnReport{SnapshotCount: len(metas)}
+		if len(metas) == 1 {
+			report.Root = metas[0].Root
+		}
 		return report, nil
 	}
 
@@ -83,7 +86,7 @@ func (db *DB) Churn(root string, n int) (ChurnReport, error) {
 	})
 
 	return ChurnReport{
-		Root:          root,
+		Root:          metas[len(metas)-1].Root, // newest snapshot's root path (informational)
 		SnapshotCount: len(metas),
 		DiffCount:     diffCount,
 		Since:         metas[0].Timestamp,

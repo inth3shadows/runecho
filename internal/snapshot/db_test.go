@@ -186,6 +186,42 @@ func TestRepoScopedHistory(t *testing.T) {
 	}
 }
 
+// TestPurgeRepo asserts cascade deletion leaves no orphaned snapshot/file/symbol
+// rows and does not touch other repos.
+func TestPurgeRepo(t *testing.T) {
+	db, _ := openTemp(t)
+	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", 0)
+	idB, _ := db.EnrollRepo("beta", "/repos/beta", 0)
+	if _, err := db.SaveSnapshot(idA, "s", "v1", "/repos/alpha", makeIR("ha", "Foo")); err != nil {
+		t.Fatalf("save a: %v", err)
+	}
+	if _, err := db.SaveSnapshot(idB, "s", "v1", "/repos/beta", makeIR("hb", "Bar")); err != nil {
+		t.Fatalf("save b: %v", err)
+	}
+
+	if err := db.PurgeRepo(idA); err != nil {
+		t.Fatalf("PurgeRepo: %v", err)
+	}
+
+	if gone, _ := db.GetRepoByName("alpha"); gone != nil {
+		t.Fatal("alpha repo row survived purge")
+	}
+	if list, _ := db.List(idA, 10); len(list) != 0 {
+		t.Fatalf("alpha snapshots survived purge: %d", len(list))
+	}
+	// No orphaned files/symbols left behind.
+	var files, syms int
+	db.conn.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files)
+	db.conn.QueryRow(`SELECT COUNT(*) FROM symbols`).Scan(&syms)
+	// beta still has exactly its 1 file + 1 symbol.
+	if files != 1 || syms != 1 {
+		t.Fatalf("orphans after purge: files=%d symbols=%d (want 1,1 for beta)", files, syms)
+	}
+	if beta, _ := db.GetRepoByName("beta"); beta == nil {
+		t.Fatal("purge of alpha wrongly removed beta")
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

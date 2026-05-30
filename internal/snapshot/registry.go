@@ -83,6 +83,31 @@ func (db *DB) RemoveRepo(id int64) error {
 	return nil
 }
 
+// PurgeRepo deletes a repo and its entire snapshot history (symbols, files,
+// snapshots, then the repo row) in one transaction — no orphaned rows.
+func (db *DB) PurgeRepo(id int64) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin purge: %w", err)
+	}
+	defer tx.Rollback()
+	stmts := []struct {
+		sql string
+	}{
+		{`DELETE FROM symbols WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`},
+		{`DELETE FROM files WHERE snapshot_id IN (SELECT id FROM snapshots WHERE repo_id = ?)`},
+		{`DELETE FROM snapshots WHERE repo_id = ?`},
+		{`DELETE FROM repos WHERE id = ?`},
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s.sql, id); err != nil {
+			return fmt.Errorf("purge repo %d: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
 // TouchRepo records indexing state after a (re)index: when it last ran and how
 // many parse errors were seen (self-observing / honest-coverage guarantees).
 func (db *DB) TouchRepo(id int64, lastIndexed time.Time, parseErrors int) error {

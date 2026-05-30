@@ -45,6 +45,12 @@ func main() {
 		case "churn":
 			runChurn(os.Args[2:])
 			return
+		case "repo":
+			runRepo(os.Args[2:])
+			return
+		case "backup":
+			runBackup(os.Args[2:])
+			return
 		case "validate-claims":
 			runValidateClaims(os.Args[2:])
 			return
@@ -73,7 +79,191 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       ai-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       ai-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       ai-ir repo add <path> [--name=<n>] [--cap=<N>]")
+	fmt.Fprintln(os.Stderr, "       ai-ir repo list | rm <name> | reindex <name>")
+	fmt.Fprintln(os.Stderr, "       ai-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       ai-ir validate-claims --text=<file> [--ir=<path>]")
+}
+
+// runRepo dispatches the central-store registry subcommands.
+func runRepo(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo add|list|rm|reindex ...")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "add":
+		runRepoAdd(args[1:])
+	case "list", "ls":
+		runRepoList(args[1:])
+	case "rm", "remove":
+		runRepoRemove(args[1:])
+	case "reindex":
+		runRepoReindex(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ai-ir repo: unknown subcommand %q\n", args[0])
+		os.Exit(1)
+	}
+}
+
+// runRepoAdd enrolls a repo explicitly. An explicit --name that collides is an
+// error (strict); a derived name auto-disambiguates.
+func runRepoAdd(args []string) {
+	fs := flag.NewFlagSet("repo add", flag.ExitOnError)
+	name := fs.String("name", "", "repo name (default: derived from path)")
+	cap := fs.Int("cap", 0, "max files to index, 0 = unlimited (advisory; logged when exceeded)")
+	fs.Parse(args)
+
+	root := resolveRoot(fs.Args())
+	db := mustOpenDB()
+	defer db.Close()
+
+	if existing, err := db.GetRepoByPath(root); err != nil {
+		fatal(err)
+	} else if existing != nil {
+		fmt.Printf("Already enrolled: %s (id=%d) -> %s\n", existing.Name, existing.ID, existing.Path)
+		return
+	}
+
+	n := *name
+	if n == "" {
+		n = uniqueName(db, deriveRepoName(root))
+	}
+	id, err := db.EnrollRepo(n, root, *cap)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s\n", n, id, *cap, root)
+}
+
+// runRepoList prints all enrolled repos and their indexing state.
+func runRepoList(args []string) {
+	db := mustOpenDB()
+	defer db.Close()
+	repos, err := db.ListRepos()
+	if err != nil {
+		fatal(err)
+	}
+	if len(repos) == 0 {
+		fmt.Println("No repos enrolled. Add one: ai-ir repo add <path>")
+		return
+	}
+	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "PATH")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, r := range repos {
+		last := "never"
+		if !r.LastIndexed.IsZero() {
+			last = r.LastIndexed.Format(time.RFC3339)
+		}
+		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %s\n",
+			r.Name, r.ID, last, r.ParseErrors, r.FileCap, r.Path)
+	}
+}
+
+// runRepoRemove purges a repo and its entire history by name.
+func runRepoRemove(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo rm <name>")
+		os.Exit(1)
+	}
+	db := mustOpenDB()
+	defer db.Close()
+	repo, err := db.GetRepoByName(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	if repo == nil {
+		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
+		os.Exit(1)
+	}
+	if err := db.PurgeRepo(repo.ID); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Removed %s (id=%d) and its history.\n", repo.Name, repo.ID)
+}
+
+// runRepoReindex rebuilds an enrolled repo's IR and records a snapshot, by name.
+// Serial, fresh-per-repo. Cap is advisory: actual file count is reported and a
+// warning is logged when it exceeds the cap (honest coverage — no silent claim).
+func runRepoReindex(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo reindex <name>")
+		os.Exit(1)
+	}
+	db := mustOpenDB()
+	defer db.Close()
+	repo, err := db.GetRepoByName(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	if repo == nil {
+		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
+		os.Exit(1)
+	}
+
+	irData := buildIR(repo.Path)
+	if err := irData.Save(filepath.Join(repo.Path, ".ai", "ir.json")); err != nil {
+		fatal(fmt.Errorf("save ir.json: %w", err))
+	}
+	if repo.FileCap > 0 && len(irData.Files) > repo.FileCap {
+		fmt.Fprintf(os.Stderr, "Warning: %s indexed %d files, exceeds cap %d (full index used; cap not yet enforced)\n",
+			repo.Name, len(irData.Files), repo.FileCap)
+	}
+	id, err := db.SaveSnapshot(repo.ID, "", "reindex", repo.Path, irData)
+	if err != nil {
+		fatal(err)
+	}
+	if err := db.TouchRepo(repo.ID, time.Now(), 0); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
+	}
+	short := irData.RootHash
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...\n", repo.Name, id, len(irData.Files), short)
+}
+
+// runBackup writes an atomic backup of the central store via VACUUM INTO.
+func runBackup(args []string) {
+	dest := ""
+	if len(args) > 0 {
+		dest = args[0]
+	}
+	if dest == "" {
+		dir, err := runechoDir()
+		if err != nil {
+			fatal(err)
+		}
+		dest = filepath.Join(dir, "backups", "history-backup.db")
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			fatal(err)
+		}
+	}
+	if _, err := os.Stat(dest); err == nil {
+		fatal(fmt.Errorf("backup destination already exists: %s (VACUUM INTO requires a new file)", dest))
+	}
+	db := mustOpenDB()
+	defer db.Close()
+	if err := db.BackupTo(dest); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Backup written: %s\n", dest)
+}
+
+// buildIR generates a fresh IR for root (full, not incremental).
+func buildIR(root string) *ir.IR {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		fatal(err)
+	}
+	config := ir.GeneratorConfig{
+		IgnoredPaths: []string{"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata"},
+	}
+	result, err := ir.NewGenerator(config).Generate(abs)
+	if err != nil {
+		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
+	}
+	return result
 }
 
 // runIndex is the original ai-ir [root] behavior.
@@ -590,23 +780,38 @@ func resolveRepoForWrite(db *snapshot.DB, root string) int64 {
 	if repo != nil {
 		return repo.ID
 	}
+	id, err := db.EnrollRepo(uniqueName(db, deriveRepoName(root)), root, 0)
+	if err != nil {
+		fatal(err)
+	}
+	return id
+}
+
+// deriveRepoName builds a default enrollment name from the last two path segments
+// (e.g. runecho/master -> "runecho-master"), avoiding collisions across the
+// bare-worktree layout. Falls back to the basename at a filesystem root.
+func deriveRepoName(root string) string {
 	base := filepath.Base(root)
-	name := base
+	parent := filepath.Base(filepath.Dir(root))
+	if parent == "" || parent == "." || parent == base || parent == string(filepath.Separator) {
+		return base
+	}
+	return parent + "-" + base
+}
+
+// uniqueName returns desired, or desired-2/-3/... if the name is already taken.
+func uniqueName(db *snapshot.DB, desired string) string {
+	name := desired
 	for i := 2; ; i++ {
 		existing, err := db.GetRepoByName(name)
 		if err != nil {
 			fatal(err)
 		}
 		if existing == nil {
-			break
+			return name
 		}
-		name = fmt.Sprintf("%s-%d", base, i)
+		name = fmt.Sprintf("%s-%d", desired, i)
 	}
-	id, err := db.EnrollRepo(name, root, 0)
-	if err != nil {
-		fatal(err)
-	}
-	return id
 }
 
 // lookupRepoID returns the repo_id for root, or -1 if never enrolled. Read

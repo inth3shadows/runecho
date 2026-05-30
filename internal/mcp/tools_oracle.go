@@ -237,13 +237,11 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		}
 	}
 
-	return jsonText(map[string]any{
-		"repo":          repo.Name,
-		"summary":       snapshot.FormatCompact(result),
-		"total_added":   result.TotalAdded,
-		"total_removed": result.TotalRemoved,
-		"files":         result.Files,
-	})
+	// Single source of truth for the diff JSON shape, shared with the
+	// `runecho-ir diff --json` CLI so the two surfaces cannot drift.
+	payload := snapshot.DiffPayload(result)
+	payload["repo"] = repo.Name
+	return jsonText(payload)
 }
 
 // scopedSnapshot fetches a snapshot by id but rejects it if it belongs to a

@@ -194,6 +194,27 @@ func FormatCompact(d DiffResult) string {
 		aShort, bShort, addStr, remStr, fileStr)
 }
 
+// DiffPayload converts a DiffResult into the canonical JSON-friendly map shared
+// by the `runecho-ir diff --json` CLI flag and the MCP `diff` oracle tool. Both
+// surfaces marshal this single shape so a machine consumer (e.g. the harness
+// gate) sees identical output regardless of entry point — they cannot drift.
+// (The MCP adds a "repo" key on top of this base before marshalling.)
+func DiffPayload(d DiffResult) map[string]interface{} {
+	// Normalize nil → empty slice so a zero-drift diff marshals "files": []
+	// rather than "files": null. The contract is consumed by machines (the
+	// harness gate), and an array consumer must never have to null-guard.
+	files := d.Files
+	if files == nil {
+		files = []FileDiff{}
+	}
+	return map[string]interface{}{
+		"summary":       FormatCompact(d),
+		"total_added":   d.TotalAdded,
+		"total_removed": d.TotalRemoved,
+		"files":         files,
+	}
+}
+
 // FormatFull returns a human-readable per-file breakdown.
 func FormatFull(d DiffResult) string {
 	if len(d.Files) == 0 {

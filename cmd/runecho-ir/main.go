@@ -334,7 +334,7 @@ func runSnapshot(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	irData := mustLoadIR(root)
+	irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	db := mustOpenDB()
 	defer db.Close()
 
@@ -387,7 +387,7 @@ func runDiff(args []string) {
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", *since, root)
 			os.Exit(0)
 		}
-		irData := mustLoadIR(root)
+		irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		result, err = db.DiffLive(*meta, irData)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -529,7 +529,7 @@ func runVerify(args []string) {
 		os.Exit(0)
 	}
 
-	irData := mustLoadIR(root)
+	irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -562,18 +562,6 @@ func resolveRoot(args []string) string {
 // positionalAfterFlags returns the non-flag args (already parsed by fs.Args()).
 func positionalAfterFlags(args []string) []string {
 	return args
-}
-
-// mustLoadIR loads .ai/ir.json from root or exits.
-func mustLoadIR(root string) *ir.IR {
-	irPath := filepath.Join(root, ".ai", "ir.json")
-	irData, err := ir.Load(irPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to load ir.json at %q: %v\n", irPath, err)
-		fmt.Fprintln(os.Stderr, "Run 'runecho-ir [root]' first to generate the index.")
-		os.Exit(1)
-	}
-	return irData
 }
 
 // runChurn reports file and symbol churn rate across recent snapshots.

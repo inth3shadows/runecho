@@ -1,209 +1,58 @@
 #!/usr/bin/env bash
-# RunEcho installer — builds binaries, symlinks hooks, and configures ~/.claude/settings.json
-# Run once from the repo root: bash install.sh
+# RunEcho installer — builds the two truth-oracle binaries.
+#
+#   runecho-ir   low-level CLI: index, snapshot, diff, log, churn, verify,
+#                repo add|list|rm|reindex, backup
+#   runecho-mcp  stdio MCP oracle server (structure/diff/hash/status/health)
+#
+# Run from the repo root:  bash install.sh
+#
+# This script does NOT modify ~/.claude.json or any agent config. Registering
+# the MCP server is a manual, reversible step printed at the end.
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOOK_DIR="$HOME/.claude/hooks"
-SETTINGS_FILE="$HOME/.claude/settings.json"
-
-mkdir -p "$HOOK_DIR"
-
-# Build binaries → ~/bin
-BIN_DIR="$HOME/bin"
-mkdir -p "$BIN_DIR"
 cd "$SCRIPT_DIR"
 
-# On Windows (Git Bash), Go needs explicit .exe to be found by native process spawners
+# Install target: ~/.local/bin (XDG default; on PATH for most setups).
+BIN_DIR="${RUNECHO_BIN_DIR:-$HOME/.local/bin}"
+mkdir -p "$BIN_DIR"
+
+# Windows (Git Bash) needs an explicit .exe for native process spawners.
 EXE=""
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || -n "$WINDIR" ]]; then
-  EXE=".exe"
-fi
-
-for cmd in ir session document task context governor pipeline session-end provenance mcp-server; do
-  echo "Building ai-$cmd..."
-  if go build -a -o "$BIN_DIR/ai-$cmd$EXE" "./cmd/$cmd" 2>/tmp/_runecho_build_err; then
-    echo "  Built: $BIN_DIR/ai-$cmd$EXE"
-  else
-    echo "  WARNING: ai-$cmd build failed (binary may be in use — restart and re-run install.sh):"
-    sed 's/^/    /' /tmp/_runecho_build_err
-  fi
-done
-
-# Symlink hooks (including fault-emitter — sourced by governor, stop-checkpoint, session-end)
-echo ""
-echo "Symlinking hooks → $HOOK_DIR/"
-for hook in \
-  fault-emitter.sh \
-  session-governor.sh \
-  model-enforcer.sh \
-  ir-injector.sh \
-  stop-checkpoint.sh \
-  session-end.sh \
-  destructive-bash-guard.sh \
-  scope-guard.sh \
-  constraint-reinjector.sh \
-  pre-compact-snapshot.sh \
-  contract-sync.sh; do
-  rm -f "$HOOK_DIR/$hook" && ln -s "$SCRIPT_DIR/hooks/$hook" "$HOOK_DIR/$hook"
-  echo "  $hook"
-done
-
-# Symlink skills → ~/.claude/skills/
-SKILL_DIR="$HOME/.claude/skills"
-mkdir -p "$SKILL_DIR"
-echo ""
-echo "Symlinking skills → $SKILL_DIR/"
-for skill_src in "$SCRIPT_DIR"/skills/*/; do
-  skill_name="$(basename "$skill_src")"
-  rm -rf "$SKILL_DIR/$skill_name" && ln -s "$skill_src" "$SKILL_DIR/$skill_name"
-  echo "  $skill_name"
-done
-
-# Configure ~/.claude/settings.json — merge RunEcho hooks (idempotent)
-echo ""
-echo "Configuring $SETTINGS_FILE..."
-
-PYTHON=""
-for _py in python3 python py; do
-  _candidate=$(command -v "$_py" 2>/dev/null) || continue
-  "$_candidate" -c "import sys; sys.exit(0)" 2>/dev/null && PYTHON="$_candidate" && break
-done
-if [ -z "$PYTHON" ]; then
-  echo "install.sh: ERROR: No functional Python 3 found (python3/python/py all failed or are Windows Store stubs). Install Python 3 from python.org." >&2
-  exit 1
-fi
-"$PYTHON" - <<'PYEOF'
-import json, os, sys
-
-settings_file = os.path.expanduser("~/.claude/settings.json")
-
-runecho_hooks = {
-    "SessionStart": [
-        {"matcher": "compact", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/constraint-reinjector.sh", "timeout": 3}]}
-    ],
-    "UserPromptSubmit": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-governor.sh", "timeout": 5}]},
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/ir-injector.sh", "timeout": 5}]},
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/contract-sync.sh", "timeout": 3}]}
-    ],
-    "PreToolUse": [
-        {"matcher": "Task",      "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/model-enforcer.sh", "timeout": 5}]},
-        {"matcher": "Bash",      "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/destructive-bash-guard.sh", "timeout": 3}]},
-        {"matcher": "Edit|Write","hooks": [{"type": "command", "command": "bash ~/.claude/hooks/scope-guard.sh", "timeout": 3}]}
-    ],
-    "PreCompact": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/pre-compact-snapshot.sh", "timeout": 3}]}
-    ],
-    "Stop": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/stop-checkpoint.sh", "timeout": 5}]}
-    ],
-    "SessionEnd": [
-        {"matcher": "", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/session-end.sh", "timeout": 5}]}
-    ]
-}
-
-# Load or create settings
-if os.path.exists(settings_file):
-    with open(settings_file) as f:
-        settings = json.load(f)
-else:
-    settings = {}
-
-# Extract runecho hook commands for dedup check
-def hook_commands(entries):
-    cmds = set()
-    for entry in entries:
-        for h in entry.get("hooks", []):
-            cmds.add(h.get("command", ""))
-    return cmds
-
-existing_hooks = settings.get("hooks", {})
-added = []
-skipped = []
-
-for event, entries in runecho_hooks.items():
-    existing = existing_hooks.get(event, [])
-    existing_cmds = hook_commands(existing)
-    for entry in entries:
-        entry_cmds = hook_commands([entry])
-        if entry_cmds & existing_cmds:
-            skipped.append(next(iter(entry_cmds)))
-        else:
-            existing.append(entry)
-            added.append(next(iter(entry_cmds)))
-    existing_hooks[event] = existing
-
-settings["hooks"] = existing_hooks
-
-# Register MCP server (idempotent)
-mcp_entry = {
-    "type": "stdio",
-    "command": os.path.expanduser("~/bin/ai-mcp-server"),
-    "args": ["--workspace", os.getcwd()],
-    "env": {}
-}
-existing_mcp = settings.get("mcpServers", {})
-if "runecho" not in existing_mcp:
-    existing_mcp["runecho"] = mcp_entry
-    settings["mcpServers"] = existing_mcp
-    print("  Added: mcpServers.runecho")
-else:
-    print("  Already present: mcpServers.runecho")
-
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-
-if added:
-    for cmd in added:
-        print(f"  Added: {cmd}")
-if skipped:
-    for cmd in skipped:
-        print(f"  Already present: {cmd}")
-print(f"  Settings written: {settings_file}")
-PYEOF
-
-# Install git pre-commit hook (wrapper → versioned script, avoids symlink issues on Windows)
-echo ""
-echo "Installing git pre-commit hook..."
-GIT_DIR=$(git -C "$SCRIPT_DIR" rev-parse --git-dir 2>/dev/null || true)
-if [ -n "$GIT_DIR" ]; then
-  GIT_HOOK_DIR="$GIT_DIR/hooks"
-  mkdir -p "$GIT_HOOK_DIR"
-  # Write a wrapper that delegates to the versioned hook script
-  cat > "$GIT_HOOK_DIR/pre-commit" <<HOOKEOF
-#!/usr/bin/env bash
-exec bash "$SCRIPT_DIR/hooks/pre-commit.sh" "\$@"
-HOOKEOF
-  chmod +x "$GIT_HOOK_DIR/pre-commit"
-  echo "  pre-commit → $GIT_HOOK_DIR/pre-commit (wrapper → hooks/pre-commit.sh)"
-else
-  echo "  WARNING: not a git repo — skipping git pre-commit hook"
-fi
-
-# Validate hooks with ShellCheck if available
-if command -v shellcheck &>/dev/null; then
-  echo ""
-  echo "Running ShellCheck on hooks..."
-  shellcheck "$SCRIPT_DIR"/hooks/*.sh && echo "  All hooks passed." || echo "  ShellCheck warnings found — review before deploying."
-else
-  echo ""
-  case "$(uname -s)" in
-    Darwin) echo "ShellCheck not found — skipping hook validation (install: brew install shellcheck)" ;;
-    Linux)  echo "ShellCheck not found — skipping hook validation (install: apt install shellcheck / dnf install ShellCheck)" ;;
-    *)      echo "ShellCheck not found — skipping hook validation (install: winget install koalaman.shellcheck)" ;;
-  esac
-fi
-
-echo ""
-echo "RunEcho install complete."
-echo ""
-echo "Optional: set RUNECHO_CLASSIFIER_KEY for LLM routing:"
-case "$(uname -s)" in
-  Darwin|Linux) echo '  export RUNECHO_CLASSIFIER_KEY="sk-ant-api03-..."  # add to ~/.bashrc or ~/.zshrc' ;;
-  *)            echo '  $env:RUNECHO_CLASSIFIER_KEY = "sk-ant-api03-..."  # add to PowerShell profile' ;;
+case "${OSTYPE:-}" in
+  msys|cygwin) EXE=".exe" ;;
 esac
+[ -n "${WINDIR:-}" ] && EXE=".exe"
+
+command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.24+)." >&2; exit 1; }
+
+for cmd in runecho-ir runecho-mcp; do
+  echo "Building $cmd..."
+  go build -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
+  echo "  Built: $BIN_DIR/$cmd$EXE"
+done
+
 echo ""
-echo "Index a project:"
-echo "  cd /path/to/project && ai-ir"
+echo "RunEcho install complete. Central store lives at ~/.runecho/history.db."
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo ""; echo "NOTE: $BIN_DIR is not on your PATH. Add it:"; echo "  export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
+
+cat <<EOF
+
+Quick start:
+  runecho-ir repo add /path/to/repo     # enroll a repo
+  runecho-ir repo reindex <name>        # build IR + snapshot
+  runecho-ir repo list                  # see enrolled repos
+
+Register the oracle MCP server (manual — edits your agent config):
+  # Claude Code:
+  claude mcp add runecho -- "$BIN_DIR/runecho-mcp$EXE"
+  # Codex (~/.codex/config.toml):
+  #   [mcp_servers.runecho]
+  #   command = "$BIN_DIR/runecho-mcp$EXE"
+EOF

@@ -16,17 +16,17 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// Usage: ai-ir [root-path]
+// Usage: runecho-ir [root-path]
 // Generates .ai/ir.json for the project at root-path (default: current directory).
 // If .ai/ir.json already exists, performs incremental update (only re-parses changed files).
 //
 // Subcommands:
-//   ai-ir snapshot [--label=manual] [--session=""] [root]
-//   ai-ir diff [--since=label | id-a id-b] [--compact] [root]
-//   ai-ir log [--n=10] [root]
-//   ai-ir verify [--session=""] [root]
-//   ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]
-//   ai-ir validate-claims --text=<file> [--ir=<path>]
+//   runecho-ir snapshot [--label=manual] [--session=""] [root]
+//   runecho-ir diff [--since=label | id-a id-b] [--compact] [root]
+//   runecho-ir log [--n=10] [root]
+//   runecho-ir verify [--session=""] [root]
+//   runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]
+//   runecho-ir validate-claims --text=<file> [--ir=<path>]
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -58,11 +58,11 @@ func main() {
 			printUsage()
 			os.Exit(0)
 		case "--version", "-v":
-			fmt.Println("ai-ir dev")
+			fmt.Println("runecho-ir dev")
 			os.Exit(0)
 		default:
 			if strings.HasPrefix(os.Args[1], "-") {
-				fmt.Fprintf(os.Stderr, "ai-ir: unknown flag %q\n", os.Args[1])
+				fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", os.Args[1])
 				printUsage()
 				os.Exit(1)
 			}
@@ -73,22 +73,22 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "Usage: ai-ir [root-path]")
-	fmt.Fprintln(os.Stderr, "       ai-ir snapshot [--label=manual] [--session=<id>] [root]")
-	fmt.Fprintln(os.Stderr, "       ai-ir diff [--since=<label>] [--compact] [root]")
-	fmt.Fprintln(os.Stderr, "       ai-ir log [--n=10] [root]")
-	fmt.Fprintln(os.Stderr, "       ai-ir verify [--session=<id>] [root]")
-	fmt.Fprintln(os.Stderr, "       ai-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
-	fmt.Fprintln(os.Stderr, "       ai-ir repo add <path> [--name=<n>] [--cap=<N>]")
-	fmt.Fprintln(os.Stderr, "       ai-ir repo list | rm <name> | reindex <name>")
-	fmt.Fprintln(os.Stderr, "       ai-ir backup [dest.db]")
-	fmt.Fprintln(os.Stderr, "       ai-ir validate-claims --text=<file> [--ir=<path>]")
+	fmt.Fprintln(os.Stderr, "Usage: runecho-ir [root-path]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir snapshot [--label=manual] [--session=<id>] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir diff [--since=<label>] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name>")
+	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
 }
 
 // runRepo dispatches the central-store registry subcommands.
 func runRepo(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo add|list|rm|reindex ...")
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo add|list|rm|reindex ...")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -101,7 +101,7 @@ func runRepo(args []string) {
 	case "reindex":
 		runRepoReindex(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "ai-ir repo: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "runecho-ir repo: unknown subcommand %q\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -145,7 +145,7 @@ func runRepoList(args []string) {
 		fatal(err)
 	}
 	if len(repos) == 0 {
-		fmt.Println("No repos enrolled. Add one: ai-ir repo add <path>")
+		fmt.Println("No repos enrolled. Add one: runecho-ir repo add <path>")
 		return
 	}
 	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "PATH")
@@ -163,7 +163,7 @@ func runRepoList(args []string) {
 // runRepoRemove purges a repo and its entire history by name.
 func runRepoRemove(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo rm <name>")
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo rm <name>")
 		os.Exit(1)
 	}
 	db := mustOpenDB()
@@ -187,7 +187,7 @@ func runRepoRemove(args []string) {
 // warning is logged when it exceeds the cap (honest coverage — no silent claim).
 func runRepoReindex(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: ai-ir repo reindex <name>")
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo reindex <name>")
 		os.Exit(1)
 	}
 	db := mustOpenDB()
@@ -266,12 +266,12 @@ func buildIR(root string) *ir.IR {
 	return result
 }
 
-// runIndex is the original ai-ir [root] behavior.
+// runIndex is the original runecho-ir [root] behavior.
 func runIndex(args []string) {
 	rootPath := "."
 	if len(args) > 1 {
 		if strings.HasPrefix(args[1], "-") {
-			fmt.Fprintf(os.Stderr, "ai-ir: unknown flag %q\n", args[1])
+			fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", args[1])
 			printUsage()
 			os.Exit(1)
 		}
@@ -397,8 +397,8 @@ func runDiff(args []string) {
 		// Two positional ID mode.
 		positional := fs.Args()
 		if len(positional) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: ai-ir diff --since=<label> [root]")
-			fmt.Fprintln(os.Stderr, "       ai-ir diff <id-a> <id-b> [root]")
+			fmt.Fprintln(os.Stderr, "Usage: runecho-ir diff --since=<label> [root]")
+			fmt.Fprintln(os.Stderr, "       runecho-ir diff <id-a> <id-b> [root]")
 			os.Exit(1)
 		}
 		idA, err := strconv.ParseInt(positional[0], 10, 64)
@@ -494,7 +494,7 @@ func runVerify(args []string) {
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Println("No session-start snapshot found.")
-		fmt.Println("Run: ai-ir snapshot --label=session-start")
+		fmt.Println("Run: runecho-ir snapshot --label=session-start")
 		os.Exit(0)
 	}
 
@@ -525,7 +525,7 @@ func runVerify(args []string) {
 
 	if meta == nil {
 		fmt.Println("No session-start snapshot found.")
-		fmt.Println("Run: ai-ir snapshot --label=session-start")
+		fmt.Println("Run: runecho-ir snapshot --label=session-start")
 		os.Exit(0)
 	}
 
@@ -546,7 +546,7 @@ func resolveRoot(args []string) string {
 	rootPath := "."
 	if len(args) > 0 {
 		if strings.HasPrefix(args[0], "-") {
-			fmt.Fprintf(os.Stderr, "ai-ir: unexpected flag %q where root path was expected\n", args[0])
+			fmt.Fprintf(os.Stderr, "runecho-ir: unexpected flag %q where root path was expected\n", args[0])
 			os.Exit(1)
 		}
 		rootPath = args[0]
@@ -570,7 +570,7 @@ func mustLoadIR(root string) *ir.IR {
 	irData, err := ir.Load(irPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to load ir.json at %q: %v\n", irPath, err)
-		fmt.Fprintln(os.Stderr, "Run 'ai-ir [root]' first to generate the index.")
+		fmt.Fprintln(os.Stderr, "Run 'runecho-ir [root]' first to generate the index.")
 		os.Exit(1)
 	}
 	return irData

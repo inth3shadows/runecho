@@ -78,11 +78,16 @@ func run() int {
 		return 0
 	}
 
-	// Look up enrolled repo.
+	// Look up enrolled repo. Bare-repo worktrees (claudew agent dirs) have a
+	// show-toplevel that is the worktree dir itself, not any enrolled path — fall
+	// back to checking the common-dir and all git worktree paths.
 	repo, err := db.GetRepoByPath(repoRoot)
 	if err != nil {
 		warnf("store error: %v", err)
 		return 0
+	}
+	if repo == nil {
+		repo = findEnrolledRepoViaWorktrees(db, repoRoot)
 	}
 	if repo == nil {
 		infof("skipping: repo not enrolled (run: runecho-ir repo add .)")
@@ -246,8 +251,14 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 	}
 
 	repo, err := db.GetRepoByPath(repoRoot)
-	if err != nil || repo == nil {
+	if err != nil {
 		return nil, "", false
+	}
+	if repo == nil {
+		repo = findEnrolledRepoViaWorktrees(db, repoRoot)
+		if repo == nil {
+			return nil, "", false
+		}
 	}
 
 	snaps, err := db.List(repo.ID, 1)
@@ -279,6 +290,64 @@ func hookApprove() {
 
 func hookBlock(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
+}
+
+// findEnrolledRepoViaWorktrees handles bare-repo worktrees (claudew agent dirs)
+// where git show-toplevel returns a transient worktree path that was never
+// enrolled. It tries two fallbacks in order:
+//  1. git-common-dir — the bare root for bare repos; the .git parent for regular
+//     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
+//  2. git worktree list — each registered worktree path. Covers bare-repo layouts
+//     where enrollment used a specific worktree (e.g. the `main` branch worktree).
+func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) *snapshot.Repo {
+	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
+		if !filepath.IsAbs(commonDir) {
+			commonDir = filepath.Join(worktreePath, commonDir)
+		}
+		commonDir = filepath.Clean(commonDir)
+		// Non-bare repos: common-dir is the .git dir — strip to get the repo root.
+		if filepath.Base(commonDir) == ".git" {
+			commonDir = filepath.Dir(commonDir)
+		}
+		if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
+			return repo
+		}
+	}
+	for _, wt := range gitWorktreePathsFor(worktreePath) {
+		if wt == worktreePath {
+			continue
+		}
+		if repo, err := db.GetRepoByPath(wt); err == nil && repo != nil {
+			return repo
+		}
+	}
+	return nil
+}
+
+func gitCommonDirFor(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitWorktreePathsFor returns all working-tree paths registered for the git
+// repo containing dir, parsed from `git worktree list --porcelain`.
+func gitWorktreePathsFor(dir string) []string {
+	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if after, ok := strings.CutPrefix(line, "worktree "); ok {
+			if p := strings.TrimSpace(after); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
 }
 
 func gitTopLevel() (string, error) {

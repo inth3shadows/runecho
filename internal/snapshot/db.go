@@ -218,6 +218,33 @@ func (db *DB) CountSnapshots(repoID int64) (int, error) {
 	return n, nil
 }
 
+// SymbolsForLatestSnapshot returns the set of symbol names recorded in the most
+// recent snapshot for repoID. Returns an empty map (no error) when there are no
+// snapshots yet.
+func (db *DB) SymbolsForLatestSnapshot(repoID int64) (map[string]struct{}, error) {
+	rows, err := db.conn.Query(`
+		SELECT DISTINCT s.name
+		FROM symbols s
+		JOIN files f ON s.file_id = f.id
+		WHERE f.snapshot_id = (
+			SELECT id FROM snapshots WHERE repo_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1
+		)`, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("symbols for latest snapshot: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan symbol: %w", err)
+		}
+		out[name] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // Close closes the underlying connection.
 func (db *DB) Close() error {
 	return db.conn.Close()

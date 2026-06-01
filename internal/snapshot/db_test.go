@@ -222,6 +222,49 @@ func TestPurgeRepo(t *testing.T) {
 	}
 }
 
+// TestSymbolsForLatestSnapshot asserts the method returns the right symbol set
+// scoped to the most recent snapshot and ignores other repos.
+func TestSymbolsForLatestSnapshot(t *testing.T) {
+	db, _ := openTemp(t)
+	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", 0)
+	idB, _ := db.EnrollRepo("beta", "/repos/beta", 0)
+
+	// alpha: two snapshots — only the latest should be returned.
+	if _, err := db.SaveSnapshot(idA, "s1", "old", "/repos/alpha", makeIR("h1", "OldFunc")); err != nil {
+		t.Fatalf("save old: %v", err)
+	}
+	if _, err := db.SaveSnapshot(idA, "s2", "new", "/repos/alpha", makeIR("h2", "NewFunc")); err != nil {
+		t.Fatalf("save new: %v", err)
+	}
+	// beta: should not appear in alpha's result.
+	if _, err := db.SaveSnapshot(idB, "s3", "v1", "/repos/beta", makeIR("h3", "BetaFunc")); err != nil {
+		t.Fatalf("save beta: %v", err)
+	}
+
+	syms, err := db.SymbolsForLatestSnapshot(idA)
+	if err != nil {
+		t.Fatalf("SymbolsForLatestSnapshot: %v", err)
+	}
+	if _, ok := syms["NewFunc"]; !ok {
+		t.Errorf("expected NewFunc in symbol set, got %v", syms)
+	}
+	if _, ok := syms["OldFunc"]; ok {
+		t.Errorf("OldFunc from stale snapshot leaked into result")
+	}
+	if _, ok := syms["BetaFunc"]; ok {
+		t.Errorf("BetaFunc from other repo leaked into result")
+	}
+
+	// Empty repo: no error, empty map.
+	empty, err := db.SymbolsForLatestSnapshot(idB + 999)
+	if err != nil {
+		t.Fatalf("SymbolsForLatestSnapshot for unknown repo: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected empty map for unknown repo, got %v", empty)
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

@@ -257,7 +257,13 @@ func buildIR(root string) *ir.IR {
 		fatal(err)
 	}
 	config := ir.GeneratorConfig{
-		IgnoredPaths: []string{"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata"},
+		IgnoredPaths: []string{
+			"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata",
+			// Python virtualenvs and caches
+			".venv", "venv", "__pycache__", "site-packages", ".tox",
+			// Go vendored deps
+			"vendor",
+		},
 	}
 	result, err := ir.NewGenerator(config).Generate(abs)
 	if err != nil {
@@ -287,7 +293,13 @@ func runIndex(args []string) {
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
 
 	config := ir.GeneratorConfig{
-		IgnoredPaths: []string{"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata"},
+		IgnoredPaths: []string{
+			"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata",
+			// Python virtualenvs and caches
+			".venv", "venv", "__pycache__", "site-packages", ".tox",
+			// Go vendored deps
+			"vendor",
+		},
 	}
 	generator := ir.NewGenerator(config)
 

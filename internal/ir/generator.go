@@ -38,6 +38,14 @@ func NewGenerator(config GeneratorConfig) *Generator {
 		ignored[".cursor"] = true
 		ignored[".vscode"] = true
 		ignored["testdata"] = true
+		// Python virtualenvs and caches
+		ignored[".venv"] = true
+		ignored["venv"] = true
+		ignored["__pycache__"] = true
+		ignored["site-packages"] = true
+		ignored[".tox"] = true
+		// Go and other vendored deps
+		ignored["vendor"] = true
 	}
 
 	return &Generator{

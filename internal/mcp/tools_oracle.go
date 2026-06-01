@@ -9,9 +9,9 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// ignoredPaths matches the cmd/ir indexer so the oracle's live IR is identical
-// to what gets snapshotted (cross-runtime / cross-tool parity).
-var ignoredPaths = []string{"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata"}
+// liveIR builds a deterministic full IR for the repo's current code.
+// Uses ir.DefaultIgnoredPaths — the single canonical list shared with the CLI
+// so oracle hashes are always identical to stored snapshot hashes.
 
 // Oracle exposes deterministic, read-only structure/drift queries over the
 // central store. Every tool resolves a repo by its enrolled name, so the oracle
@@ -104,9 +104,8 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 	return repo, nil
 }
 
-// liveIR builds a deterministic full IR for the repo's current code.
 func liveIR(path string) (*ir.IR, error) {
-	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ignoredPaths})
+	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
 	return gen.Generate(path)
 }
 

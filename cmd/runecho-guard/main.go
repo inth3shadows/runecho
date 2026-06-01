@@ -27,6 +27,7 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/snapshot"
+	"github.com/inth3shadows/runecho/internal/store"
 )
 
 const version = "0.1.0"
@@ -406,16 +407,8 @@ func gitTopLevelFor(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func runechoDir() (string, error) {
-	if h := os.Getenv("RUNECHO_HOME"); h != "" {
-		return h, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".runecho"), nil
-}
+// runechoDir is the package-local alias to the shared store helper.
+func runechoDir() (string, error) { return store.RunechoDir() }
 
 func parseMaxAge() (time.Duration, error) {
 	if s := os.Getenv("RUNECHO_GUARD_MAX_AGE"); s != "" {

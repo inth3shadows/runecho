@@ -14,6 +14,7 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
+	"github.com/inth3shadows/runecho/internal/store"
 )
 
 // Usage: runecho-ir [root-path]
@@ -256,16 +257,7 @@ func buildIR(root string) *ir.IR {
 	if err != nil {
 		fatal(err)
 	}
-	config := ir.GeneratorConfig{
-		IgnoredPaths: []string{
-			"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata",
-			// Python virtualenvs and caches
-			".venv", "venv", "__pycache__", "site-packages", ".tox",
-			// Go vendored deps
-			"vendor",
-		},
-	}
-	result, err := ir.NewGenerator(config).Generate(abs)
+	result, err := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths}).Generate(abs)
 	if err != nil {
 		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
@@ -292,16 +284,7 @@ func runIndex(args []string) {
 
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
 
-	config := ir.GeneratorConfig{
-		IgnoredPaths: []string{
-			"node_modules", "dist", ".git", ".cursor", ".vscode", "testdata",
-			// Python virtualenvs and caches
-			".venv", "venv", "__pycache__", "site-packages", ".tox",
-			// Go vendored deps
-			"vendor",
-		},
-	}
-	generator := ir.NewGenerator(config)
+	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
 
 	var result *ir.IR
 
@@ -685,6 +668,9 @@ func runValidateClaims(args []string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(out)
+	if len(mismatches) > 0 {
+		os.Exit(1)
+	}
 }
 
 // extractSymbolRefs returns a map of symbol → context snippet from text.
@@ -755,18 +741,8 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// runechoDir resolves the central store directory: $RUNECHO_HOME if set
-// (isolation/testing seam), else ~/.runecho.
-func runechoDir() (string, error) {
-	if h := os.Getenv("RUNECHO_HOME"); h != "" {
-		return h, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".runecho"), nil
-}
+// runechoDir is the package-local alias to the shared store helper.
+func runechoDir() (string, error) { return store.RunechoDir() }
 
 // mustOpenDB opens the central snapshot store (~/.runecho/history.db) or exits.
 // History is centralized so the oracle serves all enrolled repos from one

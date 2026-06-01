@@ -95,24 +95,49 @@ func (p *JSParser) Parse(source string) (FileStructure, error) {
 }
 
 // removeComments strips single-line and multi-line comments.
-// This is a simplified implementation - may not handle all edge cases.
+// Multi-line /* … */ comments are removed via regex. Single-line // comments
+// are stripped per-line with string-literal awareness so that URLs inside
+// import strings (e.g. import 'http://example.com') are preserved correctly.
 func removeComments(source string) string {
-	// Remove multi-line comments /* ... */
 	multiLineRegex := regexp.MustCompile(`/\*[\s\S]*?\*/`)
 	source = multiLineRegex.ReplaceAllString(source, "")
 
-	// Remove single-line comments // ...
 	lines := strings.Split(source, "\n")
-	var cleaned []string
-	for _, line := range lines {
-		// Find // outside of strings (simplified - doesn't handle all cases)
-		if idx := strings.Index(line, "//"); idx >= 0 {
-			line = line[:idx]
-		}
-		cleaned = append(cleaned, line)
+	for i, line := range lines {
+		lines[i] = stripLineComment(line)
 	}
+	return strings.Join(lines, "\n")
+}
 
-	return strings.Join(cleaned, "\n")
+// stripLineComment removes a // comment from a line, skipping // that appears
+// inside a string literal (single-quote, double-quote, or backtick).
+// Handles backslash escapes inside string literals. Template literal nesting
+// and exotic Unicode escapes are not tracked — this is still best-effort.
+func stripLineComment(line string) string {
+	inStr := false
+	var strChar byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inStr {
+			if c == '\\' {
+				i++ // skip the escaped character
+				continue
+			}
+			if c == strChar {
+				inStr = false
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			inStr = true
+			strChar = c
+			continue
+		}
+		if c == '/' && i+1 < len(line) && line[i+1] == '/' {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // extractImports finds all import statements.

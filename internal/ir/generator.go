@@ -24,201 +24,117 @@ type GeneratorConfig struct {
 
 // NewGenerator creates a new IR generator.
 func NewGenerator(config GeneratorConfig) *Generator {
-	// Build ignored paths map
-	ignored := make(map[string]bool)
-	for _, path := range config.IgnoredPaths {
-		ignored[path] = true
+	paths := config.IgnoredPaths
+	if len(paths) == 0 {
+		paths = DefaultIgnoredPaths
 	}
-
-	// Set default ignored paths if none provided
-	if len(ignored) == 0 {
-		ignored["node_modules"] = true
-		ignored["dist"] = true
-		ignored[".git"] = true
-		ignored[".cursor"] = true
-		ignored[".vscode"] = true
-		ignored["testdata"] = true
-		// Python virtualenvs and caches
-		ignored[".venv"] = true
-		ignored["venv"] = true
-		ignored["__pycache__"] = true
-		ignored["site-packages"] = true
-		ignored[".tox"] = true
-		// Go and other vendored deps
-		ignored["vendor"] = true
+	ignored := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		ignored[p] = true
 	}
-
 	return &Generator{
 		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
 		ignoredPaths: ignored,
 	}
 }
 
-// Generate creates IR for all supported files in the given root directory.
-func (g *Generator) Generate(rootPath string) (*IR, error) {
-	// Convert to absolute and clean path for determinism
-	absRoot, err := filepath.Abs(rootPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
-	}
-	absRoot = filepath.Clean(absRoot)
+// walkerFunc is called for each supported source file found during a walk.
+// absRoot is the walk root; normalizedPath is the relative, normalized path.
+// Returning an error from walkerFunc is propagated and stops the walk.
+type walkerFunc func(absPath, normalizedPath string) error
 
-	ir := &IR{
-		Version: 1,
-		Files:   make(map[string]FileIR),
-	}
-
-	// Walk directory tree
-	err = filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
+// walkSourceFiles walks absRoot, calling fn for each supported source file.
+// It skips ignored directories, symlinked directories, and unsupported extensions.
+func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
+	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			// Log but continue on access errors
 			fmt.Fprintf(os.Stderr, "Warning: failed to access %s: %v\n", path, err)
 			return nil
 		}
-
-		// Skip symlinks
 		if info.Mode()&os.ModeSymlink != 0 {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		// Skip directories in ignored list
 		if info.IsDir() {
-			dirName := filepath.Base(path)
-			if g.ignoredPaths[dirName] {
+			if g.ignoredPaths[filepath.Base(path)] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		// Check if file extension is supported
-		ext := filepath.Ext(path)
-		if !g.supportsExtension(ext) {
+		if !g.supportsExtension(filepath.Ext(path)) {
 			return nil
 		}
-
-		// Parse file
-		fileIR, err := g.parseFile(path)
-		if err != nil {
-			// Log warning but continue
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", path, err)
-			return nil
-		}
-
-		// Compute relative path from root and normalize
 		relPath, err := filepath.Rel(absRoot, path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to compute relative path for %s: %v\n", path, err)
 			return nil
 		}
-		normalizedPath := normalizePath(relPath)
-
-		ir.Files[normalizedPath] = fileIR
-		return nil
+		return fn(path, normalizePath(relPath))
 	})
+}
 
+// Generate creates IR for all supported files in the given root directory.
+func (g *Generator) Generate(rootPath string) (*IR, error) {
+	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+	absRoot = filepath.Clean(absRoot)
+
+	result := &IR{Version: 1, Files: make(map[string]FileIR)}
+
+	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		fileIR, err := g.parseFile(absPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
+			return nil
+		}
+		result.Files[normPath] = fileIR
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
-	// Compute root hash
-	ir.RootHash = ComputeRootHash(ir.Files)
-
-	return ir, nil
+	result.RootHash = ComputeRootHash(result.Files)
+	return result, nil
 }
 
 // Update incrementally updates IR based on file hashes.
 // Only re-parses files whose hash has changed.
 func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, error) {
-	// Convert to absolute and clean path for determinism
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
-	updatedIR := &IR{
-		Version: 1,
-		Files:   make(map[string]FileIR),
-	}
+	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
 
-	// Track which files we've seen
-	seenFiles := make(map[string]bool)
-
-	// Walk directory tree
-	err = filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
+	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		currentHash, err := HashFile(absPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to access %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to hash %s: %v\n", absPath, err)
 			return nil
 		}
-
-		// Skip symlinks
-		if info.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
+		if existing, ok := existingIR.Files[normPath]; ok && existing.Hash == currentHash {
+			updated.Files[normPath] = existing
 			return nil
 		}
-
-		if info.IsDir() {
-			dirName := filepath.Base(path)
-			if g.ignoredPaths[dirName] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		ext := filepath.Ext(path)
-		if !g.supportsExtension(ext) {
-			return nil
-		}
-
-		// Compute relative path from root and normalize
-		relPath, err := filepath.Rel(absRoot, path)
+		fileIR, err := g.parseFile(absPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to compute relative path for %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
 			return nil
 		}
-		normalizedPath := normalizePath(relPath)
-		seenFiles[normalizedPath] = true
-
-		// Compute current hash
-		currentHash, err := HashFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to hash %s: %v\n", path, err)
-			return nil
-		}
-
-		// Check if file exists in existing IR with same hash
-		if existingFile, exists := existingIR.Files[normalizedPath]; exists {
-			if existingFile.Hash == currentHash {
-				// Hash unchanged, reuse existing IR
-				updatedIR.Files[normalizedPath] = existingFile
-				return nil
-			}
-		}
-
-		// Hash changed or new file - reparse
-		fileIR, err := g.parseFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", path, err)
-			return nil
-		}
-
-		updatedIR.Files[normalizedPath] = fileIR
+		updated.Files[normPath] = fileIR
 		return nil
-	})
-
-	if err != nil {
+	}); err != nil {
 		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
-	// Compute root hash
-	updatedIR.RootHash = ComputeRootHash(updatedIR.Files)
-
-	return updatedIR, nil
+	updated.RootHash = ComputeRootHash(updated.Files)
+	return updated, nil
 }
 
 // normalizePath applies all path normalization rules:

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -127,5 +128,64 @@ func TestOracleDiffPartialPairErrors(t *testing.T) {
 	}
 	if _, err := o.diff([]byte(`{"repo":"` + name + `","b":2}`)); err == nil {
 		t.Error("diff with only `b` should error, got success")
+	}
+}
+
+// TestOracleDiffCrossRepoBlocked verifies that snapshot IDs from a different
+// repo are rejected — diffs must never cross repo boundaries.
+func TestOracleDiffCrossRepoBlocked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	srcA := []byte("package demo\nfunc FuncA() {}\n")
+	srcB := []byte("package demo\nfunc FuncB() {}\n")
+	os.WriteFile(filepath.Join(dir1, "a.go"), srcA, 0644)
+	os.WriteFile(filepath.Join(dir2, "b.go"), srcB, 0644)
+
+	repoID1, _ := db.EnrollRepo("repoA", dir1, 0)
+	repoID2, _ := db.EnrollRepo("repoB", dir2, 0)
+
+	live1, _ := liveIR(dir1)
+	live2, _ := liveIR(dir2)
+	snapID1, _ := db.SaveSnapshot(repoID1, "", "s", dir1, live1)
+	snapID2, _ := db.SaveSnapshot(repoID2, "", "s", dir2, live2)
+
+	o := NewOracle(db, dbPath)
+
+	args := []byte(fmt.Sprintf(`{"repo":"repoA","a":%d,"b":%d}`, snapID1, snapID2))
+	if _, err := o.diff(args); err == nil {
+		t.Error("cross-repo diff should be rejected, got success")
+	}
+}
+
+// TestOracleDiffSinceMode verifies the `since` label mode: diff latest snapshot
+// with that label against live code.
+func TestOracleDiffSinceMode(t *testing.T) {
+	o, name, db := newOracleRepo(t)
+	repo, _ := db.GetRepoByName(name)
+
+	live, _ := liveIR(repo.Path)
+	db.SaveSnapshot(repo.ID, "", "session-start", repo.Path, live)
+
+	// Add a third function to the live code.
+	extra := []byte("package demo\n\nfunc Alpha() {}\nfunc Beta() {}\nfunc Gamma() {}\n")
+	os.WriteFile(filepath.Join(repo.Path, "demo.go"), extra, 0644)
+
+	d := call(t, o.diff, `{"repo":"`+name+`","since":"session-start"}`)
+	if d["total_added"].(float64) != 1 {
+		t.Errorf("since-mode diff total_added = %v, want 1 (Gamma)", d["total_added"])
+	}
+}
+
+// TestOracleDiffSinceMissingLabel errors cleanly when the label does not exist.
+func TestOracleDiffSinceMissingLabel(t *testing.T) {
+	o, name, _ := newOracleRepo(t)
+	if _, err := o.diff([]byte(`{"repo":"` + name + `","since":"no-such-label"}`)); err == nil {
+		t.Error("unknown since label should return error")
 	}
 }

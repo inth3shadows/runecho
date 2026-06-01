@@ -1,7 +1,7 @@
 # Binaries
 *.exe
 runecho
-runecho-guard
+/runecho-guard
 phase0_demo
 verify_determinism
 validate_path_determinism

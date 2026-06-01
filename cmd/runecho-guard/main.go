@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,6 +30,11 @@ import (
 )
 
 const version = "0.1.0"
+
+// gitTimeout caps each git subprocess in the hook path. If git blocks
+// (credential helper, network mount, locked index), the hook would otherwise
+// hang indefinitely.
+const gitTimeout = 3 * time.Second
 
 func main() {
 	os.Exit(run())
@@ -87,7 +93,13 @@ func run() int {
 		return 0
 	}
 	if repo == nil {
-		repo = findEnrolledRepoViaWorktrees(db, repoRoot)
+		var enrolledRoot string
+		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
+		if enrolledRoot != "" {
+			// Update repoRoot so ignorePath and ParseStagedDiff use the enrolled
+			// repo's root, not the transient claudew worktree path.
+			repoRoot = enrolledRoot
+		}
 	}
 	if repo == nil {
 		infof("skipping: repo not enrolled (run: runecho-ir repo add .)")
@@ -255,9 +267,15 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 		return nil, "", false
 	}
 	if repo == nil {
-		repo = findEnrolledRepoViaWorktrees(db, repoRoot)
+		var enrolledRoot string
+		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
 		if repo == nil {
 			return nil, "", false
+		}
+		if enrolledRoot != "" {
+			// Update repoRoot so ignorePath points to the enrolled repo, not the
+			// transient claudew worktree.
+			repoRoot = enrolledRoot
 		}
 	}
 
@@ -299,7 +317,16 @@ func hookBlock(reason string) {
 //     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
 //  2. git worktree list — each registered worktree path. Covers bare-repo layouts
 //     where enrollment used a specific worktree (e.g. the `main` branch worktree).
-func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) *snapshot.Repo {
+//
+// Returns both the matched repo and the enrolled root path. Callers must update
+// repoRoot to enrolledRoot when non-empty so that ignorePath and diff parsing use
+// the enrolled repo's root, not the transient worktree directory.
+//
+// NOTE: this fallback is permanent. repo.Path serves dual purposes — lookup key
+// and buildIR source root — so normalizing to the common-dir at enrollment time
+// would break reindex. A clean fix requires splitting repo.Path into separate
+// lookup-key and source-root fields in the schema.
+func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapshot.Repo, string) {
 	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
 		if !filepath.IsAbs(commonDir) {
 			commonDir = filepath.Join(worktreePath, commonDir)
@@ -309,8 +336,13 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) *snapsho
 		if filepath.Base(commonDir) == ".git" {
 			commonDir = filepath.Dir(commonDir)
 		}
-		if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
-			return repo
+		// Skip if common-dir resolved to worktreePath itself (bare repo main
+		// worktree: git returns "." which joins to worktreePath). That path was
+		// already tried by the caller; re-checking it wastes a DB roundtrip.
+		if commonDir != worktreePath {
+			if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
+				return repo, commonDir
+			}
 		}
 	}
 	for _, wt := range gitWorktreePathsFor(worktreePath) {
@@ -318,14 +350,16 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) *snapsho
 			continue
 		}
 		if repo, err := db.GetRepoByPath(wt); err == nil && repo != nil {
-			return repo
+			return repo, wt
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 func gitCommonDirFor(dir string) (string, error) {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-common-dir").Output()
 	if err != nil {
 		return "", err
 	}
@@ -335,7 +369,9 @@ func gitCommonDirFor(dir string) (string, error) {
 // gitWorktreePathsFor returns all working-tree paths registered for the git
 // repo containing dir, parsed from `git worktree list --porcelain`.
 func gitWorktreePathsFor(dir string) []string {
-	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return nil
 	}
@@ -351,7 +387,9 @@ func gitWorktreePathsFor(dir string) []string {
 }
 
 func gitTopLevel() (string, error) {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", err
 	}
@@ -359,7 +397,9 @@ func gitTopLevel() (string, error) {
 }
 
 func gitTopLevelFor(dir string) (string, error) {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", err
 	}

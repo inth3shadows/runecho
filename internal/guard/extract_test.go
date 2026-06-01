@@ -127,6 +127,26 @@ func TestExtractRefs_Go_BuiltinsSkipped(t *testing.T) {
 	}
 }
 
+func TestExtractRefs_Go_UnexportedSkipped(t *testing.T) {
+	ls := lines(
+		`lookupSymbols()`,
+		`hookApprove()`,
+		`textToAddedLines("x")`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "lookupSymbols", "hookApprove", "textToAddedLines") {
+		t.Errorf("unexported Go refs should be skipped, got %v", refNames(refs))
+	}
+}
+
+func TestExtractRefs_Go_ExportedStillChecked(t *testing.T) {
+	ls := lines(`result := ParseStagedDiff(root)`)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "ParseStagedDiff") {
+		t.Errorf("exported Go ref should still be extracted, got %v", refNames(refs))
+	}
+}
+
 func TestExtractRefs_Go_DefLineSkipped(t *testing.T) {
 	ls := lines(`func HandleRequest(w http.ResponseWriter, r *http.Request) {`)
 	refs := ExtractRefs(LangGo, ls)

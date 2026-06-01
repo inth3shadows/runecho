@@ -155,6 +155,11 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 			if _, ok := builtins[name]; ok {
 				continue
 			}
+			// For Go, skip unexported (lowercase) refs — the IR only indexes exported
+			// symbols, so there is nothing to validate unexported calls against.
+			if lang == LangGo && (name[0] < 'A' || name[0] > 'Z') {
+				continue
+			}
 			// Skip definition lines (func/def/function keyword on same line before ident)
 			if isDefLine(lang, text) {
 				continue

@@ -196,7 +196,7 @@ func runHookMode() int {
 		return 0
 	}
 
-	symbols, ignorePath, ok := lookupSymbols()
+	symbols, ignorePath, ok := lookupSymbolsFor(filepath.Dir(filePath))
 	if !ok {
 		hookApprove()
 		return 0
@@ -223,14 +223,14 @@ func runHookMode() int {
 	return 0
 }
 
-// lookupSymbols loads the symbol set for the repo containing the current directory.
+// lookupSymbolsFor loads the symbol set for the repo containing dir.
 // Returns ok=false on any degradation condition (no DB, not enrolled, no snapshot).
-func lookupSymbols() (symbols map[string]struct{}, ignorePath string, ok bool) {
-	dir, err := runechoDir()
+func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, ok bool) {
+	storeDir, err := runechoDir()
 	if err != nil {
 		return nil, "", false
 	}
-	dbPath := filepath.Join(dir, "history.db")
+	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, "", false
 	}
@@ -240,7 +240,7 @@ func lookupSymbols() (symbols map[string]struct{}, ignorePath string, ok bool) {
 	}
 	defer db.Close()
 
-	repoRoot, err := gitTopLevel()
+	repoRoot, err := gitTopLevelFor(dir)
 	if err != nil {
 		return nil, "", false
 	}
@@ -283,6 +283,14 @@ func hookBlock(reason string) {
 
 func gitTopLevel() (string, error) {
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitTopLevelFor(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", err
 	}

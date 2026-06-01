@@ -5,15 +5,17 @@
 // Usage:
 //
 //	runecho-guard [--dry-run] [--verbose]
+//	runecho-guard --hook-mode  (Claude Code PreToolUse hook — reads JSON from stdin)
 //
 // Environment:
 //
-//	RUNECHO_GUARD_SKIP=1        bypass all checks, exit 0
+//	RUNECHO_GUARD_SKIP=1        bypass all checks, exit 0 / approve
 //	RUNECHO_HOME                override central store directory (default ~/.runecho)
 //	RUNECHO_GUARD_MAX_AGE=<dur> staleness warning threshold (default 24h)
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -33,14 +35,22 @@ func main() {
 }
 
 func run() int {
-	// Bypass check first — before touching git or the DB.
+	dryRun := flag.Bool("dry-run", false, "report violations but exit 0")
+	verbose := flag.Bool("verbose", false, "print every checked symbol")
+	hookMode := flag.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
+	flag.Parse()
+
+	// Bypass check after flag parsing so hook mode can emit a proper JSON approve.
 	if os.Getenv("RUNECHO_GUARD_SKIP") == "1" {
+		if *hookMode {
+			hookApprove()
+		}
 		return 0
 	}
 
-	dryRun := flag.Bool("dry-run", false, "report violations but exit 0")
-	verbose := flag.Bool("verbose", false, "print every checked symbol")
-	flag.Parse()
+	if *hookMode {
+		return runHookMode()
+	}
 
 	// Resolve central store.
 	dir, err := runechoDir()
@@ -146,6 +156,129 @@ func run() int {
 		return 0
 	}
 	return 1
+}
+
+// runHookMode implements the Claude Code PreToolUse hook contract.
+// Reads JSON from stdin, writes {"decision":"approve"|"block","reason":"..."} to stdout.
+// Exits 0 unconditionally — the decision is communicated through the JSON output.
+func runHookMode() int {
+	var payload struct {
+		ToolName  string `json:"tool_name"`
+		ToolInput struct {
+			FilePath  string `json:"file_path"`
+			NewString string `json:"new_string"` // Edit tool
+			Content   string `json:"content"`    // Write tool
+		} `json:"tool_input"`
+	}
+	if err := json.NewDecoder(os.Stdin).Decode(&payload); err != nil {
+		hookApprove()
+		return 0
+	}
+
+	if payload.ToolName != "Edit" && payload.ToolName != "Write" {
+		hookApprove()
+		return 0
+	}
+
+	text := payload.ToolInput.NewString
+	if text == "" {
+		text = payload.ToolInput.Content
+	}
+	filePath := payload.ToolInput.FilePath
+	if text == "" || filePath == "" {
+		hookApprove()
+		return 0
+	}
+
+	lang := guard.LangFor(filePath)
+	if lang == guard.LangUnknown {
+		hookApprove()
+		return 0
+	}
+
+	symbols, ignorePath, ok := lookupSymbols()
+	if !ok {
+		hookApprove()
+		return 0
+	}
+
+	diffs := []guard.FileDiff{{
+		Path:       filePath,
+		AddedLines: textToAddedLines(text),
+	}}
+
+	violations := guard.Run(symbols, ignorePath, diffs)
+	if len(violations) == 0 {
+		hookApprove()
+		return 0
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[runecho-guard] %d unresolved symbol(s) in new content:\n", len(violations))
+	for _, v := range violations {
+		fmt.Fprintf(&sb, "  line %d: %s\n", v.Line, v.Symbol)
+	}
+	fmt.Fprintf(&sb, "Add false positives to .runechoguardignore or set RUNECHO_GUARD_SKIP=1 to bypass.")
+	hookBlock(sb.String())
+	return 0
+}
+
+// lookupSymbols loads the symbol set for the repo containing the current directory.
+// Returns ok=false on any degradation condition (no DB, not enrolled, no snapshot).
+func lookupSymbols() (symbols map[string]struct{}, ignorePath string, ok bool) {
+	dir, err := runechoDir()
+	if err != nil {
+		return nil, "", false
+	}
+	dbPath := filepath.Join(dir, "history.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return nil, "", false
+	}
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		return nil, "", false
+	}
+	defer db.Close()
+
+	repoRoot, err := gitTopLevel()
+	if err != nil {
+		return nil, "", false
+	}
+
+	repo, err := db.GetRepoByPath(repoRoot)
+	if err != nil || repo == nil {
+		return nil, "", false
+	}
+
+	snaps, err := db.List(repo.ID, 1)
+	if err != nil || len(snaps) == 0 {
+		return nil, "", false
+	}
+
+	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
+	if err != nil {
+		return nil, "", false
+	}
+
+	return syms, filepath.Join(repoRoot, ".runechoguardignore"), true
+}
+
+// textToAddedLines converts a multi-line string into AddedLine entries (1-based).
+func textToAddedLines(text string) []guard.AddedLine {
+	raw := strings.Split(text, "\n")
+	lines := make([]guard.AddedLine, len(raw))
+	for i, l := range raw {
+		lines[i] = guard.AddedLine{LineNo: i + 1, Text: l}
+	}
+	return lines
+}
+
+func hookApprove() {
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "approve"})
+}
+
+func hookBlock(reason string) {
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
 }
 
 func gitTopLevel() (string, error) {

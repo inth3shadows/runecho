@@ -383,15 +383,17 @@ func runDiff(args []string) {
 	asJSON := fs.Bool("json", false, "machine-readable JSON (parity with the MCP diff tool)")
 	fs.Parse(args)
 
-	root := resolveRoot(positionalAfterFlags(fs.Args()))
 	db := mustOpenDB()
 	defer db.Close()
 
 	var result snapshot.DiffResult
 
 	if *since != "" {
-		// --since mode: A = last snapshot by label, B = live ir.json.
+		// --since mode: A = last snapshot by label, B = live ir.json. root is
+		// resolved here, not at the top: in two-ID mode the leading positional
+		// is a snapshot id, not a path, so resolving a root there is meaningless.
 		_ = sessionID // future: filter by session if needed
+		root := resolveRoot(fs.Args())
 		repoID := lookupRepoID(db, root)
 		if repoID < 0 {
 			fmt.Fprintf(os.Stderr, "Repo %q is not enrolled (no snapshots yet)\n", root)
@@ -592,11 +594,6 @@ func resolveRoot(args []string) string {
 		os.Exit(1)
 	}
 	return abs
-}
-
-// positionalAfterFlags returns the non-flag args (already parsed by fs.Args()).
-func positionalAfterFlags(args []string) []string {
-	return args
 }
 
 // runChurn reports file and symbol churn rate across recent snapshots.

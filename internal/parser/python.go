@@ -46,10 +46,12 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 		line = strings.TrimRight(line, "\r")
 
 		if m := pyImportRegex.FindStringSubmatch(line); m != nil {
-			mod := strings.Split(m[1], ".")[0] // top-level package only
-			if !importSet[mod] {
+			// Dedupe on the full module path so distinct dotted imports
+			// (import os.path AND import os) are both recorded — keying on the
+			// top-level package alone silently dropped all but the first.
+			if !importSet[m[1]] {
 				imports = append(imports, m[1])
-				importSet[mod] = true
+				importSet[m[1]] = true
 			}
 			continue
 		}
@@ -90,10 +92,12 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 	sort.Strings(classes)
 	sort.Strings(exports)
 
+	// Dedupe after sorting (parity with the Go/JS parsers): a top-level name
+	// can legitimately repeat across conditional def/class blocks.
 	return FileStructure{
-		Imports:   imports,
-		Functions: functions,
-		Classes:   classes,
-		Exports:   exports,
+		Imports:   deduplicate(imports),
+		Functions: deduplicate(functions),
+		Classes:   deduplicate(classes),
+		Exports:   deduplicate(exports),
 	}, nil
 }

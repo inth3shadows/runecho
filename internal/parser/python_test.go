@@ -41,6 +41,21 @@ func TestPythonParser_Imports(t *testing.T) {
 	}
 }
 
+// Regression: when a dotted import precedes its bare parent, the parent must
+// still be recorded. The old top-level-package dedup dropped it silently.
+func TestPythonParser_DottedImportThenBareParent(t *testing.T) {
+	src := "import os.path\nimport os\nimport xml.etree\nimport xml.dom\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []string{"os", "os.path", "xml.dom", "xml.etree"}
+	if !slices.Equal(fs.Imports, want) {
+		t.Errorf("Imports = %v, want %v", fs.Imports, want)
+	}
+}
+
 func TestPythonParser_Functions(t *testing.T) {
 	src := "def process_data(x):\n    return x\n\ndef _private_helper():\n    pass\n\ndef __dunder__():\n    pass\n"
 	p := NewPythonParser()

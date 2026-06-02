@@ -521,3 +521,115 @@ func TestMigrateV3BackwardCompat(t *testing.T) {
 		t.Errorf("EffectiveSourceRoot = %q, want /repos/legacy", repo.EffectiveSourceRoot())
 	}
 }
+
+// TestRepoCommonDir verifies the V4 common_dir lookup key: a freshly enrolled
+// repo has no common_dir until set, SetRepoCommonDir persists it, and
+// GetRepoByCommonDir round-trips. An empty arg must never match a NULL row.
+func TestRepoCommonDir(t *testing.T) {
+	db, _ := openTemp(t)
+
+	id, err := db.EnrollRepo("r", "/repos/r/main", "/repos/r", 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	// Fresh repo: common_dir empty, and an empty lookup must not match it.
+	fresh, _ := db.GetRepoByName("r")
+	if fresh.CommonDir != "" {
+		t.Fatalf("fresh repo CommonDir = %q, want empty", fresh.CommonDir)
+	}
+	if miss, err := db.GetRepoByCommonDir(""); err != nil || miss != nil {
+		t.Fatalf("empty common_dir lookup must be nil,nil: %v %v", miss, err)
+	}
+
+	// Set and round-trip.
+	if err := db.SetRepoCommonDir(id, "/repos/r/.bare"); err != nil {
+		t.Fatalf("SetRepoCommonDir: %v", err)
+	}
+	got, err := db.GetRepoByCommonDir("/repos/r/.bare")
+	if err != nil || got == nil {
+		t.Fatalf("GetRepoByCommonDir: %v %v", got, err)
+	}
+	if got.ID != id || got.CommonDir != "/repos/r/.bare" {
+		t.Fatalf("GetRepoByCommonDir mismatch: %+v", got)
+	}
+	// CommonDir must surface through the other readers too.
+	if byName, _ := db.GetRepoByName("r"); byName.CommonDir != "/repos/r/.bare" {
+		t.Errorf("GetRepoByName CommonDir = %q, want /repos/r/.bare", byName.CommonDir)
+	}
+
+	if miss, err := db.GetRepoByCommonDir("/nope"); err != nil || miss != nil {
+		t.Fatalf("unknown common_dir must be nil,nil: %v %v", miss, err)
+	}
+}
+
+// TestMigrateV4BackwardCompat simulates a V3 database (before common_dir existed)
+// being upgraded to V4 and verifies existing rows get a NULL common_dir that the
+// readers tolerate, and that an empty-key lookup never matches such a row.
+func TestMigrateV4BackwardCompat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "v3.db")
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := conn.Exec(p); err != nil {
+			t.Fatalf("pragma: %v", err)
+		}
+	}
+	// Run V1..V3, stopping before V4.
+	for v := 0; v < 3; v++ {
+		tx, _ := conn.Begin()
+		if err := migrations[v](tx); err != nil {
+			t.Fatalf("migration v%d: %v", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+			t.Fatalf("set user_version: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit migration v%d: %v", v+1, err)
+		}
+	}
+	// Insert a V3-style repo row (common_dir column does not exist yet).
+	if _, err := conn.Exec(
+		`INSERT INTO repos (name, path, source_root, file_cap, enrolled_at)
+		 VALUES ('legacy', '/repos/legacy', '/repos/legacy', 0, '2026-01-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("insert legacy repo: %v", err)
+	}
+	conn.Close()
+
+	// Re-open with snapshot.Open, which applies V4 (adds common_dir, no backfill).
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open after V4: %v", err)
+	}
+	defer db.Close()
+
+	if v := userVersion(t, db); v != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, SchemaVersion)
+	}
+	repo, err := db.GetRepoByPath("/repos/legacy")
+	if err != nil || repo == nil {
+		t.Fatalf("GetRepoByPath: %v %v", repo, err)
+	}
+	if repo.CommonDir != "" {
+		t.Errorf("pre-V4 row common_dir after migration = %q, want empty", repo.CommonDir)
+	}
+	// An empty-key lookup must not resolve the NULL-common_dir legacy row.
+	if miss, err := db.GetRepoByCommonDir(""); err != nil || miss != nil {
+		t.Fatalf("empty common_dir lookup must be nil,nil: %v %v", miss, err)
+	}
+	// Backfill then resolve via the fast path.
+	if err := db.SetRepoCommonDir(repo.ID, "/repos/legacy/.git"); err != nil {
+		t.Fatalf("SetRepoCommonDir: %v", err)
+	}
+	if got, err := db.GetRepoByCommonDir("/repos/legacy/.git"); err != nil || got == nil || got.ID != repo.ID {
+		t.Fatalf("after backfill GetRepoByCommonDir: %v %v", got, err)
+	}
+}

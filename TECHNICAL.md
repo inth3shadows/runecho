@@ -80,7 +80,10 @@ SQLite at `~/.runecho/history.db` (override dir with `RUNECHO_HOME`). Schema
 version is tracked in `PRAGMA user_version`; migrations run in order inside
 transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
 
-- `repos(id, name UNIQUE, path UNIQUE, source_root, file_cap, enrolled_at, last_indexed, parse_errors)`
+- `repos(id, name UNIQUE, path UNIQUE, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors)`
+  — `common_dir` is the git-common-dir, a stable identity shared by every
+  worktree of a repo; the guard keys lookup on it so bare-repo worktrees resolve
+  in O(1) instead of scanning `git worktree list`.
 - `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
 - `files(id, snapshot_id → snapshots, path, content_hash)`
 - `symbols(id, file_id → files, name, kind)`

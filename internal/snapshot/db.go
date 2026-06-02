@@ -87,6 +87,7 @@ var migrations = []migration{
 	migrateV1, // 0 → 1: baseline snapshots/files/symbols
 	migrateV2, // 1 → 2: central-store repos registry + snapshots.repo_id
 	migrateV3, // 2 → 3: split repo.Path into lookup key (path) + source root (source_root)
+	migrateV4, // 3 → 4: add common_dir — stable cross-worktree lookup key
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -185,6 +186,21 @@ func migrateV3(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE repos ADD COLUMN source_root TEXT`,
 		`UPDATE repos SET source_root = path WHERE source_root IS NULL`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV4 adds common_dir — the git-common-dir of an enrolled repo, a stable
+// identity shared by every worktree of that repo (bare or not). Lookup keyed on
+// it resolves bare-repo claudew worktrees in O(1) without the worktree-list
+// fallback. Existing rows get NULL (the column is populated lazily on enroll or
+// on the guard's first resolution; pre-V4 repos fall back to the compat shim
+// until then). The DB layer never shells to git, so there is no in-migration
+// backfill.
+func migrateV4(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE repos ADD COLUMN common_dir TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_repos_common_dir ON repos(common_dir)`,
 	}
 	return execAll(tx, stmts)
 }

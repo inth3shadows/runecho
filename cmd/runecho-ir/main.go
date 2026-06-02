@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/claims"
+	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
@@ -137,6 +138,11 @@ func runRepoAdd(args []string) {
 	id, err := db.EnrollRepo(n, root, *sourceRoot, *cap)
 	if err != nil {
 		fatal(err)
+	}
+	// Record the git-common-dir so the guard resolves this repo in O(1) from any
+	// worktree (schema V4). Best-effort: a non-git path just defers to lazy backfill.
+	if cd, cdErr := gitutil.CommonDir(root); cdErr == nil {
+		_ = db.SetRepoCommonDir(id, cd)
 	}
 	// Read the stored source root back rather than re-deriving EnrollRepo's
 	// empty-defaults-to-path rule here, so the displayed value can't drift from it.
@@ -733,6 +739,13 @@ func resolveRepoForWrite(db *snapshot.DB, root string) *snapshot.Repo {
 	repo, err = db.GetRepoByPath(root)
 	if err != nil {
 		fatal(err)
+	}
+	// Record the git-common-dir for O(1) cross-worktree guard lookup (schema V4).
+	// Best-effort: a non-git root just defers to the guard's lazy backfill.
+	if repo != nil {
+		if cd, cdErr := gitutil.CommonDir(root); cdErr == nil {
+			_ = db.SetRepoCommonDir(repo.ID, cd)
+		}
 	}
 	return repo
 }

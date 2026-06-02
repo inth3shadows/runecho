@@ -17,6 +17,7 @@ type Repo struct {
 	Name        string
 	Path        string // enrollment lookup key (UNIQUE); never changes after enroll
 	SourceRoot  string // directory walked for IR generation (schema V3; = Path for most repos)
+	CommonDir   string // git-common-dir; stable lookup key across worktrees (schema V4; may be empty for pre-V4 rows)
 	FileCap     int    // 0 = unlimited; honest-coverage cap for huge repos
 	EnrolledAt  time.Time
 	LastIndexed time.Time // zero if never indexed
@@ -58,21 +59,45 @@ func (db *DB) EnrollRepo(name, path, sourceRoot string, fileCap int) (int64, err
 // GetRepoByPath returns the repo enrolled at path, or nil, nil if none.
 func (db *DB) GetRepoByPath(path string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos WHERE path = ?`, path))
 }
 
 // GetRepoByName returns the repo with the given name, or nil, nil if none.
 func (db *DB) GetRepoByName(name string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos WHERE name = ?`, name))
+}
+
+// GetRepoByCommonDir returns the repo whose git-common-dir matches, or nil, nil
+// if none. commonDir is the stable identity shared by all worktrees of a repo
+// (schema V4); callers must pass a non-empty, normalized (absolute + cleaned)
+// value — an empty arg must never match a pre-V4 row whose common_dir is NULL.
+func (db *DB) GetRepoByCommonDir(commonDir string) (*Repo, error) {
+	if commonDir == "" {
+		return nil, nil
+	}
+	return scanRepo(db.conn.QueryRow(
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
+		 FROM repos WHERE common_dir = ?`, commonDir))
+}
+
+// SetRepoCommonDir records a repo's git-common-dir (schema V4). Used both at
+// enroll time and as a lazy backfill the first time the guard resolves a pre-V4
+// repo via the worktree-list shim, after which lookup keys on common_dir in O(1).
+func (db *DB) SetRepoCommonDir(id int64, commonDir string) error {
+	if _, err := db.conn.Exec(
+		`UPDATE repos SET common_dir = ? WHERE id = ?`, commonDir, id); err != nil {
+		return fmt.Errorf("set common_dir for repo %d: %w", id, err)
+	}
+	return nil
 }
 
 // ListRepos returns all enrolled repos, ordered by name.
 func (db *DB) ListRepos() ([]Repo, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list repos: %w", err)
@@ -162,13 +187,17 @@ func scanRepoRows(rows *sql.Rows) (*Repo, error) {
 func scanRepoCols(scan func(...any) error) (*Repo, error) {
 	var r Repo
 	var sourceRoot sql.NullString
+	var commonDir sql.NullString
 	var enrolled string
 	var lastIndexed sql.NullString
-	if err := scan(&r.ID, &r.Name, &r.Path, &sourceRoot, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
+	if err := scan(&r.ID, &r.Name, &r.Path, &sourceRoot, &commonDir, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
 		return nil, err
 	}
 	if sourceRoot.Valid {
 		r.SourceRoot = sourceRoot.String
+	}
+	if commonDir.Valid {
+		r.CommonDir = commonDir.String
 	}
 	var parseErr error
 	r.EnrolledAt, parseErr = time.Parse(time.RFC3339, enrolled)

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
@@ -78,32 +79,17 @@ func run() int {
 	}
 	defer db.Close()
 
-	// Resolve repo root.
-	repoRoot, err := gitTopLevel()
+	// Resolve the enrolled repo for the current working tree. resolveRepo keys on
+	// the git-common-dir (stable across all worktrees), so bare-repo claudew
+	// worktrees resolve in O(1). repoRoot is the enrolled repo's real working
+	// tree — where ParseStagedDiff and the ignorefile are read from.
+	cwd, err := os.Getwd()
 	if err != nil {
-		warnf("cannot determine repo root: %v", err)
+		warnf("cannot determine working directory: %v", err)
 		return 0
 	}
-
-	// Look up enrolled repo. Bare-repo worktrees (claudew agent dirs) have a
-	// show-toplevel that is the worktree dir itself, not any enrolled path — fall
-	// back to checking the common-dir and all git worktree paths.
-	repo, err := db.GetRepoByPath(repoRoot)
-	if err != nil {
-		warnf("store error: %v", err)
-		return 0
-	}
-	if repo == nil {
-		var enrolledRoot string
-		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
-		if enrolledRoot != "" {
-			// Point ignorePath and ParseStagedDiff at the enrolled repo's working
-			// tree (a real git dir), not the transient claudew worktree. The symbol
-			// set is loaded by repo.ID, independent of this path.
-			repoRoot = enrolledRoot
-		}
-	}
-	if repo == nil {
+	repo, repoRoot, ok := resolveRepo(db, cwd)
+	if !ok {
 		infof("skipping: repo not enrolled (run: runecho-ir repo add .)")
 		return 0
 	}
@@ -264,26 +250,9 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 	}
 	defer db.Close()
 
-	repoRoot, err := gitTopLevelFor(dir)
-	if err != nil {
+	repo, repoRoot, ok := resolveRepo(db, dir)
+	if !ok {
 		return nil, "", false
-	}
-
-	repo, err := db.GetRepoByPath(repoRoot)
-	if err != nil {
-		return nil, "", false
-	}
-	if repo == nil {
-		var enrolledRoot string
-		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
-		if repo == nil {
-			return nil, "", false
-		}
-		if enrolledRoot != "" {
-			// Point ignorePath at the enrolled repo's working tree, not the
-			// transient claudew worktree.
-			repoRoot = enrolledRoot
-		}
 	}
 
 	snaps, err := db.List(repo.ID, 1)
@@ -307,23 +276,66 @@ func hookBlock(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
 }
 
-// findEnrolledRepoViaWorktrees handles bare-repo worktrees (claudew agent dirs)
-// where git show-toplevel returns a transient worktree path that was never
-// enrolled. It tries two fallbacks in order:
+// resolveRepo finds the enrolled repo whose worktree contains dir, and the real
+// working-tree path (a git directory) to read the staged diff and ignorefile
+// from. It resolves in three tiers:
+//
+//  1. Fast path — git-common-dir. The common-dir is the stable identity shared
+//     by every worktree of a repo (bare or not), so a bare-repo claudew worktree
+//     resolves in O(1): one git subprocess plus one indexed query. This is the
+//     steady-state path for all repos enrolled under schema V4.
+//  2. Enrolled-path lookup — for repos enrolled before V4 populated common_dir
+//     (or when git-common-dir is unavailable). On a hit, common_dir is
+//     backfilled so subsequent fires take the fast path.
+//  3. Worktree-list compat shim — findEnrolledRepoViaWorktrees, for pre-V4
+//     bare-repo enrollments whose path is a specific worktree. Also backfills.
+//
+// repoRoot is always the enrolled repo.Path (a real working tree). The symbol
+// set is loaded by repo.ID downstream, independent of this path.
+func resolveRepo(db *snapshot.DB, dir string) (*snapshot.Repo, string, bool) {
+	commonDir, cdErr := gitutil.CommonDir(dir)
+	if cdErr == nil {
+		if repo, err := db.GetRepoByCommonDir(commonDir); err == nil && repo != nil {
+			return repo, repo.Path, true
+		}
+	}
+	// Compat tiers for pre-V4 repos (or when git-common-dir is unavailable).
+	repoRoot, err := gitTopLevelFor(dir)
+	if err != nil {
+		return nil, "", false
+	}
+	if repo, err := db.GetRepoByPath(repoRoot); err == nil && repo != nil {
+		backfillCommonDir(db, repo.ID, commonDir, cdErr)
+		return repo, repoRoot, true
+	}
+	if repo, enrolledRoot := findEnrolledRepoViaWorktrees(db, repoRoot); repo != nil {
+		backfillCommonDir(db, repo.ID, commonDir, cdErr)
+		return repo, enrolledRoot, true
+	}
+	return nil, "", false
+}
+
+// backfillCommonDir records common_dir on a repo resolved via a compat tier, so
+// the next guard fire takes resolveRepo's O(1) fast path. Best-effort: a write
+// error or an unavailable git-common-dir simply leaves the compat tier in place.
+func backfillCommonDir(db *snapshot.DB, repoID int64, commonDir string, cdErr error) {
+	if cdErr == nil && commonDir != "" {
+		_ = db.SetRepoCommonDir(repoID, commonDir)
+	}
+}
+
+// findEnrolledRepoViaWorktrees is the legacy compatibility shim for repos
+// enrolled before schema V4 populated common_dir (resolveRepo's tier 3). It
+// handles bare-repo worktrees (claudew agent dirs) where git show-toplevel
+// returns a transient worktree path that was never enrolled, trying:
 //  1. git-common-dir — the bare root for bare repos; the .git parent for regular
 //     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
 //  2. git worktree list — each registered worktree path. Covers bare-repo layouts
 //     where enrollment used a specific worktree (e.g. the `main` branch worktree).
 //
-// Returns both the matched repo and the enrolled root path (a real git directory).
-// Callers must update repoRoot to enrolledRoot when non-empty so that the staged
-// diff and ignorefile are read from the enrolled repo's working tree.
-//
-// NOTE: this fallback is a permanent, intentional resolution path. Repo lookup
-// keys on the enrolled `path`, which a transient worktree never matches, so the
-// fallback fires regardless of schema V3's source_root (that column only governs
-// which directory `reindex`/`liveIR` walk, not this lookup). Eliminating it would
-// require keying lookup on the git-common-dir, a larger change.
+// Returns both the matched repo and the enrolled root path (a real git
+// directory). resolveRepo backfills common_dir on a hit here, so this shim
+// self-retires after the first guard fire on each pre-V4 repo.
 func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapshot.Repo, string) {
 	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
 		if !filepath.IsAbs(commonDir) {
@@ -382,16 +394,6 @@ func gitWorktreePathsFor(dir string) []string {
 		}
 	}
 	return paths
-}
-
-func gitTopLevel() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func gitTopLevelFor(dir string) (string, error) {

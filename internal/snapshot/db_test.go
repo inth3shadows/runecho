@@ -303,6 +303,41 @@ func TestRemoveRepo_NoSnapshots_Succeeds(t *testing.T) {
 	}
 }
 
+
+// TestGetLatestByLabel_TiebreakById asserts that when two snapshots share the
+// same RFC3339 timestamp, the one with the higher row id wins — deterministic
+// even in fast CI where sub-second collisions are possible.
+func TestGetLatestByLabel_TiebreakById(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/tmp/r", 0)
+
+	// Insert two rows with identical timestamps directly to control ordering.
+	ts := "2026-06-01T12:00:00Z"
+	if _, err := db.conn.Exec(
+		`INSERT INTO snapshots (repo_id, session_id, label, timestamp, root, root_hash) VALUES (?, 's', 'v1', ?, '/tmp', 'h-lower')`,
+		id, ts,
+	); err != nil {
+		t.Fatalf("insert first: %v", err)
+	}
+	if _, err := db.conn.Exec(
+		`INSERT INTO snapshots (repo_id, session_id, label, timestamp, root, root_hash) VALUES (?, 's', 'v1', ?, '/tmp', 'h-higher')`,
+		id, ts,
+	); err != nil {
+		t.Fatalf("insert second: %v", err)
+	}
+
+	m, err := db.GetLatestByLabel(id, "v1")
+	if err != nil {
+		t.Fatalf("GetLatestByLabel: %v", err)
+	}
+	if m == nil {
+		t.Fatal("expected a result, got nil")
+	}
+	if m.RootHash != "h-higher" {
+		t.Errorf("tiebreak: got root_hash %q, want h-higher (higher id wins)", m.RootHash)
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

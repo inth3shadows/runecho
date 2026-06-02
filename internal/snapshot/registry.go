@@ -3,6 +3,7 @@ package snapshot
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -149,9 +150,17 @@ func scanRepoCols(scan func(...any) error) (*Repo, error) {
 	if err := scan(&r.ID, &r.Name, &r.Path, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
 		return nil, err
 	}
-	r.EnrolledAt, _ = time.Parse(time.RFC3339, enrolled)
+	var parseErr error
+	r.EnrolledAt, parseErr = time.Parse(time.RFC3339, enrolled)
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "runecho: warning: repo %d enrolled_at %q: %v\n", r.ID, enrolled, parseErr)
+	}
 	if lastIndexed.Valid {
-		r.LastIndexed, _ = time.Parse(time.RFC3339, lastIndexed.String)
+		r.LastIndexed, parseErr = time.Parse(time.RFC3339, lastIndexed.String)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "runecho: warning: repo %d last_indexed %q: %v\n", r.ID, lastIndexed.String, parseErr)
+			r.LastIndexed = time.Time{}
+		}
 	}
 	return &r, nil
 }

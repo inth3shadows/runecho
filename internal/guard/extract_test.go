@@ -198,6 +198,23 @@ func TestExtractRefs_Unknown_ReturnsNil(t *testing.T) {
 	}
 }
 
+
+// TestExtractRefs_Go_ClosingCommentLineSkipped verifies that a line starting
+// with */ (block-comment close) is treated as a comment and produces no refs,
+// even when followed by text that looks like a call.
+func TestExtractRefs_Go_ClosingCommentLineSkipped(t *testing.T) {
+	ls := lines(
+		`*/ SomeCall()`,
+		`* StarPrefixCall()`,
+		`// LineComment()`,
+		`/* BlockOpen()`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "SomeCall", "StarPrefixCall", "LineComment", "BlockOpen") {
+		t.Errorf("comment lines should produce no refs, got %v", refNames(refs))
+	}
+}
+
 func TestLangFor(t *testing.T) {
 	cases := []struct {
 		path string

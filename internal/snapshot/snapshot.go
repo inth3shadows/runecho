@@ -95,7 +95,7 @@ func (db *DB) GetLatestByLabel(repoID int64, label string) (*SnapshotMeta, error
 		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
 		 FROM snapshots s
 		 WHERE s.repo_id = ? AND s.label = ?
-		 ORDER BY s.timestamp DESC
+		 ORDER BY s.timestamp DESC, s.id DESC
 		 LIMIT 1`,
 		repoID, label,
 	)
@@ -121,7 +121,7 @@ func (db *DB) List(repoID int64, n int) ([]SnapshotMeta, error) {
 		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
 		 FROM snapshots s
 		 WHERE s.repo_id = ?
-		 ORDER BY s.timestamp DESC
+		 ORDER BY s.timestamp DESC, s.id DESC
 		 LIMIT ?`,
 		repoID, n,
 	)

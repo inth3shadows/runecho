@@ -53,10 +53,7 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	inImportBlock := false
 
 	for _, line := range lines {
-		// Strip inline comments before matching
-		if idx := strings.Index(line, "//"); idx >= 0 {
-			line = line[:idx]
-		}
+		line = stripLineComment(line)
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue

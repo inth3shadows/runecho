@@ -15,21 +15,35 @@ import (
 type Repo struct {
 	ID          int64
 	Name        string
-	Path        string
-	FileCap     int // 0 = unlimited; honest-coverage cap for huge repos
+	Path        string // enrollment lookup key (UNIQUE); never changes after enroll
+	SourceRoot  string // directory walked for IR generation (schema V3; = Path for most repos)
+	FileCap     int    // 0 = unlimited; honest-coverage cap for huge repos
 	EnrolledAt  time.Time
 	LastIndexed time.Time // zero if never indexed
 	ParseErrors int
 }
 
+// EffectiveSourceRoot returns the directory to walk for IR generation. For repos
+// enrolled before schema V3 where source_root may be empty, falls back to Path.
+func (r *Repo) EffectiveSourceRoot() string {
+	if r.SourceRoot != "" {
+		return r.SourceRoot
+	}
+	return r.Path
+}
+
 // EnrollRepo registers a repo and returns its id. Strict: returns an error if the
 // name or path is already taken (callers wanting auto-disambiguation handle that
-// at their layer). enrolledAt is taken from the caller-free clock at insert time.
-func (db *DB) EnrollRepo(name, path string, fileCap int) (int64, error) {
+// at their layer). sourceRoot is the directory walked for IR generation; when
+// empty it defaults to path (the typical case for non-bare-repo layouts).
+func (db *DB) EnrollRepo(name, path, sourceRoot string, fileCap int) (int64, error) {
+	if sourceRoot == "" {
+		sourceRoot = path
+	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.conn.Exec(
-		`INSERT INTO repos (name, path, file_cap, enrolled_at) VALUES (?, ?, ?, ?)`,
-		name, path, fileCap, ts,
+		`INSERT INTO repos (name, path, source_root, file_cap, enrolled_at) VALUES (?, ?, ?, ?, ?)`,
+		name, path, sourceRoot, fileCap, ts,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("enroll repo %q: %w", name, err)
@@ -44,21 +58,21 @@ func (db *DB) EnrollRepo(name, path string, fileCap int) (int64, error) {
 // GetRepoByPath returns the repo enrolled at path, or nil, nil if none.
 func (db *DB) GetRepoByPath(path string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos WHERE path = ?`, path))
 }
 
 // GetRepoByName returns the repo with the given name, or nil, nil if none.
 func (db *DB) GetRepoByName(name string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos WHERE name = ?`, name))
 }
 
 // ListRepos returns all enrolled repos, ordered by name.
 func (db *DB) ListRepos() ([]Repo, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, name, path, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, file_cap, enrolled_at, last_indexed, parse_errors
 		 FROM repos ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list repos: %w", err)
@@ -143,13 +157,18 @@ func scanRepoRows(rows *sql.Rows) (*Repo, error) {
 }
 
 // scanRepoCols scans the standard repo column order via the given Scan closure,
-// shared by *sql.Row and *sql.Rows. last_indexed is nullable.
+// shared by *sql.Row and *sql.Rows. last_indexed is nullable; source_root is
+// nullable for pre-V3 rows (though migrateV3 backfills it to path for all existing rows).
 func scanRepoCols(scan func(...any) error) (*Repo, error) {
 	var r Repo
+	var sourceRoot sql.NullString
 	var enrolled string
 	var lastIndexed sql.NullString
-	if err := scan(&r.ID, &r.Name, &r.Path, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
+	if err := scan(&r.ID, &r.Name, &r.Path, &sourceRoot, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
 		return nil, err
+	}
+	if sourceRoot.Valid {
+		r.SourceRoot = sourceRoot.String
 	}
 	var parseErr error
 	r.EnrolledAt, parseErr = time.Parse(time.RFC3339, enrolled)

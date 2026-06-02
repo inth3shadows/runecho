@@ -12,7 +12,7 @@ import (
 // locked", no data races in our code, and reads always see consistent state.
 func TestConcurrentReadWrite(t *testing.T) {
 	db, _ := openTemp(t)
-	repoID, err := db.EnrollRepo("alpha", "/repos/alpha", 0)
+	repoID, err := db.EnrollRepo("alpha", "/repos/alpha", "", 0)
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}

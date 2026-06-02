@@ -86,6 +86,7 @@ type migration func(*sql.Tx) error
 var migrations = []migration{
 	migrateV1, // 0 → 1: baseline snapshots/files/symbols
 	migrateV2, // 1 → 2: central-store repos registry + snapshots.repo_id
+	migrateV3, // 2 → 3: split repo.Path into lookup key (path) + source root (source_root)
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -172,6 +173,18 @@ func migrateV2(tx *sql.Tx) error {
 		)`,
 		`ALTER TABLE snapshots ADD COLUMN repo_id INTEGER REFERENCES repos(id)`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_repo ON snapshots(repo_id)`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV3 splits repo.Path into two roles: the lookup key (path, unchanged,
+// UNIQUE) and the source root for IR generation (source_root). Existing rows get
+// source_root = path. Newly enrolled repos may differ (bare-repo worktrees where
+// the enrolled path is a worktree dir but indexing should walk a different root).
+func migrateV3(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE repos ADD COLUMN source_root TEXT`,
+		`UPDATE repos SET source_root = path WHERE source_root IS NULL`,
 	}
 	return execAll(tx, stmts)
 }

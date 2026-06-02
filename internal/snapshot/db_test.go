@@ -1,9 +1,13 @@
 package snapshot
 
 import (
+	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/inth3shadows/runecho/internal/ir"
 )
@@ -48,7 +52,7 @@ func TestMigrateToLatest(t *testing.T) {
 		t.Fatalf("user_version = %d, want %d", got, SchemaVersion)
 	}
 	// repos table must exist (v2) — enrolling proves the schema is present.
-	if _, err := db.EnrollRepo("r", "/tmp/r", 0); err != nil {
+	if _, err := db.EnrollRepo("r", "/tmp/r", "", 0); err != nil {
 		t.Fatalf("EnrollRepo on fresh schema: %v", err)
 	}
 }
@@ -61,7 +65,7 @@ func TestMigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	id, err := db1.EnrollRepo("r", "/tmp/r", 0)
+	id, err := db1.EnrollRepo("r", "/tmp/r", "", 0)
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
@@ -86,19 +90,19 @@ func TestMigrateIdempotent(t *testing.T) {
 func TestRegistry(t *testing.T) {
 	db, _ := openTemp(t)
 
-	idA, err := db.EnrollRepo("alpha", "/repos/alpha", 100)
+	idA, err := db.EnrollRepo("alpha", "/repos/alpha", "", 100)
 	if err != nil {
 		t.Fatalf("enroll alpha: %v", err)
 	}
-	if _, err := db.EnrollRepo("beta", "/repos/beta", 0); err != nil {
+	if _, err := db.EnrollRepo("beta", "/repos/beta", "", 0); err != nil {
 		t.Fatalf("enroll beta: %v", err)
 	}
 
 	// Duplicate name and duplicate path must both fail (UNIQUE).
-	if _, err := db.EnrollRepo("alpha", "/repos/other", 0); err == nil {
+	if _, err := db.EnrollRepo("alpha", "/repos/other", "", 0); err == nil {
 		t.Fatal("expected duplicate-name enroll to fail")
 	}
-	if _, err := db.EnrollRepo("gamma", "/repos/alpha", 0); err == nil {
+	if _, err := db.EnrollRepo("gamma", "/repos/alpha", "", 0); err == nil {
 		t.Fatal("expected duplicate-path enroll to fail")
 	}
 
@@ -140,8 +144,8 @@ func TestRegistry(t *testing.T) {
 // separate histories. List/Diff scoped by repo_id never leak across repos.
 func TestRepoScopedHistory(t *testing.T) {
 	db, _ := openTemp(t)
-	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", 0)
-	idB, _ := db.EnrollRepo("beta", "/repos/beta", 0)
+	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", "", 0)
+	idB, _ := db.EnrollRepo("beta", "/repos/beta", "", 0)
 
 	// Repo A: two snapshots, second adds Foo.
 	a1, err := db.SaveSnapshot(idA, "s", "v1", "/repos/alpha", makeIR("ha1"))
@@ -190,8 +194,8 @@ func TestRepoScopedHistory(t *testing.T) {
 // rows and does not touch other repos.
 func TestPurgeRepo(t *testing.T) {
 	db, _ := openTemp(t)
-	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", 0)
-	idB, _ := db.EnrollRepo("beta", "/repos/beta", 0)
+	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", "", 0)
+	idB, _ := db.EnrollRepo("beta", "/repos/beta", "", 0)
 	if _, err := db.SaveSnapshot(idA, "s", "v1", "/repos/alpha", makeIR("ha", "Foo")); err != nil {
 		t.Fatalf("save a: %v", err)
 	}
@@ -226,8 +230,8 @@ func TestPurgeRepo(t *testing.T) {
 // scoped to the most recent snapshot and ignores other repos.
 func TestSymbolsForLatestSnapshot(t *testing.T) {
 	db, _ := openTemp(t)
-	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", 0)
-	idB, _ := db.EnrollRepo("beta", "/repos/beta", 0)
+	idA, _ := db.EnrollRepo("alpha", "/repos/alpha", "", 0)
+	idB, _ := db.EnrollRepo("beta", "/repos/beta", "", 0)
 
 	// alpha: two snapshots — only the latest should be returned.
 	if _, err := db.SaveSnapshot(idA, "s1", "old", "/repos/alpha", makeIR("h1", "OldFunc")); err != nil {
@@ -269,7 +273,7 @@ func TestSymbolsForLatestSnapshot(t *testing.T) {
 // a repo that still has snapshot history — callers must use PurgeRepo instead.
 func TestRemoveRepo_WithSnapshots_Errors(t *testing.T) {
 	db, _ := openTemp(t)
-	id, err := db.EnrollRepo("r", "/tmp/r", 0)
+	id, err := db.EnrollRepo("r", "/tmp/r", "", 0)
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
@@ -290,7 +294,7 @@ func TestRemoveRepo_WithSnapshots_Errors(t *testing.T) {
 // when no snapshots exist for the repo.
 func TestRemoveRepo_NoSnapshots_Succeeds(t *testing.T) {
 	db, _ := openTemp(t)
-	id, err := db.EnrollRepo("r2", "/tmp/r2", 0)
+	id, err := db.EnrollRepo("r2", "/tmp/r2", "", 0)
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
@@ -309,7 +313,7 @@ func TestRemoveRepo_NoSnapshots_Succeeds(t *testing.T) {
 // even in fast CI where sub-second collisions are possible.
 func TestGetLatestByLabel_TiebreakById(t *testing.T) {
 	db, _ := openTemp(t)
-	id, _ := db.EnrollRepo("r", "/tmp/r", 0)
+	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
 
 	// Insert two rows with identical timestamps directly to control ordering.
 	ts := "2026-06-01T12:00:00Z"
@@ -341,7 +345,7 @@ func TestGetLatestByLabel_TiebreakById(t *testing.T) {
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)
-	if _, err := db.EnrollRepo("alpha", "/repos/alpha", 0); err != nil {
+	if _, err := db.EnrollRepo("alpha", "/repos/alpha", "", 0); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
 	backup := filepath.Join(t.TempDir(), "backup.db")
@@ -380,7 +384,7 @@ func TestDeriveRepoName(t *testing.T) {
 // TestUniqueName asserts disambiguation when a name is already taken.
 func TestUniqueName(t *testing.T) {
 	db, _ := openTemp(t)
-	if _, err := db.EnrollRepo("myrepo", "/tmp/myrepo", 0); err != nil {
+	if _, err := db.EnrollRepo("myrepo", "/tmp/myrepo", "", 0); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
 
@@ -393,7 +397,7 @@ func TestUniqueName(t *testing.T) {
 	}
 
 	// Enroll myrepo-2 too; next should be myrepo-3.
-	if _, err := db.EnrollRepo("myrepo-2", "/tmp/myrepo-2", 0); err != nil {
+	if _, err := db.EnrollRepo("myrepo-2", "/tmp/myrepo-2", "", 0); err != nil {
 		t.Fatalf("enroll myrepo-2: %v", err)
 	}
 	name, err = UniqueName(db, "myrepo")
@@ -414,5 +418,106 @@ func TestUniqueName_Free(t *testing.T) {
 	}
 	if name != "fresh" {
 		t.Errorf("got %q, want fresh", name)
+	}
+}
+
+// TestEnrollRepo_SourceRoot verifies EffectiveSourceRoot behavior:
+// empty sourceRoot defaults to path; explicit sourceRoot is used when set.
+func TestEnrollRepo_SourceRoot(t *testing.T) {
+	db, _ := openTemp(t)
+
+	// Empty sourceRoot → defaults to path.
+	if _, err := db.EnrollRepo("default", "/repos/default", "", 0); err != nil {
+		t.Fatalf("enroll default: %v", err)
+	}
+	r, err := db.GetRepoByPath("/repos/default")
+	if err != nil || r == nil {
+		t.Fatalf("GetRepoByPath: %v %v", r, err)
+	}
+	if r.SourceRoot != "/repos/default" {
+		t.Errorf("SourceRoot = %q, want /repos/default", r.SourceRoot)
+	}
+	if r.EffectiveSourceRoot() != "/repos/default" {
+		t.Errorf("EffectiveSourceRoot = %q, want /repos/default", r.EffectiveSourceRoot())
+	}
+
+	// Explicit sourceRoot differs from path (bare-repo worktree layout).
+	if _, err := db.EnrollRepo("bare", "/repos/bare/main", "/repos/bare", 0); err != nil {
+		t.Fatalf("enroll bare: %v", err)
+	}
+	r2, err := db.GetRepoByPath("/repos/bare/main")
+	if err != nil || r2 == nil {
+		t.Fatalf("GetRepoByPath bare: %v %v", r2, err)
+	}
+	if r2.Path != "/repos/bare/main" {
+		t.Errorf("Path = %q, want /repos/bare/main", r2.Path)
+	}
+	if r2.SourceRoot != "/repos/bare" {
+		t.Errorf("SourceRoot = %q, want /repos/bare", r2.SourceRoot)
+	}
+	if r2.EffectiveSourceRoot() != "/repos/bare" {
+		t.Errorf("EffectiveSourceRoot = %q, want /repos/bare", r2.EffectiveSourceRoot())
+	}
+}
+
+// TestMigrateV3BackwardCompat simulates a V2 database (before source_root existed)
+// being upgraded to V3 and verifies existing rows get source_root = path.
+func TestMigrateV3BackwardCompat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "v2.db")
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := conn.Exec(p); err != nil {
+			t.Fatalf("pragma: %v", err)
+		}
+	}
+	// Run only V1 and V2 migrations, stopping before V3.
+	for v := 0; v < 2; v++ {
+		tx, _ := conn.Begin()
+		if err := migrations[v](tx); err != nil {
+			t.Fatalf("migration v%d: %v", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+			t.Fatalf("set user_version: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit migration v%d: %v", v+1, err)
+		}
+	}
+	// Insert a V2-style repo row (source_root column does not exist yet).
+	_, err = conn.Exec(
+		`INSERT INTO repos (name, path, file_cap, enrolled_at) VALUES ('legacy', '/repos/legacy', 0, '2026-01-01T00:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy repo: %v", err)
+	}
+	conn.Close()
+
+	// Re-open with snapshot.Open, which applies V3 (adds and backfills source_root).
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open after V3: %v", err)
+	}
+	defer db.Close()
+
+	if v := userVersion(t, db); v != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, SchemaVersion)
+	}
+	repo, err := db.GetRepoByPath("/repos/legacy")
+	if err != nil || repo == nil {
+		t.Fatalf("GetRepoByPath: %v %v", repo, err)
+	}
+	if repo.SourceRoot != "/repos/legacy" {
+		t.Errorf("source_root after V3 migration = %q, want /repos/legacy", repo.SourceRoot)
+	}
+	if repo.EffectiveSourceRoot() != "/repos/legacy" {
+		t.Errorf("EffectiveSourceRoot = %q, want /repos/legacy", repo.EffectiveSourceRoot())
 	}
 }

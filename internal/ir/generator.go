@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,12 +16,18 @@ import (
 type Generator struct {
 	parsers      []parser.Parser
 	ignoredPaths map[string]bool
+	fileCap      int // 0 = unlimited; walk stops after this many files
 }
 
 // GeneratorConfig configures IR generation behavior.
 type GeneratorConfig struct {
 	IgnoredPaths []string // Directory names to ignore
+	FileCap      int      // Max files to index; 0 = unlimited. Walk stops after this many files are processed.
 }
+
+// errFileCap is the sentinel returned by a walk callback when the file cap is
+// reached. It stops the walk early and is not propagated as a real error.
+var errFileCap = errors.New("file cap reached")
 
 // NewGenerator creates a new IR generator.
 func NewGenerator(config GeneratorConfig) *Generator {
@@ -35,6 +42,7 @@ func NewGenerator(config GeneratorConfig) *Generator {
 	return &Generator{
 		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
 		ignoredPaths: ignored,
+		fileCap:      config.FileCap,
 	}
 }
 
@@ -76,6 +84,7 @@ func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 }
 
 // Generate creates IR for all supported files in the given root directory.
+// When FileCap > 0, the walk stops after that many files are processed.
 func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
@@ -84,9 +93,13 @@ func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 	absRoot = filepath.Clean(absRoot)
 
 	result := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors int
+	var parseErrors, fileCount int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		if g.fileCap > 0 && fileCount >= g.fileCap {
+			return errFileCap
+		}
+		fileCount++
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
@@ -95,7 +108,7 @@ func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 		}
 		result.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errFileCap) {
 		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
@@ -104,7 +117,8 @@ func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 }
 
 // Update incrementally updates IR based on file hashes.
-// Only re-parses files whose hash has changed.
+// Only re-parses files whose hash has changed. When FileCap > 0, the walk stops
+// after that many files are processed (consistent with Generate).
 func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
@@ -113,9 +127,13 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 	absRoot = filepath.Clean(absRoot)
 
 	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors int
+	var parseErrors, fileCount int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		if g.fileCap > 0 && fileCount >= g.fileCap {
+			return errFileCap
+		}
+		fileCount++
 		currentHash, err := HashFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to hash %s: %v\n", absPath, err)
@@ -133,7 +151,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 		}
 		updated.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errFileCap) {
 		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
 	}
 

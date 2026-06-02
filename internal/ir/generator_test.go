@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -452,6 +453,46 @@ func equalIR(a, b *IR) bool {
 	}
 
 	return true
+}
+
+// TestGenerate_FileCap verifies that Generate stops after FileCap files and that
+// Update respects the same cap, producing consistent (capped) hashes.
+func TestGenerate_FileCap(t *testing.T) {
+	tmpDir := t.TempDir()
+	for i := range 5 {
+		name := fmt.Sprintf("f%d.js", i)
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte("function x() {}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gen := NewGenerator(GeneratorConfig{FileCap: 3})
+	result, _, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if len(result.Files) != 3 {
+		t.Errorf("FileCap=3: got %d files, want 3", len(result.Files))
+	}
+
+	// Update with same cap should also produce exactly 3 files.
+	result2, _, err := gen.Update(result, tmpDir)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if len(result2.Files) != 3 {
+		t.Errorf("Update FileCap=3: got %d files, want 3", len(result2.Files))
+	}
+
+	// Zero cap means unlimited.
+	genUnlimited := NewGenerator(GeneratorConfig{})
+	full, _, err := genUnlimited.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate unlimited failed: %v", err)
+	}
+	if len(full.Files) != 5 {
+		t.Errorf("FileCap=0: got %d files, want 5", len(full.Files))
+	}
 }
 
 // TestGenerate_ParseErrorCount verifies that files failing to parse are counted

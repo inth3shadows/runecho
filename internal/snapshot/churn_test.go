@@ -24,7 +24,7 @@ func twoFileIR(rootHash, hashA, hashB string, fnsA, fnsB []string) *ir.IR {
 
 func TestChurn_InsufficientSnapshots(t *testing.T) {
 	db, _ := openTemp(t)
-	repoID, _ := db.EnrollRepo("r", "/r", 0)
+	repoID, _ := db.EnrollRepo("r", "/r", "", 0)
 
 	// 0 snapshots
 	r, err := db.Churn(repoID, 10)
@@ -48,7 +48,7 @@ func TestChurn_InsufficientSnapshots(t *testing.T) {
 
 func TestChurn_BasicFileAndSymbolCounting(t *testing.T) {
 	db, _ := openTemp(t)
-	repoID, _ := db.EnrollRepo("r", "/r", 0)
+	repoID, _ := db.EnrollRepo("r", "/r", "", 0)
 
 	// Snapshot 1: a.go={"Alpha"} b.go={"Beta"}
 	//   a.go hash "a1", b.go hash "b1"
@@ -93,7 +93,7 @@ func TestChurn_BasicFileAndSymbolCounting(t *testing.T) {
 
 func TestChurn_FileChangesMultipleTimes(t *testing.T) {
 	db, _ := openTemp(t)
-	repoID, _ := db.EnrollRepo("r", "/r", 0)
+	repoID, _ := db.EnrollRepo("r", "/r", "", 0)
 
 	// a.go changes in every diff
 	db.SaveSnapshot(repoID, "", "s1", "/r", makeIR("h1", "A"))

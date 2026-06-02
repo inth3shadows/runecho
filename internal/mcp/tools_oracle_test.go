@@ -26,7 +26,7 @@ func newOracleRepo(t *testing.T) (*Oracle, string, *snapshot.DB) {
 	if err := os.WriteFile(filepath.Join(repoDir, "demo.go"), []byte(src), 0644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if _, err := db.EnrollRepo("demo", repoDir, 0); err != nil {
+	if _, err := db.EnrollRepo("demo", repoDir, "", 0); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
 	return NewOracle(db, dbPath), "demo", db
@@ -147,8 +147,8 @@ func TestOracleDiffCrossRepoBlocked(t *testing.T) {
 	os.WriteFile(filepath.Join(dir1, "a.go"), srcA, 0644)
 	os.WriteFile(filepath.Join(dir2, "b.go"), srcB, 0644)
 
-	repoID1, _ := db.EnrollRepo("repoA", dir1, 0)
-	repoID2, _ := db.EnrollRepo("repoB", dir2, 0)
+	repoID1, _ := db.EnrollRepo("repoA", dir1, "", 0)
+	repoID2, _ := db.EnrollRepo("repoB", dir2, "", 0)
 
 	live1, _ := liveIR(dir1)
 	live2, _ := liveIR(dir2)

@@ -129,7 +129,7 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	irData, err := liveIR(repo.Path)
+	irData, err := liveIR(repo.EffectiveSourceRoot())
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +155,7 @@ func (o *Oracle) hash(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	irData, err := liveIR(repo.Path)
+	irData, err := liveIR(repo.EffectiveSourceRoot())
 	if err != nil {
 		return "", err
 	}
@@ -211,7 +211,7 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		if meta == nil {
 			return "", fmt.Errorf("no snapshot labeled %q for repo %q", a.Since, repo.Name)
 		}
-		live, err := liveIR(repo.Path)
+		live, err := liveIR(repo.EffectiveSourceRoot())
 		if err != nil {
 			return "", err
 		}
@@ -227,7 +227,7 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		if len(latest) == 0 {
 			return "", fmt.Errorf("repo %q has no snapshots; run `ai-ir repo reindex %s`", repo.Name, repo.Name)
 		}
-		live, err := liveIR(repo.Path)
+		live, err := liveIR(repo.EffectiveSourceRoot())
 		if err != nil {
 			return "", err
 		}

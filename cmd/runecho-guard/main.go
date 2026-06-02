@@ -94,12 +94,11 @@ func run() int {
 		return 0
 	}
 	if repo == nil {
-		var enrolledRoot string
-		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
-		if enrolledRoot != "" {
-			// Update repoRoot so ignorePath and ParseStagedDiff use the enrolled
-			// repo's root, not the transient claudew worktree path.
-			repoRoot = enrolledRoot
+		repo, _ = findEnrolledRepoViaWorktrees(db, repoRoot)
+		if repo != nil {
+			// Use the enrolled repo's effective source root so ignorePath and
+			// ParseStagedDiff reference the correct directory, not the transient worktree.
+			repoRoot = repo.EffectiveSourceRoot()
 		}
 	}
 	if repo == nil {
@@ -273,16 +272,11 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 		return nil, "", false
 	}
 	if repo == nil {
-		var enrolledRoot string
-		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
+		repo, _ = findEnrolledRepoViaWorktrees(db, repoRoot)
 		if repo == nil {
 			return nil, "", false
 		}
-		if enrolledRoot != "" {
-			// Update repoRoot so ignorePath points to the enrolled repo, not the
-			// transient claudew worktree.
-			repoRoot = enrolledRoot
-		}
+		repoRoot = repo.EffectiveSourceRoot()
 	}
 
 	snaps, err := db.List(repo.ID, 1)
@@ -306,22 +300,15 @@ func hookBlock(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
 }
 
-// findEnrolledRepoViaWorktrees handles bare-repo worktrees (claudew agent dirs)
-// where git show-toplevel returns a transient worktree path that was never
-// enrolled. It tries two fallbacks in order:
+// findEnrolledRepoViaWorktrees is a compatibility shim for bare-repo worktrees
+// (claudew agent dirs) where git show-toplevel returns a transient worktree path
+// that was never directly enrolled. It tries two fallbacks:
 //  1. git-common-dir — the bare root for bare repos; the .git parent for regular
-//     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
-//  2. git worktree list — each registered worktree path. Covers bare-repo layouts
-//     where enrollment used a specific worktree (e.g. the `main` branch worktree).
+//     linked worktrees.
+//  2. git worktree list — each registered worktree path.
 //
-// Returns both the matched repo and the enrolled root path. Callers must update
-// repoRoot to enrolledRoot when non-empty so that ignorePath and diff parsing use
-// the enrolled repo's root, not the transient worktree directory.
-//
-// NOTE: this fallback is permanent. repo.Path serves dual purposes — lookup key
-// and buildIR source root — so normalizing to the common-dir at enrollment time
-// would break reindex. A clean fix requires splitting repo.Path into separate
-// lookup-key and source-root fields in the schema.
+// Deprecated: re-enroll with `runecho-ir repo add --source-root=<path>` to set
+// the source root explicitly; that eliminates this fallback entirely.
 func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapshot.Repo, string) {
 	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
 		if !filepath.IsAbs(commonDir) {
@@ -337,6 +324,7 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapsh
 		// already tried by the caller; re-checking it wastes a DB roundtrip.
 		if commonDir != worktreePath {
 			if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
+				fmt.Fprintf(os.Stderr, "runecho: worktree fallback used for %q — re-enroll with `runecho-ir repo add --source-root=<path>` to avoid this\n", repo.Name)
 				return repo, commonDir
 			}
 		}
@@ -346,6 +334,7 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapsh
 			continue
 		}
 		if repo, err := db.GetRepoByPath(wt); err == nil && repo != nil {
+			fmt.Fprintf(os.Stderr, "runecho: worktree fallback used for %q — re-enroll with `runecho-ir repo add --source-root=<path>` to avoid this\n", repo.Name)
 			return repo, wt
 		}
 	}

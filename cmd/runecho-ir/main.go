@@ -79,7 +79,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name>")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
@@ -111,7 +111,8 @@ func runRepo(args []string) {
 func runRepoAdd(args []string) {
 	fs := flag.NewFlagSet("repo add", flag.ExitOnError)
 	name := fs.String("name", "", "repo name (default: derived from path)")
-	cap := fs.Int("cap", 0, "max files to index, 0 = unlimited (advisory; logged when exceeded)")
+	cap := fs.Int("cap", 0, "max files to index, 0 = unlimited")
+	sourceRoot := fs.String("source-root", "", "directory to walk for IR generation (default: same as path; use for bare-repo worktree layouts)")
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
@@ -133,11 +134,19 @@ func runRepoAdd(args []string) {
 			fatal(uErr)
 		}
 	}
-	id, err := db.EnrollRepo(n, root, *cap)
+	id, err := db.EnrollRepo(n, root, *sourceRoot, *cap)
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s\n", n, id, *cap, root)
+	srcRoot := *sourceRoot
+	if srcRoot == "" {
+		srcRoot = root
+	}
+	if srcRoot == root {
+		fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s\n", n, id, *cap, root)
+	} else {
+		fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s (source-root: %s)\n", n, id, *cap, root, srcRoot)
+	}
 }
 
 // runRepoList prints all enrolled repos and their indexing state.
@@ -205,15 +214,12 @@ func runRepoReindex(args []string) {
 		os.Exit(1)
 	}
 
-	irData, parseErrors := buildIR(repo.Path)
-	if err := irData.Save(filepath.Join(repo.Path, ".ai", "ir.json")); err != nil {
+	srcRoot := repo.EffectiveSourceRoot()
+	irData, parseErrors := buildIR(srcRoot, repo.FileCap)
+	if err := irData.Save(filepath.Join(srcRoot, ".ai", "ir.json")); err != nil {
 		fatal(fmt.Errorf("save ir.json: %w", err))
 	}
-	if repo.FileCap > 0 && len(irData.Files) > repo.FileCap {
-		fmt.Fprintf(os.Stderr, "Warning: %s indexed %d files, exceeds cap %d (full index used; cap not yet enforced)\n",
-			repo.Name, len(irData.Files), repo.FileCap)
-	}
-	id, err := db.SaveSnapshot(repo.ID, "", "reindex", repo.Path, irData)
+	id, err := db.SaveSnapshot(repo.ID, "", "reindex", srcRoot, irData)
 	if err != nil {
 		fatal(err)
 	}
@@ -255,13 +261,17 @@ func runBackup(args []string) {
 }
 
 // buildIR generates a fresh IR for root (full, not incremental).
+// fileCap limits the number of files indexed (0 = unlimited).
 // Returns the IR and the number of files that failed to parse.
-func buildIR(root string) (*ir.IR, int) {
+func buildIR(root string, fileCap int) (*ir.IR, int) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		fatal(err)
 	}
-	result, parseErrors, err := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths}).Generate(abs)
+	result, parseErrors, err := ir.NewGenerator(ir.GeneratorConfig{
+		IgnoredPaths: ir.DefaultIgnoredPaths,
+		FileCap:      fileCap,
+	}).Generate(abs)
 	if err != nil {
 		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
@@ -336,7 +346,7 @@ func runSnapshot(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	irData, parseErrors := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, parseErrors := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	db := mustOpenDB()
 	defer db.Close()
 
@@ -390,7 +400,7 @@ func runDiff(args []string) {
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", *since, root)
 			os.Exit(0)
 		}
-		irData, _ := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+		irData, _ := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		result, err = db.DiffLive(*meta, irData)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -548,7 +558,7 @@ func runVerify(args []string) {
 		os.Exit(0)
 	}
 
-	irData, _ := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, _ := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -716,7 +726,7 @@ func resolveRepoForWrite(db *snapshot.DB, root string) int64 {
 	if uErr != nil {
 		fatal(uErr)
 	}
-	id, err := db.EnrollRepo(uname, root, 0)
+	id, err := db.EnrollRepo(uname, root, root, 0)
 	if err != nil {
 		fatal(err)
 	}

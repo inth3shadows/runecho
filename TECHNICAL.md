@@ -80,7 +80,7 @@ SQLite at `~/.runecho/history.db` (override dir with `RUNECHO_HOME`). Schema
 version is tracked in `PRAGMA user_version`; migrations run in order inside
 transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
 
-- `repos(id, name UNIQUE, path UNIQUE, file_cap, enrolled_at, last_indexed, parse_errors)`
+- `repos(id, name UNIQUE, path UNIQUE, source_root, file_cap, enrolled_at, last_indexed, parse_errors)`
 - `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
 - `files(id, snapshot_id → snapshots, path, content_hash)`
 - `symbols(id, file_id → files, name, kind)`
@@ -126,9 +126,9 @@ runecho-ir repo list                              # enrolled repos + index state
 
 - **Languages:** Go, JS/TS, Python only. Parsers are regex/AST-shallow — top-level
   symbols, not nested scopes.
-- **File cap is advisory.** `repo add --cap N` is recorded and a warning is logged
-  when a repo exceeds it, but indexing is not yet truncated (enforcement needs a
-  generator change). Coverage is reported honestly; it is never silently capped.
+- **File cap is enforced.** `repo add --cap N` stops the walk after N files. The
+  root hash reflects only the capped file set — truncation changes the hash compared
+  to an uncapped run of the same repo. Coverage is reported honestly via `status`.
 - **Single-connection store.** Correct and torn-read-free, but reads do not run
   concurrently with writes. Fine at single-operator scale; not built for many
   concurrent indexers.

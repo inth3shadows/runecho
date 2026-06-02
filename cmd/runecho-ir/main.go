@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/claims"
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
@@ -128,7 +127,11 @@ func runRepoAdd(args []string) {
 
 	n := *name
 	if n == "" {
-		n = uniqueName(db, deriveRepoName(root))
+		var uErr error
+		n, uErr = snapshot.UniqueName(db, snapshot.DeriveRepoName(root))
+		if uErr != nil {
+			fatal(uErr)
+		}
 	}
 	id, err := db.EnrollRepo(n, root, *cap)
 	if err != nil {
@@ -645,7 +648,7 @@ func runValidateClaims(args []string) {
 	}
 
 	// Extract symbol references from text.
-	refs := extractSymbolRefs(text)
+	refs := claims.ExtractSymbolRefs(text)
 
 	type Mismatch struct {
 		Ref     string `json:"ref"`
@@ -671,74 +674,6 @@ func runValidateClaims(args []string) {
 	if len(mismatches) > 0 {
 		os.Exit(1)
 	}
-}
-
-// extractSymbolRefs returns a map of symbol → context snippet from text.
-// Targets: backtick-quoted identifiers, and "func X", "type X", "var X" patterns.
-// Conservative: only flags names with uppercase (CamelCase) or containing underscore+uppercase.
-func extractSymbolRefs(text string) map[string]string {
-	refs := make(map[string]string)
-	lines := bufio.NewScanner(strings.NewReader(text))
-
-	// Patterns
-	backtickRe := regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_]*)`")
-	declRe := regexp.MustCompile(`\b(?:func|type|var|const)\s+([A-Z][A-Za-z0-9_]*)`)
-
-	for lines.Scan() {
-		line := lines.Text()
-
-		for _, m := range backtickRe.FindAllStringSubmatch(line, -1) {
-			sym := m[1]
-			if isCodeSymbol(sym) {
-				if _, seen := refs[sym]; !seen {
-					refs[sym] = truncate(line, 80)
-				}
-			}
-		}
-
-		for _, m := range declRe.FindAllStringSubmatch(line, -1) {
-			sym := m[1]
-			if isCodeSymbol(sym) {
-				if _, seen := refs[sym]; !seen {
-					refs[sym] = truncate(line, 80)
-				}
-			}
-		}
-	}
-	return refs
-}
-
-// isCodeSymbol returns true if the name looks like a CamelCase code identifier.
-// Requires mixed case (both upper and lower letters) to avoid false positives on:
-//   - ALL_CAPS shell/env constants (IR_DRIFT, OPUS_BLOCKED)
-//   - snake_case shell functions (emit_fault, validate_claims)
-//   - Python dunders (__all__, __init__)
-//
-// Only CamelCase/PascalCase names like IRProvider, ValidateClaims, FileIR pass.
-func isCodeSymbol(name string) bool {
-	if len(name) <= 2 {
-		return false
-	}
-	hasUpper := false
-	hasLower := false
-	for _, r := range name {
-		if r >= 'A' && r <= 'Z' {
-			hasUpper = true
-		}
-		if r >= 'a' && r <= 'z' {
-			hasLower = true
-		}
-	}
-	// Must have both upper and lower to be CamelCase
-	return hasUpper && hasLower
-}
-
-func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // runechoDir is the package-local alias to the shared store helper.
@@ -773,38 +708,15 @@ func resolveRepoForWrite(db *snapshot.DB, root string) int64 {
 	if repo != nil {
 		return repo.ID
 	}
-	id, err := db.EnrollRepo(uniqueName(db, deriveRepoName(root)), root, 0)
+	uname, uErr := snapshot.UniqueName(db, snapshot.DeriveRepoName(root))
+	if uErr != nil {
+		fatal(uErr)
+	}
+	id, err := db.EnrollRepo(uname, root, 0)
 	if err != nil {
 		fatal(err)
 	}
 	return id
-}
-
-// deriveRepoName builds a default enrollment name from the last two path segments
-// (e.g. runecho/master -> "runecho-master"), avoiding collisions across the
-// bare-worktree layout. Falls back to the basename at a filesystem root.
-func deriveRepoName(root string) string {
-	base := filepath.Base(root)
-	parent := filepath.Base(filepath.Dir(root))
-	if parent == "" || parent == "." || parent == base || parent == string(filepath.Separator) {
-		return base
-	}
-	return parent + "-" + base
-}
-
-// uniqueName returns desired, or desired-2/-3/... if the name is already taken.
-func uniqueName(db *snapshot.DB, desired string) string {
-	name := desired
-	for i := 2; ; i++ {
-		existing, err := db.GetRepoByName(name)
-		if err != nil {
-			fatal(err)
-		}
-		if existing == nil {
-			return name
-		}
-		name = fmt.Sprintf("%s-%d", desired, i)
-	}
 }
 
 // lookupRepoID returns the repo_id for root, or -1 if never enrolled. Read

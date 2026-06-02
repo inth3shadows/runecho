@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/inth3shadows/runecho/internal/snapshot"
+)
 
 func TestDeriveRepoName(t *testing.T) {
 	cases := []struct {
@@ -13,8 +17,8 @@ func TestDeriveRepoName(t *testing.T) {
 		{"/foo", "foo"}, // parent is filesystem root → basename only
 	}
 	for _, c := range cases {
-		if got := deriveRepoName(c.root); got != c.want {
-			t.Errorf("deriveRepoName(%q) = %q, want %q", c.root, got, c.want)
+		if got := snapshot.DeriveRepoName(c.root); got != c.want {
+			t.Errorf("DeriveRepoName(%q) = %q, want %q", c.root, got, c.want)
 		}
 	}
 }

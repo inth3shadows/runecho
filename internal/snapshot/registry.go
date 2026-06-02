@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -163,4 +164,32 @@ func scanRepoCols(scan func(...any) error) (*Repo, error) {
 		}
 	}
 	return &r, nil
+}
+
+// DeriveRepoName builds a default enrollment name from the last two path
+// segments (e.g. runecho/master → "runecho-master"), avoiding collisions
+// in bare-worktree layouts. Falls back to the basename at a filesystem root.
+func DeriveRepoName(root string) string {
+	base := filepath.Base(root)
+	parent := filepath.Base(filepath.Dir(root))
+	if parent == "" || parent == "." || parent == base || parent == string(filepath.Separator) {
+		return base
+	}
+	return parent + "-" + base
+}
+
+// UniqueName returns desired if no repo with that name exists in db, otherwise
+// returns desired-2, desired-3, … until a free name is found.
+func UniqueName(db *DB, desired string) (string, error) {
+	name := desired
+	for i := 2; ; i++ {
+		existing, err := db.GetRepoByName(name)
+		if err != nil {
+			return "", err
+		}
+		if existing == nil {
+			return name, nil
+		}
+		name = fmt.Sprintf("%s-%d", desired, i)
+	}
 }

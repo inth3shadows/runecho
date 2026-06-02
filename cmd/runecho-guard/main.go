@@ -119,7 +119,7 @@ func run() int {
 	}
 
 	// Warn if IR is stale.
-	maxAge, err := parseMaxAge()
+	maxAge, err := guard.ParseMaxAge()
 	if err != nil {
 		warnf("%v", err)
 		return 1
@@ -227,7 +227,7 @@ func runHookMode() int {
 
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
-		AddedLines: textToAddedLines(text),
+		AddedLines: guard.TextToAddedLines(text),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -296,16 +296,6 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 	}
 
 	return syms, filepath.Join(repoRoot, ".runechoguardignore"), true
-}
-
-// textToAddedLines converts a multi-line string into AddedLine entries (1-based).
-func textToAddedLines(text string) []guard.AddedLine {
-	raw := strings.Split(text, "\n")
-	lines := make([]guard.AddedLine, len(raw))
-	for i, l := range raw {
-		lines[i] = guard.AddedLine{LineNo: i + 1, Text: l}
-	}
-	return lines
 }
 
 func hookApprove() {
@@ -414,17 +404,6 @@ func gitTopLevelFor(dir string) (string, error) {
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
-
-func parseMaxAge() (time.Duration, error) {
-	if s := os.Getenv("RUNECHO_GUARD_MAX_AGE"); s != "" {
-		d, err := time.ParseDuration(s)
-		if err != nil {
-			return 0, fmt.Errorf("bad RUNECHO_GUARD_MAX_AGE %q: %w", s, err)
-		}
-		return d, nil
-	}
-	return 24 * time.Hour, nil
-}
 
 func warnf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[runecho-guard] WARNING: "+format+"\n", args...)

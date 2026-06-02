@@ -358,3 +358,61 @@ func TestBackupTo(t *testing.T) {
 		t.Fatalf("backup missing data: %v %v", repo, err)
 	}
 }
+
+// TestDeriveRepoName covers the two-segment and root-fallback cases.
+func TestDeriveRepoName(t *testing.T) {
+	cases := []struct {
+		root string
+		want string
+	}{
+		{"/home/ericm/repos/runecho/master", "runecho-master"},
+		{"/repos/myapp", "repos-myapp"},
+		{"/singledir", "singledir"},
+		{"/a/b", "a-b"},
+	}
+	for _, tc := range cases {
+		if got := DeriveRepoName(tc.root); got != tc.want {
+			t.Errorf("DeriveRepoName(%q) = %q, want %q", tc.root, got, tc.want)
+		}
+	}
+}
+
+// TestUniqueName asserts disambiguation when a name is already taken.
+func TestUniqueName(t *testing.T) {
+	db, _ := openTemp(t)
+	if _, err := db.EnrollRepo("myrepo", "/tmp/myrepo", 0); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	name, err := UniqueName(db, "myrepo")
+	if err != nil {
+		t.Fatalf("UniqueName: %v", err)
+	}
+	if name != "myrepo-2" {
+		t.Errorf("got %q, want myrepo-2", name)
+	}
+
+	// Enroll myrepo-2 too; next should be myrepo-3.
+	if _, err := db.EnrollRepo("myrepo-2", "/tmp/myrepo-2", 0); err != nil {
+		t.Fatalf("enroll myrepo-2: %v", err)
+	}
+	name, err = UniqueName(db, "myrepo")
+	if err != nil {
+		t.Fatalf("UniqueName second pass: %v", err)
+	}
+	if name != "myrepo-3" {
+		t.Errorf("got %q, want myrepo-3", name)
+	}
+}
+
+// TestUniqueName_Free asserts that a completely free name is returned unchanged.
+func TestUniqueName_Free(t *testing.T) {
+	db, _ := openTemp(t)
+	name, err := UniqueName(db, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "fresh" {
+		t.Errorf("got %q, want fresh", name)
+	}
+}

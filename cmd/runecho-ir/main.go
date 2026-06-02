@@ -205,7 +205,7 @@ func runRepoReindex(args []string) {
 		os.Exit(1)
 	}
 
-	irData := buildIR(repo.Path)
+	irData, parseErrors := buildIR(repo.Path)
 	if err := irData.Save(filepath.Join(repo.Path, ".ai", "ir.json")); err != nil {
 		fatal(fmt.Errorf("save ir.json: %w", err))
 	}
@@ -217,7 +217,7 @@ func runRepoReindex(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	if err := db.TouchRepo(repo.ID, time.Now(), 0); err != nil {
+	if err := db.TouchRepo(repo.ID, time.Now(), parseErrors); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	short := irData.RootHash
@@ -255,16 +255,17 @@ func runBackup(args []string) {
 }
 
 // buildIR generates a fresh IR for root (full, not incremental).
-func buildIR(root string) *ir.IR {
+// Returns the IR and the number of files that failed to parse.
+func buildIR(root string) (*ir.IR, int) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		fatal(err)
 	}
-	result, err := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths}).Generate(abs)
+	result, parseErrors, err := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths}).Generate(abs)
 	if err != nil {
 		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
-	return result
+	return result, parseErrors
 }
 
 // runIndex is the original runecho-ir [root] behavior.
@@ -290,22 +291,25 @@ func runIndex(args []string) {
 	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
 
 	var result *ir.IR
+	var genErr error
 
 	if _, err := os.Stat(irPath); err == nil {
 		existing, loadErr := ir.Load(irPath)
 		if loadErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to load existing IR, regenerating: %v\n", loadErr)
-			result, err = generator.Generate(absRoot)
+			result, _, genErr = generator.Generate(absRoot)
 		} else {
-			result, err = generator.Update(existing, absRoot)
+			result, _, genErr = generator.Update(existing, absRoot)
 		}
 	} else {
 		if err := os.MkdirAll(filepath.Dir(irPath), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .ai directory: %v\n", err)
 			os.Exit(1)
 		}
-		result, err = generator.Generate(absRoot)
+		result, _, genErr = generator.Generate(absRoot)
 	}
+
+	err = genErr
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -332,7 +336,7 @@ func runSnapshot(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, parseErrors := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	db := mustOpenDB()
 	defer db.Close()
 
@@ -343,7 +347,7 @@ func runSnapshot(args []string) {
 		os.Exit(1)
 	}
 	// Record the capture point (self-observing: last_indexed staleness).
-	if err := db.TouchRepo(repoID, time.Now(), 0); err != nil {
+	if err := db.TouchRepo(repoID, time.Now(), parseErrors); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	shortHash := irData.RootHash
@@ -386,7 +390,7 @@ func runDiff(args []string) {
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", *since, root)
 			os.Exit(0)
 		}
-		irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+		irData, _ := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		result, err = db.DiffLive(*meta, irData)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -544,7 +548,7 @@ func runVerify(args []string) {
 		os.Exit(0)
 	}
 
-	irData := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, _ := buildIR(root) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

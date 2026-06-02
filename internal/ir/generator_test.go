@@ -38,7 +38,7 @@ export const baz;
 	// Generate IR 100 times
 	results := make([]*IR, 100)
 	for i := 0; i < 100; i++ {
-		ir, err := generator.Generate(tmpDir)
+		ir, _, err := generator.Generate(tmpDir)
 		if err != nil {
 			t.Fatalf("Generate failed on iteration %d: %v", i, err)
 		}
@@ -79,7 +79,7 @@ func TestGenerator_Generate_JSONDeterminism(t *testing.T) {
 	// Generate IR and marshal to JSON 100 times
 	jsonResults := make([]string, 100)
 	for i := 0; i < 100; i++ {
-		ir, err := generator.Generate(tmpDir)
+		ir, _, err := generator.Generate(tmpDir)
 		if err != nil {
 			t.Fatalf("Generate failed on iteration %d: %v", i, err)
 		}
@@ -131,7 +131,7 @@ func TestGenerator_Generate_IgnoredPaths(t *testing.T) {
 	config := GeneratorConfig{}
 	generator := NewGenerator(config)
 
-	ir, err := generator.Generate(tmpDir)
+	ir, _, err := generator.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestGenerator_Generate_OnlySupportedExtensions(t *testing.T) {
 	config := GeneratorConfig{}
 	generator := NewGenerator(config)
 
-	ir, err := generator.Generate(tmpDir)
+	ir, _, err := generator.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestGenerator_Update_IncrementalUpdate(t *testing.T) {
 	generator := NewGenerator(config)
 
 	// Generate initial IR
-	initialIR, err := generator.Generate(tmpDir)
+	initialIR, _, err := generator.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Initial generate failed: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestGenerator_Update_IncrementalUpdate(t *testing.T) {
 		t.Fatalf("Failed to modify file2: %v", err)
 	}
 
-	updatedIR, err := generator.Update(initialIR, tmpDir)
+	updatedIR, _, err := generator.Update(initialIR, tmpDir)
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestGenerator_Generate_PathNormalization(t *testing.T) {
 	config := GeneratorConfig{}
 	generator := NewGenerator(config)
 
-	ir, err := generator.Generate(tmpDir)
+	ir, _, err := generator.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestGenerator_Generate_EmptyDirectory(t *testing.T) {
 	config := GeneratorConfig{}
 	generator := NewGenerator(config)
 
-	ir, err := generator.Generate(tmpDir)
+	ir, _, err := generator.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -324,13 +324,13 @@ func TestGenerator_Generate_UnicodeNormalization(t *testing.T) {
 	generator := NewGenerator(config)
 
 	// Generate IR for NFC directory
-	irNFC, err := generator.Generate(tmpDirNFC)
+	irNFC, _, err := generator.Generate(tmpDirNFC)
 	if err != nil {
 		t.Fatalf("Generate failed for NFC: %v", err)
 	}
 
 	// Generate IR for NFD directory
-	irNFD, err := generator.Generate(tmpDirNFD)
+	irNFD, _, err := generator.Generate(tmpDirNFD)
 	if err != nil {
 		t.Fatalf("Generate failed for NFD: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestGenerate_OversizedFileSkipped(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{})
-	result, err := gen.Generate(tmpDir)
+	result, _, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
@@ -452,4 +452,37 @@ func equalIR(a, b *IR) bool {
 	}
 
 	return true
+}
+
+// TestGenerate_ParseErrorCount verifies that files failing to parse are counted
+// and excluded from the IR rather than causing Generate to fail.
+func TestGenerate_ParseErrorCount(t *testing.T) {
+	orig := maxParseBytes
+	maxParseBytes = 16 // "package main // oversized" (25 bytes) exceeds this
+	defer func() { maxParseBytes = orig }()
+
+	tmpDir := t.TempDir()
+	small := filepath.Join(tmpDir, "small.go")
+	if err := os.WriteFile(small, []byte("package x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	big := filepath.Join(tmpDir, "big.go")
+	if err := os.WriteFile(big, []byte("package main // oversized"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := NewGenerator(GeneratorConfig{})
+	result, parseErrors, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if parseErrors != 1 {
+		t.Errorf("parseErrors = %d, want 1", parseErrors)
+	}
+	if _, ok := result.Files["small.go"]; !ok {
+		t.Error("small.go should be in IR")
+	}
+	if _, ok := result.Files["big.go"]; ok {
+		t.Error("big.go should be excluded (parse error)")
+	}
 }

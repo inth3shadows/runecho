@@ -106,7 +106,8 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 
 func liveIR(path string) (*ir.IR, error) {
 	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
-	return gen.Generate(path)
+	irData, _, err := gen.Generate(path)
+	return irData, err
 }
 
 func jsonText(v any) (string, error) {

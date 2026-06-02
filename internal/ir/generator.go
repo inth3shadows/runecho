@@ -76,41 +76,44 @@ func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 }
 
 // Generate creates IR for all supported files in the given root directory.
-func (g *Generator) Generate(rootPath string) (*IR, error) {
+func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return nil, 0, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
 	result := &IR{Version: 1, Files: make(map[string]FileIR)}
+	var parseErrors int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
+			parseErrors++
 			return nil
 		}
 		result.Files[normPath] = fileIR
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	result.RootHash = ComputeRootHash(result.Files)
-	return result, nil
+	return result, parseErrors, nil
 }
 
 // Update incrementally updates IR based on file hashes.
 // Only re-parses files whose hash has changed.
-func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, error) {
+func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return nil, 0, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
 	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
+	var parseErrors int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
 		currentHash, err := HashFile(absPath)
@@ -125,16 +128,17 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, error) {
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
+			parseErrors++
 			return nil
 		}
 		updated.Files[normPath] = fileIR
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	updated.RootHash = ComputeRootHash(updated.Files)
-	return updated, nil
+	return updated, parseErrors, nil
 }
 
 // normalizePath applies all path normalization rules:

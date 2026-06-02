@@ -32,6 +32,52 @@ func newOracleRepo(t *testing.T) (*Oracle, string, *snapshot.DB) {
 	return NewOracle(db, dbPath), "demo", db
 }
 
+// TestOracleDiff_CappedRepoNoPhantomDrift is the regression guard for the P4-B
+// cap-consistency bug: a repo enrolled with FileCap>0 stores a capped snapshot,
+// and the oracle's live IR must be generated under the same cap. If liveIR were
+// uncapped, latest-vs-live diff would report every file beyond the cap as a
+// phantom addition on an unchanged repo.
+func TestOracleDiff_CappedRepoNoPhantomDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// Repo with 5 source files, enrolled with a cap of 2.
+	repoDir := t.TempDir()
+	for _, n := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		if err := os.WriteFile(filepath.Join(repoDir, n), []byte("package demo\n\nfunc F"+n[:1]+"() {}\n"), 0644); err != nil {
+			t.Fatalf("write %s: %v", n, err)
+		}
+	}
+	repoID, err := db.EnrollRepo("capped", repoDir, "", 2)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	// Store a capped snapshot (mirrors `repo reindex` honoring FileCap=2).
+	capped, err := liveIR(repoDir, 2)
+	if err != nil {
+		t.Fatalf("liveIR capped: %v", err)
+	}
+	if len(capped.Files) != 2 {
+		t.Fatalf("capped snapshot has %d files, want 2", len(capped.Files))
+	}
+	if _, err := db.SaveSnapshot(repoID, "", "reindex", repoDir, capped); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	// Default latest-vs-live diff on the UNCHANGED repo must report zero drift.
+	o := NewOracle(db, dbPath)
+	out := call(t, o.diff, `{"repo":"capped"}`)
+	if out["total_added"].(float64) != 0 || out["total_removed"].(float64) != 0 {
+		t.Errorf("capped repo phantom drift: added=%v removed=%v (want 0/0) — liveIR not honoring FileCap",
+			out["total_added"], out["total_removed"])
+	}
+}
+
 func call(t *testing.T, fn func(json.RawMessage) (string, error), args string) map[string]any {
 	t.Helper()
 	out, err := fn([]byte(args))
@@ -93,7 +139,7 @@ func TestOracleDiffDetectsDrift(t *testing.T) {
 	repo, _ := db.GetRepoByName(name)
 
 	// Snapshot the current state (Alpha, Beta), then add Gamma to the live code.
-	live, err := liveIR(repo.Path)
+	live, err := liveIR(repo.Path, 0)
 	if err != nil {
 		t.Fatalf("liveIR: %v", err)
 	}
@@ -150,8 +196,8 @@ func TestOracleDiffCrossRepoBlocked(t *testing.T) {
 	repoID1, _ := db.EnrollRepo("repoA", dir1, "", 0)
 	repoID2, _ := db.EnrollRepo("repoB", dir2, "", 0)
 
-	live1, _ := liveIR(dir1)
-	live2, _ := liveIR(dir2)
+	live1, _ := liveIR(dir1, 0)
+	live2, _ := liveIR(dir2, 0)
 	snapID1, _ := db.SaveSnapshot(repoID1, "", "s", dir1, live1)
 	snapID2, _ := db.SaveSnapshot(repoID2, "", "s", dir2, live2)
 
@@ -169,7 +215,7 @@ func TestOracleDiffSinceMode(t *testing.T) {
 	o, name, db := newOracleRepo(t)
 	repo, _ := db.GetRepoByName(name)
 
-	live, _ := liveIR(repo.Path)
+	live, _ := liveIR(repo.Path, 0)
 	db.SaveSnapshot(repo.ID, "", "session-start", repo.Path, live)
 
 	// Add a third function to the live code.

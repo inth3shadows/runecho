@@ -495,6 +495,42 @@ func TestGenerate_FileCap(t *testing.T) {
 	}
 }
 
+// TestGenerate_FileCap_ParseFailuresDontConsumeBudget verifies the cap counts
+// files actually indexed, not files attempted: a leading unparseable file must
+// not eat a cap slot, so a cap of 2 still yields 2 successfully-indexed files.
+func TestGenerate_FileCap_ParseFailuresDontConsumeBudget(t *testing.T) {
+	orig := maxParseBytes
+	maxParseBytes = 24 // "package main // oversized" exceeds this; short files pass
+	defer func() { maxParseBytes = orig }()
+
+	tmpDir := t.TempDir()
+	// a.go sorts first and is oversized → parse failure (must not consume budget).
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main // oversized!!"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// b.go, c.go, d.go are small and valid.
+	for _, n := range []string{"b.go", "c.go", "d.go"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, n), []byte("package x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gen := NewGenerator(GeneratorConfig{FileCap: 2})
+	result, parseErrors, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if len(result.Files) != 2 {
+		t.Errorf("cap=2 with a leading parse failure: got %d indexed files, want 2", len(result.Files))
+	}
+	if parseErrors != 1 {
+		t.Errorf("parseErrors = %d, want 1 (the oversized a.go)", parseErrors)
+	}
+	if _, ok := result.Files["a.go"]; ok {
+		t.Error("a.go failed to parse and must not appear in the IR")
+	}
+}
+
 // TestGenerate_ParseErrorCount verifies that files failing to parse are counted
 // and excluded from the IR rather than causing Generate to fail.
 func TestGenerate_ParseErrorCount(t *testing.T) {

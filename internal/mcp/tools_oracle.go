@@ -104,8 +104,11 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 	return repo, nil
 }
 
-func liveIR(path string) (*ir.IR, error) {
-	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
+// liveIR builds a deterministic full IR for path, applying fileCap (0 = unlimited)
+// so the live IR is generated under the same cap as the repo's stored snapshots.
+// A mismatch here would make every diff/hash report phantom drift for capped repos.
+func liveIR(path string, fileCap int) (*ir.IR, error) {
+	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, FileCap: fileCap})
 	irData, _, err := gen.Generate(path)
 	return irData, err
 }
@@ -129,7 +132,7 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	irData, err := liveIR(repo.EffectiveSourceRoot())
+	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +158,7 @@ func (o *Oracle) hash(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	irData, err := liveIR(repo.EffectiveSourceRoot())
+	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 	if err != nil {
 		return "", err
 	}
@@ -211,7 +214,7 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		if meta == nil {
 			return "", fmt.Errorf("no snapshot labeled %q for repo %q", a.Since, repo.Name)
 		}
-		live, err := liveIR(repo.EffectiveSourceRoot())
+		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 		if err != nil {
 			return "", err
 		}
@@ -227,7 +230,7 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		if len(latest) == 0 {
 			return "", fmt.Errorf("repo %q has no snapshots; run `ai-ir repo reindex %s`", repo.Name, repo.Name)
 		}
-		live, err := liveIR(repo.EffectiveSourceRoot())
+		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 		if err != nil {
 			return "", err
 		}

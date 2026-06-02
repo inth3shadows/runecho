@@ -94,11 +94,13 @@ func run() int {
 		return 0
 	}
 	if repo == nil {
-		repo, _ = findEnrolledRepoViaWorktrees(db, repoRoot)
-		if repo != nil {
-			// Use the enrolled repo's effective source root so ignorePath and
-			// ParseStagedDiff reference the correct directory, not the transient worktree.
-			repoRoot = repo.EffectiveSourceRoot()
+		var enrolledRoot string
+		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
+		if enrolledRoot != "" {
+			// Point ignorePath and ParseStagedDiff at the enrolled repo's working
+			// tree (a real git dir), not the transient claudew worktree. The symbol
+			// set is loaded by repo.ID, independent of this path.
+			repoRoot = enrolledRoot
 		}
 	}
 	if repo == nil {
@@ -272,11 +274,16 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 		return nil, "", false
 	}
 	if repo == nil {
-		repo, _ = findEnrolledRepoViaWorktrees(db, repoRoot)
+		var enrolledRoot string
+		repo, enrolledRoot = findEnrolledRepoViaWorktrees(db, repoRoot)
 		if repo == nil {
 			return nil, "", false
 		}
-		repoRoot = repo.EffectiveSourceRoot()
+		if enrolledRoot != "" {
+			// Point ignorePath at the enrolled repo's working tree, not the
+			// transient claudew worktree.
+			repoRoot = enrolledRoot
+		}
 	}
 
 	snaps, err := db.List(repo.ID, 1)
@@ -300,15 +307,23 @@ func hookBlock(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
 }
 
-// findEnrolledRepoViaWorktrees is a compatibility shim for bare-repo worktrees
-// (claudew agent dirs) where git show-toplevel returns a transient worktree path
-// that was never directly enrolled. It tries two fallbacks:
+// findEnrolledRepoViaWorktrees handles bare-repo worktrees (claudew agent dirs)
+// where git show-toplevel returns a transient worktree path that was never
+// enrolled. It tries two fallbacks in order:
 //  1. git-common-dir — the bare root for bare repos; the .git parent for regular
-//     linked worktrees.
-//  2. git worktree list — each registered worktree path.
+//     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
+//  2. git worktree list — each registered worktree path. Covers bare-repo layouts
+//     where enrollment used a specific worktree (e.g. the `main` branch worktree).
 //
-// Deprecated: re-enroll with `runecho-ir repo add --source-root=<path>` to set
-// the source root explicitly; that eliminates this fallback entirely.
+// Returns both the matched repo and the enrolled root path (a real git directory).
+// Callers must update repoRoot to enrolledRoot when non-empty so that the staged
+// diff and ignorefile are read from the enrolled repo's working tree.
+//
+// NOTE: this fallback is a permanent, intentional resolution path. Repo lookup
+// keys on the enrolled `path`, which a transient worktree never matches, so the
+// fallback fires regardless of schema V3's source_root (that column only governs
+// which directory `reindex`/`liveIR` walk, not this lookup). Eliminating it would
+// require keying lookup on the git-common-dir, a larger change.
 func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapshot.Repo, string) {
 	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
 		if !filepath.IsAbs(commonDir) {
@@ -324,7 +339,6 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapsh
 		// already tried by the caller; re-checking it wastes a DB roundtrip.
 		if commonDir != worktreePath {
 			if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
-				fmt.Fprintf(os.Stderr, "runecho: worktree fallback used for %q — re-enroll with `runecho-ir repo add --source-root=<path>` to avoid this\n", repo.Name)
 				return repo, commonDir
 			}
 		}
@@ -334,7 +348,6 @@ func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapsh
 			continue
 		}
 		if repo, err := db.GetRepoByPath(wt); err == nil && repo != nil {
-			fmt.Fprintf(os.Stderr, "runecho: worktree fallback used for %q — re-enroll with `runecho-ir repo add --source-root=<path>` to avoid this\n", repo.Name)
 			return repo, wt
 		}
 	}

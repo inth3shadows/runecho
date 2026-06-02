@@ -138,15 +138,13 @@ func runRepoAdd(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	srcRoot := *sourceRoot
-	if srcRoot == "" {
-		srcRoot = root
+	// Read the stored source root back rather than re-deriving EnrollRepo's
+	// empty-defaults-to-path rule here, so the displayed value can't drift from it.
+	suffix := ""
+	if enrolled, err := db.GetRepoByName(n); err == nil && enrolled != nil && enrolled.SourceRoot != root {
+		suffix = fmt.Sprintf(" (source-root: %s)", enrolled.SourceRoot)
 	}
-	if srcRoot == root {
-		fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s\n", n, id, *cap, root)
-	} else {
-		fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s (source-root: %s)\n", n, id, *cap, root, srcRoot)
-	}
+	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s%s\n", n, id, *cap, root, suffix)
 }
 
 // runRepoList prints all enrolled repos and their indexing state.
@@ -346,18 +344,20 @@ func runSnapshot(args []string) {
 	fs.Parse(args)
 
 	root := resolveRoot(fs.Args())
-	irData, parseErrors := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	db := mustOpenDB()
 	defer db.Close()
 
-	repoID := resolveRepoForWrite(db, root)
-	id, err := db.SaveSnapshot(repoID, *sessionID, *label, root, irData)
+	// Resolve (auto-enrolling) first so the snapshot honors the repo's file cap —
+	// otherwise an uncapped snapshot would never match a capped reindex of the same repo.
+	repo := resolveRepoForWrite(db, root)
+	irData, parseErrors := buildIR(root, repo.FileCap) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	id, err := db.SaveSnapshot(repo.ID, *sessionID, *label, root, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	// Record the capture point (self-observing: last_indexed staleness).
-	if err := db.TouchRepo(repoID, time.Now(), parseErrors); err != nil {
+	if err := db.TouchRepo(repo.ID, time.Now(), parseErrors); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	shortHash := irData.RootHash
@@ -400,7 +400,7 @@ func runDiff(args []string) {
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", *since, root)
 			os.Exit(0)
 		}
-		irData, _ := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+		irData, _ := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		result, err = db.DiffLive(*meta, irData)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -558,7 +558,7 @@ func runVerify(args []string) {
 		os.Exit(0)
 	}
 
-	irData, _ := buildIR(root, 0) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, _ := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -711,26 +711,44 @@ func mustOpenDB() *snapshot.DB {
 	return db
 }
 
-// resolveRepoForWrite returns the repo_id for root, auto-enrolling on first write
-// (snapshot). Name defaults to the path basename, disambiguated with a numeric
-// suffix on collision; use `repo add --name` for a chosen label (Stage 2).
-func resolveRepoForWrite(db *snapshot.DB, root string) int64 {
+// resolveRepoForWrite returns the enrolled repo for root, auto-enrolling on first
+// write (snapshot). Name defaults to the path basename, disambiguated with a
+// numeric suffix on collision; use `repo add --name` for a chosen label (Stage 2).
+// Returning the full repo lets callers apply its FileCap when generating IR.
+func resolveRepoForWrite(db *snapshot.DB, root string) *snapshot.Repo {
 	repo, err := db.GetRepoByPath(root)
 	if err != nil {
 		fatal(err)
 	}
 	if repo != nil {
-		return repo.ID
+		return repo
 	}
 	uname, uErr := snapshot.UniqueName(db, snapshot.DeriveRepoName(root))
 	if uErr != nil {
 		fatal(uErr)
 	}
-	id, err := db.EnrollRepo(uname, root, root, 0)
+	if _, err := db.EnrollRepo(uname, root, root, 0); err != nil {
+		fatal(err)
+	}
+	repo, err = db.GetRepoByPath(root)
 	if err != nil {
 		fatal(err)
 	}
-	return id
+	return repo
+}
+
+// repoFileCap returns the enrolled repo's file cap for root, or 0 (unlimited) if
+// not enrolled. Compare commands (diff/verify) generate live IR under this cap so
+// it matches the cap used when the baseline snapshot was stored.
+func repoFileCap(db *snapshot.DB, root string) int {
+	repo, err := db.GetRepoByPath(root)
+	if err != nil {
+		fatal(err)
+	}
+	if repo == nil {
+		return 0
+	}
+	return repo.FileCap
 }
 
 // lookupRepoID returns the repo_id for root, or -1 if never enrolled. Read

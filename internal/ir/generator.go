@@ -29,6 +29,13 @@ type GeneratorConfig struct {
 // reached. It stops the walk early and is not propagated as a real error.
 var errFileCap = errors.New("file cap reached")
 
+// capReached reports whether indexedCount has hit the configured file cap.
+// indexedCount is the number of files already added to the IR — files that fail
+// to parse never reach the IR, so they do not consume cap budget.
+func (g *Generator) capReached(indexedCount int) bool {
+	return g.fileCap > 0 && indexedCount >= g.fileCap
+}
+
 // NewGenerator creates a new IR generator.
 func NewGenerator(config GeneratorConfig) *Generator {
 	paths := config.IgnoredPaths
@@ -93,13 +100,12 @@ func (g *Generator) Generate(rootPath string) (*IR, int, error) {
 	absRoot = filepath.Clean(absRoot)
 
 	result := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors, fileCount int
+	var parseErrors int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
-		if g.fileCap > 0 && fileCount >= g.fileCap {
+		if g.capReached(len(result.Files)) {
 			return errFileCap
 		}
-		fileCount++
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
@@ -127,13 +133,12 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 	absRoot = filepath.Clean(absRoot)
 
 	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors, fileCount int
+	var parseErrors int
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
-		if g.fileCap > 0 && fileCount >= g.fileCap {
+		if g.capReached(len(updated.Files)) {
 			return errFileCap
 		}
-		fileCount++
 		currentHash, err := HashFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to hash %s: %v\n", absPath, err)

@@ -113,3 +113,32 @@ func TestResolveRepo_Unenrolled(t *testing.T) {
 		t.Error("resolveRepo resolved an unenrolled repo")
 	}
 }
+
+func TestHookText_ByTool(t *testing.T) {
+	edits := []struct {
+		NewString string `json:"new_string"`
+	}{{NewString: "a := Foo()"}, {NewString: ""}, {NewString: "b := Bar()"}}
+
+	if got := hookText("Edit", "x := Edited()", "ignored", nil); got != "x := Edited()" {
+		t.Errorf("Edit text = %q", got)
+	}
+	if got := hookText("Write", "ignored", "full file content", nil); got != "full file content" {
+		t.Errorf("Write text = %q", got)
+	}
+	// MultiEdit joins non-empty replacements so symbols in any edit are checked.
+	if got := hookText("MultiEdit", "", "", edits); got != "a := Foo()\nb := Bar()" {
+		t.Errorf("MultiEdit text = %q, want both edits joined (empty skipped)", got)
+	}
+	if got := hookText("Read", "x", "y", edits); got != "" {
+		t.Errorf("unhandled tool should yield empty text, got %q", got)
+	}
+}
+
+func TestSuggestionSuffix(t *testing.T) {
+	if got := suggestionSuffix(""); got != "" {
+		t.Errorf("empty suggestion should render nothing, got %q", got)
+	}
+	if got := suggestionSuffix("RealName"); got != "  (did you mean \"RealName\"?)" {
+		t.Errorf("suffix = %q", got)
+	}
+}

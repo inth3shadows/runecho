@@ -48,10 +48,11 @@ func run() int {
 	hookMode := flag.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
 	flag.Parse()
 
-	// Bypass check after flag parsing so hook mode can emit a proper JSON approve.
+	// Bypass check after flag parsing. In hook mode this defers (emits nothing),
+	// letting Claude Code's normal permission flow run unobstructed.
 	if os.Getenv("RUNECHO_GUARD_SKIP") == "1" {
 		if *hookMode {
-			hookApprove()
+			hookDefer()
 		}
 		return 0
 	}
@@ -152,7 +153,7 @@ func run() int {
 	// Report violations.
 	fmt.Fprintf(os.Stderr, "[runecho-guard] %d unresolved symbol(s):\n", len(violations))
 	for _, v := range violations {
-		fmt.Fprintf(os.Stderr, "  %s:%d: %s\n", v.File, v.Line, v.Symbol)
+		fmt.Fprintf(os.Stderr, "  %s:%d: %s%s\n", v.File, v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 	}
 	fmt.Fprintf(os.Stderr, "\nNote: only bare calls are checked (method calls x.Foo() are skipped).\n")
 	fmt.Fprintf(os.Stderr, "Add false positives to .runechoguardignore, or bypass with RUNECHO_GUARD_SKIP=1.\n")
@@ -163,9 +164,12 @@ func run() int {
 	return 1
 }
 
-// runHookMode implements the Claude Code PreToolUse hook contract.
-// Reads JSON from stdin, writes {"decision":"approve"|"block","reason":"..."} to stdout.
-// Exits 0 unconditionally — the decision is communicated through the JSON output.
+// runHookMode implements the Claude Code PreToolUse hook contract (2026 form:
+// hookSpecificOutput.permissionDecision). Reads JSON from stdin, and either denies
+// the tool call (hallucinated symbol) or defers to the normal permission flow.
+// It NEVER emits "allow": a guard's job is to block, not to auto-approve every
+// edit out from under the user's permission prompts. Exits 0 unconditionally —
+// the decision is communicated through the JSON output (or its absence).
 func runHookMode() int {
 	var payload struct {
 		ToolName  string `json:"tool_name"`
@@ -173,42 +177,37 @@ func runHookMode() int {
 			FilePath  string `json:"file_path"`
 			NewString string `json:"new_string"` // Edit tool
 			Content   string `json:"content"`    // Write tool
+			Edits     []struct {
+				NewString string `json:"new_string"`
+			} `json:"edits"` // MultiEdit tool
 		} `json:"tool_input"`
 	}
 	if err := json.NewDecoder(os.Stdin).Decode(&payload); err != nil {
-		hookApprove()
+		hookDefer()
 		return 0
 	}
 
-	if payload.ToolName != "Edit" && payload.ToolName != "Write" {
-		hookApprove()
-		return 0
-	}
-
-	text := payload.ToolInput.NewString
-	if text == "" {
-		text = payload.ToolInput.Content
-	}
+	text := hookText(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits)
 	filePath := payload.ToolInput.FilePath
 	if text == "" || filePath == "" {
-		hookApprove()
+		hookDefer()
 		return 0
 	}
 	// Reject null bytes (invalid on all supported OSes) and extreme lengths.
 	if strings.ContainsRune(filePath, 0) || len(filePath) > 4096 {
-		hookApprove()
+		hookDefer()
 		return 0
 	}
 
 	lang := guard.LangFor(filePath)
 	if lang == guard.LangUnknown {
-		hookApprove()
+		hookDefer()
 		return 0
 	}
 
-	symbols, ignorePath, ok := lookupSymbolsFor(filepath.Dir(filePath))
+	symbols, ignorePath, latest, ok := lookupSymbolsFor(filepath.Dir(filePath))
 	if !ok {
-		hookApprove()
+		hookDefer()
 		return 0
 	}
 
@@ -219,61 +218,124 @@ func runHookMode() int {
 
 	violations := guard.Run(symbols, ignorePath, diffs)
 	if len(violations) == 0 {
-		hookApprove()
+		// No hallucinated symbols. Defer to the normal permission flow, but if the
+		// IR is stale the check may be incomplete — say so via additionalContext
+		// (which informs Claude without forcing an allow/deny).
+		hookDeferStale(latest)
 		return 0
 	}
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[runecho-guard] %d unresolved symbol(s) in new content:\n", len(violations))
 	for _, v := range violations {
-		fmt.Fprintf(&sb, "  line %d: %s\n", v.Line, v.Symbol)
+		fmt.Fprintf(&sb, "  line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 	}
 	fmt.Fprintf(&sb, "Add false positives to .runechoguardignore or set RUNECHO_GUARD_SKIP=1 to bypass.")
-	hookBlock(sb.String())
+	hookDeny(sb.String())
 	return 0
 }
 
-// lookupSymbolsFor loads the symbol set for the repo containing dir.
-// Returns ok=false on any degradation condition (no DB, not enrolled, no snapshot).
-func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, ok bool) {
+// hookText returns the new content to check for the given tool. For MultiEdit it
+// concatenates every edit's replacement text so symbols introduced in any edit
+// are validated.
+func hookText(toolName, newString, content string, edits []struct {
+	NewString string `json:"new_string"`
+}) string {
+	switch toolName {
+	case "Edit":
+		return newString
+	case "Write":
+		return content
+	case "MultiEdit":
+		var parts []string
+		for _, e := range edits {
+			if e.NewString != "" {
+				parts = append(parts, e.NewString)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+// suggestionSuffix renders the model-free "did you mean" hint, or "" if none.
+func suggestionSuffix(suggestion string) string {
+	if suggestion == "" {
+		return ""
+	}
+	return fmt.Sprintf("  (did you mean %q?)", suggestion)
+}
+
+// lookupSymbolsFor loads the symbol set for the repo containing dir, plus the
+// timestamp of the latest snapshot (for staleness reporting). Returns ok=false on
+// any degradation condition (no DB, not enrolled, no snapshot).
+func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, ok bool) {
 	storeDir, err := runechoDir()
 	if err != nil {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 	db, err := snapshot.Open(dbPath)
 	if err != nil {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 	defer db.Close()
 
 	repo, repoRoot, ok := resolveRepo(db, dir)
 	if !ok {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return nil, "", false
+		return nil, "", time.Time{}, false
 	}
 
-	return syms, filepath.Join(repoRoot, ".runechoguardignore"), true
+	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, true
 }
 
-func hookApprove() {
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "approve"})
+// hookDefer emits no decision, so Claude Code applies its normal permission flow.
+func hookDefer() {}
+
+// hookDeferStale defers, but attaches an advisory note when the IR is older than
+// the staleness threshold — the symbol check may have missed recently-added names.
+func hookDeferStale(latest time.Time) {
+	maxAge, err := guard.ParseMaxAge()
+	if err != nil {
+		return // bad config — stay silent rather than nag with a broken message
+	}
+	age := time.Since(latest)
+	if age <= maxAge {
+		return
+	}
+	days := int(age.Hours() / 24)
+	ctx := fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days)
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":     "PreToolUse",
+			"additionalContext": ctx,
+		},
+	})
 }
 
-func hookBlock(reason string) {
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"decision": "block", "reason": reason})
+// hookDeny blocks the tool call with the given reason (2026 hookSpecificOutput form).
+func hookDeny(reason string) {
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		},
+	})
 }
 
 // resolveRepo finds the enrolled repo whose worktree contains dir, and the real

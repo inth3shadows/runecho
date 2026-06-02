@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
+	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
@@ -131,6 +132,37 @@ func TestHookText_ByTool(t *testing.T) {
 	}
 	if got := hookText("Read", "x", "y", edits); got != "" {
 		t.Errorf("unhandled tool should yield empty text, got %q", got)
+	}
+}
+
+func TestAddInFileDefs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mod.py")
+	src := "def _private_helper(x):\n    return x + 1\n\n" +
+		"def public_thing(y):\n    inner = lambda z: z\n    return _private_helper(inner(y))\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	symbols := map[string]struct{}{}
+	addInFileDefs(symbols, path, guard.LangPython)
+
+	// Top-level AND indented defs are folded in (the def regex is ^\s*-anchored),
+	// so a hunk-scoped Edit calling either won't false-positive.
+	for _, want := range []string{"_private_helper", "public_thing"} {
+		if _, ok := symbols[want]; !ok {
+			t.Errorf("expected %q folded into known set, have %v", want, symbols)
+		}
+	}
+}
+
+func TestAddInFileDefs_MissingFileIsSilent(t *testing.T) {
+	symbols := map[string]struct{}{}
+	// A brand-new file (Write/Edit creating it) does not exist yet — must add
+	// nothing and not panic.
+	addInFileDefs(symbols, filepath.Join(t.TempDir(), "does-not-exist.go"), guard.LangGo)
+	if len(symbols) != 0 {
+		t.Errorf("missing file should add nothing, got %v", symbols)
 	}
 }
 

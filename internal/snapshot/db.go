@@ -38,6 +38,32 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+// OpenFast opens the snapshot DB for latency-sensitive read paths, skipping the
+// on-open PRAGMA quick_check integrity scan that Open performs. That scan reads
+// the whole file (~137ms on a 48 MiB store) — acceptable for the writer/CLI, but
+// far too costly for the PreToolUse guard hook, which fires on every edit and only
+// reads. Integrity is the generator's responsibility on write; a read that races a
+// corruption simply yields a query error, and the guard degrades to defer. Pragmas
+// and migration (both cheap when the schema is current) are still applied.
+func OpenFast(path string) (*DB, error) {
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
+	}
+	conn.SetMaxOpenConns(1)
+
+	db := &DB{conn: conn}
+	if err := db.setPragmas(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := db.migrate(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 // integrityCheck runs PRAGMA quick_check (cheaper than integrity_check, sufficient
 // for catching corruption on open). Durability guarantee: never serve a corrupt DB.
 func (db *DB) integrityCheck() error {

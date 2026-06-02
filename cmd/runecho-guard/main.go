@@ -211,6 +211,13 @@ func runHookMode() int {
 		return 0
 	}
 
+	// An Edit/MultiEdit hunk sees only the changed region, not the rest of the
+	// file — so a call to a sibling function (or a nested/local def, or a private
+	// `_helper` the IR may not index) elsewhere in the file would falsely read as
+	// hallucinated. Fold the current on-disk file's definitions into the known set
+	// to suppress that. Best-effort: a missing/oversized file simply adds nothing.
+	addInFileDefs(symbols, filePath, lang)
+
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
 		AddedLines: guard.TextToAddedLines(text),
@@ -226,13 +233,41 @@ func runHookMode() int {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[runecho-guard] %d unresolved symbol(s) in new content:\n", len(violations))
+	fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
 	for _, v := range violations {
 		fmt.Fprintf(&sb, "  line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 	}
-	fmt.Fprintf(&sb, "Add false positives to .runechoguardignore or set RUNECHO_GUARD_SKIP=1 to bypass.")
-	hookDeny(sb.String())
+	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
+	hookAsk(sb.String())
 	return 0
+}
+
+// maxInFileBytes caps the on-disk file read in addInFileDefs. Files larger than
+// this are skipped — the definition-context gain is not worth the read/scan cost,
+// and the SQLite symbol set already covers the file's top-level declarations.
+const maxInFileBytes = 2 << 20 // 2 MiB
+
+// addInFileDefs reads the current on-disk file and folds every definition the
+// def-extractor finds (top-level AND indented/nested defs and local arrow
+// consts, since the def regexes are `^\s*`-anchored) into the known symbol set.
+// This is the P2 residual-killer: it makes a hunk-scoped Edit aware of the rest
+// of its own file without re-implementing a scope-tracking parser. It mutates
+// symbols in place (a fresh per-call map). Degrades silently on any read error
+// (e.g. a brand-new file being created), adding nothing.
+func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang) {
+	data, err := os.ReadFile(filePath)
+	if err != nil || len(data) > maxInFileBytes {
+		return
+	}
+	fileLines := guard.TextToAddedLines(string(data))
+	for _, def := range guard.ExtractDefs(lang, fileLines) {
+		symbols[def] = struct{}{}
+	}
+	// Imported names (`from pathlib import Path`, `import {readFileSync} …`) are
+	// real callables bound elsewhere in the file; fold them in too.
+	for _, imp := range guard.ExtractImports(lang, fileLines) {
+		symbols[imp] = struct{}{}
+	}
 }
 
 // hookText returns the new content to check for the given tool. For MultiEdit it
@@ -279,7 +314,9 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, "", time.Time{}, false
 	}
-	db, err := snapshot.Open(dbPath)
+	// OpenFast skips the on-open integrity scan — this read path fires on every
+	// edit and must stay cheap; integrity is the writer's concern.
+	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		return nil, "", time.Time{}, false
 	}
@@ -327,12 +364,21 @@ func hookDeferStale(latest time.Time) {
 	})
 }
 
-// hookDeny blocks the tool call with the given reason (2026 hookSpecificOutput form).
-func hookDeny(reason string) {
+// hookAsk surfaces the flagged symbol(s) for user confirmation (permissionDecision
+// "ask", 2026 hookSpecificOutput form) rather than hard-denying. A guard mistake
+// (the residual false-positive floor) then costs a single dismissal instead of an
+// env-var/ignorefile override — which is what keeps the user reading the reason
+// instead of training a reflexive bypass. The guard still never auto-allows.
+//
+// Posture note: this is the soft posture for every language. The plan's graduation
+// rule (see runecho-guard-fp-precision-and-p5.md) is to move a language to a hard
+// "deny" only after it has fired correctly ~20 times with zero false blocks in live
+// use, reverting to "ask" on any confirmed false block.
+func hookAsk(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "deny",
+			"permissionDecision":       "ask",
 			"permissionDecisionReason": reason,
 		},
 	})

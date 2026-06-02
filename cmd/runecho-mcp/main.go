@@ -11,6 +11,7 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/mcp"
 	"github.com/inth3shadows/runecho/internal/snapshot"
+	"github.com/inth3shadows/runecho/internal/store"
 )
 
 const version = "0.1.0"
@@ -43,15 +44,6 @@ func main() {
 	}
 }
 
-// runechoDir resolves the central store directory: $RUNECHO_HOME if set, else
-// ~/.runecho. Mirrors cmd/ir so both share one store.
-func runechoDir() (string, error) {
-	if h := os.Getenv("RUNECHO_HOME"); h != "" {
-		return h, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".runecho"), nil
-}
+// runechoDir delegates to the shared store helper so all entry points use a
+// single definition and stay in sync when the resolution logic changes.
+func runechoDir() (string, error) { return store.RunechoDir() }

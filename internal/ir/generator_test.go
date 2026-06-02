@@ -398,6 +398,36 @@ func TestGenerator_Generate_UnicodeNormalization(t *testing.T) {
 	}
 }
 
+// TestGenerate_OversizedFileSkipped verifies that a file exceeding maxParseBytes
+// is silently skipped rather than causing Generate to fail.
+func TestGenerate_OversizedFileSkipped(t *testing.T) {
+	orig := maxParseBytes
+	maxParseBytes = 16 // any real source file exceeds this
+	defer func() { maxParseBytes = orig }()
+
+	tmpDir := t.TempDir()
+	big := filepath.Join(tmpDir, "big.go")
+	if err := os.WriteFile(big, []byte("package main // larger than cap"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	small := filepath.Join(tmpDir, "small.go")
+	if err := os.WriteFile(small, []byte("package x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := NewGenerator(GeneratorConfig{})
+	result, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, ok := result.Files["big.go"]; ok {
+		t.Error("oversized file should have been skipped but appeared in IR")
+	}
+	if _, ok := result.Files["small.go"]; !ok {
+		t.Error("small file should be in IR but was missing")
+	}
+}
+
 // Helper functions
 
 func equalIR(a, b *IR) bool {

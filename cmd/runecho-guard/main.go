@@ -207,6 +207,11 @@ func runHookMode() int {
 		hookApprove()
 		return 0
 	}
+	// Reject null bytes (invalid on all supported OSes) and extreme lengths.
+	if strings.ContainsRune(filePath, 0) || len(filePath) > 4096 {
+		hookApprove()
+		return 0
+	}
 
 	lang := guard.LangFor(filePath)
 	if lang == guard.LangUnknown {

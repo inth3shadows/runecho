@@ -74,9 +74,16 @@ func (db *DB) ListRepos() ([]Repo, error) {
 	return repos, rows.Err()
 }
 
-// RemoveRepo deletes a repo by id. Snapshot rows are left with a dangling repo_id
-// reference; callers that want cascade should delete snapshots first.
+// RemoveRepo deletes a repo by id. Returns an error if the repo has any
+// snapshots — use PurgeRepo to remove the repo and its full history atomically.
 func (db *DB) RemoveRepo(id int64) error {
+	n, err := db.CountSnapshots(id)
+	if err != nil {
+		return fmt.Errorf("count snapshots before remove: %w", err)
+	}
+	if n > 0 {
+		return fmt.Errorf("repo %d has %d snapshot(s); use PurgeRepo to delete them along with the repo", id, n)
+	}
 	if _, err := db.conn.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("remove repo %d: %w", id, err)
 	}

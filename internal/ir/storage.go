@@ -26,29 +26,22 @@ type FileIR struct {
 	Exports   []string `json:"exports"`   // Sorted
 }
 
-// orderedFile is used for deterministic JSON marshalling.
-type orderedFile struct {
-	Path string `json:"path"`
-	Data FileIR `json:"data"`
-}
-
 // MarshalJSON implements deterministic JSON marshalling for IR.
-// Files are sorted by path to ensure stable output.
+// Files are sorted by path to ensure stable output across runs.
 func (ir *IR) MarshalJSON() ([]byte, error) {
-	// Sort file paths
 	paths := make([]string, 0, len(ir.Files))
 	for path := range ir.Files {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 
-	// Build ordered list
-	orderedFiles := make(map[string]FileIR)
+	ordered := make(map[string]FileIR, len(paths))
 	for _, path := range paths {
-		orderedFiles[path] = ir.Files[path]
+		ordered[path] = ir.Files[path]
 	}
 
-	// Create anonymous struct with ordered fields
+	// encoding/json sorts map keys before encoding (since Go 1.12) — that is
+	// what enforces stable file ordering in the output, not the map itself.
 	return json.MarshalIndent(&struct {
 		Version  int               `json:"version"`
 		RootHash string            `json:"root_hash"`
@@ -56,7 +49,7 @@ func (ir *IR) MarshalJSON() ([]byte, error) {
 	}{
 		Version:  ir.Version,
 		RootHash: ir.RootHash,
-		Files:    orderedFiles,
+		Files:    ordered,
 	}, "", "  ")
 }
 

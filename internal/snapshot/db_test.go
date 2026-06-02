@@ -265,6 +265,44 @@ func TestSymbolsForLatestSnapshot(t *testing.T) {
 	}
 }
 
+// TestRemoveRepo_WithSnapshots_Errors asserts that RemoveRepo refuses to delete
+// a repo that still has snapshot history — callers must use PurgeRepo instead.
+func TestRemoveRepo_WithSnapshots_Errors(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/tmp/r", 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if _, err := db.SaveSnapshot(id, "", "test", "/tmp/r", makeIR("h1", "Foo")); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+	if err := db.RemoveRepo(id); err == nil {
+		t.Fatal("RemoveRepo with snapshots should return an error")
+	}
+	// Repo must still exist after the failed remove.
+	repo, err := db.GetRepoByName("r")
+	if err != nil || repo == nil {
+		t.Fatalf("repo should still exist after failed remove: err=%v repo=%v", err, repo)
+	}
+}
+
+// TestRemoveRepo_NoSnapshots_Succeeds asserts that RemoveRepo works cleanly
+// when no snapshots exist for the repo.
+func TestRemoveRepo_NoSnapshots_Succeeds(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r2", "/tmp/r2", 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if err := db.RemoveRepo(id); err != nil {
+		t.Fatalf("RemoveRepo with no snapshots: %v", err)
+	}
+	repo, err := db.GetRepoByName("r2")
+	if err != nil || repo != nil {
+		t.Fatalf("repo should be gone after remove: err=%v repo=%v", err, repo)
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

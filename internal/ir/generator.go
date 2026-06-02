@@ -176,8 +176,21 @@ func (g *Generator) parserFor(ext string) parser.Parser {
 	return nil
 }
 
+// maxParseBytes is the per-file size limit for source parsing. Files larger
+// than this are skipped with a warning — oversized files are usually generated
+// artifacts, not hand-authored source. var so tests can lower the cap.
+var maxParseBytes int64 = 10 * 1024 * 1024
+
 // parseFile parses a single file and returns its IR.
 func (g *Generator) parseFile(path string) (FileIR, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileIR{}, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if info.Size() > maxParseBytes {
+		return FileIR{}, fmt.Errorf("skipping oversized file (%d bytes)", info.Size())
+	}
+
 	// Read file
 	content, err := os.ReadFile(path)
 	if err != nil {

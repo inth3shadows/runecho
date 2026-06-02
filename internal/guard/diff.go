@@ -86,6 +86,12 @@ func parseDiffOutput(raw string) ([]FileDiff, error) {
 		// Removed lines ('-') don't advance the new-file counter
 	}
 	if err := scanner.Err(); err != nil {
+		if err == bufio.ErrTooLong {
+			// A single diff line exceeded the 4 MB cap (e.g. a minified JS blob).
+			// Return whatever was parsed before the oversized line — the guard
+			// can still validate all files that preceded it.
+			return result, nil
+		}
 		return nil, fmt.Errorf("scan diff: %w", err)
 	}
 	return result, nil

@@ -20,9 +20,10 @@ fact table** for source code, plus durable history of it, queryable by humans
                  │  snapshot (central store)   │  ~/.runecho/history.db (SQLite/WAL)
                  │  repos · snapshots · files  │  versioned schema, integrity-checked
                  │  · symbols                  │
-                 └──────┬───────────────┬──────┘
-                        │               │
-           runecho-ir (CLI)      runecho-mcp (stdio MCP)
+                 └──────┬───────────────┬───────────────┬──────┘
+                        │               │               │
+           runecho-ir (CLI)   runecho-mcp (stdio MCP)   runecho-guard
+                                                        (pre-commit / PreToolUse hook)
 ```
 
 Key design decisions:
@@ -55,8 +56,16 @@ Key design decisions:
 | `internal/snapshot/churn.go` | `Churn` over the last N snapshots | — |
 | `internal/mcp/server.go` | Minimal stdio JSON-RPC 2.0 MCP server | — |
 | `internal/mcp/tools_oracle.go` | The five oracle tools, wired to `ir` + `snapshot` | `ir`, `snapshot` |
+| `internal/guard/diff.go` | Parse `git diff --cached --unified=0` into added lines | — |
+| `internal/guard/extract.go` | Per-language definition/reference/import extraction + builtin sets | — |
+| `internal/guard/validate.go` | Two-pass validation: collect new defs, then flag unresolved refs | — |
+| `internal/guard/suggest.go` | Deterministic "did you mean" via Levenshtein (distance ≤ 2) | — |
+| `internal/claims/claims.go` | Extract code-symbol references from prose for `validate-claims` | — |
+| `internal/gitutil/gitutil.go` | Canonical git-common-dir resolution — the V4 repo-lookup key | — |
+| `internal/store/dir.go` | Single source of truth for `$RUNECHO_HOME` / `~/.runecho` | — |
 | `cmd/runecho-ir/main.go` | CLI entrypoint and subcommand dispatch | `ir`, `snapshot` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
+| `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
 
 ## The MCP Oracle Tools
 
@@ -73,6 +82,39 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 
 A `diff` with explicit `a`/`b` rejects snapshot ids that belong to a different
 repo — diffs never cross repo boundaries.
+
+## The Guard (`runecho-guard`)
+
+The guard validates *new* code against the enrolled repo's indexed symbols and
+flags bare function calls that resolve to nothing — the signature shape of a
+hallucinated API. Two modes share the same validation core:
+
+- **Pre-commit mode** (default; installed by `install.sh --hook`). Reads
+  `git diff --cached --unified=0`, validates added lines, and exits 1 with a
+  `file:line: symbol (did you mean "X"?)` report if violations are found.
+- **Hook mode** (`--hook-mode`). A Claude Code `PreToolUse` hook for
+  `Edit|Write|MultiEdit`. Reads the tool-call JSON on stdin, validates the new
+  content, and answers via the `hookSpecificOutput` contract: unresolved symbols
+  → `permissionDecision: "ask"` with the violation list as the reason. The guard
+  never auto-approves — on a clean check it emits nothing and defers to the
+  normal permission flow.
+
+Validation is a two-pass static check: first collect every definition the change
+itself introduces (plus the on-disk file's own definitions and imports, so local
+helpers don't false-positive), then flag bare calls — `Foo(`, never `pkg.Foo(` —
+that appear in neither the IR, the new definitions, the per-language builtin
+sets, nor `.runechoguardignore` (one literal symbol per line, `#` comments, at
+the repo root).
+
+**Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
+error, or a hung git subprocess (3s cap) all degrade to silence — the guard
+blocks hallucinations; it must never block work. Repo resolution is three-tier:
+git-common-dir key (O(1), schema V4) → enrolled-path lookup → worktree-list
+scan, backfilling `common_dir` on a hit so the next fire takes the fast path.
+
+Residual false positives are intrinsic to regex-level static analysis
+(dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
+~5% for Python — which is why hook mode asks instead of denying.
 
 ## Storage Schema
 
@@ -99,16 +141,18 @@ newer-than-supported database.
 |---|---|---|
 | `RUNECHO_HOME` | `~/.runecho` | Directory for `history.db` and backups (isolation / testing seam) |
 | `RUNECHO_BIN_DIR` | `~/.local/bin` | Install target used by `install.sh` |
-| `RUNECHO_GUARD_SKIP` | — | Reserved for a future commit-guard bypass |
+| `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
+| `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
 
 ## Deployment
 
 This is a local developer tool, not a service.
 
 ```bash
-bash install.sh                              # build both binaries → $RUNECHO_BIN_DIR
+bash install.sh                              # build all three binaries → $RUNECHO_BIN_DIR
 claude mcp add runecho -- ~/.local/bin/runecho-mcp   # register with Claude Code
 # Codex: add [mcp_servers.runecho] command = "~/.local/bin/runecho-mcp" to ~/.codex/config.toml
+bash install.sh --hook                       # from a target repo's root: install the pre-commit guard
 ```
 
 Rollback: `claude mcp remove runecho`, delete the Codex block, and remove the
@@ -137,3 +181,7 @@ runecho-ir repo list                              # enrolled repos + index state
   concurrent indexers.
 - **`coverage %`** is not computed (the generator does not yet count skipped vs
   supported files); `status` reports indexed file count and parse errors instead.
+- **The guard checks bare calls only.** Qualified calls (`pkg.Foo()`,
+  `obj.method()`) are assumed external and skipped; dynamically-assigned
+  callables can't be resolved statically. It catches the common hallucination
+  shape, not every possible one.

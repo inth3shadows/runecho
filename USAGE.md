@@ -7,8 +7,9 @@ remembers what that map looked like at past points in time. With it, an AI codin
 assistant can check "does this function really exist?" and "what actually changed
 since I last looked?" against facts instead of memory.
 
-You interact with it two ways: the `runecho-ir` command in your terminal, and
-(once registered) automatically through your AI assistant.
+You interact with it three ways: the `runecho-ir` command in your terminal,
+automatically through your AI assistant (once registered), and — if you install
+the guard — automatically at commit time or whenever the assistant edits a file.
 
 ## How to Use It
 
@@ -65,6 +66,32 @@ After registering RunEcho with your assistant (the installer prints the command)
 the assistant can ask the oracle directly for a repo's structure or drift — no
 action needed from you. It just gets more accurate.
 
+### Catch hallucinated code before it lands
+
+The guard checks new code against the indexed map and flags calls to functions
+that don't exist anywhere — the classic AI hallucination. Install it per repo:
+
+```
+bash install.sh --hook        # run from the target repo's root
+```
+
+From then on, a commit that calls a nonexistent function is blocked with a
+`file:line` report and, when there's a near match, a "did you mean …?" hint.
+Common situations:
+
+- **It flagged something real** (a dynamic or generated symbol) — add that name
+  on its own line to `.runechoguardignore` at the repo root, or refresh the map
+  with `runecho-ir repo reindex <name>`.
+- **You need this one commit through right now** —
+  `RUNECHO_GUARD_SKIP=1 git commit …`.
+- **It warns the index is stale** — run `runecho-ir repo reindex <name>`; the
+  guard won't judge against facts older than a day by default.
+
+The same check can run inside Claude Code as a `PreToolUse` hook
+(`runecho-guard --hook-mode`), reviewing every edit the assistant makes and
+asking for your confirmation when it references symbols that don't exist. See
+[TECHNICAL.md](TECHNICAL.md#the-guard-runecho-guard) for the hook configuration.
+
 ## What to Do When Something Breaks
 
 - **"repo … is not enrolled"** — run `runecho-ir repo add <path>` first, then
@@ -78,6 +105,9 @@ action needed from you. It just gets more accurate.
   JavaScript/TypeScript, and Python; files in other languages are not counted.
 - **You want to start a repo's history over** — `runecho-ir repo rm <name>`
   removes it and its history, then `repo add` + `repo reindex` gives a clean start.
+- **A commit is blocked and you disagree with the guard** — see "Catch
+  hallucinated code" above: ignore-list the symbol, reindex, or bypass once with
+  `RUNECHO_GUARD_SKIP=1`.
 
 For anything not covered here, see the [Technical Reference](TECHNICAL.md).
 

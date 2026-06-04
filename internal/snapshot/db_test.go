@@ -369,7 +369,7 @@ func TestDeriveRepoName(t *testing.T) {
 		root string
 		want string
 	}{
-		{"/home/ericm/repos/runecho/master", "runecho-master"},
+		{"/home/alice/repos/runecho/master", "runecho-master"},
 		{"/repos/myapp", "repos-myapp"},
 		{"/singledir", "singledir"},
 		{"/a/b", "a-b"},

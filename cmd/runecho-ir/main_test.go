@@ -11,9 +11,9 @@ func TestDeriveRepoName(t *testing.T) {
 		root string
 		want string
 	}{
-		{"/home/ericm/personal_projects/runecho/master", "runecho-master"},
-		{"/home/ericm/personal_projects/coriolis/eric", "coriolis-eric"},
-		{"/home/ericm/foo", "ericm-foo"},
+		{"/home/alice/projects/runecho/master", "runecho-master"},
+		{"/home/alice/projects/myapp/dev", "myapp-dev"},
+		{"/home/alice/foo", "alice-foo"},
 		{"/foo", "foo"}, // parent is filesystem root → basename only
 	}
 	for _, c := range cases {

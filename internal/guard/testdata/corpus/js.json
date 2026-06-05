@@ -1,0 +1,80 @@
+[
+  {
+    "name": "js-tp-hallucinated-call",
+    "desc": "bare call to a nonexistent symbol must be flagged",
+    "file": "submit.js",
+    "known": ["saveUser"],
+    "edit": "function handleSubmit(form) {\n  const result = processOrder(form);\n  saveUser(result);\n  return result;\n}\n",
+    "expect": ["processOrder"]
+  },
+  {
+    "name": "js-tp-typo-with-suggestion",
+    "desc": "one-edit typo of a known symbol is flagged with a did-you-mean",
+    "file": "refresh.js",
+    "known": ["fetchUsers"],
+    "edit": "function refresh() {\n  return fetchUser().then(render);\n}\n",
+    "expect": ["fetchUser"],
+    "suggest": {"fetchUser": "fetchUsers"}
+  },
+  {
+    "name": "js-tn-builtins-and-qualified",
+    "desc": "builtins (parseInt, fetch) and qualified calls (console.log, JSON.parse) are clean",
+    "file": "parse.js",
+    "edit": "function readPort(raw) {\n  console.log(raw);\n  const cfg = JSON.parse(raw);\n  return parseInt(cfg.port, 10);\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-arrow-def-then-call",
+    "desc": "arrow function defined in the edit may be called in the edit",
+    "file": "fmt.js",
+    "edit": "const fmtDate = (d) => d.toISOString();\nconst when = fmtDate(new Date());\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-esm-import-fold",
+    "desc": "names bound by import statements in the on-disk file are known",
+    "file": "register.js",
+    "infile": "import { validateUser, normalizeEmail } from './auth';\nimport config from './config';\n",
+    "edit": "function registerUser(form) {\n  const email = normalizeEmail(form.email);\n  return validateUser(email);\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-require-fold",
+    "desc": "destructured require bindings in the on-disk file are known",
+    "file": "cli.js",
+    "infile": "const { parseArgs } = require('util');\n",
+    "edit": "function main(argv) {\n  const opts = parseArgs(argv);\n  return opts;\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-template-literal-sql",
+    "desc": "SQL keywords inside template literals must not read as calls",
+    "file": "query.js",
+    "edit": "function countLogs(db, level) {\n  const q = `SELECT COUNT(*) FROM logs WHERE level = ${level}`;\n  return db.query(q);\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-fp-dynamic-callable",
+    "desc": "KNOWN FP: a variable holding a callable cannot be resolved statically",
+    "file": "dispatch.js",
+    "edit": "function dispatch(handlers, evt) {\n  const fn = handlers[evt.type];\n  fn(evt);\n}\n",
+    "expect": [],
+    "known_fp": ["fn"]
+  },
+  {
+    "name": "js-fp-export-function-decl",
+    "desc": "KNOWN FP: `export function Name(` is not recognized as a definition line",
+    "file": "report.js",
+    "edit": "export function buildReport(rows) {\n  return rows.length;\n}\n",
+    "expect": [],
+    "known_fp": ["buildReport"]
+  },
+  {
+    "name": "js-fp-async-function-decl",
+    "desc": "KNOWN FP: `async function Name(` is not recognized as a definition line",
+    "file": "load.js",
+    "edit": "async function loadConfig() {\n  return {};\n}\n",
+    "expect": [],
+    "known_fp": ["loadConfig"]
+  }
+]

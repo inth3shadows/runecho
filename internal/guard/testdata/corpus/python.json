@@ -1,0 +1,104 @@
+[
+  {
+    "name": "py-tp-hallucinated-call",
+    "desc": "bare call to a nonexistent symbol must be flagged",
+    "file": "submit.py",
+    "known": ["save_user"],
+    "edit": "def submit(form):\n    record = process_order(form)\n    save_user(record)\n",
+    "expect": ["process_order"]
+  },
+  {
+    "name": "py-tp-typo-with-suggestion",
+    "desc": "one-edit typo of a known symbol is flagged with a did-you-mean",
+    "file": "users.py",
+    "known": ["fetch_users"],
+    "edit": "def refresh():\n    return fetch_user()\n",
+    "expect": ["fetch_user"],
+    "suggest": {"fetch_user": "fetch_users"}
+  },
+  {
+    "name": "py-tn-known-symbol",
+    "desc": "calling an IR-known symbol is clean",
+    "file": "submit.py",
+    "known": ["save_user"],
+    "edit": "def store(record):\n    save_user(record)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-builtins-and-exceptions",
+    "desc": "print/len/isinstance and exception constructors never flag",
+    "file": "summary.py",
+    "edit": "def summarize(items):\n    if not isinstance(items, list):\n        raise ValueError(\"expected list\")\n    print(len(items))\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-private-helper-from-infile",
+    "desc": "private defs in the on-disk file are known via in-file context",
+    "file": "batch.py",
+    "known": ["save_user"],
+    "infile": "def _validate(record):\n    return bool(record)\n\ndef save_user(record):\n    _validate(record)\n",
+    "edit": "def save_batch(records):\n    for r in records:\n        _validate(r)\n        save_user(r)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-from-import-fold",
+    "desc": "names bound by from-imports in the on-disk file are known",
+    "file": "records.py",
+    "infile": "from utils import save_record\n",
+    "edit": "def persist(r):\n    save_record(r)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-multiline-import-paren",
+    "desc": "parenthesized multi-line from-import binds all names",
+    "file": "records.py",
+    "infile": "from utils import (\n    save_record,\n    load_record,\n)\n",
+    "edit": "def fetch(rid):\n    return load_record(rid)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-import-binding-call",
+    "desc": "a from-imported class used as a constructor is known",
+    "file": "fsutil.py",
+    "infile": "from pathlib import Path\n",
+    "edit": "def ensure_dir(p):\n    Path(p).mkdir(parents=True, exist_ok=True)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-docstring-and-comment",
+    "desc": "docstring prose and comments naming calls must not flag",
+    "file": "cleanup.py",
+    "edit": "def cleanup_task():\n    \"\"\"Runs cleanup_all() and reports COUNT(errors).\"\"\"\n    # TODO: wire process_all() here\n    pass\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-multiline-sql-string",
+    "desc": "triple-quoted SQL spanning consecutive lines stays blanked",
+    "file": "queries.py",
+    "edit": "QUERY = \"\"\"\nSELECT COUNT(*), MAX(created_at)\nFROM events\n\"\"\"\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-same-edit-definition",
+    "desc": "a function defined in the same edit may be called in the same edit",
+    "file": "hashing.py",
+    "edit": "def compute_hash(data):\n    return hash(data)\n\ndef save(data):\n    return compute_hash(data)\n",
+    "expect": []
+  },
+  {
+    "name": "py-fp-local-callable",
+    "desc": "KNOWN FP: a local variable holding a callable cannot be resolved statically",
+    "file": "dispatch.py",
+    "edit": "def dispatch(key, payload):\n    handler = HANDLERS[key]\n    handler(payload)\n",
+    "expect": [],
+    "known_fp": ["handler"]
+  },
+  {
+    "name": "py-fp-async-def",
+    "desc": "KNOWN FP: `async def name(` is not recognized as a definition line",
+    "file": "fetcher.py",
+    "edit": "async def fetch_all(urls):\n    return [u for u in urls]\n",
+    "expect": [],
+    "known_fp": ["fetch_all"]
+  }
+]

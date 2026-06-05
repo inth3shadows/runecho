@@ -1,0 +1,77 @@
+[
+  {
+    "name": "go-tp-hallucinated-call",
+    "desc": "bare call to a symbol that exists nowhere must be flagged",
+    "file": "service.go",
+    "known": ["SaveUser"],
+    "edit": "func Handle(w http.ResponseWriter) {\n    res := ProcessOrder(w)\n    _ = res\n}\n",
+    "expect": ["ProcessOrder"]
+  },
+  {
+    "name": "go-tp-typo-with-suggestion",
+    "desc": "one-edit typo of a known symbol is flagged with a did-you-mean",
+    "file": "profile.go",
+    "known": ["FetchUser"],
+    "edit": "func LoadProfile(ctx context.Context) error {\n    u, err := FetchUserr(ctx)\n    if err != nil {\n        return err\n    }\n    _ = u\n    return nil\n}\n",
+    "expect": ["FetchUserr"],
+    "suggest": {"FetchUserr": "FetchUser"}
+  },
+  {
+    "name": "go-tn-known-symbol",
+    "desc": "calling an IR-known symbol is clean",
+    "file": "service.go",
+    "known": ["SaveUser"],
+    "edit": "func Submit(u User) error {\n    return SaveUser(u)\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-builtins",
+    "desc": "len/make/append and friends never flag",
+    "file": "util.go",
+    "edit": "func Resize(items []int) []int {\n    out := make([]int, 0, len(items))\n    out = append(out, items...)\n    return out\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-qualified-calls",
+    "desc": "pkg.Func and obj.Method are assumed external and skipped",
+    "file": "report.go",
+    "edit": "func Report(w io.Writer) {\n    fmt.Fprintf(w, \"ok\")\n    log.Println(\"done\")\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-unexported-refs-skipped",
+    "desc": "lowercase calls are skipped — the IR only indexes exported symbols",
+    "file": "run.go",
+    "edit": "func Run() {\n    setup()\n    defer teardown()\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-same-edit-definition",
+    "desc": "a function defined in the same edit may be called in the same edit (pass 1)",
+    "file": "hash.go",
+    "edit": "func ComputeHash(data []byte) string {\n    return \"\"\n}\n\nfunc Save(b []byte) {\n    h := ComputeHash(b)\n    _ = h\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-sql-in-raw-string",
+    "desc": "SQL keywords inside a single-line raw string must not read as calls",
+    "file": "db.go",
+    "edit": "func CountUsers(db *sql.DB) error {\n    q := `SELECT COUNT(id) FROM users WHERE active = TRUE`\n    return db.QueryRow(q).Err()\n}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-multiline-raw-string",
+    "desc": "raw string spanning consecutive lines stays blanked (VALUES ( is not a call)",
+    "file": "db.go",
+    "edit": "var insertQuery = `INSERT INTO users (id, name)\nVALUES ($1, $2)\nON CONFLICT (id) DO NOTHING`\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-comment-mentions-call",
+    "desc": "whole-line comments are skipped even when they name a call",
+    "file": "reconcile.go",
+    "known": ["Current"],
+    "edit": "// Reconcile calls MergeState() under the hood.\nfunc Reconcile() {\n    state := Current()\n    _ = state\n}\n",
+    "expect": []
+  }
+]

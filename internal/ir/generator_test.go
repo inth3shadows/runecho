@@ -516,15 +516,23 @@ func TestGenerate_FileCap_ParseFailuresDontConsumeBudget(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{FileCap: 2})
-	result, parseErrors, err := gen.Generate(tmpDir)
+	result, stats, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
 	if len(result.Files) != 2 {
 		t.Errorf("cap=2 with a leading parse failure: got %d indexed files, want 2", len(result.Files))
 	}
-	if parseErrors != 1 {
-		t.Errorf("parseErrors = %d, want 1 (the oversized a.go)", parseErrors)
+	if stats.ParseErrors != 1 {
+		t.Errorf("ParseErrors = %d, want 1 (the oversized a.go)", stats.ParseErrors)
+	}
+	// Honest denominator: all 4 supported files counted even though the cap
+	// truncated indexing at 2 — coverage must not read ~100% on a capped walk.
+	if stats.SupportedSeen != 4 {
+		t.Errorf("SupportedSeen = %d, want 4 (cap must not stop the count)", stats.SupportedSeen)
+	}
+	if stats.Indexed != 2 {
+		t.Errorf("Indexed = %d, want 2", stats.Indexed)
 	}
 	if _, ok := result.Files["a.go"]; ok {
 		t.Error("a.go failed to parse and must not appear in the IR")
@@ -549,12 +557,15 @@ func TestGenerate_ParseErrorCount(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{})
-	result, parseErrors, err := gen.Generate(tmpDir)
+	result, stats, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
-	if parseErrors != 1 {
-		t.Errorf("parseErrors = %d, want 1", parseErrors)
+	if stats.ParseErrors != 1 {
+		t.Errorf("ParseErrors = %d, want 1", stats.ParseErrors)
+	}
+	if stats.SupportedSeen != 2 || stats.Indexed != 1 {
+		t.Errorf("stats = %+v, want SupportedSeen=2 Indexed=1", stats)
 	}
 	if _, ok := result.Files["small.go"]; !ok {
 		t.Error("small.go should be in IR")

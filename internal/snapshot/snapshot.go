@@ -102,6 +102,24 @@ func (db *DB) GetLatestByLabel(repoID int64, label string) (*SnapshotMeta, error
 	return scanMeta(row)
 }
 
+// GetLatestByLabelSession returns the most recent snapshot for repoID with the
+// given label AND session id. Returns nil, nil if no matching snapshot exists.
+// Used by `diff --since=<label> --session=<id>` (CLI and MCP) to pin the
+// reference point to a specific session instead of whatever session most
+// recently used the label.
+func (db *DB) GetLatestByLabelSession(repoID int64, label, sessionID string) (*SnapshotMeta, error) {
+	row := db.conn.QueryRow(
+		`SELECT s.id, s.repo_id, s.session_id, s.label, s.timestamp, s.root, s.root_hash,
+		        (SELECT COUNT(*) FROM files WHERE snapshot_id = s.id) AS file_count
+		 FROM snapshots s
+		 WHERE s.repo_id = ? AND s.label = ? AND s.session_id = ?
+		 ORDER BY s.timestamp DESC, s.id DESC
+		 LIMIT 1`,
+		repoID, label, sessionID,
+	)
+	return scanMeta(row)
+}
+
 // GetByID returns a snapshot by its primary key.
 func (db *DB) GetByID(id int64) (*SnapshotMeta, error) {
 	row := db.conn.QueryRow(

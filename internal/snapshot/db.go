@@ -114,6 +114,7 @@ var migrations = []migration{
 	migrateV2, // 1 → 2: central-store repos registry + snapshots.repo_id
 	migrateV3, // 2 → 3: split repo.Path into lookup key (path) + source root (source_root)
 	migrateV4, // 3 → 4: add common_dir — stable cross-worktree lookup key
+	migrateV5, // 4 → 5: add supported_seen — honest-coverage denominator
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -227,6 +228,18 @@ func migrateV4(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE repos ADD COLUMN common_dir TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_repos_common_dir ON repos(common_dir)`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV5 adds supported_seen — how many supported-extension files the last
+// (re)index walk encountered, including those beyond the file cap. Together with
+// the latest snapshot's file count this yields coverage % (the denominator the
+// generator previously never reported). Existing rows get 0 = "not yet measured";
+// the next reindex populates it.
+func migrateV5(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE repos ADD COLUMN supported_seen INTEGER NOT NULL DEFAULT 0`,
 	}
 	return execAll(tx, stmts)
 }

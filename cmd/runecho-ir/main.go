@@ -165,15 +165,23 @@ func runRepoList(args []string) {
 		fmt.Println("No repos enrolled. Add one: runecho-ir repo add <path>")
 		return
 	}
-	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "PATH")
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %-7s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "COVER", "PATH")
+	fmt.Println(strings.Repeat("-", 108))
 	for _, r := range repos {
 		last := "never"
 		if !r.LastIndexed.IsZero() {
 			last = r.LastIndexed.Format(time.RFC3339)
 		}
-		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %s\n",
-			r.Name, r.ID, last, r.ParseErrors, r.FileCap, r.Path)
+		// Coverage = files in the latest snapshot vs supported files seen by the
+		// last walk. "-" until a post-V5 reindex has measured the denominator.
+		cover := "-"
+		if r.SupportedSeen > 0 {
+			if latest, err := db.List(r.ID, 1); err == nil && len(latest) == 1 {
+				cover = fmt.Sprintf("%d%%", latest[0].FileCount*100/r.SupportedSeen)
+			}
+		}
+		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %-7s  %s\n",
+			r.Name, r.ID, last, r.ParseErrors, r.FileCap, cover, r.Path)
 	}
 }
 
@@ -219,7 +227,7 @@ func runRepoReindex(args []string) {
 	}
 
 	srcRoot := repo.EffectiveSourceRoot()
-	irData, parseErrors := buildIR(srcRoot, repo.FileCap)
+	irData, stats := buildIR(srcRoot, repo.FileCap)
 	if err := irData.Save(filepath.Join(srcRoot, ".ai", "ir.json")); err != nil {
 		fatal(fmt.Errorf("save ir.json: %w", err))
 	}
@@ -227,14 +235,15 @@ func runRepoReindex(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	if err := db.TouchRepo(repo.ID, time.Now(), parseErrors); err != nil {
+	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	short := irData.RootHash
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...\n", repo.Name, id, len(irData.Files), short)
+	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
+		repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
 }
 
 // runBackup writes an atomic backup of the central store via VACUUM INTO.
@@ -266,20 +275,29 @@ func runBackup(args []string) {
 
 // buildIR generates a fresh IR for root (full, not incremental).
 // fileCap limits the number of files indexed (0 = unlimited).
-// Returns the IR and the number of files that failed to parse.
-func buildIR(root string, fileCap int) (*ir.IR, int) {
+// Returns the IR and the walk's honest-coverage stats.
+func buildIR(root string, fileCap int) (*ir.IR, ir.Stats) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		fatal(err)
 	}
-	result, parseErrors, err := ir.NewGenerator(ir.GeneratorConfig{
+	result, stats, err := ir.NewGenerator(ir.GeneratorConfig{
 		IgnoredPaths: ir.DefaultIgnoredPaths,
 		FileCap:      fileCap,
 	}).Generate(abs)
 	if err != nil {
 		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
-	return result, parseErrors
+	return result, stats
+}
+
+// coverageSuffix formats " coverage=N/M (P%)" from walk stats, or "" when the
+// walk saw no supported files (nothing meaningful to report).
+func coverageSuffix(stats ir.Stats) string {
+	if stats.SupportedSeen == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" coverage=%d/%d (%.0f%%)", stats.Indexed, stats.SupportedSeen, stats.Coverage())
 }
 
 // runIndex is the original runecho-ir [root] behavior.
@@ -305,22 +323,23 @@ func runIndex(args []string) {
 	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
 
 	var result *ir.IR
+	var stats ir.Stats
 	var genErr error
 
 	if _, err := os.Stat(irPath); err == nil {
 		existing, loadErr := ir.Load(irPath)
 		if loadErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to load existing IR, regenerating: %v\n", loadErr)
-			result, _, genErr = generator.Generate(absRoot)
+			result, stats, genErr = generator.Generate(absRoot)
 		} else {
-			result, _, genErr = generator.Update(existing, absRoot)
+			result, stats, genErr = generator.Update(existing, absRoot)
 		}
 	} else {
 		if err := os.MkdirAll(filepath.Dir(irPath), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .ai directory: %v\n", err)
 			os.Exit(1)
 		}
-		result, _, genErr = generator.Generate(absRoot)
+		result, stats, genErr = generator.Generate(absRoot)
 	}
 
 	err = genErr
@@ -339,7 +358,7 @@ func runIndex(args []string) {
 	if len(shortHash) > 12 {
 		shortHash = shortHash[:12]
 	}
-	fmt.Printf("Indexed %d files — root_hash: %s...\n", len(result.Files), shortHash)
+	fmt.Printf("Indexed %d files — root_hash: %s...%s\n", len(result.Files), shortHash, coverageSuffix(stats))
 }
 
 // runSnapshot saves a snapshot of the current ir.json.
@@ -356,14 +375,14 @@ func runSnapshot(args []string) {
 	// Resolve (auto-enrolling) first so the snapshot honors the repo's file cap —
 	// otherwise an uncapped snapshot would never match a capped reindex of the same repo.
 	repo := resolveRepoForWrite(db, root)
-	irData, parseErrors := buildIR(root, repo.FileCap) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, stats := buildIR(root, repo.FileCap) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	id, err := db.SaveSnapshot(repo.ID, *sessionID, *label, root, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	// Record the capture point (self-observing: last_indexed staleness).
-	if err := db.TouchRepo(repo.ID, time.Now(), parseErrors); err != nil {
+	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 	}
 	shortHash := irData.RootHash
@@ -392,20 +411,29 @@ func runDiff(args []string) {
 		// --since mode: A = last snapshot by label, B = live ir.json. root is
 		// resolved here, not at the top: in two-ID mode the leading positional
 		// is a snapshot id, not a path, so resolving a root there is meaningless.
-		_ = sessionID // future: filter by session if needed
 		root := resolveRoot(fs.Args())
 		repoID := lookupRepoID(db, root)
 		if repoID < 0 {
 			fmt.Fprintf(os.Stderr, "Repo %q is not enrolled (no snapshots yet)\n", root)
 			os.Exit(0)
 		}
-		meta, err := db.GetLatestByLabel(repoID, *since)
+		var meta *snapshot.SnapshotMeta
+		var err error
+		if *sessionID != "" {
+			meta, err = db.GetLatestByLabelSession(repoID, *since, *sessionID)
+		} else {
+			meta, err = db.GetLatestByLabel(repoID, *since)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		if meta == nil {
-			fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", *since, root)
+			suffix := ""
+			if *sessionID != "" {
+				suffix = fmt.Sprintf(" (session %q)", *sessionID)
+			}
+			fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s for root %q\n", *since, suffix, root)
 			os.Exit(0)
 		}
 		irData, _ := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json

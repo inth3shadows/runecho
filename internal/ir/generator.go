@@ -1,7 +1,6 @@
 package ir
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,13 +24,29 @@ type GeneratorConfig struct {
 	FileCap      int      // Max files to index; 0 = unlimited. Walk stops after this many files are processed.
 }
 
-// errFileCap is the sentinel returned by a walk callback when the file cap is
-// reached. It stops the walk early and is not propagated as a real error.
-var errFileCap = errors.New("file cap reached")
+// Stats reports honest-coverage counters from a Generate/Update walk.
+type Stats struct {
+	ParseErrors   int // supported files that failed to parse (not in the IR)
+	SupportedSeen int // supported-extension files encountered, including beyond the cap
+	Indexed       int // files in the IR (== len(IR.Files))
+}
+
+// Coverage returns Indexed as a percentage of SupportedSeen. A walk that saw no
+// supported files is vacuously 100% covered.
+func (s Stats) Coverage() float64 {
+	if s.SupportedSeen == 0 {
+		return 100
+	}
+	return float64(s.Indexed) / float64(s.SupportedSeen) * 100
+}
 
 // capReached reports whether indexedCount has hit the configured file cap.
 // indexedCount is the number of files already added to the IR — files that fail
 // to parse never reach the IR, so they do not consume cap budget.
+//
+// Once the cap is reached the walk continues but only counts supported files
+// (no stat/hash/parse work), so SupportedSeen stays an honest denominator for
+// coverage instead of stopping at ~100% the moment the cap truncates.
 func (g *Generator) capReached(indexedCount int) bool {
 	return g.fileCap > 0 && indexedCount >= g.fileCap
 }
@@ -91,53 +106,58 @@ func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 }
 
 // Generate creates IR for all supported files in the given root directory.
-// When FileCap > 0, the walk stops after that many files are processed.
-func (g *Generator) Generate(rootPath string) (*IR, int, error) {
+// When FileCap > 0, indexing stops after that many files; the walk continues
+// counting supported files so Stats reports honest coverage.
+func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return nil, Stats{}, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
 	result := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors int
+	var stats Stats
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		stats.SupportedSeen++
 		if g.capReached(len(result.Files)) {
-			return errFileCap
+			return nil // count only; cap bounds parse work, not the denominator
 		}
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
-			parseErrors++
+			stats.ParseErrors++
 			return nil
 		}
 		result.Files[normPath] = fileIR
 		return nil
-	}); err != nil && !errors.Is(err, errFileCap) {
-		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
+	}); err != nil {
+		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	result.RootHash = ComputeRootHash(result.Files)
-	return result, parseErrors, nil
+	stats.Indexed = len(result.Files)
+	return result, stats, nil
 }
 
 // Update incrementally updates IR based on file hashes.
-// Only re-parses files whose hash has changed. When FileCap > 0, the walk stops
-// after that many files are processed (consistent with Generate).
-func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
+// Only re-parses files whose hash has changed. When FileCap > 0, indexing stops
+// after that many files (consistent with Generate); the walk continues counting
+// supported files so Stats reports honest coverage.
+func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return nil, Stats{}, fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
 	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
-	var parseErrors int
+	var stats Stats
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+		stats.SupportedSeen++
 		if g.capReached(len(updated.Files)) {
-			return errFileCap
+			return nil // count only; cap bounds parse work, not the denominator
 		}
 		currentHash, err := HashFile(absPath)
 		if err != nil {
@@ -151,17 +171,18 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, int, error) {
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
-			parseErrors++
+			stats.ParseErrors++
 			return nil
 		}
 		updated.Files[normPath] = fileIR
 		return nil
-	}); err != nil && !errors.Is(err, errFileCap) {
-		return nil, 0, fmt.Errorf("failed to walk directory: %w", err)
+	}); err != nil {
+		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	updated.RootHash = ComputeRootHash(updated.Files)
-	return updated, parseErrors, nil
+	stats.Indexed = len(updated.Files)
+	return updated, stats, nil
 }
 
 // normalizePath applies all path normalization rules:

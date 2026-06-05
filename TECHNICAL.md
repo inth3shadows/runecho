@@ -75,9 +75,9 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 | Tool | Args | Returns |
 |---|---|---|
 | `structure` | `repo` | Files + symbols of the live IR, with counts |
-| `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) | Structural drift; default is latest snapshot vs live |
+| `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
-| `status` | `repo` | last-indexed, staleness, parse errors, snapshot count, latest stored hash, file cap |
+| `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
 | `health` | — | Schema version, live integrity check, repo count, db path |
 
 A `diff` with explicit `a`/`b` rejects snapshot ids that belong to a different
@@ -122,7 +122,7 @@ SQLite at `~/.runecho/history.db` (override dir with `RUNECHO_HOME`). Schema
 version is tracked in `PRAGMA user_version`; migrations run in order inside
 transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
 
-- `repos(id, name UNIQUE, path UNIQUE, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors)`
+- `repos(id, name UNIQUE, path UNIQUE, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen)`
   — `common_dir` is the git-common-dir, a stable identity shared by every
   worktree of a repo; the guard keys lookup on it so bare-repo worktrees resolve
   in O(1) instead of scanning `git worktree list`.
@@ -173,14 +173,15 @@ runecho-ir repo list                              # enrolled repos + index state
 
 - **Languages:** Go, JS/TS, Python only. Parsers are regex/AST-shallow — top-level
   symbols, not nested scopes.
-- **File cap is enforced.** `repo add --cap N` stops the walk after N files. The
-  root hash reflects only the capped file set — truncation changes the hash compared
-  to an uncapped run of the same repo. Coverage is reported honestly via `status`.
+- **File cap is enforced.** `repo add --cap N` stops indexing after N files (the
+  walk continues counting supported files, so the coverage denominator stays
+  honest). The root hash reflects only the capped file set — truncation changes
+  the hash compared to an uncapped run of the same repo. Coverage % — indexed
+  files over supported files seen by the last walk — is reported by `status`
+  and `repo list`.
 - **Single-connection store.** Correct and torn-read-free, but reads do not run
   concurrently with writes. Fine at single-operator scale; not built for many
   concurrent indexers.
-- **`coverage %`** is not computed (the generator does not yet count skipped vs
-  supported files); `status` reports indexed file count and parse errors instead.
 - **The guard checks bare calls only.** Qualified calls (`pkg.Foo()`,
   `obj.method()`) are assumed external and skipped; dynamically-assigned
   callables can't be resolved statically. It catches the common hallucination

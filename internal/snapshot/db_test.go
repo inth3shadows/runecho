@@ -130,13 +130,13 @@ func TestRegistry(t *testing.T) {
 	}
 
 	when := time.Now().UTC().Truncate(time.Second)
-	if err := db.TouchRepo(idA, when, 3); err != nil {
+	if err := db.TouchRepo(idA, when, 3, 51); err != nil {
 		t.Fatalf("TouchRepo: %v", err)
 	}
 	after, _ := db.GetRepoByPath("/repos/alpha")
-	if after.ParseErrors != 3 || !after.LastIndexed.Equal(when) {
-		t.Fatalf("TouchRepo not persisted: errs=%d lastIndexed=%v want %v",
-			after.ParseErrors, after.LastIndexed, when)
+	if after.ParseErrors != 3 || after.SupportedSeen != 51 || !after.LastIndexed.Equal(when) {
+		t.Fatalf("TouchRepo not persisted: errs=%d seen=%d lastIndexed=%v want %v",
+			after.ParseErrors, after.SupportedSeen, after.LastIndexed, when)
 	}
 }
 
@@ -339,6 +339,45 @@ func TestGetLatestByLabel_TiebreakById(t *testing.T) {
 	}
 	if m.RootHash != "h-higher" {
 		t.Errorf("tiebreak: got root_hash %q, want h-higher (higher id wins)", m.RootHash)
+	}
+}
+
+// TestGetLatestByLabelSession pins the reference snapshot to a session: the
+// same label used by two sessions must resolve to each session's own latest,
+// and an unknown session is nil, nil — never a silent fallback to any-session.
+func TestGetLatestByLabelSession(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
+
+	if _, err := db.SaveSnapshot(id, "sess-1", "session-start", "/tmp/r", makeIR("h1")); err != nil {
+		t.Fatalf("save s1a: %v", err)
+	}
+	if _, err := db.SaveSnapshot(id, "sess-2", "session-start", "/tmp/r", makeIR("h2")); err != nil {
+		t.Fatalf("save s2: %v", err)
+	}
+	// sess-1 again, later — must win for sess-1 (id tiebreak within the session).
+	if _, err := db.SaveSnapshot(id, "sess-1", "session-start", "/tmp/r", makeIR("h3")); err != nil {
+		t.Fatalf("save s1b: %v", err)
+	}
+
+	got, err := db.GetLatestByLabelSession(id, "session-start", "sess-1")
+	if err != nil || got == nil {
+		t.Fatalf("sess-1 lookup: %v %v", got, err)
+	}
+	if got.RootHash != "h3" {
+		t.Errorf("sess-1 latest = %q, want h3", got.RootHash)
+	}
+
+	got, err = db.GetLatestByLabelSession(id, "session-start", "sess-2")
+	if err != nil || got == nil {
+		t.Fatalf("sess-2 lookup: %v %v", got, err)
+	}
+	if got.RootHash != "h2" {
+		t.Errorf("sess-2 latest = %q, want h2", got.RootHash)
+	}
+
+	if miss, err := db.GetLatestByLabelSession(id, "session-start", "sess-3"); err != nil || miss != nil {
+		t.Errorf("unknown session must be nil,nil: %v %v", miss, err)
 	}
 }
 

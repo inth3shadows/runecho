@@ -22,6 +22,10 @@ type Repo struct {
 	EnrolledAt  time.Time
 	LastIndexed time.Time // zero if never indexed
 	ParseErrors int
+	// SupportedSeen is how many supported-extension files the last (re)index walk
+	// encountered, including beyond the cap (schema V5; 0 = not yet measured).
+	// Against the latest snapshot's file count it yields coverage %.
+	SupportedSeen int
 }
 
 // EffectiveSourceRoot returns the directory to walk for IR generation. For repos
@@ -59,14 +63,14 @@ func (db *DB) EnrollRepo(name, path, sourceRoot string, fileCap int) (int64, err
 // GetRepoByPath returns the repo enrolled at path, or nil, nil if none.
 func (db *DB) GetRepoByPath(path string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen
 		 FROM repos WHERE path = ?`, path))
 }
 
 // GetRepoByName returns the repo with the given name, or nil, nil if none.
 func (db *DB) GetRepoByName(name string) (*Repo, error) {
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen
 		 FROM repos WHERE name = ?`, name))
 }
 
@@ -79,7 +83,7 @@ func (db *DB) GetRepoByCommonDir(commonDir string) (*Repo, error) {
 		return nil, nil
 	}
 	return scanRepo(db.conn.QueryRow(
-		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen
 		 FROM repos WHERE common_dir = ?`, commonDir))
 }
 
@@ -97,7 +101,7 @@ func (db *DB) SetRepoCommonDir(id int64, commonDir string) error {
 // ListRepos returns all enrolled repos, ordered by name.
 func (db *DB) ListRepos() ([]Repo, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen
 		 FROM repos ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list repos: %w", err)
@@ -156,12 +160,13 @@ func (db *DB) PurgeRepo(id int64) error {
 	return tx.Commit()
 }
 
-// TouchRepo records indexing state after a (re)index: when it last ran and how
-// many parse errors were seen (self-observing / honest-coverage guarantees).
-func (db *DB) TouchRepo(id int64, lastIndexed time.Time, parseErrors int) error {
+// TouchRepo records indexing state after a (re)index: when it last ran, how
+// many parse errors were seen, and how many supported files the walk
+// encountered (self-observing / honest-coverage guarantees).
+func (db *DB) TouchRepo(id int64, lastIndexed time.Time, parseErrors, supportedSeen int) error {
 	_, err := db.conn.Exec(
-		`UPDATE repos SET last_indexed = ?, parse_errors = ? WHERE id = ?`,
-		lastIndexed.UTC().Format(time.RFC3339), parseErrors, id,
+		`UPDATE repos SET last_indexed = ?, parse_errors = ?, supported_seen = ? WHERE id = ?`,
+		lastIndexed.UTC().Format(time.RFC3339), parseErrors, supportedSeen, id,
 	)
 	if err != nil {
 		return fmt.Errorf("touch repo %d: %w", id, err)
@@ -190,7 +195,7 @@ func scanRepoCols(scan func(...any) error) (*Repo, error) {
 	var commonDir sql.NullString
 	var enrolled string
 	var lastIndexed sql.NullString
-	if err := scan(&r.ID, &r.Name, &r.Path, &sourceRoot, &commonDir, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors); err != nil {
+	if err := scan(&r.ID, &r.Name, &r.Path, &sourceRoot, &commonDir, &r.FileCap, &enrolled, &lastIndexed, &r.ParseErrors, &r.SupportedSeen); err != nil {
 		return nil, err
 	}
 	if sourceRoot.Valid {

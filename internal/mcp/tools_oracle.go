@@ -48,7 +48,7 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "status",
-		Description: "Per-repo health: last indexed, staleness, parse errors, snapshot count, latest stored hash, file cap.",
+		Description: "Per-repo health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap.",
 		InputSchema: repoSchema("name of an enrolled repo"),
 		Handler:     o.status,
 	})
@@ -83,7 +83,8 @@ func diffSchema() map[string]any {
 			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo"},
 			"a":     map[string]any{"type": "integer", "description": "snapshot id A (with b)"},
 			"b":     map[string]any{"type": "integer", "description": "snapshot id B (with a)"},
-			"since": map[string]any{"type": "string", "description": "diff latest snapshot with this label vs live code"},
+			"since":   map[string]any{"type": "string", "description": "diff latest snapshot with this label vs live code"},
+			"session": map[string]any{"type": "string", "description": "with `since`: pin the reference snapshot to this session id"},
 		},
 		"required": []string{"repo"},
 	}
@@ -171,10 +172,11 @@ func (o *Oracle) hash(args json.RawMessage) (string, error) {
 
 func (o *Oracle) diff(args json.RawMessage) (string, error) {
 	var a struct {
-		Repo  string `json:"repo"`
-		A     *int64 `json:"a"`
-		B     *int64 `json:"b"`
-		Since string `json:"since"`
+		Repo    string `json:"repo"`
+		A       *int64 `json:"a"`
+		B       *int64 `json:"b"`
+		Since   string `json:"since"`
+		Session string `json:"session"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
@@ -188,6 +190,11 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 	// silently fall through to latest-vs-live and answer a different question.
 	if (a.A != nil) != (a.B != nil) {
 		return "", fmt.Errorf("diff requires both `a` and `b` snapshot ids together, or neither")
+	}
+	// session only qualifies a since-label lookup; alone (or with a/b) it would
+	// silently do nothing — refuse rather than answer a different question.
+	if a.Session != "" && a.Since == "" {
+		return "", fmt.Errorf("`session` requires `since`")
 	}
 
 	var result snapshot.DiffResult
@@ -207,11 +214,20 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 			return "", err
 		}
 	case a.Since != "":
-		meta, err := o.db.GetLatestByLabel(repo.ID, a.Since)
+		var meta *snapshot.SnapshotMeta
+		var err error
+		if a.Session != "" {
+			meta, err = o.db.GetLatestByLabelSession(repo.ID, a.Since, a.Session)
+		} else {
+			meta, err = o.db.GetLatestByLabel(repo.ID, a.Since)
+		}
 		if err != nil {
 			return "", err
 		}
 		if meta == nil {
+			if a.Session != "" {
+				return "", fmt.Errorf("no snapshot labeled %q with session %q for repo %q", a.Since, a.Session, repo.Name)
+			}
 			return "", fmt.Errorf("no snapshot labeled %q for repo %q", a.Since, repo.Name)
 		}
 		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
@@ -292,6 +308,12 @@ func (o *Oracle) status(args json.RawMessage) (string, error) {
 	}
 	if latest, err := o.db.List(repo.ID, 1); err == nil && len(latest) == 1 {
 		out["latest_root_hash"] = latest[0].RootHash
+		// Coverage as of the last walk: indexed (latest snapshot's file count) over
+		// supported files seen. supported_seen=0 means no post-V5 reindex yet.
+		if repo.SupportedSeen > 0 {
+			out["supported_files"] = repo.SupportedSeen
+			out["coverage_percent"] = latest[0].FileCount * 100 / repo.SupportedSeen
+		}
 	}
 	return jsonText(out)
 }

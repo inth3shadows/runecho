@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -304,10 +305,10 @@ func TestGenerate_RefsExtraction(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if got, want := result.Files["a.go"].Refs, []string{"Alpha", "DoThing", "Zebra"}; !equalStrings(got, want) {
+	if got, want := result.Files["a.go"].Refs, []string{"Alpha", "DoThing", "Zebra"}; !slices.Equal(got, want) {
 		t.Errorf("a.go refs = %v, want %v (sorted; qualified/unexported/def-line excluded)", got, want)
 	}
-	if got, want := result.Files["b.py"].Refs, []string{"process_order"}; !equalStrings(got, want) {
+	if got, want := result.Files["b.py"].Refs, []string{"process_order"}; !slices.Equal(got, want) {
 		t.Errorf("b.py refs = %v, want %v (builtins excluded)", got, want)
 	}
 	if refs := result.Files["c.go"].Refs; refs == nil || len(refs) != 0 {
@@ -315,16 +316,38 @@ func TestGenerate_RefsExtraction(t *testing.T) {
 	}
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// TestUpdate_VersionMismatchRegenerates: Update must fall back to a full
+// Generate for an old-format IR — reusing v1 entries verbatim would leave
+// their Refs empty forever.
+func TestUpdate_VersionMismatchRegenerates(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := "package x\n\nfunc Caller() {\n\tDoThing()\n}\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+	gen := NewGenerator(GeneratorConfig{})
+	current, _, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return true
+
+	// Simulate a v1 artifact: same files, version 1, refs stripped.
+	old := &IR{Version: 1, Files: make(map[string]FileIR)}
+	for p, f := range current.Files {
+		f.Refs = nil
+		old.Files[p] = f
+	}
+
+	updated, _, err := gen.Update(old, tmpDir)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.Version != IRVersion {
+		t.Errorf("Version = %d, want %d", updated.Version, IRVersion)
+	}
+	if got := updated.Files["a.go"].Refs; !slices.Equal(got, []string{"DoThing"}) {
+		t.Errorf("refs after v1 Update = %v, want [DoThing] (must regenerate, not reuse)", got)
+	}
 }
 
 func TestGenerator_Generate_UnicodeNormalization(t *testing.T) {

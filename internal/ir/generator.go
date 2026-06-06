@@ -145,7 +145,15 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 // Only re-parses files whose hash has changed. When FileCap > 0, indexing stops
 // after that many files (consistent with Generate); the walk continues counting
 // supported files so Stats reports honest coverage.
+//
+// A version-mismatched IR falls back to a full Generate: Update reuses entries
+// for unchanged files verbatim, which would leave fields added by newer format
+// versions (e.g. v2 refs) empty forever. Guarding here — not just at call
+// sites — means no caller can perpetuate a stale format by mistake.
 func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) {
+	if existingIR == nil || existingIR.Version != IRVersion {
+		return g.Generate(rootPath)
+	}
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to resolve absolute path: %w", err)
@@ -246,11 +254,9 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		return FileIR{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Compute hash
-	hash, err := HashFile(path)
-	if err != nil {
-		return FileIR{}, fmt.Errorf("failed to hash file: %w", err)
-	}
+	// Hash the bytes already in memory — re-reading via HashFile would both
+	// waste a syscall and race file modification between read and hash.
+	hash := HashBytes(content)
 
 	// Dispatch to the right parser by extension
 	ext := filepath.Ext(path)

@@ -106,7 +106,7 @@ func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {
 	irPath := filepath.Join(tmpDir, "ir.json")
 
 	original := &IR{
-		Version: 1,
+		Version: IRVersion,
 		Files: map[string]FileIR{
 			"test.ts": {
 				Hash:      "abcdef123456",
@@ -114,6 +114,7 @@ func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {
 				Functions: []string{"foo", "bar"},
 				Classes:   []string{"Test"},
 				Exports:   []string{"foo", "bar"},
+				Refs:      []string{"baz", "qux"},
 			},
 		},
 	}
@@ -238,7 +239,8 @@ func equalFileIR(a, b FileIR) bool {
 		equalStringSlices(a.Imports, b.Imports) &&
 		equalStringSlices(a.Functions, b.Functions) &&
 		equalStringSlices(a.Classes, b.Classes) &&
-		equalStringSlices(a.Exports, b.Exports)
+		equalStringSlices(a.Exports, b.Exports) &&
+		equalStringSlices(a.Refs, b.Refs)
 }
 
 func equalStringSlices(a, b []string) bool {

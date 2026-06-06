@@ -73,5 +73,28 @@
     "known": ["Current"],
     "edit": "// Reconcile calls MergeState() under the hood.\nfunc Reconcile() {\n    state := Current()\n    _ = state\n}\n",
     "expect": []
+  },
+  {
+    "name": "go-tp-star-prefix-wrapped-code",
+    "desc": "FIX: a hallucinated call on a `* `-prefixed line (a wrapped multiplication, NOT inside a block comment) must be flagged (was a silent FN — `* ` prefix was guessed to be a comment)",
+    "file": "calc.go",
+    "known": ["Scale"],
+    "edit": "func Total(x int) int {\n    return x\n        * Compute(x)\n}\n",
+    "expect": ["Compute"]
+  },
+  {
+    "name": "go-tn-star-prefix-inside-block-comment",
+    "desc": "FIX: a `* `-prefixed line genuinely inside a /* ... */ block comment stays a comment (state-driven), so the named call is not flagged",
+    "file": "doc.go",
+    "edit": "/*\n * Helper docs: see FakeHelper() for details.\n */\nfunc Helper() {}\n",
+    "expect": []
+  },
+  {
+    "name": "go-tn-inline-block-comment",
+    "desc": "FIX: an inline /* ... */ block comment is blanked but surrounding code is still scanned",
+    "file": "inline.go",
+    "known": ["Real"],
+    "edit": "func Use() {\n    _ = /* Hidden() */ Real()\n}\n",
+    "expect": []
   }
 ]

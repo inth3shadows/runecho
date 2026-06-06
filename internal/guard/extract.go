@@ -385,11 +385,26 @@ func builtinsFor(lang Lang) map[string]struct{} {
 	return nil
 }
 
+// isCommentLine reports whether a line is a *whole-line* comment that should be
+// skipped outright (used only when not mid-string/mid-block-comment).
+//
+// It deliberately only matches `//` (an unambiguous line comment). It does NOT
+// match `* `/`*/` prefixes: those are only comment text when genuinely inside a
+// /* ... */ region, which is now tracked statefully by stripLiteralsStateful
+// (open == "*/"). Guessing "comment" from a `* ` prefix dropped real code —
+// a wrapped `\t* Compute()` multiplication or a `*ptr`-style line — which for a
+// truth-oracle is an FN (a silently missed hallucinated call), the worst class.
+// Now such a line outside a block comment is scanned as code; the only cost is
+// that a real block-comment continuation seen across a diff-hunk gap (where
+// block state was reset, like the multi-line string reset above) reads as code
+// and may yield a false positive. FP (noisy) is the safe direction over FN
+// (silent miss). A `/*` that opens a block comment is handled by the stripper,
+// not here, so genuine block comments are still blanked.
 func isCommentLine(lang Lang, text string) bool {
 	trimmed := strings.TrimSpace(text)
 	switch lang {
 	case LangGo, LangJS:
-		return strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "*/")
+		return strings.HasPrefix(trimmed, "//")
 	case LangPython:
 		return strings.HasPrefix(trimmed, "#")
 	}
@@ -448,6 +463,33 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 			}
 			break
 		}
+		// Go/JS block comment /* ... */ — may span lines. Blank to the closing
+		// */; if it doesn't close on this line, open multi-line state ("*/") so
+		// the continuation lines (including `* ...`-prefixed ones) are blanked as
+		// comment text rather than guessed at by line prefix. This is what makes
+		// the `* `-prefix case state-driven instead of prefix-guessed: a `* Foo()`
+		// line is only comment text when we're genuinely inside a /* */ region.
+		if (lang == LangGo || lang == LangJS) && hasAt(b, i, "/*") {
+			out[i] = ' '
+			out[i+1] = ' '
+			i += 2
+			closed := false
+			for i < n {
+				if hasAt(b, i, "*/") {
+					out[i] = ' '
+					out[i+1] = ' '
+					i += 2
+					closed = true
+					break
+				}
+				out[i] = ' '
+				i++
+			}
+			if !closed {
+				return string(out), "*/" // opens multi-line comment state
+			}
+			continue
+		}
 		// Python triple-quoted string (docstring / multi-line SQL).
 		if lang == LangPython && (hasAt(b, i, `"""`) || hasAt(b, i, `'''`)) {
 			delim := string(b[i : i+3])
@@ -482,6 +524,56 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 		}
 		// Single-line "..." / '...' string.
 		if c == '"' || c == '\'' {
+			// Python f-strings interpolate: f"{Build(y)}" contains a *real* call
+			// inside the {...} region. Blanking the whole interior (as for an
+			// ordinary string) silently loses that call — an FN, the worst class
+			// for a truth-oracle. So for an f-string we blank the literal text but
+			// SCAN (leave intact) the {...} interpolation regions, honoring the
+			// {{ / }} escapes that denote literal braces (not interpolations).
+			// Length is still preserved either way, keeping match indices honest.
+			if lang == LangPython && isFStringPrefix(b, i) {
+				quote := b[i]
+				i++
+				for i < n && b[i] != quote {
+					switch {
+					case b[i] == '\\' && i+1 < n:
+						out[i] = ' '
+						out[i+1] = ' '
+						i += 2
+					case hasAt(b, i, "{{") || hasAt(b, i, "}}"):
+						// Escaped literal brace — not an interpolation; blank both.
+						out[i] = ' '
+						out[i+1] = ' '
+						i += 2
+					case b[i] == '{':
+						// Interpolation region: leave bytes intact so the call inside
+						// is seen by reCallIdent. Runs to the matching '}' (no nesting
+						// of '{' inside an interpolation in valid f-strings, but a dict
+						// literal could appear — track brace depth to be safe).
+						depth := 1
+						i++ // past the '{'
+						for i < n && depth > 0 && b[i] != quote {
+							if b[i] == '{' {
+								depth++
+							} else if b[i] == '}' {
+								depth--
+								if depth == 0 {
+									i++ // past the closing '}'
+									break
+								}
+							}
+							i++
+						}
+					default:
+						out[i] = ' '
+						i++
+					}
+				}
+				if i < n && b[i] == quote {
+					i++
+				}
+				continue
+			}
 			quote := c
 			i++
 			for i < n && b[i] != quote {
@@ -503,6 +595,45 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 		i++
 	}
 	return string(out), open
+}
+
+// isFStringPrefix reports whether the quote at index i opens a Python f-string,
+// by inspecting the (up to two) string-prefix letters immediately before it.
+// Python allows f, rf, fr, and case variants (and br/rb, which are NOT f-strings).
+// The prefix must be a token boundary on its left so we don't treat the `f` in an
+// identifier like `conf"x"` (not valid Python, but be defensive) as a prefix.
+func isFStringPrefix(b []byte, i int) bool {
+	// Collect the run of letters directly preceding the quote (max 2 for valid
+	// Python prefixes).
+	start := i
+	for start > 0 && start > i-2 && isPrefixLetter(b[start-1]) {
+		start--
+	}
+	if start == i {
+		return false
+	}
+	// Left of the prefix must not be an identifier char (else it's a bare name,
+	// not a string prefix).
+	if start > 0 {
+		p := b[start-1]
+		if p == '_' || (p >= 'A' && p <= 'Z') || (p >= 'a' && p <= 'z') || (p >= '0' && p <= '9') {
+			return false
+		}
+	}
+	for j := start; j < i; j++ {
+		if b[j] == 'f' || b[j] == 'F' {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrefixLetter(c byte) bool {
+	switch c {
+	case 'f', 'F', 'r', 'R', 'b', 'B':
+		return true
+	}
+	return false
 }
 
 // hasAt reports whether b contains s starting at index i.

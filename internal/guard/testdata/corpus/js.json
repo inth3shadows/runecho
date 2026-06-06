@@ -76,5 +76,13 @@
     "edit": "async function loadConfig() {\n  return {};\n}\n",
     "expect": [],
     "known_fp": ["loadConfig"]
+  },
+  {
+    "name": "js-fp-regex-literal",
+    "desc": "KNOWN FP (by audit decision): a regex literal `/Foo(x)/` extracts Foo as a bogus call. Line-level regex-vs-division disambiguation is genuinely ambiguous (a leading `/` could be either), so this stays a tracked false positive rather than risking a heuristic that drops real division-context calls.",
+    "file": "match.js",
+    "edit": "function match(s) {\n  const re = /Foo(x)/;\n  return re.test(s);\n}\n",
+    "expect": [],
+    "known_fp": ["Foo"]
   }
 ]

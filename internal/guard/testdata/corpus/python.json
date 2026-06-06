@@ -86,6 +86,30 @@
     "expect": []
   },
   {
+    "name": "py-tp-fstring-interpolation-call",
+    "desc": "FIX: a hallucinated call inside an f-string {...} interpolation must be flagged (was a silent FN — the whole f-string interior was blanked)",
+    "file": "render.py",
+    "known": ["build_url"],
+    "edit": "def render(y):\n    return f\"link: {build_urls(y)}\"\n",
+    "expect": ["build_urls"],
+    "suggest": {"build_urls": "build_url"}
+  },
+  {
+    "name": "py-tn-fstring-known-call",
+    "desc": "FIX: a known symbol called inside an f-string interpolation is clean (interpolation scanned, not flagged)",
+    "file": "render.py",
+    "known": ["build_url"],
+    "edit": "def render(y):\n    return f\"link: {build_url(y)}\"\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-fstring-prose-and-escapes",
+    "desc": "FIX: literal text and {{ }} brace escapes in an f-string must NOT read as calls (only the real interpolation is scanned)",
+    "file": "msg.py",
+    "edit": "def msg(n):\n    return f\"{{not_a_call()}} count is COUNT() = {n}\"\n",
+    "expect": []
+  },
+  {
     "name": "py-fp-local-callable",
     "desc": "KNOWN FP: a local variable holding a callable cannot be resolved statically",
     "file": "dispatch.py",

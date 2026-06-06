@@ -198,19 +198,85 @@ func TestExtractRefs_Unknown_ReturnsNil(t *testing.T) {
 	}
 }
 
-// TestExtractRefs_Go_ClosingCommentLineSkipped verifies that a line starting
-// with */ (block-comment close) is treated as a comment and produces no refs,
-// even when followed by text that looks like a call.
-func TestExtractRefs_Go_ClosingCommentLineSkipped(t *testing.T) {
-	ls := lines(
-		`*/ SomeCall()`,
-		`* StarPrefixCall()`,
-		`// LineComment()`,
+// TestExtractRefs_Go_CommentLinesStateDriven verifies the state-driven comment
+// handling: `//` line comments and the interior of a genuine /* ... */ block are
+// blanked, but a `* `/`*/`-prefixed line that is NOT inside a tracked block
+// comment is now scanned as code. The latter is the deliberate FP-over-FN
+// tradeoff (a stray `*/` outside a block reads as code, a noisy FP, rather than
+// dropping a real `\t* Compute()` multiplication as a silent FN).
+func TestExtractRefs_Go_CommentLinesStateDriven(t *testing.T) {
+	// A genuine block comment: open, body line, close — all blanked.
+	block := lines(
 		`/* BlockOpen()`,
+		`* InsideBlock()`,
+		`*/`,
+	)
+	refs := ExtractRefs(LangGo, block)
+	if !containsNone(refs, "BlockOpen", "InsideBlock") {
+		t.Errorf("block-comment interior should produce no refs, got %v", refNames(refs))
+	}
+
+	// A `//` line comment is still skipped outright.
+	refs = ExtractRefs(LangGo, lines(`// LineComment()`))
+	if !containsNone(refs, "LineComment") {
+		t.Errorf("// line comment should produce no refs, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_StarPrefixCodeNotDropped is the regression guard for the
+// `* `-prefix FN: a wrapped multiplication starting a line (NOT inside a block
+// comment) must be scanned as code, so a hallucinated call there is still caught.
+func TestExtractRefs_Go_StarPrefixCodeNotDropped(t *testing.T) {
+	ls := lines("\t* Compute()")
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "Compute") {
+		t.Errorf("`* `-prefixed code (wrapped multiply) must be scanned, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_StarInsideBlockComment proves the contrast: the SAME `* X()`
+// line, when actually inside a /* ... */ region, is correctly treated as comment.
+func TestExtractRefs_Go_StarInsideBlockComment(t *testing.T) {
+	ls := lines(
+		`/* Documentation block`,
+		`* Mentions Fake() here`,
+		`*/`,
+		`real := Real()`,
 	)
 	refs := ExtractRefs(LangGo, ls)
-	if !containsNone(refs, "SomeCall", "StarPrefixCall", "LineComment", "BlockOpen") {
-		t.Errorf("comment lines should produce no refs, got %v", refNames(refs))
+	if !containsNone(refs, "Fake") {
+		t.Errorf("`* `-line inside a block comment must not yield refs, got %v", refNames(refs))
+	}
+	if !containsAll(refs, "Real") {
+		t.Errorf("code after the block-comment close must still be scanned, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_InlineBlockComment verifies a single-line /* ... */ blanks
+// its interior but leaves surrounding code visible.
+func TestExtractRefs_Go_InlineBlockComment(t *testing.T) {
+	ls := lines(`x := /* Hidden() */ Visible()`)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "Hidden") {
+		t.Errorf("inline block-comment interior should be blanked, got %v", refNames(refs))
+	}
+	if !containsAll(refs, "Visible") {
+		t.Errorf("code after an inline block comment should be scanned, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_BlockCommentStateResetsOnLineGap documents the conservative
+// tradeoff: when a diff-hunk gap resets block-comment state, a `* `-prefixed
+// continuation line reads as code (a potential FP) rather than being silently
+// dropped (an FN). FP is the safe direction for a truth-oracle.
+func TestExtractRefs_BlockCommentStateResetsOnLineGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: `/* opened here`},
+		{LineNo: 80, Text: `* Stranded()`}, // far away → block state reset → scanned as code
+	}
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "Stranded") {
+		t.Errorf("post-gap `* ` line should be scanned as code (FP-over-FN), got %v", refNames(refs))
 	}
 }
 
@@ -329,6 +395,60 @@ func TestStripLiterals_EscapedQuote(t *testing.T) {
 	refs := ExtractRefs(LangGo, ls)
 	if !containsAll(refs, "RealFn") {
 		t.Errorf("escaped quote mishandled; RealFn lost. refs=%v", refNames(refs))
+	}
+}
+
+// --- P-fix: Python f-string interpolation scanning ---
+
+// TestExtractRefs_Python_FStringInterpolation is the regression guard for the
+// f-string FN: a genuine call inside f"{...}" must be found, while literal text
+// (and {{ }} escapes) outside the interpolation stays blanked.
+func TestExtractRefs_Python_FStringInterpolation(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string // refs that MUST appear
+		nope []string // refs that must NOT appear
+	}{
+		{"basic", `x = f"{Build(y)}"`, []string{"Build"}, nil},
+		{"prose-outside-interp", `x = f"call Foo() here {Bar(y)}"`, []string{"Bar"}, []string{"Foo"}},
+		{"brace-escapes", `x = f"{{Literal()}} real {Build(y)}"`, []string{"Build"}, []string{"Literal"}},
+		{"nested-calls", `x = f"{Outer(Inner(z))}"`, []string{"Outer", "Inner"}, nil},
+		{"rf-prefix", `x = rf"{Build(y)}"`, []string{"Build"}, nil},
+		{"fr-prefix", `x = fr"{Build(y)}"`, []string{"Build"}, nil},
+		{"upper-F-prefix", `x = F"{Build(y)}"`, []string{"Build"}, nil},
+		{"plain-string-unaffected", `x = "call Foo() here"`, nil, []string{"Foo"}},
+		{"b-prefix-not-fstring", `x = b"{Foo()}"`, nil, []string{"Foo"}},
+		{"two-interps", `x = f"{First(a)}-{Second(b)}"`, []string{"First", "Second"}, nil},
+		{"dict-literal-in-interp", `x = f"{lookup[Key(k)]}"`, []string{"Key"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := ExtractRefs(LangPython, lines(tc.line))
+			if len(tc.want) > 0 && !containsAll(refs, tc.want...) {
+				t.Errorf("want %v in refs, got %v", tc.want, refNames(refs))
+			}
+			if len(tc.nope) > 0 && !containsNone(refs, tc.nope...) {
+				t.Errorf("did not want %v, got %v", tc.nope, refNames(refs))
+			}
+		})
+	}
+}
+
+// TestStripLiterals_FStringPreservesLength keeps the load-bearing invariant: the
+// f-string scan path must still be length-preserving so LineNo/indices stay honest.
+func TestStripLiterals_FStringPreservesLength(t *testing.T) {
+	cases := []string{
+		`x = f"{Build(y)}"`,
+		`x = f"{{esc}} {Call(z)}"`,
+		`x = f"prose {A(b)} more {C(d)}"`,
+		`x = rf"\d+ {Match(p)}"`,
+	}
+	for _, in := range cases {
+		got := stripLiterals(LangPython, in)
+		if len(got) != len(in) {
+			t.Errorf("stripLiterals(%q) changed length: %d != %d (%q)", in, len(got), len(in), got)
+		}
 	}
 }
 

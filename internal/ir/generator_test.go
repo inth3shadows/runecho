@@ -276,9 +276,55 @@ func TestGenerator_Generate_EmptyDirectory(t *testing.T) {
 	}
 
 	// Should still have version
-	if ir.Version != 1 {
-		t.Errorf("Expected version 1, got %d", ir.Version)
+	if ir.Version != IRVersion {
+		t.Errorf("Expected version %d, got %d", IRVersion, ir.Version)
 	}
+}
+
+// TestGenerate_RefsExtraction verifies IR v2 indexes bare call targets per file
+// under the guard's extraction rules: qualified calls, builtins, definition
+// lines, and (Go) unexported names are excluded; output is sorted and non-nil.
+func TestGenerate_RefsExtraction(t *testing.T) {
+	tmpDir := t.TempDir()
+	goSrc := "package x\n\nfunc Caller() {\n\tDoThing()\n\tfmt.Println(\"x\")\n\thelper()\n\tZebra()\n\tAlpha()\n}\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte(goSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pySrc := "def run():\n    process_order()\n    print(len(x))\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.py"), []byte(pySrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptySrc := "package y\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte(emptySrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _, err := NewGenerator(GeneratorConfig{}).Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if got, want := result.Files["a.go"].Refs, []string{"Alpha", "DoThing", "Zebra"}; !equalStrings(got, want) {
+		t.Errorf("a.go refs = %v, want %v (sorted; qualified/unexported/def-line excluded)", got, want)
+	}
+	if got, want := result.Files["b.py"].Refs, []string{"process_order"}; !equalStrings(got, want) {
+		t.Errorf("b.py refs = %v, want %v (builtins excluded)", got, want)
+	}
+	if refs := result.Files["c.go"].Refs; refs == nil || len(refs) != 0 {
+		t.Errorf("c.go refs = %#v, want non-nil empty slice (stable [] in JSON)", refs)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestGenerator_Generate_UnicodeNormalization(t *testing.T) {

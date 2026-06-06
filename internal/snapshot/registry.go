@@ -146,6 +146,8 @@ func (db *DB) PurgeRepo(id int64) error {
 	stmts := []struct {
 		sql string
 	}{
+		{`DELETE FROM refs WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`},
 		{`DELETE FROM symbols WHERE file_id IN (
 			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`},
 		{`DELETE FROM files WHERE snapshot_id IN (SELECT id FROM snapshots WHERE repo_id = ?)`},

@@ -74,7 +74,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 
 | Tool | Args | Returns |
 |---|---|---|
-| `structure` | `repo` | Files + symbols of the live IR, with counts |
+| `structure` | `repo` | Files + symbols of the live IR, with counts; per-file `refs` answer "who calls X" |
 | `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
@@ -129,6 +129,12 @@ transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
 - `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
 - `files(id, snapshot_id → snapshots, path, content_hash)`
 - `symbols(id, file_id → files, name, kind)`
+- `refs(id, file_id → files, name)` — bare call sites per snapshot file (IR v2).
+  Kept separate from `symbols` on purpose: refs are derived *usage* facts, not
+  declared structure, so they never widen the guard's known-symbol set or add
+  noise to structural diffs. Extraction is shared with the guard
+  (`guard.ExtractRefs`), so index-time facts and edit-time validation can
+  never disagree about what counts as a call.
 
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`

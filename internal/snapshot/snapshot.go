@@ -79,6 +79,17 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 				return 0, fmt.Errorf("insert symbol %q: %w", sym.name, err)
 			}
 		}
+
+		// Refs live in their own table (see migrateV6) so they never leak into
+		// symbol loaders or structural diffs.
+		for _, name := range file.Refs {
+			if _, err := tx.Exec(
+				`INSERT INTO refs (file_id, name) VALUES (?, ?)`,
+				fileID, name,
+			); err != nil {
+				return 0, fmt.Errorf("insert ref %q: %w", name, err)
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -118,6 +129,34 @@ func (db *DB) GetLatestByLabelSession(repoID int64, label, sessionID string) (*S
 		repoID, label, sessionID,
 	)
 	return scanMeta(row)
+}
+
+// RefsToName returns the sorted file paths in snapshot snapshotID whose indexed
+// refs include name — "who calls X" as of that snapshot. Empty for pre-V6
+// snapshots (no refs rows were stored). The answer is deterministic: it derives
+// from the stored IR, not from any live scan.
+func (db *DB) RefsToName(snapshotID int64, name string) ([]string, error) {
+	rows, err := db.conn.Query(
+		`SELECT DISTINCT f.path FROM refs r
+		 JOIN files f ON r.file_id = f.id
+		 WHERE f.snapshot_id = ? AND r.name = ?
+		 ORDER BY f.path`,
+		snapshotID, name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("refs to %q: %w", name, err)
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
 }
 
 // GetByID returns a snapshot by its primary key.

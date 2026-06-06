@@ -381,6 +381,46 @@ func TestGetLatestByLabelSession(t *testing.T) {
 	}
 }
 
+// TestSaveSnapshot_RefsToName verifies refs persist per snapshot file (schema
+// V6) and answer "who calls X" deterministically — and that PurgeRepo removes
+// them with the rest of the history (no orphan rows).
+func TestSaveSnapshot_RefsToName(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
+
+	irData := &ir.IR{Version: ir.IRVersion, RootHash: "h", Files: map[string]ir.FileIR{
+		"a.go": {Hash: "h1", Refs: []string{"DoThing"}},
+		"b.go": {Hash: "h2", Refs: []string{"DoThing", "Other"}},
+		"c.go": {Hash: "h3"},
+	}}
+	snapID, err := db.SaveSnapshot(id, "s", "v1", "/tmp/r", irData)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	got, err := db.RefsToName(snapID, "DoThing")
+	if err != nil {
+		t.Fatalf("RefsToName: %v", err)
+	}
+	if len(got) != 2 || got[0] != "a.go" || got[1] != "b.go" {
+		t.Errorf("callers of DoThing = %v, want [a.go b.go]", got)
+	}
+	if got, _ := db.RefsToName(snapID, "Other"); len(got) != 1 || got[0] != "b.go" {
+		t.Errorf("callers of Other = %v, want [b.go]", got)
+	}
+	if got, _ := db.RefsToName(snapID, "Nope"); len(got) != 0 {
+		t.Errorf("callers of Nope = %v, want empty", got)
+	}
+
+	if err := db.PurgeRepo(id); err != nil {
+		t.Fatalf("PurgeRepo: %v", err)
+	}
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM refs`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("refs rows after purge = %d (err=%v), want 0", n, err)
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

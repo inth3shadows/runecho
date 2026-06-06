@@ -115,6 +115,7 @@ var migrations = []migration{
 	migrateV3, // 2 → 3: split repo.Path into lookup key (path) + source root (source_root)
 	migrateV4, // 3 → 4: add common_dir — stable cross-worktree lookup key
 	migrateV5, // 4 → 5: add supported_seen — honest-coverage denominator
+	migrateV6, // 5 → 6: refs table — bare call sites per snapshot file
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -240,6 +241,25 @@ func migrateV4(tx *sql.Tx) error {
 func migrateV5(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE repos ADD COLUMN supported_seen INTEGER NOT NULL DEFAULT 0`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV6 adds the refs table — the bare function-call targets each snapshot
+// file contains (IR v2). Deliberately a separate table, NOT symbols.kind='ref':
+// refs are derived usage facts, not declared structure. Folding them into
+// symbols would silently widen the guard's known-symbol set (loaders read all
+// kinds) and pollute structural diffs with usage noise. Pre-V6 snapshots simply
+// have no refs rows — "who calls X" answers from post-V6 snapshots only.
+func migrateV6(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS refs (
+			id      INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_id INTEGER NOT NULL REFERENCES files(id),
+			name    TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name)`,
 	}
 	return execAll(tx, stmts)
 }

@@ -328,10 +328,17 @@ func runIndex(args []string) {
 
 	if _, err := os.Stat(irPath); err == nil {
 		existing, loadErr := ir.Load(irPath)
-		if loadErr != nil {
+		switch {
+		case loadErr != nil:
 			fmt.Fprintf(os.Stderr, "Warning: failed to load existing IR, regenerating: %v\n", loadErr)
 			result, stats, genErr = generator.Generate(absRoot)
-		} else {
+		case existing.Version != ir.IRVersion:
+			// An old-format IR cannot be incrementally updated: Update reuses
+			// unchanged files verbatim, which would leave fields added by newer
+			// versions (e.g. v2 refs) empty forever.
+			fmt.Fprintf(os.Stderr, "IR format v%d -> v%d: full regenerate\n", existing.Version, ir.IRVersion)
+			result, stats, genErr = generator.Generate(absRoot)
+		default:
 			result, stats, genErr = generator.Update(existing, absRoot)
 		}
 	} else {

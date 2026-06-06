@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/parser"
 	"golang.org/x/text/unicode/norm"
 )
@@ -115,7 +116,7 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 	}
 	absRoot = filepath.Clean(absRoot)
 
-	result := &IR{Version: 1, Files: make(map[string]FileIR)}
+	result := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
@@ -151,7 +152,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 	}
 	absRoot = filepath.Clean(absRoot)
 
-	updated := &IR{Version: 1, Files: make(map[string]FileIR)}
+	updated := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
 
 	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
@@ -276,6 +277,24 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		Functions: structure.Functions,
 		Classes:   structure.Classes,
 		Exports:   structure.Exports,
+		Refs:      extractRefs(path, string(content)),
 	}, nil
+}
+
+// extractRefs returns the sorted, deduplicated bare call targets in content,
+// using the guard's extractor as the single source of truth (see FileIR.Refs).
+// Always non-nil so the JSON form is a stable [] rather than null.
+func extractRefs(path, content string) []string {
+	lang := guard.LangFor(path)
+	set := make(map[string]struct{})
+	for _, ref := range guard.ExtractRefs(lang, guard.TextToAddedLines(content)) {
+		set[ref.Name] = struct{}{}
+	}
+	refs := make([]string, 0, len(set))
+	for name := range set {
+		refs = append(refs, name)
+	}
+	sort.Strings(refs)
+	return refs
 }
 

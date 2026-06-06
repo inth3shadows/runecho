@@ -10,6 +10,12 @@ import (
 // DefaultIRPath is the default location for IR storage.
 const DefaultIRPath = ".ai/ir.json"
 
+// IRVersion is the current IR format version. Version 2 added per-file Refs
+// (bare call sites). A loaded IR with an older version must be fully
+// regenerated, not incrementally updated — Update reuses entries for unchanged
+// files verbatim, which would leave their new fields empty forever.
+const IRVersion = 2
+
 // IR represents the complete intermediate representation of a codebase.
 type IR struct {
 	Version  int               `json:"version"`
@@ -24,6 +30,12 @@ type FileIR struct {
 	Functions []string `json:"functions"` // Sorted
 	Classes   []string `json:"classes"`   // Sorted
 	Exports   []string `json:"exports"`   // Sorted
+	// Refs are the bare function-call targets that appear in the file, sorted
+	// and deduplicated (IR v2). Extraction is shared with runecho-guard
+	// (guard.ExtractRefs) so edit-time validation and index-time facts can
+	// never disagree: qualified calls, builtins, and (for Go) unexported names
+	// are excluded by the same rules at both ends.
+	Refs []string `json:"refs"`
 }
 
 // MarshalJSON implements deterministic JSON marshalling for IR.

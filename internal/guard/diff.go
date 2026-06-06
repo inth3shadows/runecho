@@ -22,19 +22,23 @@ type AddedLine struct {
 }
 
 // ParseStagedDiff runs `git diff --cached --unified=0` and returns per-file
-// added lines. Returns an empty slice (no error) when nothing is staged.
-func ParseStagedDiff(repoRoot string) ([]FileDiff, error) {
+// added lines. Returns an empty slice (no error) when nothing is staged. partial
+// is true when an oversized diff line forced the parse to stop early — see
+// parseDiffOutput; the caller should treat the result as incomplete coverage.
+func ParseStagedDiff(repoRoot string) (diffs []FileDiff, partial bool, err error) {
 	cmd := exec.Command("git", "-C", repoRoot, "diff", "--cached", "--unified=0")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached: %w", err)
+		return nil, false, fmt.Errorf("git diff --cached: %w", err)
 	}
 	return parseDiffOutput(string(out))
 }
 
 // parseDiffOutput parses the raw unified-diff text into FileDiff entries.
-// Exported for testing without subprocess.
-func parseDiffOutput(raw string) ([]FileDiff, error) {
+// Exported for testing without subprocess. partial is true when scanning hit
+// bufio.ErrTooLong: an oversized diff line truncated the stream, so any file
+// after it was never seen — the returned diffs cover only what preceded the blob.
+func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 	var result []FileDiff
 	var cur *FileDiff
 	newLineNo := 0 // running new-file line counter within the current hunk
@@ -89,12 +93,14 @@ func parseDiffOutput(raw string) ([]FileDiff, error) {
 		if err == bufio.ErrTooLong {
 			// A single diff line exceeded the 4 MB cap (e.g. a minified JS blob).
 			// Return whatever was parsed before the oversized line — the guard
-			// can still validate all files that preceded it.
-			return result, nil
+			// can still validate all files that preceded it — but flag partial so
+			// the caller can warn that coverage was incomplete rather than silently
+			// skipping every file past the blob.
+			return result, true, nil
 		}
-		return nil, fmt.Errorf("scan diff: %w", err)
+		return nil, false, fmt.Errorf("scan diff: %w", err)
 	}
-	return result, nil
+	return result, false, nil
 }
 
 // parseHunkStart extracts the new-file start line from a @@ header.

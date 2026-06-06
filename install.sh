@@ -8,8 +8,15 @@
 #
 # Usage:
 #   bash install.sh            # build all three binaries to $BIN_DIR
-#   bash install.sh --hook     # also install pre-commit hook in the current repo
-#   bash install.sh --hook --force  # overwrite an existing pre-commit hook
+#   bash install.sh --hook     # also install the GIT pre-commit hook in the cwd repo
+#   bash install.sh --hook --force      # overwrite an existing pre-commit hook
+#   bash install.sh --print-hook-config # print the Claude Code PreToolUse snippet
+#
+# Two distinct integrations share the runecho-guard binary:
+#   --hook               installs the git pre-commit variant (fires at `git commit`)
+#   --print-hook-config  emits the Claude Code PreToolUse settings.json snippet
+#                        (--hook-mode; fires on every Edit/Write/MultiEdit). This
+#                        is the primary, edit-time integration the docs describe.
 
 set -euo pipefail
 
@@ -19,10 +26,12 @@ cd "$SCRIPT_DIR"
 # Parse flags
 INSTALL_HOOK=0
 FORCE_HOOK=0
+PRINT_HOOK_CONFIG=0
 for arg in "$@"; do
   case "$arg" in
     --hook)  INSTALL_HOOK=1 ;;
     --force) FORCE_HOOK=1 ;;
+    --print-hook-config) PRINT_HOOK_CONFIG=1 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -37,6 +46,37 @@ case "${OSTYPE:-}" in
   msys|cygwin) EXE=".exe" ;;
 esac
 [ -n "${WINDIR:-}" ] && EXE=".exe"
+
+# --print-hook-config: emit the Claude Code PreToolUse snippet and exit. This is
+# config-only (no build needed), so it short-circuits before the Go toolchain
+# check — usable even on a box without Go to copy the snippet into settings.json.
+# The matcher (Edit|Write|MultiEdit) and --hook-mode invocation MUST match what
+# cmd/runecho-guard/main.go reads and what TECHNICAL.md documents.
+if [ "$PRINT_HOOK_CONFIG" -eq 1 ]; then
+  cat <<CFG
+Add this to your Claude Code settings.json (~/.claude/settings.json) to vet every
+assistant edit at write time via the PreToolUse hook:
+
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Edit|Write|MultiEdit",
+          "hooks": [
+            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --hook-mode" }
+          ]
+        }
+      ]
+    }
+  }
+
+The guard reads the tool-call JSON on stdin and answers via permissionDecision:
+unresolved symbols → "ask"; a clean check defers to the normal permission flow.
+It never auto-approves and never exits nonzero. Disable per-session with
+RUNECHO_GUARD_SKIP=1.
+CFG
+  exit 0
+fi
 
 command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.24+)." >&2; exit 1; }
 
@@ -79,7 +119,10 @@ if [ "$INSTALL_HOOK" -eq 1 ]; then
 exec "$BIN_DIR/runecho-guard$EXE" "\$@"
 HOOK
   chmod +x "$HOOK_FILE"
-  echo "Pre-commit hook installed: $HOOK_FILE"
+  echo "Git pre-commit hook installed: $HOOK_FILE"
+  echo "  NOTE: this is the GIT-COMMIT-TIME variant — it vets the staged diff at"
+  echo "  'git commit'. For edit-time vetting inside Claude Code (the primary"
+  echo "  integration), wire the PreToolUse hook: bash install.sh --print-hook-config"
   echo "  Bypass any commit with: RUNECHO_GUARD_SKIP=1 git commit ..."
 fi
 
@@ -90,9 +133,12 @@ Quick start:
   runecho-ir repo reindex <name>        # build IR + snapshot
   runecho-ir repo list                  # see enrolled repos
 
-Install the pre-commit guard in a repo:
+Install the GIT pre-commit guard in a repo (commit-time):
   bash install.sh --hook                # from the runecho repo root, targeting cwd
   # or manually: cp .git/hooks/pre-commit <target-repo>/.git/hooks/
+
+Wire the Claude Code PreToolUse guard (edit-time — the primary integration):
+  bash install.sh --print-hook-config   # prints the settings.json snippet
 
 Register the oracle MCP server (manual — edits your agent config):
   # Claude Code:

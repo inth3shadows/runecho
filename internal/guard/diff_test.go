@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ index abc..def 100644
 +	fmt.Println("hello")
 +}
 `
-	diffs, err := parseDiffOutput(raw)
+	diffs, _, err := parseDiffOutput(raw)
 	if err != nil {
 		t.Fatalf("parseDiffOutput: %v", err)
 	}
@@ -49,7 +50,7 @@ diff --git a/b.py b/b.py
 @@ -0,0 +1 @@
 +def b(): pass
 `
-	diffs, err := parseDiffOutput(raw)
+	diffs, _, err := parseDiffOutput(raw)
 	if err != nil {
 		t.Fatalf("parseDiffOutput: %v", err)
 	}
@@ -68,12 +69,52 @@ diff --git a/b.py b/b.py
 }
 
 func TestParseDiffOutput_Empty(t *testing.T) {
-	diffs, err := parseDiffOutput("")
+	diffs, _, err := parseDiffOutput("")
 	if err != nil {
 		t.Fatalf("parseDiffOutput: %v", err)
 	}
 	if len(diffs) != 0 {
 		t.Errorf("expected empty result for empty diff, got %v", diffs)
+	}
+}
+
+// An oversized diff line (over the 4 MB scanner cap) must set partial=true and
+// return only the files that preceded it — never silently swallow the rest.
+func TestParseDiffOutput_OversizedLineSetsPartial(t *testing.T) {
+	// First file parses cleanly; then a single '+' line longer than the 4 MB cap
+	// (a minified blob) trips bufio.ErrTooLong, so b.py after it is never seen.
+	huge := strings.Repeat("x", 5*1024*1024)
+	raw := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -0,0 +1,1 @@\n+package a\n" +
+		"diff --git a/blob.js b/blob.js\n--- a/blob.js\n+++ b/blob.js\n@@ -0,0 +1,1 @@\n+" + huge + "\n" +
+		"diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1 @@\n+def b(): pass\n"
+
+	diffs, partial, err := parseDiffOutput(raw)
+	if err != nil {
+		t.Fatalf("parseDiffOutput: %v", err)
+	}
+	if !partial {
+		t.Fatal("expected partial=true after an oversized diff line")
+	}
+	// a.go preceded the blob and must be present; b.py followed it and must be absent.
+	for _, d := range diffs {
+		if d.Path == "b.py" {
+			t.Errorf("b.py followed the oversized line and should not have been parsed, got %v", diffs)
+		}
+	}
+	if len(diffs) == 0 || diffs[0].Path != "a.go" {
+		t.Errorf("expected a.go (preceding the blob) to be parsed, got %v", diffs)
+	}
+}
+
+// A normal diff must report partial=false.
+func TestParseDiffOutput_NotPartial(t *testing.T) {
+	raw := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -0,0 +1,1 @@\n+package a\n"
+	_, partial, err := parseDiffOutput(raw)
+	if err != nil {
+		t.Fatalf("parseDiffOutput: %v", err)
+	}
+	if partial {
+		t.Error("a well-formed diff must not be flagged partial")
 	}
 }
 
@@ -86,7 +127,7 @@ func TestParseDiffOutput_RemovedLinesOnly(t *testing.T) {
 -func Old() {}
 -// comment
 `
-	diffs, err := parseDiffOutput(raw)
+	diffs, _, err := parseDiffOutput(raw)
 	if err != nil {
 		t.Fatalf("parseDiffOutput: %v", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,14 +53,17 @@ func run() int {
 	// Bypass check after flag parsing. In hook mode this defers (emits nothing),
 	// letting Claude Code's normal permission flow run unobstructed.
 	if os.Getenv("RUNECHO_GUARD_SKIP") == "1" {
-		if *hookMode {
-			hookDefer()
-		}
+		// hookDefer is a no-op, so there is nothing to write here either way.
 		return 0
 	}
 
 	if *hookMode {
-		return runHookMode()
+		// Cap stdin: an unbounded decode would buffer an arbitrarily large payload
+		// before the per-field size checks in runHookMode ever run — a latency
+		// footgun for a hook with a ~12ms budget. 16 MiB comfortably exceeds any
+		// real tool input. The cap lives here (not in runHookMode) so tests can
+		// feed a bare reader without re-wrapping it.
+		return runHookMode(io.LimitReader(os.Stdin, 16<<20), os.Stdout)
 	}
 
 	// Resolve central store.
@@ -130,10 +134,16 @@ func run() int {
 	}
 
 	// Parse staged diff.
-	diffs, err := guard.ParseStagedDiff(repoRoot)
+	diffs, partial, err := guard.ParseStagedDiff(repoRoot)
 	if err != nil {
 		warnf("cannot parse staged diff: %v", err)
 		return 0
+	}
+	if partial {
+		// An oversized diff line (e.g. a minified blob) truncated the parse: every
+		// file staged after it went unchecked. Surface this — a silent skip could
+		// let a hallucinated symbol through behind a large generated file.
+		warnf("staged diff truncated by an oversized line — files after it were NOT checked")
 	}
 	if len(diffs) == 0 {
 		return 0
@@ -170,12 +180,14 @@ func run() int {
 }
 
 // runHookMode implements the Claude Code PreToolUse hook contract (2026 form:
-// hookSpecificOutput.permissionDecision). Reads JSON from stdin, and either denies
+// hookSpecificOutput.permissionDecision). Reads JSON from in, and either denies
 // the tool call (hallucinated symbol) or defers to the normal permission flow.
 // It NEVER emits "allow": a guard's job is to block, not to auto-approve every
 // edit out from under the user's permission prompts. Exits 0 unconditionally —
-// the decision is communicated through the JSON output (or its absence).
-func runHookMode() int {
+// the decision is communicated through the JSON written to out (or its absence).
+// in/out are explicit (not os.Stdin/os.Stdout) so the full decision contract is
+// testable without a subprocess; main() passes the real streams.
+func runHookMode(in io.Reader, out io.Writer) int {
 	var payload struct {
 		ToolName  string `json:"tool_name"`
 		ToolInput struct {
@@ -187,7 +199,7 @@ func runHookMode() int {
 			} `json:"edits"` // MultiEdit tool
 		} `json:"tool_input"`
 	}
-	if err := json.NewDecoder(os.Stdin).Decode(&payload); err != nil {
+	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		return 0
 	}
@@ -213,7 +225,7 @@ func runHookMode() int {
 	symbols, ignorePath, latest, warn, ok := lookupSymbolsFor(filepath.Dir(filePath))
 	if !ok {
 		if warn != "" {
-			hookDeferContext(warn)
+			hookDeferContext(out, warn)
 		} else {
 			hookDefer()
 		}
@@ -237,7 +249,7 @@ func runHookMode() int {
 		// No hallucinated symbols. Defer to the normal permission flow, but if the
 		// IR is stale the check may be incomplete — say so via additionalContext
 		// (which informs Claude without forcing an allow/deny).
-		hookDeferStale(latest)
+		hookDeferStale(out, latest)
 		return 0
 	}
 
@@ -247,7 +259,7 @@ func runHookMode() int {
 		fmt.Fprintf(&sb, "  line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
-	hookAsk(sb.String())
+	hookAsk(out, sb.String())
 	return 0
 }
 
@@ -360,7 +372,7 @@ func hookDefer() {}
 
 // hookDeferStale defers, but attaches an advisory note when the IR is older than
 // the staleness threshold — the symbol check may have missed recently-added names.
-func hookDeferStale(latest time.Time) {
+func hookDeferStale(out io.Writer, latest time.Time) {
 	maxAge, err := guard.ParseMaxAge()
 	if err != nil {
 		return // bad config — stay silent rather than nag with a broken message
@@ -370,13 +382,13 @@ func hookDeferStale(latest time.Time) {
 		return
 	}
 	days := int(age.Hours() / 24)
-	hookDeferContext(fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days))
+	hookDeferContext(out, fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days))
 }
 
 // hookDeferContext defers (no permission decision) while surfacing an advisory
 // note via additionalContext — informs Claude without forcing allow/deny.
-func hookDeferContext(ctx string) {
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+func hookDeferContext(out io.Writer, ctx string) {
+	_ = json.NewEncoder(out).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":     "PreToolUse",
 			"additionalContext": ctx,
@@ -394,8 +406,8 @@ func hookDeferContext(ctx string) {
 // rule (see runecho-guard-fp-precision-and-p5.md) is to move a language to a hard
 // "deny" only after it has fired correctly ~20 times with zero false blocks in live
 // use, reverting to "ask" on any confirmed false block.
-func hookAsk(reason string) {
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+func hookAsk(out io.Writer, reason string) {
+	_ = json.NewEncoder(out).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":            "PreToolUse",
 			"permissionDecision":       "ask",

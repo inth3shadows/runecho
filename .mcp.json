@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "runecho": {
+      "command": "${RUNECHO_MCP_COMMAND:-runecho-mcp}",
+      "args": [],
+      "env": {}
+    }
+  }
+}

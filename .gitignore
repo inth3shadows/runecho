@@ -39,6 +39,9 @@ coverage.html
 
 # Claude Code
 .claude/
+!.claude/
+.claude/*
+!.claude/settings.json
 
 # Secrets (belt-and-suspenders — key only lives in PowerShell profile)
 .env

@@ -121,18 +121,25 @@ func (db *DB) ListRepos() ([]Repo, error) {
 
 // RemoveRepo deletes a repo by id. Returns an error if the repo has any
 // snapshots — use PurgeRepo to remove the repo and its full history atomically.
+// Count and delete run in one transaction so a snapshot inserted between them
+// can't be orphaned by the repo-row delete.
 func (db *DB) RemoveRepo(id int64) error {
-	n, err := db.CountSnapshots(id)
+	tx, err := db.conn.Begin()
 	if err != nil {
+		return fmt.Errorf("begin remove: %w", err)
+	}
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM snapshots WHERE repo_id = ?`, id).Scan(&n); err != nil {
 		return fmt.Errorf("count snapshots before remove: %w", err)
 	}
 	if n > 0 {
 		return fmt.Errorf("repo %d has %d snapshot(s); use PurgeRepo to delete them along with the repo", id, n)
 	}
-	if _, err := db.conn.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
+	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("remove repo %d: %w", id, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // PurgeRepo deletes a repo and its entire snapshot history (symbols, files,
@@ -143,19 +150,17 @@ func (db *DB) PurgeRepo(id int64) error {
 		return fmt.Errorf("begin purge: %w", err)
 	}
 	defer tx.Rollback()
-	stmts := []struct {
-		sql string
-	}{
-		{`DELETE FROM refs WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`},
-		{`DELETE FROM symbols WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`},
-		{`DELETE FROM files WHERE snapshot_id IN (SELECT id FROM snapshots WHERE repo_id = ?)`},
-		{`DELETE FROM snapshots WHERE repo_id = ?`},
-		{`DELETE FROM repos WHERE id = ?`},
+	stmts := []string{
+		`DELETE FROM refs WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`,
+		`DELETE FROM symbols WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`,
+		`DELETE FROM files WHERE snapshot_id IN (SELECT id FROM snapshots WHERE repo_id = ?)`,
+		`DELETE FROM snapshots WHERE repo_id = ?`,
+		`DELETE FROM repos WHERE id = ?`,
 	}
 	for _, s := range stmts {
-		if _, err := tx.Exec(s.sql, id); err != nil {
+		if _, err := tx.Exec(s, id); err != nil {
 			return fmt.Errorf("purge repo %d: %w", id, err)
 		}
 	}

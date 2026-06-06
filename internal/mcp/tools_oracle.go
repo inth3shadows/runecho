@@ -312,7 +312,7 @@ func (o *Oracle) status(args json.RawMessage) (string, error) {
 		// supported files seen. supported_seen=0 means no post-V5 reindex yet.
 		if repo.SupportedSeen > 0 {
 			out["supported_files"] = repo.SupportedSeen
-			out["coverage_percent"] = latest[0].FileCount * 100 / repo.SupportedSeen
+			out["coverage_percent"] = snapshot.CoveragePercent(latest[0].FileCount, repo.SupportedSeen)
 		}
 	}
 	return jsonText(out)

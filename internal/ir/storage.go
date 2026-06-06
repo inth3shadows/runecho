@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -89,6 +90,14 @@ func (ir *IR) UnmarshalJSON(data []byte) error {
 func (ir *IR) Save(path string) error {
 	if path == "" {
 		path = DefaultIRPath
+	}
+
+	// Ensure the parent dir exists — the DefaultIRPath default (.ai/ir.json)
+	// must work standalone, not only when the caller pre-created .ai/.
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create IR dir: %w", err)
+		}
 	}
 
 	data, err := json.Marshal(ir)

@@ -1,6 +1,21 @@
 package snapshot
 
-import "time"
+import (
+	"math"
+	"time"
+)
+
+// CoveragePercent returns indexed/supported as a percentage rounded to one
+// decimal. Integer division truncated here before (199/200 read as 99, and
+// anything under 1% read as 0 — "fully uncovered") — one decimal keeps small
+// nonzero coverage visible. Returns 0 when supported is 0; callers gate on
+// supported > 0 for the "not yet measured" case.
+func CoveragePercent(indexed, supported int) float64 {
+	if supported <= 0 {
+		return 0
+	}
+	return math.Round(float64(indexed)*1000/float64(supported)) / 10
+}
 
 // FileChurn tracks how many diffs a file was modified/added/removed in.
 type FileChurn struct {

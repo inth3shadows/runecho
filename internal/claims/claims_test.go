@@ -1,6 +1,10 @@
 package claims
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestIsCodeSymbol(t *testing.T) {
 	cases := []struct {
@@ -74,5 +78,39 @@ func TestExtractSymbolRefs_Dedup(t *testing.T) {
 	// Should appear exactly once; map guarantees this but verify count.
 	if len(refs) != 1 {
 		t.Errorf("dedup: expected 1 unique ref, got %d: %v", len(refs), refs)
+	}
+}
+
+// Regression: bufio.Scanner's 64KB default cap silently dropped long lines.
+// A valid symbol on a >64KB line must still be extracted.
+func TestExtractSymbolRefs_LongLine(t *testing.T) {
+	text := strings.Repeat("x", 70*1024) + " then call `RealSymbol` here."
+	refs := ExtractSymbolRefs(text)
+	if _, ok := refs["RealSymbol"]; !ok {
+		t.Errorf("expected RealSymbol on 70KB line, got %v", refs)
+	}
+}
+
+// Regression: ASCII-only regexes excluded Unicode identifiers, which Go, JS,
+// and Python all permit.
+func TestExtractSymbolRefs_UnicodeIdentifier(t *testing.T) {
+	text := "See `ÜnïcödeName` and func Δelta for details."
+	refs := ExtractSymbolRefs(text)
+	if _, ok := refs["ÜnïcödeName"]; !ok {
+		t.Errorf("expected ÜnïcödeName in refs: %v", refs)
+	}
+}
+
+// Regression: truncate sliced at a byte offset, splitting multibyte runes and
+// emitting invalid UTF-8 into stored snippets.
+func TestTruncate_RuneBoundary(t *testing.T) {
+	// 79 ASCII bytes then a 2-byte rune straddling the 80-byte cut point.
+	s := strings.Repeat("a", 79) + "é" + strings.Repeat("b", 20)
+	got := truncate(s, 80)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
+	if want := strings.Repeat("a", 79) + "..."; got != want {
+		t.Errorf("truncate = %q, want %q", got, want)
 	}
 }

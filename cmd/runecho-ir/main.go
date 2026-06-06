@@ -177,7 +177,7 @@ func runRepoList(args []string) {
 		cover := "-"
 		if r.SupportedSeen > 0 {
 			if latest, err := db.List(r.ID, 1); err == nil && len(latest) == 1 {
-				cover = fmt.Sprintf("%d%%", latest[0].FileCount*100/r.SupportedSeen)
+				cover = fmt.Sprintf("%.1f%%", snapshot.CoveragePercent(latest[0].FileCount, r.SupportedSeen))
 			}
 		}
 		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %-7s  %s\n",
@@ -543,13 +543,18 @@ func runLog(args []string) {
 		if len(shortHash) > 8 {
 			shortHash = shortHash[:8]
 		}
+		// Date portion only; guard the slice like session above (a zero or
+		// malformed Timestamp must not panic the listing).
 		ts := m.Timestamp.Format(time.RFC3339)
+		if len(ts) > 10 {
+			ts = ts[:10]
+		}
 		session := m.SessionID
 		if len(session) > 25 {
 			session = session[:22] + "..."
 		}
 		fmt.Printf("%-5d  %-15s  %-25s  %-10s  %-8d  %s...\n",
-			m.ID, m.Label, session, ts[:10], m.FileCount, shortHash)
+			m.ID, m.Label, session, ts, m.FileCount, shortHash)
 	}
 }
 

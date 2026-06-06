@@ -3,6 +3,7 @@ package snapshot
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -289,6 +290,12 @@ func scanMetaCols(scan func(...any) error) (*SnapshotMeta, error) {
 		return nil, err
 	}
 	m.RepoID = repoID.Int64
-	m.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
+	var parseErr error
+	m.Timestamp, parseErr = time.Parse(time.RFC3339, tsStr)
+	if parseErr != nil {
+		// Same posture as scanRepoCols: a malformed timestamp degrades to the
+		// zero time but must not do so silently.
+		fmt.Fprintf(os.Stderr, "runecho: warning: snapshot %d timestamp %q: %v\n", m.ID, tsStr, parseErr)
+	}
 	return &m, nil
 }

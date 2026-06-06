@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	_ "modernc.org/sqlite"
@@ -104,6 +105,13 @@ func (db *DB) setPragmas() error {
 	return nil
 }
 
+// ErrSchemaNewer marks the permanent (non-transient) open failure where the
+// store was migrated by a newer binary. Callers that degrade gracefully on
+// open errors (the guard is fail-open by design) must still surface THIS one
+// loudly: it means validation is silently disabled until the stale binary is
+// rebuilt, and it never resolves on its own.
+var ErrSchemaNewer = errors.New("store schema is newer than this binary")
+
 // migration brings the schema from version N to N+1, where N is its index in the
 // migrations slice. Each runs in its own transaction; user_version is bumped only
 // on commit, so a partial upgrade can never leave a torn schema.
@@ -116,6 +124,7 @@ var migrations = []migration{
 	migrateV4, // 3 → 4: add common_dir — stable cross-worktree lookup key
 	migrateV5, // 4 → 5: add supported_seen — honest-coverage denominator
 	migrateV6, // 5 → 6: refs table — bare call sites per snapshot file
+	migrateV7, // 6 → 7: refs uniqueness — (file_id, name) enforced by the schema
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -127,7 +136,7 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	if current > len(migrations) {
-		return fmt.Errorf("db schema version %d is newer than this binary supports (%d); upgrade runecho", current, len(migrations))
+		return fmt.Errorf("db schema version %d is newer than this binary supports (%d); upgrade runecho: %w", current, len(migrations), ErrSchemaNewer)
 	}
 	for v := current; v < len(migrations); v++ {
 		tx, err := db.conn.Begin()
@@ -260,6 +269,20 @@ func migrateV6(tx *sql.Tx) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name)`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV7 enforces refs uniqueness per (file_id, name) at the schema level.
+// Extraction dedupes upstream, but a constraint fails loudly if that ever
+// loosens instead of bloating silently. Any pre-existing duplicates (none
+// expected) are removed first; the plain file_id index is dropped because the
+// unique index's prefix covers it.
+func migrateV7(tx *sql.Tx) error {
+	stmts := []string{
+		`DELETE FROM refs WHERE id NOT IN (SELECT MIN(id) FROM refs GROUP BY file_id, name)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_refs_unique ON refs(file_id, name)`,
+		`DROP INDEX IF EXISTS idx_refs_file`,
 	}
 	return execAll(tx, stmts)
 }

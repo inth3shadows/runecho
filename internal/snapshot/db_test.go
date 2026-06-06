@@ -389,7 +389,9 @@ func TestSaveSnapshot_RefsToName(t *testing.T) {
 	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
 
 	irData := &ir.IR{Version: ir.IRVersion, RootHash: "h", Files: map[string]ir.FileIR{
-		"a.go": {Hash: "h1", Refs: []string{"DoThing"}},
+		// Duplicate "DoThing" in a.go: the (file_id, name) unique index (V7) +
+		// INSERT OR IGNORE must collapse it to one row, not error or double-count.
+		"a.go": {Hash: "h1", Refs: []string{"DoThing", "DoThing"}},
 		"b.go": {Hash: "h2", Refs: []string{"DoThing", "Other"}},
 		"c.go": {Hash: "h3"},
 	}}

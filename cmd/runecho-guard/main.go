@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -75,7 +76,11 @@ func run() int {
 
 	db, err := snapshot.Open(dbPath)
 	if err != nil {
-		warnf("cannot open store: %v", err)
+		if errors.Is(err, snapshot.ErrSchemaNewer) {
+			warnf("this runecho-guard binary is older than the store — symbol validation is DISABLED until it is rebuilt (bash install.sh): %v", err)
+		} else {
+			warnf("cannot open store: %v", err)
+		}
 		return 0
 	}
 	defer db.Close()
@@ -205,9 +210,13 @@ func runHookMode() int {
 		return 0
 	}
 
-	symbols, ignorePath, latest, ok := lookupSymbolsFor(filepath.Dir(filePath))
+	symbols, ignorePath, latest, warn, ok := lookupSymbolsFor(filepath.Dir(filePath))
 	if !ok {
-		hookDefer()
+		if warn != "" {
+			hookDeferContext(warn)
+		} else {
+			hookDefer()
+		}
 		return 0
 	}
 
@@ -304,40 +313,46 @@ func suggestionSuffix(suggestion string) string {
 
 // lookupSymbolsFor loads the symbol set for the repo containing dir, plus the
 // timestamp of the latest snapshot (for staleness reporting). Returns ok=false on
-// any degradation condition (no DB, not enrolled, no snapshot).
-func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, ok bool) {
+// any degradation condition (no DB, not enrolled, no snapshot). Most degradations
+// stay silent (fail-open by design), but warn carries the one that must not:
+// a store migrated by a newer binary means validation is disabled until this
+// binary is rebuilt — permanent, and invisible unless surfaced.
+func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, warn string, ok bool) {
 	storeDir, err := runechoDir()
 	if err != nil {
-		return nil, "", time.Time{}, false
+		return nil, "", time.Time{}, "", false
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil, "", time.Time{}, false
+		return nil, "", time.Time{}, "", false
 	}
 	// OpenFast skips the on-open integrity scan — this read path fires on every
 	// edit and must stay cheap; integrity is the writer's concern.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
-		return nil, "", time.Time{}, false
+		if errors.Is(err, snapshot.ErrSchemaNewer) {
+			warn = "runecho-guard is older than the RunEcho store — symbol validation is DISABLED until the guard binary is rebuilt (bash install.sh)."
+		}
+		return nil, "", time.Time{}, warn, false
 	}
 	defer db.Close()
 
 	repo, repoRoot, ok := resolveRepo(db, dir)
 	if !ok {
-		return nil, "", time.Time{}, false
+		return nil, "", time.Time{}, "", false
 	}
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return nil, "", time.Time{}, false
+		return nil, "", time.Time{}, "", false
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return nil, "", time.Time{}, false
+		return nil, "", time.Time{}, "", false
 	}
 
-	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, true
+	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, "", true
 }
 
 // hookDefer emits no decision, so Claude Code applies its normal permission flow.
@@ -355,7 +370,12 @@ func hookDeferStale(latest time.Time) {
 		return
 	}
 	days := int(age.Hours() / 24)
-	ctx := fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days)
+	hookDeferContext(fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days))
+}
+
+// hookDeferContext defers (no permission decision) while surfacing an advisory
+// note via additionalContext — informs Claude without forcing allow/deny.
+func hookDeferContext(ctx string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":     "PreToolUse",

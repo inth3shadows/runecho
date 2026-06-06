@@ -38,12 +38,29 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 	}
 	sort.Strings(paths)
 
+	// Prepare the per-row inserts once — thousands of rows go through these
+	// per snapshot, and re-parsing the SQL per Exec is pure waste.
+	fileStmt, err := tx.Prepare(`INSERT INTO files (snapshot_id, path, content_hash) VALUES (?, ?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare file insert: %w", err)
+	}
+	defer fileStmt.Close()
+	symStmt, err := tx.Prepare(`INSERT INTO symbols (file_id, name, kind) VALUES (?, ?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare symbol insert: %w", err)
+	}
+	defer symStmt.Close()
+	// OR IGNORE backstops the (file_id, name) unique index (schema V7); the
+	// generator already dedupes per file.
+	refStmt, err := tx.Prepare(`INSERT OR IGNORE INTO refs (file_id, name) VALUES (?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare ref insert: %w", err)
+	}
+	defer refStmt.Close()
+
 	for _, path := range paths {
 		file := irData.Files[path]
-		fRes, err := tx.Exec(
-			`INSERT INTO files (snapshot_id, path, content_hash) VALUES (?, ?, ?)`,
-			snapshotID, path, file.Hash,
-		)
+		fRes, err := fileStmt.Exec(snapshotID, path, file.Hash)
 		if err != nil {
 			return 0, fmt.Errorf("insert file %q: %w", path, err)
 		}
@@ -72,10 +89,7 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		}
 
 		for _, sym := range symbols {
-			if _, err := tx.Exec(
-				`INSERT INTO symbols (file_id, name, kind) VALUES (?, ?, ?)`,
-				fileID, sym.name, sym.kind,
-			); err != nil {
+			if _, err := symStmt.Exec(fileID, sym.name, sym.kind); err != nil {
 				return 0, fmt.Errorf("insert symbol %q: %w", sym.name, err)
 			}
 		}
@@ -83,10 +97,7 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		// Refs live in their own table (see migrateV6) so they never leak into
 		// symbol loaders or structural diffs.
 		for _, name := range file.Refs {
-			if _, err := tx.Exec(
-				`INSERT INTO refs (file_id, name) VALUES (?, ?)`,
-				fileID, name,
-			); err != nil {
+			if _, err := refStmt.Exec(fileID, name); err != nil {
 				return 0, fmt.Errorf("insert ref %q: %w", name, err)
 			}
 		}
@@ -136,8 +147,9 @@ func (db *DB) GetLatestByLabelSession(repoID int64, label, sessionID string) (*S
 // snapshots (no refs rows were stored). The answer is deterministic: it derives
 // from the stored IR, not from any live scan.
 func (db *DB) RefsToName(snapshotID int64, name string) ([]string, error) {
+	// No DISTINCT needed: (file_id, name) is unique by schema (V7).
 	rows, err := db.conn.Query(
-		`SELECT DISTINCT f.path FROM refs r
+		`SELECT f.path FROM refs r
 		 JOIN files f ON r.file_id = f.id
 		 WHERE f.snapshot_id = ? AND r.name = ?
 		 ORDER BY f.path`,

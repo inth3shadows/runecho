@@ -100,7 +100,7 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 		return nil, err
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("repo %q is not enrolled; enroll it with `ai-ir repo add`", name)
+		return nil, fmt.Errorf("repo %q is not enrolled; enroll it with `runecho-ir repo add`", name)
 	}
 	return repo, nil
 }
@@ -244,7 +244,7 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 			return "", err
 		}
 		if len(latest) == 0 {
-			return "", fmt.Errorf("repo %q has no snapshots; run `ai-ir repo reindex %s`", repo.Name, repo.Name)
+			return "", fmt.Errorf("repo %q has no snapshots; run `runecho-ir repo reindex %s`", repo.Name, repo.Name)
 		}
 		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 		if err != nil {

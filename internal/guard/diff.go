@@ -2,6 +2,7 @@ package guard
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -25,8 +26,12 @@ type AddedLine struct {
 // added lines. Returns an empty slice (no error) when nothing is staged. partial
 // is true when an oversized diff line forced the parse to stop early — see
 // parseDiffOutput; the caller should treat the result as incomplete coverage.
-func ParseStagedDiff(repoRoot string) (diffs []FileDiff, partial bool, err error) {
-	cmd := exec.Command("git", "-C", repoRoot, "diff", "--cached", "--unified=0")
+//
+// ctx is forwarded to the git subprocess so the caller's deadline (gitTimeout)
+// also bounds this last unbounded git call — the same 3-second cap used for
+// every other git subprocess in the hook path.
+func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, partial bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "diff", "--cached", "--unified=0")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false, fmt.Errorf("git diff --cached: %w", err)

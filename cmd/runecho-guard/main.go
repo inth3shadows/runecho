@@ -12,6 +12,11 @@
 //	RUNECHO_GUARD_SKIP=1        bypass all checks, exit 0 / approve
 //	RUNECHO_HOME                override central store directory (default ~/.runecho)
 //	RUNECHO_GUARD_MAX_AGE=<dur> staleness warning threshold (default 24h)
+//	RUNECHO_GUARD_STRICT=1      fail-closed on degraded states: in pre-commit mode,
+//	                            degraded conditions that normally warn-and-pass instead
+//	                            return exit 1; in hook mode, degraded conditions emit
+//	                            an advisory via additionalContext but still exit 0.
+//	                            Repo-not-enrolled is always a silent skip (not degraded).
 package main
 
 import (
@@ -45,10 +50,20 @@ func main() {
 }
 
 func run() int {
-	dryRun := flag.Bool("dry-run", false, "report violations but exit 0")
-	verbose := flag.Bool("verbose", false, "print every checked symbol")
-	hookMode := flag.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
-	flag.Parse()
+	return runArgs(os.Args[1:])
+}
+
+// runArgs contains the actual implementation so tests can call it without
+// re-registering flags on the global flag.CommandLine (which panics on
+// duplicate registration across test cases in the same process).
+func runArgs(args []string) int {
+	fs := flag.NewFlagSet("runecho-guard", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "report violations but exit 0")
+	verbose := fs.Bool("verbose", false, "print every checked symbol")
+	hookMode := fs.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 
 	// Bypass check after flag parsing. In hook mode this defers (emits nothing),
 	// letting Claude Code's normal permission flow run unobstructed.
@@ -66,15 +81,18 @@ func run() int {
 		return runHookMode(io.LimitReader(os.Stdin, 16<<20), os.Stdout)
 	}
 
+	strict := strictMode()
+
 	// Resolve central store.
 	dir, err := runechoDir()
 	if err != nil {
 		warnf("cannot resolve store dir: %v", err)
-		return 0
+		return degradedExit(strict)
 	}
 	dbPath := filepath.Join(dir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// runecho not installed/configured on this machine — skip silently.
+		// Not a degraded state: the store has never been created here.
 		return 0
 	}
 
@@ -85,7 +103,7 @@ func run() int {
 		} else {
 			warnf("cannot open store: %v", err)
 		}
-		return 0
+		return degradedExit(strict)
 	}
 	defer db.Close()
 
@@ -96,10 +114,12 @@ func run() int {
 	cwd, err := os.Getwd()
 	if err != nil {
 		warnf("cannot determine working directory: %v", err)
-		return 0
+		return degradedExit(strict)
 	}
 	repo, repoRoot, ok := resolveRepo(db, cwd)
 	if !ok {
+		// Repo not enrolled is always a silent skip — not a degraded state, just
+		// an unenrolled repo. RUNECHO_GUARD_STRICT=1 does not change this.
 		infof("skipping: repo not enrolled (run: runecho-ir repo add .)")
 		return 0
 	}
@@ -108,11 +128,11 @@ func run() int {
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil {
 		warnf("store error: %v", err)
-		return 0
+		return degradedExit(strict)
 	}
 	if len(snaps) == 0 {
 		infof("skipping: no snapshot yet (run: runecho-ir repo reindex %s)", repo.Name)
-		return 0
+		return degradedExit(strict)
 	}
 
 	// Warn if IR is stale.
@@ -130,20 +150,27 @@ func run() int {
 	symbols, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
 		warnf("cannot load symbol set: %v", err)
-		return 0
+		return degradedExit(strict)
 	}
 
 	// Parse staged diff.
-	diffs, partial, err := guard.ParseStagedDiff(repoRoot)
+	diffCtx, diffCancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer diffCancel()
+	diffs, partial, err := guard.ParseStagedDiff(diffCtx, repoRoot)
 	if err != nil {
+		// Context deadline kills the git subprocess when it stalls (credential
+		// helper, locked index). Fail-open by default; fail-closed under strict.
 		warnf("cannot parse staged diff: %v", err)
-		return 0
+		return degradedExit(strict)
 	}
 	if partial {
 		// An oversized diff line (e.g. a minified blob) truncated the parse: every
 		// file staged after it went unchecked. Surface this — a silent skip could
 		// let a hallucinated symbol through behind a large generated file.
 		warnf("staged diff truncated by an oversized line — files after it were NOT checked")
+		if strict {
+			return 1
+		}
 	}
 	if len(diffs) == 0 {
 		return 0
@@ -173,6 +200,19 @@ func run() int {
 	fmt.Fprintf(os.Stderr, "\nNote: only bare calls are checked (method calls x.Foo() are skipped).\n")
 	fmt.Fprintf(os.Stderr, "Add false positives to .runechoguardignore, or bypass with RUNECHO_GUARD_SKIP=1.\n")
 
+	// Log after the stderr report — fail-open: log errors are silently discarded.
+	syms := make([]string, len(violations))
+	for i, v := range violations {
+		syms[i] = v.Symbol
+	}
+	logDecision(decisionRecord{
+		Mode:     "precommit",
+		Repo:     repo.Name,
+		Decision: "ask",
+		Reason:   "violations",
+		Symbols:  syms,
+	})
+
 	if *dryRun {
 		return 0
 	}
@@ -201,6 +241,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
+		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
 		return 0
 	}
 
@@ -208,26 +249,43 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	filePath := payload.ToolInput.FilePath
 	if text == "" || filePath == "" {
 		hookDefer()
+		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "empty-input"})
 		return 0
 	}
 	// Reject null bytes (invalid on all supported OSes) and extreme lengths.
 	if strings.ContainsRune(filePath, 0) || len(filePath) > 4096 {
 		hookDefer()
+		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "bad-path"})
 		return 0
 	}
 
 	lang := guard.LangFor(filePath)
 	if lang == guard.LangUnknown {
 		hookDefer()
+		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "unknown-lang"})
 		return 0
 	}
 
-	symbols, ignorePath, latest, warn, ok := lookupSymbolsFor(filepath.Dir(filePath))
+	symbols, ignorePath, latest, repoName, warn, noRepo, ok := lookupSymbolsFor(filepath.Dir(filePath))
 	if !ok {
-		if warn != "" {
+		switch {
+		case warn != "":
+			// Schema-newer: already loud regardless of strict — surfaced always.
 			hookDeferContext(out, warn)
-		} else {
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
+		case noRepo:
+			// Not enrolled — silent skip; strict does not change this.
 			hookDefer()
+			logDecision(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"})
+		default:
+			// Store accessible but degraded (no snapshot, no symbols, etc.).
+			// Under strict, surface an advisory so the user knows validation is off.
+			if strictMode() {
+				hookDeferContext(out, "[runecho-guard] store unavailable or no snapshot — symbol validation is DISABLED for this edit (RUNECHO_GUARD_STRICT=1).")
+			} else {
+				hookDefer()
+			}
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
 		}
 		return 0
 	}
@@ -249,17 +307,26 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// No hallucinated symbols. Defer to the normal permission flow, but if the
 		// IR is stale the check may be incomplete — say so via additionalContext
 		// (which informs Claude without forcing an allow/deny).
-		hookDeferStale(out, latest)
+		staleReason := hookDeferStale(out, latest)
+		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason})
 		return 0
 	}
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
 	for _, v := range violations {
-		fmt.Fprintf(&sb, "  line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
+		// "snippet line N" is honest: in hook mode the guard scans the
+		// new_string/content snippet, not the whole file, so the number is
+		// relative to the edit hunk — not the file's absolute line number.
+		fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
+	syms := make([]string, len(violations))
+	for i, v := range violations {
+		syms[i] = v.Symbol
+	}
+	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: "violations", Symbols: syms})
 	return 0
 }
 
@@ -325,18 +392,22 @@ func suggestionSuffix(suggestion string) string {
 
 // lookupSymbolsFor loads the symbol set for the repo containing dir, plus the
 // timestamp of the latest snapshot (for staleness reporting). Returns ok=false on
-// any degradation condition (no DB, not enrolled, no snapshot). Most degradations
-// stay silent (fail-open by design), but warn carries the one that must not:
-// a store migrated by a newer binary means validation is disabled until this
-// binary is rebuilt — permanent, and invisible unless surfaced.
-func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, warn string, ok bool) {
+// any condition that prevents validation. Most failures stay silent (fail-open by
+// design), but warn carries the one that must not: a store migrated by a newer
+// binary means validation is disabled until this binary is rebuilt — permanent,
+// and invisible unless surfaced. noRepo is true when the failure is "not enrolled"
+// (an expected silent skip, not a degraded state); callers use it to suppress the
+// strict-mode advisory for unenrolled repos. repoName is the enrolled repo's name
+// whenever resolution succeeded (even if a later step degraded) — the decision log
+// needs it for per-repo analysis (C3 learned-allow).
+func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, repoName, warn string, noRepo bool, ok bool) {
 	storeDir, err := runechoDir()
 	if err != nil {
-		return nil, "", time.Time{}, "", false
+		return nil, "", time.Time{}, "", "", false, false
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil, "", time.Time{}, "", false
+		return nil, "", time.Time{}, "", "", false, false
 	}
 	// OpenFast skips the on-open integrity scan — this read path fires on every
 	// edit and must stay cheap; integrity is the writer's concern.
@@ -345,26 +416,27 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 		if errors.Is(err, snapshot.ErrSchemaNewer) {
 			warn = "runecho-guard is older than the RunEcho store — symbol validation is DISABLED until the guard binary is rebuilt (bash install.sh)."
 		}
-		return nil, "", time.Time{}, warn, false
+		return nil, "", time.Time{}, "", warn, false, false
 	}
 	defer db.Close()
 
-	repo, repoRoot, ok := resolveRepo(db, dir)
-	if !ok {
-		return nil, "", time.Time{}, "", false
+	repo, repoRoot, resolved := resolveRepo(db, dir)
+	if !resolved {
+		// Not enrolled — silent skip, not a degraded state.
+		return nil, "", time.Time{}, "", "", true, false
 	}
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return nil, "", time.Time{}, "", false
+		return nil, "", time.Time{}, repo.Name, "", false, false
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return nil, "", time.Time{}, "", false
+		return nil, "", time.Time{}, repo.Name, "", false, false
 	}
 
-	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, "", true
+	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, repo.Name, "", false, true
 }
 
 // hookDefer emits no decision, so Claude Code applies its normal permission flow.
@@ -372,17 +444,19 @@ func hookDefer() {}
 
 // hookDeferStale defers, but attaches an advisory note when the IR is older than
 // the staleness threshold — the symbol check may have missed recently-added names.
-func hookDeferStale(out io.Writer, latest time.Time) {
+// It returns the log reason: "stale-ir" when the advisory fires, "clean" otherwise.
+func hookDeferStale(out io.Writer, latest time.Time) string {
 	maxAge, err := guard.ParseMaxAge()
 	if err != nil {
-		return // bad config — stay silent rather than nag with a broken message
+		return "clean" // bad config — stay silent rather than nag with a broken message
 	}
 	age := time.Since(latest)
 	if age <= maxAge {
-		return
+		return "clean"
 	}
 	days := int(age.Hours() / 24)
 	hookDeferContext(out, fmt.Sprintf("RunEcho IR is %d day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.", days))
+	return "stale-ir"
 }
 
 // hookDeferContext defers (no permission decision) while surfacing an advisory
@@ -548,6 +622,23 @@ func gitTopLevelFor(dir string) (string, error) {
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
+
+// strictMode reports whether RUNECHO_GUARD_STRICT=1 is set. When true,
+// degraded states (store unavailable, schema mismatch, no snapshot, etc.)
+// cause pre-commit to exit 1 instead of 0, and hook mode emits an advisory
+// via additionalContext instead of silently deferring. Repo-not-enrolled is
+// always a silent skip regardless of strict (not a degraded state).
+func strictMode() bool { return os.Getenv("RUNECHO_GUARD_STRICT") == "1" }
+
+// degradedExit returns 1 when strict mode is active, 0 otherwise. Used at
+// each pre-commit degraded-state early-return so the caller cannot forget to
+// apply the strict toggle.
+func degradedExit(strict bool) int {
+	if strict {
+		return 1
+	}
+	return 0
+}
 
 func warnf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[runecho-guard] WARNING: "+format+"\n", args...)

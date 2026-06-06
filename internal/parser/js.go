@@ -43,10 +43,10 @@ func NewJSParser() *JSParser {
 	return &JSParser{}
 }
 
-// SupportsExtension returns true for .js, .ts, .gs files.
+// SupportsExtension returns true for .js, .ts, .jsx, .tsx, .gs files.
 func (p *JSParser) SupportsExtension(ext string) bool {
 	switch ext {
-	case ".js", ".ts", ".gs":
+	case ".js", ".ts", ".jsx", ".tsx", ".gs":
 		return true
 	default:
 		return false

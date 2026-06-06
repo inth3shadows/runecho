@@ -41,6 +41,38 @@ Key design decisions:
   `snapshot`/`diff`/`verify` build a *fresh* IR on every call. `.ai/ir.json` is
   only an incremental working artifact maintained by `runecho-ir index`.
 
+## User-Facing Surfaces
+
+RunEcho has three distinct surfaces. They share the same store and the same core
+IR format, but they solve different problems:
+
+| Surface | Primary user | Job |
+|---|---|---|
+| `runecho-ir` | Human operator | Enrol repos, capture snapshots, inspect drift/churn, validate claims, manage the store |
+| `runecho-mcp` | AI agent / MCP host | Ask read-only structure, diff, hash, status, and health questions |
+| `runecho-guard` | Human + AI agent | Stop or question edits that reference symbols outside known repo truth |
+
+The intended operating model is: use `runecho-ir` to maintain the baseline, let
+the MCP server answer live questions, and keep the guard close to edit time.
+
+## Repo Identity and Source Roots
+
+Each enrolled repo has three related identity values:
+
+- `path`: the enrolled working-tree path
+- `source_root`: the directory RunEcho should actually walk when building IR
+- `common_dir`: the canonical git-common-dir used to recognize worktrees of the
+  same repo quickly and consistently
+
+Most repos use the same directory for `path` and `source_root`. `--source-root`
+exists for nonstandard layouts, especially bare-repo or worktree setups where
+the place you enrol is not the place you want parsed.
+
+`repo reindex` already honors `EffectiveSourceRoot()`. Some compare-style CLI
+commands still resolve live code from the caller's root path, so for unusual
+layouts you should run them from the enrolled source tree until surface parity
+is fully finished.
+
 ## File Descriptions
 
 | Path | Role | Depends on |
@@ -112,7 +144,7 @@ blocks hallucinations; it must never block work. Repo resolution is three-tier:
 git-common-dir key (O(1), schema V4) → enrolled-path lookup → worktree-list
 scan, backfilling `common_dir` on a hit so the next fire takes the fast path.
 
-Residual false positives are intrinsic to regex-level static analysis
+Residual false positives are intrinsic to shallow static analysis
 (dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
 ~5% for Python — which is why hook mode asks instead of denying.
 
@@ -149,6 +181,7 @@ newer-than-supported database.
 | `RUNECHO_BIN_DIR` | `~/.local/bin` | Install target used by `install.sh` |
 | `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
+| `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are always skipped silently regardless of this flag. |
 
 ## Deployment
 
@@ -158,6 +191,7 @@ This is a local developer tool, not a service.
 bash install.sh                              # build all three binaries → $RUNECHO_BIN_DIR
 claude mcp add runecho -- ~/.local/bin/runecho-mcp   # register with Claude Code
 # Codex: add [mcp_servers.runecho] command = "~/.local/bin/runecho-mcp" to ~/.codex/config.toml
+bash install.sh --print-hook-config          # print the Claude Code PreToolUse snippet
 bash install.sh --hook                       # from a target repo's root: install the pre-commit guard
 ```
 
@@ -175,10 +209,42 @@ runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
 runecho-ir repo list                              # enrolled repos + index state
 ```
 
+## Parser Capability Matrix
+
+One parser per language family; all are shallow (line-regex, not AST). The table
+is intentionally honest: gaps here are tracked issues, not silently accepted.
+
+| Language | Extensions | Definitions captured | Exports semantics | Nested declarations | Depth |
+|---|---|---|---|---|---|
+| **Go** | `.go` | Top-level `func`, `type` (→ Classes), exported `var`/`const` (→ Exports) | Exported `var`/`const` names only — exported funcs/types land in Functions/Classes, not Exports | Top-level only (no leading whitespace) | Shallow / line-regex |
+| **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` declarations, `const/let/var = function/arrow`, `class` declarations | `export { ... }`, `export const/let/var/function/class`, `export default <ident>` | Best-effort: named functions inside callback arguments are missed (leading `(` is not whitespace, so the regex anchor fails); local function expressions inside factory bodies are over-captured as top-level | Shallow / line-regex |
+| **Python** | `.py` | `def` functions, `class` declarations | Names in `__all__` when present; falls back to all top-level defs/classes | Top-level only (`def`/`class` at column 0) | Shallow / line-regex |
+
+**Known gaps in the JS/TS/JSX parser** (evidence for the AST go/no-go decision, issue #15):
+
+- `export default function Foo()` and `export default class Foo` — the
+  `exportDefaultRegex` captures the keyword (`function` / `class`) as the
+  export name instead of the identifier. The function/class itself is correctly
+  captured in Functions/Classes via its own regex. Over-capture in Exports.
+- `const Name: Type = (...) => …` — TypeScript-annotated arrow components are
+  not captured in Functions. The `: Type` annotation between the variable name
+  and `=` breaks `arrowFuncRegex`. Under-capture.
+- `export * from './mod'` — star re-exports are not enumerable by regex; the
+  re-exported symbol set is silently dropped. Under-capture in Exports.
+- `export * as ns from './mod'` — namespace re-export not captured. Under-capture.
+- `export { local as alias }` — the pre-alias local name is recorded, not the
+  exported alias. Intentional (we index local definitions), but callers querying
+  by published API name will not find it.
+- Named callback functions (`setTimeout(function tick() {…})`) are **not**
+  promoted to top-level — the `(?:^|\s)` anchor before `function` correctly
+  excludes them. This is intentional under-capture (callbacks are not public
+  definitions) but it means factory-internal named function expressions are also
+  missed.
+
 ## Known Limitations
 
-- **Languages:** Go, JS/TS, Python only. Parsers are regex/AST-shallow — top-level
-  symbols, not nested scopes.
+- **Languages:** Go, JS/TS/JSX/TSX, and Python only. Parsers are deliberately
+  shallow — top-level symbols, not nested scopes or full semantic resolution.
 - **File cap is enforced.** `repo add --cap N` stops indexing after N files (the
   walk continues counting supported files, so the coverage denominator stays
   honest). The root hash reflects only the capped file set — truncation changes
@@ -192,3 +258,12 @@ runecho-ir repo list                              # enrolled repos + index state
   `obj.method()`) are assumed external and skipped; dynamically-assigned
   callables can't be resolved statically. It catches the common hallucination
   shape, not every possible one.
+- **Hashes are byte-level.** Line-ending differences (`LF` vs `CRLF`) change
+  file hashes and therefore root hashes. Cross-machine determinism depends on
+  consistent checkouts.
+- **Some degraded guard states are intentionally fail-open.** Missing store,
+  unenrolled repo, missing snapshots, and similar conditions degrade to silence
+  or warnings rather than blocking work.
+- **`--source-root` support is not fully uniform yet.** Reindex already
+  respects it; some snapshot/compare flows still assume the caller's root path
+  for live IR generation.

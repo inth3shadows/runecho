@@ -22,55 +22,56 @@ import (
 // If .ai/ir.json already exists, performs incremental update (only re-parses changed files).
 //
 // Subcommands:
-//   runecho-ir snapshot [--label=manual] [--session=""] [root]
-//   runecho-ir diff [--since=label | id-a id-b] [--compact] [root]
-//   runecho-ir log [--n=10] [root]
-//   runecho-ir verify [--session=""] [root]
-//   runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]
-//   runecho-ir validate-claims --text=<file> [--ir=<path>]
+//
+//	runecho-ir snapshot [--label=manual] [--session=""] [root]
+//	runecho-ir diff [--since=label | id-a id-b] [--compact] [root]
+//	runecho-ir log [--n=10] [root]
+//	runecho-ir verify [--session=""] [root]
+//	runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]
+//	runecho-ir validate-claims --text=<file> [--ir=<path>]
 func main() {
+	os.Exit(run())
+}
+
+// run is the testable entry point. All subcommand handlers return an int exit
+// code; main() is the only caller of os.Exit. This mirrors the runecho-guard
+// seam (run() int / main() { os.Exit(run()) }) so both commands are testable
+// without subprocess overhead.
+func run() int {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "snapshot":
-			runSnapshot(os.Args[2:])
-			return
+			return runSnapshot(os.Args[2:])
 		case "diff":
-			runDiff(os.Args[2:])
-			return
+			return runDiff(os.Args[2:])
 		case "log":
-			runLog(os.Args[2:])
-			return
+			return runLog(os.Args[2:])
 		case "verify":
-			runVerify(os.Args[2:])
-			return
+			return runVerify(os.Args[2:])
 		case "churn":
-			runChurn(os.Args[2:])
-			return
+			return runChurn(os.Args[2:])
 		case "repo":
-			runRepo(os.Args[2:])
-			return
+			return runRepo(os.Args[2:])
 		case "backup":
-			runBackup(os.Args[2:])
-			return
+			return runBackup(os.Args[2:])
 		case "validate-claims":
-			runValidateClaims(os.Args[2:])
-			return
+			return runValidateClaims(os.Args[2:])
 		case "--help", "-h", "help":
 			printUsage()
-			os.Exit(0)
+			return 0
 		case "--version", "-v":
 			fmt.Println("runecho-ir dev")
-			os.Exit(0)
+			return 0
 		default:
 			if strings.HasPrefix(os.Args[1], "-") {
 				fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", os.Args[1])
 				printUsage()
-				os.Exit(1)
+				return 1
 			}
 		}
 	}
 	// Default: index behavior (backward compat).
-	runIndex(os.Args)
+	return runIndex(os.Args)
 }
 
 func printUsage() {
@@ -87,44 +88,50 @@ func printUsage() {
 }
 
 // runRepo dispatches the central-store registry subcommands.
-func runRepo(args []string) {
+func runRepo(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo add|list|rm|reindex ...")
-		os.Exit(1)
+		return 1
 	}
 	switch args[0] {
 	case "add":
-		runRepoAdd(args[1:])
+		return runRepoAdd(args[1:])
 	case "list", "ls":
-		runRepoList(args[1:])
+		return runRepoList(args[1:])
 	case "rm", "remove":
-		runRepoRemove(args[1:])
+		return runRepoRemove(args[1:])
 	case "reindex":
-		runRepoReindex(args[1:])
+		return runRepoReindex(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "runecho-ir repo: unknown subcommand %q\n", args[0])
-		os.Exit(1)
+		return 1
 	}
 }
 
 // runRepoAdd enrolls a repo explicitly. An explicit --name that collides is an
 // error (strict); a derived name auto-disambiguates.
-func runRepoAdd(args []string) {
+func runRepoAdd(args []string) int {
 	fs := flag.NewFlagSet("repo add", flag.ExitOnError)
 	name := fs.String("name", "", "repo name (default: derived from path)")
 	cap := fs.Int("cap", 0, "max files to index, 0 = unlimited")
 	sourceRoot := fs.String("source-root", "", "directory to walk for IR generation (default: same as path; use for bare-repo worktree layouts)")
 	fs.Parse(args)
 
-	root := resolveRoot(fs.Args())
-	db := mustOpenDB()
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 
 	if existing, err := db.GetRepoByPath(root); err != nil {
-		fatal(err)
+		return printErr(err)
 	} else if existing != nil {
 		fmt.Printf("Already enrolled: %s (id=%d) -> %s\n", existing.Name, existing.ID, existing.Path)
-		return
+		return 0
 	}
 
 	n := *name
@@ -132,12 +139,12 @@ func runRepoAdd(args []string) {
 		var uErr error
 		n, uErr = snapshot.UniqueName(db, snapshot.DeriveRepoName(root))
 		if uErr != nil {
-			fatal(uErr)
+			return printErr(uErr)
 		}
 	}
 	id, err := db.EnrollRepo(n, root, *sourceRoot, *cap)
 	if err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	// Record the git-common-dir so the guard resolves this repo in O(1) from any
 	// worktree (schema V4). Best-effort: a non-git path just defers to lazy backfill.
@@ -151,19 +158,23 @@ func runRepoAdd(args []string) {
 		suffix = fmt.Sprintf(" (source-root: %s)", enrolled.SourceRoot)
 	}
 	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s%s\n", n, id, *cap, root, suffix)
+	return 0
 }
 
 // runRepoList prints all enrolled repos and their indexing state.
-func runRepoList(args []string) {
-	db := mustOpenDB()
+func runRepoList(args []string) int {
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 	repos, err := db.ListRepos()
 	if err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	if len(repos) == 0 {
 		fmt.Println("No repos enrolled. Add one: runecho-ir repo add <path>")
-		return
+		return 0
 	}
 	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %-7s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "COVER", "PATH")
 	fmt.Println(strings.Repeat("-", 108))
@@ -183,57 +194,68 @@ func runRepoList(args []string) {
 		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %-7s  %s\n",
 			r.Name, r.ID, last, r.ParseErrors, r.FileCap, cover, r.Path)
 	}
+	return 0
 }
 
 // runRepoRemove purges a repo and its entire history by name.
-func runRepoRemove(args []string) {
+func runRepoRemove(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo rm <name>")
-		os.Exit(1)
+		return 1
 	}
-	db := mustOpenDB()
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 	repo, err := db.GetRepoByName(args[0])
 	if err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	if repo == nil {
 		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
-		os.Exit(1)
+		return 1
 	}
 	if err := db.PurgeRepo(repo.ID); err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	fmt.Printf("Removed %s (id=%d) and its history.\n", repo.Name, repo.ID)
+	return 0
 }
 
 // runRepoReindex rebuilds an enrolled repo's IR and records a snapshot, by name.
 // Serial, fresh-per-repo. Cap is advisory: actual file count is reported and a
 // warning is logged when it exceeds the cap (honest coverage — no silent claim).
-func runRepoReindex(args []string) {
+func runRepoReindex(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo reindex <name>")
-		os.Exit(1)
+		return 1
 	}
-	db := mustOpenDB()
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 	repo, err := db.GetRepoByName(args[0])
 	if err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	if repo == nil {
 		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
-		os.Exit(1)
+		return 1
 	}
 
 	srcRoot := repo.EffectiveSourceRoot()
-	irData, stats := buildIR(srcRoot, repo.FileCap)
+	irData, stats, code := buildIR(srcRoot, repo.FileCap)
+	if code != 0 {
+		return code
+	}
 	if err := irData.Save(filepath.Join(srcRoot, ".ai", "ir.json")); err != nil {
-		fatal(fmt.Errorf("save ir.json: %w", err))
+		return printErr(fmt.Errorf("save ir.json: %w", err))
 	}
 	id, err := db.SaveSnapshot(repo.ID, "", "reindex", srcRoot, irData)
 	if err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
@@ -244,10 +266,11 @@ func runRepoReindex(args []string) {
 	}
 	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
 		repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
+	return 0
 }
 
 // runBackup writes an atomic backup of the central store via VACUUM INTO.
-func runBackup(args []string) {
+func runBackup(args []string) int {
 	dest := ""
 	if len(args) > 0 {
 		dest = args[0]
@@ -255,40 +278,44 @@ func runBackup(args []string) {
 	if dest == "" {
 		dir, err := runechoDir()
 		if err != nil {
-			fatal(err)
+			return printErr(err)
 		}
 		dest = filepath.Join(dir, "backups", "history-backup.db")
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			fatal(err)
+			return printErr(err)
 		}
 	}
 	if _, err := os.Stat(dest); err == nil {
-		fatal(fmt.Errorf("backup destination already exists: %s (VACUUM INTO requires a new file)", dest))
+		return printErr(fmt.Errorf("backup destination already exists: %s (VACUUM INTO requires a new file)", dest))
 	}
-	db := mustOpenDB()
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 	if err := db.BackupTo(dest); err != nil {
-		fatal(err)
+		return printErr(err)
 	}
 	fmt.Printf("Backup written: %s\n", dest)
+	return 0
 }
 
 // buildIR generates a fresh IR for root (full, not incremental).
 // fileCap limits the number of files indexed (0 = unlimited).
-// Returns the IR and the walk's honest-coverage stats.
-func buildIR(root string, fileCap int) (*ir.IR, ir.Stats) {
+// Returns the IR, the walk's honest-coverage stats, and an exit code (0 = ok).
+func buildIR(root string, fileCap int) (*ir.IR, ir.Stats, int) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		fatal(err)
+		return nil, ir.Stats{}, printErr(err)
 	}
 	result, stats, err := ir.NewGenerator(ir.GeneratorConfig{
 		IgnoredPaths: ir.DefaultIgnoredPaths,
 		FileCap:      fileCap,
 	}).Generate(abs)
 	if err != nil {
-		fatal(fmt.Errorf("generate IR for %q: %w", abs, err))
+		return nil, ir.Stats{}, printErr(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
-	return result, stats
+	return result, stats, 0
 }
 
 // coverageSuffix formats " coverage=N/M (P%)" from walk stats, or "" when the
@@ -301,13 +328,13 @@ func coverageSuffix(stats ir.Stats) string {
 }
 
 // runIndex is the original runecho-ir [root] behavior.
-func runIndex(args []string) {
+func runIndex(args []string) int {
 	rootPath := "."
 	if len(args) > 1 {
 		if strings.HasPrefix(args[1], "-") {
 			fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", args[1])
 			printUsage()
-			os.Exit(1)
+			return 1
 		}
 		rootPath = args[1]
 	}
@@ -315,7 +342,7 @@ func runIndex(args []string) {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve path %q: %v\n", rootPath, err)
-		os.Exit(1)
+		return 1
 	}
 
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
@@ -344,7 +371,7 @@ func runIndex(args []string) {
 	} else {
 		if err := os.MkdirAll(filepath.Dir(irPath), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .ai directory: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		result, stats, genErr = generator.Generate(absRoot)
 	}
@@ -353,12 +380,12 @@ func runIndex(args []string) {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if err := result.Save(irPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to save IR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	shortHash := result.RootHash
@@ -366,27 +393,40 @@ func runIndex(args []string) {
 		shortHash = shortHash[:12]
 	}
 	fmt.Printf("Indexed %d files — root_hash: %s...%s\n", len(result.Files), shortHash, coverageSuffix(stats))
+	return 0
 }
 
 // runSnapshot saves a snapshot of the current ir.json.
-func runSnapshot(args []string) {
+func runSnapshot(args []string) int {
 	fs := flag.NewFlagSet("snapshot", flag.ExitOnError)
 	label := fs.String("label", "manual", "snapshot label (e.g. session-start, session-end, manual)")
 	sessionID := fs.String("session", "", "session ID")
 	fs.Parse(args)
 
-	root := resolveRoot(fs.Args())
-	db := mustOpenDB()
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 
 	// Resolve (auto-enrolling) first so the snapshot honors the repo's file cap —
 	// otherwise an uncapped snapshot would never match a capped reindex of the same repo.
-	repo := resolveRepoForWrite(db, root)
-	irData, stats := buildIR(root, repo.FileCap) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	repo, code := resolveRepoForWrite(db, root)
+	if code != 0 {
+		return code
+	}
+	irData, stats, code := buildIR(root, repo.FileCap) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	if code != 0 {
+		return code
+	}
 	id, err := db.SaveSnapshot(repo.ID, *sessionID, *label, root, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	// Record the capture point (self-observing: last_indexed staleness).
 	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
@@ -398,10 +438,11 @@ func runSnapshot(args []string) {
 	}
 	fmt.Printf("Snapshot saved: id=%d label=%s root_hash=%s... files=%d\n",
 		id, *label, shortHash, len(irData.Files))
+	return 0
 }
 
 // runDiff shows structural diff between two snapshots (or a snapshot vs live).
-func runDiff(args []string) {
+func runDiff(args []string) int {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	since := fs.String("since", "", "diff since latest snapshot with this label vs live ir.json")
 	sessionID := fs.String("session", "", "filter by session ID (used with --since)")
@@ -409,7 +450,10 @@ func runDiff(args []string) {
 	asJSON := fs.Bool("json", false, "machine-readable JSON (parity with the MCP diff tool)")
 	fs.Parse(args)
 
-	db := mustOpenDB()
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
 	defer db.Close()
 
 	var result snapshot.DiffResult
@@ -418,11 +462,14 @@ func runDiff(args []string) {
 		// --since mode: A = last snapshot by label, B = live ir.json. root is
 		// resolved here, not at the top: in two-ID mode the leading positional
 		// is a snapshot id, not a path, so resolving a root there is meaningless.
-		root := resolveRoot(fs.Args())
+		root, code := resolveRoot(fs.Args())
+		if code != 0 {
+			return code
+		}
 		repoID := lookupRepoID(db, root)
 		if repoID < 0 {
 			fmt.Fprintf(os.Stderr, "Repo %q is not enrolled (no snapshots yet)\n", root)
-			os.Exit(0)
+			return 0
 		}
 		var meta *snapshot.SnapshotMeta
 		var err error
@@ -433,7 +480,7 @@ func runDiff(args []string) {
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		if meta == nil {
 			suffix := ""
@@ -441,13 +488,17 @@ func runDiff(args []string) {
 				suffix = fmt.Sprintf(" (session %q)", *sessionID)
 			}
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s for root %q\n", *since, suffix, root)
-			os.Exit(0)
+			return 0
 		}
-		irData, _ := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
-		result, err = db.DiffLive(*meta, irData)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+		if irCode != 0 {
+			return irCode
+		}
+		var diffErr error
+		result, diffErr = db.DiffLive(*meta, irData)
+		if diffErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", diffErr)
+			return 1
 		}
 	} else {
 		// Two positional ID mode.
@@ -455,38 +506,38 @@ func runDiff(args []string) {
 		if len(positional) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: runecho-ir diff --since=<label> [root]")
 			fmt.Fprintln(os.Stderr, "       runecho-ir diff <id-a> <id-b> [root]")
-			os.Exit(1)
+			return 1
 		}
 		idA, err := strconv.ParseInt(positional[0], 10, 64)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid snapshot ID %q\n", positional[0])
-			os.Exit(1)
+			return 1
 		}
 		idB, err := strconv.ParseInt(positional[1], 10, 64)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid snapshot ID %q\n", positional[1])
-			os.Exit(1)
+			return 1
 		}
 		metaA, err := db.GetByID(idA)
 		if err != nil || metaA == nil {
 			fmt.Fprintf(os.Stderr, "Snapshot %d not found\n", idA)
-			os.Exit(1)
+			return 1
 		}
 		metaB, err := db.GetByID(idB)
 		if err != nil || metaB == nil {
 			fmt.Fprintf(os.Stderr, "Snapshot %d not found\n", idB)
-			os.Exit(1)
+			return 1
 		}
 		// A diff must never cross repo boundaries (parity with the MCP oracle's
 		// scopedSnapshot). RepoID 0 means an unowned/legacy snapshot — refuse it.
 		if metaA.RepoID == 0 || metaA.RepoID != metaB.RepoID {
 			fmt.Fprintf(os.Stderr, "Refusing cross-repo diff: snapshots %d and %d are not in the same enrolled repo\n", idA, idB)
-			os.Exit(1)
+			return 1
 		}
 		result, err = db.Diff(*metaA, *metaB)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -497,7 +548,7 @@ func runDiff(args []string) {
 		out, err := json.MarshalIndent(snapshot.DiffPayload(result), "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Println(string(out))
 	case *compact:
@@ -508,31 +559,38 @@ func runDiff(args []string) {
 	default:
 		fmt.Print(snapshot.FormatFull(result))
 	}
+	return 0
 }
 
 // runLog prints a table of recent snapshots.
-func runLog(args []string) {
+func runLog(args []string) int {
 	fs := flag.NewFlagSet("log", flag.ExitOnError)
 	n := fs.Int("n", 10, "number of snapshots to show")
 	fs.Parse(args)
 
-	root := resolveRoot(fs.Args())
-	db := mustOpenDB()
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, dbCode := mustOpenDB()
+	if dbCode != 0 {
+		return dbCode
+	}
 	defer db.Close()
 
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Println("No snapshots found.")
-		return
+		return 0
 	}
 	metas, err := db.List(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if len(metas) == 0 {
 		fmt.Println("No snapshots found.")
-		return
+		return 0
 	}
 
 	fmt.Printf("%-5s  %-15s  %-25s  %-10s  %-8s  %s\n",
@@ -556,23 +614,30 @@ func runLog(args []string) {
 		fmt.Printf("%-5d  %-15s  %-25s  %-10s  %-8d  %s...\n",
 			m.ID, m.Label, session, ts, m.FileCount, shortHash)
 	}
+	return 0
 }
 
 // runVerify diffs the most recent session-start snapshot against live ir.json.
-func runVerify(args []string) {
+func runVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	sessionID := fs.String("session", "", "session ID to verify (optional)")
 	fs.Parse(args)
 
-	root := resolveRoot(fs.Args())
-	db := mustOpenDB()
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, dbCode := mustOpenDB()
+	if dbCode != 0 {
+		return dbCode
+	}
 	defer db.Close()
 
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Println("No session-start snapshot found.")
 		fmt.Println("Run: runecho-ir snapshot --label=session-start")
-		os.Exit(0)
+		return 0
 	}
 
 	var meta *snapshot.SnapshotMeta
@@ -584,7 +649,7 @@ func runVerify(args []string) {
 		metas, listErr := db.List(repoID, 100)
 		if listErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", listErr)
-			os.Exit(1)
+			return 1
 		}
 		for i := range metas {
 			if metas[i].Label == "session-start" && metas[i].SessionID == *sessionID {
@@ -596,67 +661,78 @@ func runVerify(args []string) {
 		meta, err = db.GetLatestByLabel(repoID, "session-start")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
 	if meta == nil {
 		fmt.Println("No session-start snapshot found.")
 		fmt.Println("Run: runecho-ir snapshot --label=session-start")
-		os.Exit(0)
+		return 0
 	}
 
-	irData, _ := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	if irCode != 0 {
+		return irCode
+	}
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	fmt.Printf("Verifying against snapshot id=%d label=%s session=%s ts=%s\n\n",
 		meta.ID, meta.Label, meta.SessionID, meta.Timestamp.Format(time.RFC3339))
 	fmt.Print(snapshot.FormatFull(result))
+	return 0
 }
 
-// resolveRoot returns the absolute project root from optional positional args.
-func resolveRoot(args []string) string {
+// resolveRoot returns the absolute project root from optional positional args,
+// and an exit code (0 = ok, 1 = error already printed).
+func resolveRoot(args []string) (string, int) {
 	rootPath := "."
 	if len(args) > 0 {
 		if strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(os.Stderr, "runecho-ir: unexpected flag %q where root path was expected\n", args[0])
-			os.Exit(1)
+			return "", 1
 		}
 		rootPath = args[0]
 	}
 	abs, err := filepath.Abs(rootPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve root %q: %v\n", rootPath, err)
-		os.Exit(1)
+		return "", 1
 	}
-	return abs
+	return abs, 0
 }
 
 // runChurn reports file and symbol churn rate across recent snapshots.
-func runChurn(args []string) {
+func runChurn(args []string) int {
 	fs := flag.NewFlagSet("churn", flag.ExitOnError)
 	n := fs.Int("n", 20, "number of snapshots to analyze")
 	minChanges := fs.Int("min-changes", 2, "minimum diffs a file/symbol must appear in to be considered hot")
 	compact := fs.Bool("compact", false, "single-line compact output")
 	fs.Parse(args)
 
-	root := resolveRoot(fs.Args())
-	db := mustOpenDB()
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, dbCode := mustOpenDB()
+	if dbCode != 0 {
+		return dbCode
+	}
 	defer db.Close()
 
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Println("No snapshots found.")
-		return
+		return 0
 	}
 	report, err := db.Churn(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if *compact {
@@ -664,12 +740,13 @@ func runChurn(args []string) {
 	} else {
 		fmt.Print(snapshot.FormatChurn(report, *minChanges))
 	}
+	return 0
 }
 
 // runValidateClaims extracts code symbol references from a text file and
 // cross-checks them against the IR. Reports identifiers referenced but not
 // found in the IR (potential hallucinations).
-func runValidateClaims(args []string) {
+func runValidateClaims(args []string) int {
 	fs := flag.NewFlagSet("validate-claims", flag.ExitOnError)
 	textFile := fs.String("text", "", "path to text file containing assistant message")
 	irPath := fs.String("ir", ".ai/ir.json", "path to ir.json")
@@ -677,14 +754,14 @@ func runValidateClaims(args []string) {
 
 	if *textFile == "" {
 		fmt.Fprintln(os.Stderr, "Error: --text=<file> required")
-		os.Exit(1)
+		return 1
 	}
 
 	// Load text.
 	textData, err := os.ReadFile(*textFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot read text file %q: %v\n", *textFile, err)
-		os.Exit(1)
+		return 1
 	}
 	text := string(textData)
 
@@ -692,7 +769,7 @@ func runValidateClaims(args []string) {
 	irData, err := ir.Load(*irPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot load IR %q: %v\n", *irPath, err)
-		os.Exit(1)
+		return 1
 	}
 	knownSymbols := make(map[string]bool)
 	for _, fileEntry := range irData.Files {
@@ -729,53 +806,54 @@ func runValidateClaims(args []string) {
 	enc.SetIndent("", "  ")
 	enc.Encode(out)
 	if len(mismatches) > 0 {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
 
-// mustOpenDB opens the central snapshot store (~/.runecho/history.db) or exits.
+// mustOpenDB opens the central snapshot store (~/.runecho/history.db) or returns 1.
 // History is centralized so the oracle serves all enrolled repos from one
 // durable, integrity-checked store; the working ir.json stays repo-local.
-func mustOpenDB() *snapshot.DB {
+func mustOpenDB() (*snapshot.DB, int) {
 	dir, err := runechoDir()
 	if err != nil {
-		fatal(err)
+		return nil, printErr(err)
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fatal(fmt.Errorf("create %s: %w", dir, err))
+		return nil, printErr(fmt.Errorf("create %s: %w", dir, err))
 	}
 	db, err := snapshot.Open(filepath.Join(dir, "history.db"))
 	if err != nil {
-		fatal(fmt.Errorf("open snapshot DB: %w", err))
+		return nil, printErr(fmt.Errorf("open snapshot DB: %w", err))
 	}
-	return db
+	return db, 0
 }
 
 // resolveRepoForWrite returns the enrolled repo for root, auto-enrolling on first
 // write (snapshot). Name defaults to the path basename, disambiguated with a
 // numeric suffix on collision; use `repo add --name` for a chosen label (Stage 2).
 // Returning the full repo lets callers apply its FileCap when generating IR.
-func resolveRepoForWrite(db *snapshot.DB, root string) *snapshot.Repo {
+func resolveRepoForWrite(db *snapshot.DB, root string) (*snapshot.Repo, int) {
 	repo, err := db.GetRepoByPath(root)
 	if err != nil {
-		fatal(err)
+		return nil, printErr(err)
 	}
 	if repo != nil {
-		return repo
+		return repo, 0
 	}
 	uname, uErr := snapshot.UniqueName(db, snapshot.DeriveRepoName(root))
 	if uErr != nil {
-		fatal(uErr)
+		return nil, printErr(uErr)
 	}
 	if _, err := db.EnrollRepo(uname, root, root, 0); err != nil {
-		fatal(err)
+		return nil, printErr(err)
 	}
 	repo, err = db.GetRepoByPath(root)
 	if err != nil {
-		fatal(err)
+		return nil, printErr(err)
 	}
 	// Record the git-common-dir for O(1) cross-worktree guard lookup (schema V4).
 	// Best-effort: a non-git root just defers to the guard's lazy backfill.
@@ -784,7 +862,7 @@ func resolveRepoForWrite(db *snapshot.DB, root string) *snapshot.Repo {
 			_ = db.SetRepoCommonDir(repo.ID, cd)
 		}
 	}
-	return repo
+	return repo, 0
 }
 
 // repoFileCap returns the enrolled repo's file cap for root, or 0 (unlimited) if
@@ -793,7 +871,9 @@ func resolveRepoForWrite(db *snapshot.DB, root string) *snapshot.Repo {
 func repoFileCap(db *snapshot.DB, root string) int {
 	repo, err := db.GetRepoByPath(root)
 	if err != nil {
-		fatal(err)
+		// Treat a lookup error as uncapped; the live IR generation will surface any
+		// real IO problems separately.
+		return 0
 	}
 	if repo == nil {
 		return 0
@@ -806,7 +886,7 @@ func repoFileCap(db *snapshot.DB, root string) int {
 func lookupRepoID(db *snapshot.DB, root string) int64 {
 	repo, err := db.GetRepoByPath(root)
 	if err != nil {
-		fatal(err)
+		return -1
 	}
 	if repo == nil {
 		return -1
@@ -814,7 +894,10 @@ func lookupRepoID(db *snapshot.DB, root string) int64 {
 	return repo.ID
 }
 
-func fatal(err error) {
+// printErr writes "Error: <err>" to stderr and returns exit code 1.
+// It replaces the old fatal() helper: instead of calling os.Exit directly,
+// callers return the code so main() (and tests) control process exit.
+func printErr(err error) int {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	os.Exit(1)
+	return 1
 }

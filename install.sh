@@ -21,6 +21,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Remember where the user invoked us: --hook targets the CALLER's repo, but the
+# Go build below must run from the runecho source tree.
+INVOKE_DIR="$(pwd)"
 cd "$SCRIPT_DIR"
 
 # Parse flags
@@ -94,11 +97,12 @@ case ":$PATH:" in
   *) echo ""; echo "NOTE: $BIN_DIR is not on your PATH. Add it:"; echo "  export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
-# --hook: install pre-commit hook in the current repo
+# --hook: install pre-commit hook in the repo the user invoked us FROM (not the
+# runecho source tree we cd'd into for the build) — resolve via the invoke dir.
 if [ "$INSTALL_HOOK" -eq 1 ]; then
   echo ""
-  HOOK_DIR="$(git rev-parse --git-dir 2>/dev/null)" || {
-    echo "install.sh: ERROR: --hook requires a git repository in the current directory." >&2
+  HOOK_DIR="$(git -C "$INVOKE_DIR" rev-parse --absolute-git-dir 2>/dev/null)" || {
+    echo "install.sh: ERROR: --hook requires a git repository in the directory you ran it from." >&2
     exit 1
   }
   HOOK_DIR="$HOOK_DIR/hooks"
@@ -134,8 +138,8 @@ Quick start:
   runecho-ir repo list                  # see enrolled repos
 
 Install the GIT pre-commit guard in a repo (commit-time):
-  bash install.sh --hook                # from the runecho repo root, targeting cwd
-  # or manually: cp .git/hooks/pre-commit <target-repo>/.git/hooks/
+  bash install.sh --hook                # run from the target repo's root
+  # (installs into the repo you invoke it from; use the full path to install.sh)
 
 Wire the Claude Code PreToolUse guard (edit-time — the primary integration):
   bash install.sh --print-hook-config   # prints the settings.json snippet

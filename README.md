@@ -97,7 +97,7 @@ full semantic analysis.
    For Codex, add this to `~/.codex/config.toml`:
    ```toml
    [mcp_servers.runecho]
-   command = "~/.local/bin/runecho-mcp"
+   command = "/home/YOUR_USER/.local/bin/runecho-mcp"  # absolute path; TOML does not expand ~
    ```
 5. Install the edit-time guard in Claude Code:
    ```bash

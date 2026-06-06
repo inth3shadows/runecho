@@ -183,6 +183,23 @@ newer-than-supported database.
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
 | `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are always skipped silently regardless of this flag. |
 
+### Decision log
+
+Every guard decision (both modes) appends one JSON line to
+`$RUNECHO_HOME/decisions.jsonl`:
+
+```json
+{"v":1,"ts":"2026-06-06T22:53:49Z","mode":"hook","repo":"runecho-master","file":"…","lang":"go","decision":"ask","reason":"violations","symbols":["FakeFn"]}
+```
+
+`decision` is `ask` or `defer`; `reason` classifies why (`clean`, `violations`,
+`stale-ir`, `no-repo`, `store-degraded`, `schema-newer`, `unknown-lang`,
+`bad-path`, `empty-input`, `parse-fail`). The write happens after the decision
+is emitted and all logging errors are discarded — the log can never alter a
+decision or slow the hook. It exists to measure the guard's real-world
+ask/defer behaviour (and to feed future learned-allow analysis); delete the
+file freely if you don't want the history.
+
 ## Deployment
 
 This is a local developer tool, not a service.
@@ -190,7 +207,8 @@ This is a local developer tool, not a service.
 ```bash
 bash install.sh                              # build all three binaries → $RUNECHO_BIN_DIR
 claude mcp add runecho -- ~/.local/bin/runecho-mcp   # register with Claude Code
-# Codex: add [mcp_servers.runecho] command = "~/.local/bin/runecho-mcp" to ~/.codex/config.toml
+# Codex: add [mcp_servers.runecho] command = "/home/YOUR_USER/.local/bin/runecho-mcp" to ~/.codex/config.toml
+#   (absolute path — TOML does not expand ~)
 bash install.sh --print-hook-config          # print the Claude Code PreToolUse snippet
 bash install.sh --hook                       # from a target repo's root: install the pre-commit guard
 ```
@@ -216,9 +234,9 @@ is intentionally honest: gaps here are tracked issues, not silently accepted.
 
 | Language | Extensions | Definitions captured | Exports semantics | Nested declarations | Depth |
 |---|---|---|---|---|---|
-| **Go** | `.go` | Top-level `func`, `type` (→ Classes), exported `var`/`const` (→ Exports) | Exported `var`/`const` names only — exported funcs/types land in Functions/Classes, not Exports | Top-level only (no leading whitespace) | Shallow / line-regex |
+| **Go** | `.go` | Top-level `func` and exported methods (→ Functions), `type` (→ Classes), exported `var`/`const` (→ Exports) | Exported `var`/`const` names only — exported funcs/types land in Functions/Classes, not Exports | Top-level only (no leading whitespace) | Shallow / line-regex |
 | **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` declarations, `const/let/var = function/arrow`, `class` declarations | `export { ... }`, `export const/let/var/function/class`, `export default <ident>` | Best-effort: named functions inside callback arguments are missed (leading `(` is not whitespace, so the regex anchor fails); local function expressions inside factory bodies are over-captured as top-level | Shallow / line-regex |
-| **Python** | `.py` | `def` functions, `class` declarations | Names in `__all__` when present; falls back to all top-level defs/classes | Top-level only (`def`/`class` at column 0) | Shallow / line-regex |
+| **Python** | `.py` | `def` functions, `class` declarations | Names in `__all__` when present; empty otherwise (no fallback) | Top-level only (`def`/`class` at column 0) | Shallow / line-regex |
 
 **Known gaps in the JS/TS/JSX parser** (evidence for the AST go/no-go decision, issue #15):
 

@@ -35,7 +35,9 @@ func main() {
 	}
 	defer db.Close()
 
-	server := mcp.NewServer("runecho", version)
+	// Diagnostics to stderr; stdout is reserved for JSON-RPC frames (stdio
+	// transport — a stray stdout write corrupts the protocol).
+	server := mcp.NewServer("runecho", version).WithLogWriter(os.Stderr)
 	mcp.NewOracle(db, dbPath).Register(server)
 
 	if err := server.Serve(os.Stdin, os.Stdout); err != nil {

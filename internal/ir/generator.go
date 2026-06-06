@@ -17,6 +17,10 @@ type Generator struct {
 	parsers      []parser.Parser
 	ignoredPaths map[string]bool
 	fileCap      int // 0 = unlimited; walk stops after this many files
+	// warn routes non-fatal walk/parse diagnostics. Defaults to stderr (set by
+	// NewGenerator) so existing callers are unchanged; tests inject a sink to
+	// assert the otherwise-silent skip branches actually fire.
+	warn func(format string, args ...any)
 }
 
 // GeneratorConfig configures IR generation behavior.
@@ -32,8 +36,14 @@ type Stats struct {
 	Indexed       int // files in the IR (== len(IR.Files))
 }
 
-// Coverage returns Indexed as a percentage of SupportedSeen. A walk that saw no
-// supported files is vacuously 100% covered.
+// Coverage returns Indexed as a percentage of SupportedSeen.
+//
+// CALLER CONTRACT: when SupportedSeen == 0 (a walk that saw no supported files)
+// this returns a vacuous 100 — there is nothing to cover, so "fully covered" is
+// the least-wrong scalar. The value is intentionally NOT changed (callers gate
+// on it numerically), so callers that render coverage to users MUST first check
+// SupportedSeen > 0 and suppress the figure otherwise — e.g. coverageSuffix in
+// cmd/runecho-ir returns "" for the 0/0 case rather than printing "100%".
 func (s Stats) Coverage() float64 {
 	if s.SupportedSeen == 0 {
 		return 100
@@ -66,6 +76,9 @@ func NewGenerator(config GeneratorConfig) *Generator {
 		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
 		ignoredPaths: ignored,
 		fileCap:      config.FileCap,
+		warn: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format, args...)
+		},
 	}
 }
 
@@ -79,7 +92,7 @@ type walkerFunc func(absPath, normalizedPath string) error
 func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to access %s: %v\n", path, err)
+			g.warn("Warning: failed to access %s: %v\n", path, err)
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -99,7 +112,7 @@ func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 		}
 		relPath, err := filepath.Rel(absRoot, path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to compute relative path for %s: %v\n", path, err)
+			g.warn("Warning: failed to compute relative path for %s: %v\n", path, err)
 			return nil
 		}
 		return fn(path, normalizePath(relPath))
@@ -126,7 +139,7 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 		}
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
+			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
 			return nil
 		}
@@ -170,7 +183,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 		}
 		currentHash, err := HashFile(absPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to hash %s: %v\n", absPath, err)
+			g.warn("Warning: failed to hash %s: %v\n", absPath, err)
 			return nil
 		}
 		if existing, ok := existingIR.Files[normPath]; ok && existing.Hash == currentHash {
@@ -179,7 +192,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 		}
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", absPath, err)
+			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
 			return nil
 		}

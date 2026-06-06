@@ -9,7 +9,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"os"
 )
+
+// stderrSink is the default diagnostic destination. It is os.Stderr — never
+// os.Stdout, which carries the JSON-RPC frames. var (not a literal) so the
+// default can be redirected once at construction.
+var stderrSink io.Writer = os.Stderr
 
 // DefaultProtocolVersion is returned when the client does not request one.
 const DefaultProtocolVersion = "2025-06-18"
@@ -50,11 +57,43 @@ type Server struct {
 	version string
 	tools   map[string]Tool
 	order   []string
+	// log records operator-facing diagnostics (recovered tool panics, parse
+	// errors, oversized frames). It MUST never write to the JSON-RPC stdout
+	// stream — on stdio transport a stray stdout byte corrupts the protocol — so
+	// it defaults to a stderr logger. nil means discard (set by NewServer; left
+	// non-nil here defensively so a zero Server never panics on logf).
+	log *log.Logger
 }
 
-// NewServer creates a server advertising the given name/version.
+// NewServer creates a server advertising the given name/version. Diagnostics go
+// to stderr by default; use WithLogWriter to redirect (e.g. to a test sink or
+// io.Discard). stdout stays reserved exclusively for JSON-RPC frames.
 func NewServer(name, version string) *Server {
-	return &Server{name: name, version: version, tools: map[string]Tool{}}
+	return &Server{
+		name:    name,
+		version: version,
+		tools:   map[string]Tool{},
+		log:     log.New(stderrSink, "runecho-mcp: ", log.LstdFlags),
+	}
+}
+
+// WithLogWriter redirects server diagnostics to w (e.g. os.Stderr explicitly, a
+// test buffer, or io.Discard). It never affects stdout. Returns the server for
+// chaining at construction. A nil w silences diagnostics.
+func (s *Server) WithLogWriter(w io.Writer) *Server {
+	if w == nil {
+		w = io.Discard
+	}
+	s.log = log.New(w, "runecho-mcp: ", log.LstdFlags)
+	return s
+}
+
+// logf writes one diagnostic line if a logger is configured. Safe on a nil
+// logger so a zero-value Server (constructed without NewServer) stays usable.
+func (s *Server) logf(format string, args ...any) {
+	if s.log != nil {
+		s.log.Printf(format, args...)
+	}
 }
 
 // Register adds a tool. Registration order is the tools/list order.
@@ -83,12 +122,14 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 
 		switch {
 		case tooLong:
+			s.logf("dropped oversized request frame (> %d bytes)", maxRequestBytes)
 			_ = enc.Encode(errFrame(-32600, "request too large"))
 		case len(bytes.TrimSpace(line)) == 0:
 			// blank line (or clean EOF) — nothing to do
 		default:
 			var req request
 			if e := json.Unmarshal(line, &req); e != nil {
+				s.logf("request parse error: %v", e)
 				_ = enc.Encode(errFrame(-32700, "parse error"))
 				break
 			}
@@ -210,7 +251,7 @@ func (s *Server) callTool(id, params json.RawMessage) (response, bool) {
 	if !ok {
 		return s.errResp(id, -32602, "unknown tool: "+p.Name), true
 	}
-	text, err := invoke(t, p.Arguments)
+	text, err := s.invoke(t, p.Arguments)
 	if err != nil {
 		// Tool-level failure: MCP convention is a result with isError=true so the
 		// model sees the message, not a JSON-RPC transport error.
@@ -220,11 +261,14 @@ func (s *Server) callTool(id, params json.RawMessage) (response, bool) {
 }
 
 // invoke runs a tool handler, converting a panic into an error. The serve loop
-// has no other recovery, so one misbehaving tool must not crash the oracle.
-func invoke(t Tool, args json.RawMessage) (text string, err error) {
+// has no other recovery, so one misbehaving tool must not crash the oracle. A
+// recovered panic is logged to the operator sink (the client only sees a terse
+// isError string) so a crashing tool is diagnosable server-side.
+func (s *Server) invoke(t Tool, args json.RawMessage) (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("tool %q panicked: %v", t.Name, r)
+			s.logf("recovered panic in tool %q: %v", t.Name, r)
 		}
 	}()
 	return t.Handler(args)

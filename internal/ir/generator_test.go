@@ -4,9 +4,99 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
+
+// captureWarnings replaces a generator's warn sink with an in-memory collector
+// and returns a pointer to the captured lines. Exercises the otherwise-silent
+// skip branches (walk-access error, rel-path failure, parse/hash failures).
+func captureWarnings(g *Generator) *[]string {
+	var lines []string
+	g.warn = func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	return &lines
+}
+
+// The walk-error callback (a directory that errors during Walk) must route a
+// warning through the injected sink and let the walk continue, not abort. On
+// Linux an unreadable dir (chmod 000) makes filepath.Walk hand the callback a
+// permission error for that path.
+func TestGenerate_WalkErrorWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 does not deny directory traversal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses the chmod 000 permission check")
+	}
+
+	tmpDir := t.TempDir()
+	// A reachable, indexable file so the walk has real work alongside the error.
+	if err := os.WriteFile(filepath.Join(tmpDir, "ok.go"), []byte("package x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable subdirectory: Walk lstat's it fine, then errors trying to
+	// read its entries, invoking the callback with err != nil for that path.
+	denied := filepath.Join(tmpDir, "denied")
+	if err := os.Mkdir(denied, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(denied, "hidden.go"), []byte("package y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(denied, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(denied, 0755) }) // let t.TempDir cleanup remove it
+
+	gen := NewGenerator(GeneratorConfig{})
+	warnings := captureWarnings(gen)
+
+	result, _, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate should survive an unreadable subdir, got: %v", err)
+	}
+	// The walk continued: the reachable file is still indexed.
+	if _, ok := result.Files["ok.go"]; !ok {
+		t.Error("ok.go should be indexed despite the unreadable sibling dir")
+	}
+	// And the access error surfaced through the sink, not /dev/null.
+	if !slices.ContainsFunc(*warnings, func(s string) bool {
+		return strings.Contains(s, "failed to access")
+	}) {
+		t.Errorf("expected a 'failed to access' warning, got %v", *warnings)
+	}
+}
+
+// The parse-failure branch must route its warning through the injected sink.
+// (The filepath.Rel-failure branch at the relPath site is not practically
+// constructible here: walkSourceFiles always passes paths rooted at the cleaned
+// absRoot it walks, so Rel cannot fail — left untested by design.)
+func TestGenerate_ParseFailureWarns(t *testing.T) {
+	orig := maxParseBytes
+	maxParseBytes = 16 // forces the oversized-file parse failure
+	defer func() { maxParseBytes = orig }()
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "big.go"), []byte("package main // oversized"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := NewGenerator(GeneratorConfig{})
+	warnings := captureWarnings(gen)
+
+	if _, _, err := gen.Generate(tmpDir); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if !slices.ContainsFunc(*warnings, func(s string) bool {
+		return strings.Contains(s, "failed to parse")
+	}) {
+		t.Errorf("expected a 'failed to parse' warning, got %v", *warnings)
+	}
+}
 
 func TestGenerator_Generate_Determinism(t *testing.T) {
 	// Create temporary test directory with source files

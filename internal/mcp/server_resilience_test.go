@@ -7,6 +7,77 @@ import (
 	"testing"
 )
 
+// A recovered tool panic must (a) still return an isError result to the client
+// and (b) emit one diagnostic line on the injected log sink — the client sees a
+// terse string, the operator gets the panic value.
+func TestServe_ToolPanicLogged(t *testing.T) {
+	var logSink strings.Builder
+	s := NewServer("t", "0").WithLogWriter(&logSink)
+	s.Register(Tool{Name: "boom", Handler: func(json.RawMessage) (string, error) {
+		panic("kaboom")
+	}})
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"boom","arguments":{}}}` + "\n"
+
+	var out strings.Builder
+	if err := s.Serve(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve crashed on tool panic: %v", err)
+	}
+
+	// (a) client still gets isError.
+	resps := countResponses(t, out.String())
+	if len(resps) != 1 {
+		t.Fatalf("expected 1 response, got %d: %s", len(resps), out.String())
+	}
+	res, ok := resps[0]["result"].(map[string]any)
+	if !ok || res["isError"] != true {
+		t.Errorf("panicking tool should return isError result, got %v", resps[0])
+	}
+
+	// (b) the panic is logged with the tool name and the panic value.
+	logged := logSink.String()
+	if !strings.Contains(logged, "boom") || !strings.Contains(logged, "kaboom") {
+		t.Errorf("panic log should name the tool and panic value, got %q", logged)
+	}
+	// The isError result legitimately carries the panic message (MCP convention).
+	// What must NOT leak into stdout is the operator log line — its "runecho-mcp:"
+	// prefix would corrupt the JSON-RPC frame stream.
+	if strings.Contains(out.String(), "runecho-mcp:") {
+		t.Errorf("operator log line leaked into stdout JSON-RPC stream: %s", out.String())
+	}
+}
+
+// An oversized frame must emit a diagnostic on the injected sink (and still be
+// answered with -32600 on the wire — covered by TestServe_OversizedFrameSurvives).
+func TestServe_OversizedFrameLogged(t *testing.T) {
+	var logSink strings.Builder
+	s := NewServer("t", "0").WithLogWriter(&logSink)
+	big := strings.Repeat("x", maxRequestBytes+1024)
+	input := `{"jsonrpc":"2.0","id":1,"method":"ping","params":"` + big + `"}` + "\n"
+
+	var out strings.Builder
+	if err := s.Serve(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error on oversized frame: %v", err)
+	}
+	if !strings.Contains(logSink.String(), "oversized") {
+		t.Errorf("oversized frame should be logged, got %q", logSink.String())
+	}
+}
+
+// A malformed JSON frame must emit a parse-error diagnostic on the injected sink.
+func TestServe_ParseErrorLogged(t *testing.T) {
+	var logSink strings.Builder
+	s := NewServer("t", "0").WithLogWriter(&logSink)
+	input := "{not json}\n"
+
+	var out strings.Builder
+	if err := s.Serve(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error on parse error: %v", err)
+	}
+	if !strings.Contains(logSink.String(), "parse error") {
+		t.Errorf("parse error should be logged, got %q", logSink.String())
+	}
+}
+
 // countResponses parses newline-delimited JSON-RPC responses out of raw output.
 func countResponses(t *testing.T, raw string) []map[string]any {
 	t.Helper()

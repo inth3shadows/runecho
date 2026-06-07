@@ -38,8 +38,9 @@ Key design decisions:
   table, so a repo keeps its identity (and history) even if its path moves. Reads
   scope by `repo_id`, never by the volatile root-path string.
 - **The oracle never answers from a cache.** `runecho-mcp` and the CLI's
-  `snapshot`/`diff`/`verify` build a *fresh* IR on every call. `.ai/ir.json` is
-  only an incremental working artifact maintained by `runecho-ir index`.
+  `snapshot`/`diff`/`verify`/`truth-trail` build a *fresh* IR on every call.
+  `.ai/ir.json` is only an incremental working artifact maintained by
+  `runecho-ir index`.
 
 ## User-Facing Surfaces
 
@@ -48,7 +49,7 @@ IR format, but they solve different problems:
 
 | Surface | Primary user | Job |
 |---|---|---|
-| `runecho-ir` | Human operator | Enrol repos, capture snapshots, inspect drift/churn, validate claims, manage the store |
+| `runecho-ir` | Human operator | Enrol repos, capture snapshots, inspect drift/churn, generate change receipts (`truth-trail`), validate claims, manage the store |
 | `runecho-mcp` | AI agent / MCP host | Ask read-only structure, diff, hash, status, and health questions |
 | `runecho-guard` | Human + AI agent | Stop or question edits that reference symbols outside known repo truth |
 
@@ -92,7 +93,7 @@ is fully finished.
 | `internal/guard/extract.go` | Per-language definition/reference/import extraction + builtin sets | — |
 | `internal/guard/validate.go` | Two-pass validation: collect new defs, then flag unresolved refs | — |
 | `internal/guard/suggest.go` | Deterministic "did you mean" via Levenshtein (distance ≤ 2) | — |
-| `internal/claims/claims.go` | Extract code-symbol references from prose for `validate-claims` | — |
+| `internal/claims/claims.go` | Extract code-symbol references from prose for `validate-claims` and `truth-trail --text` | — |
 | `internal/gitutil/gitutil.go` | Canonical git-common-dir resolution — the V4 repo-lookup key | — |
 | `internal/store/dir.go` | Single source of truth for `$RUNECHO_HOME` / `~/.runecho` | — |
 | `cmd/runecho-ir/main.go` | CLI entrypoint and subcommand dispatch | `ir`, `snapshot` |
@@ -106,7 +107,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 
 | Tool | Args | Returns |
 |---|---|---|
-| `structure` | `repo` | Files + symbols of the live IR, with counts; per-file `refs` answer "who calls X" |
+| `structure` | `repo` | Files + symbols of the live IR, with counts; per-file `refs` list the bare call sites within that file |
 | `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
@@ -200,6 +201,22 @@ is emitted and all logging errors are discarded — the log can never alter a
 decision or slow the hook. It exists to measure the guard's real-world
 ask/defer behaviour (and to feed future learned-allow analysis); delete the
 file freely if you don't want the history.
+
+## Exit Code Contract
+
+Every `runecho-ir` subcommand returns one of three values, defined as constants
+in `cmd/runecho-ir/main.go`:
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `ExitOK` | `0` | Clean run — success or no notable findings |
+| `ExitNoData` | `1` | Soft condition: repo not enrolled, no matching snapshot, stale claims found, mismatches found by `validate-claims` |
+| `ExitError` | `2` | Hard error: bad arguments, I/O failure, database error, explicit bad snapshot ID, cross-repo diff refusal |
+
+The three-tier contract follows the grep/diff convention (lower = softer). Scripts
+can distinguish "nothing to check yet" (`1`) from "the tool crashed" (`2`) without
+parsing stderr. A bare `command || { handle; }` blocks on both non-zero codes, so
+the safe default posture is preserved.
 
 ## Deployment
 

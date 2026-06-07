@@ -134,7 +134,7 @@ not general-purpose code intelligence.
 
 | Path | Purpose |
 |---|---|
-| `cmd/runecho-ir/` | The CLI: index, snapshot, diff, log, churn, verify, repo, backup |
+| `cmd/runecho-ir/` | The CLI: index, snapshot, diff, log, churn, verify, truth-trail, validate-claims, repo, backup |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
 | `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode |
 | `internal/parser/` | Per-language structure extraction (Go/JS/TS/Python) |
@@ -142,7 +142,7 @@ not general-purpose code intelligence.
 | `internal/snapshot/` | Central store: migrations, registry, diff, churn, backup |
 | `internal/mcp/` | Minimal MCP plumbing + the oracle tools |
 | `internal/guard/` | Diff parsing, symbol extraction, validation, did-you-mean |
-| `internal/claims/` | Symbol-reference extraction from prose (`validate-claims`) |
+| `internal/claims/` | Symbol-reference extraction from prose (`validate-claims`, `truth-trail --text`) |
 | `internal/gitutil/` | Canonical git-common-dir resolution (worktree identity) |
 | `install.sh` | Builds all three binaries; `--hook` installs the pre-commit guard |
 

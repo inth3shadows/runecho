@@ -102,7 +102,7 @@ func printUsage() {
 func runRepo(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo add|list|rm|reindex ...")
-		return 1
+		return ExitError
 	}
 	switch args[0] {
 	case "add":
@@ -382,7 +382,7 @@ func runIndex(args []string) int {
 	} else {
 		if err := os.MkdirAll(filepath.Dir(irPath), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to create .ai directory: %v\n", err)
-			return 1
+			return ExitError
 		}
 		result, stats, genErr = generator.Generate(absRoot)
 	}
@@ -437,7 +437,7 @@ func runSnapshot(args []string) int {
 	id, err := db.SaveSnapshot(repo.ID, *sessionID, *label, root, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 	// Record the capture point (self-observing: last_indexed staleness).
 	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
@@ -771,7 +771,7 @@ func runValidateClaims(args []string) int {
 	textData, err := os.ReadFile(*textFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot read text file %q: %v\n", *textFile, err)
-		return 1
+		return ExitError
 	}
 	text := string(textData)
 
@@ -779,7 +779,7 @@ func runValidateClaims(args []string) int {
 	irData, err := ir.Load(*irPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot load IR %q: %v\n", *irPath, err)
-		return 1
+		return ExitError
 	}
 	knownSymbols := make(map[string]bool)
 	for _, fileEntry := range irData.Files {

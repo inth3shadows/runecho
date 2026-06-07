@@ -124,7 +124,7 @@ Replace `YOUR_USER` with your actual username, or point to wherever you set
 If you want to append the default configuration automatically:
 
 ```bash
-printf '\n[mcp_servers.runecho]\ncommand = "%s"\n' "$HOME/.local/bin/runecho-mcp" >> ~/.codex/config.toml
+printf '\n[mcp_servers.runecho]\ncommand = "%s"\n' "${RUNECHO_BIN_DIR:-$HOME/.local/bin}/runecho-mcp" >> ~/.codex/config.toml
 ```
 
 ## Daily Workflow
@@ -146,8 +146,10 @@ From inside a repo, compare the live code to the last snapshot:
 runecho-ir diff --since=reindex
 ```
 
-Empty output means nothing structural changed. Otherwise you get a per-file list
-of added and removed functions, classes, exports, and imports.
+`reindex` is the label that `repo reindex` writes automatically — you can also use
+any label you created with `snapshot --label=<name>`, such as `session-start`.
+Empty diff output means nothing structural changed. Otherwise you get a per-file
+list of added and removed functions, classes, exports, and imports.
 
 ### Capture a new baseline snapshot
 
@@ -176,6 +178,44 @@ runecho-ir validate-claims --text notes.md
 
 Use this when you have prose that mentions functions, classes, or other symbols
 and you want to check those references against the current IR.
+
+### Capture a session-start snapshot
+
+Before starting a long coding session, bookmark the current structure:
+
+```bash
+runecho-ir snapshot --label=session-start
+```
+
+This gives you a reference point that `verify` and `truth-trail` compare against
+during and after the session.
+
+### Check for structural drift from the session start
+
+```bash
+runecho-ir verify
+```
+
+Shows what functions, classes, exports, or imports changed since your
+`session-start` snapshot. An empty diff body (just the header line) means the
+structure is unchanged.
+
+### Get a full change receipt before committing
+
+```bash
+runecho-ir truth-trail --since=session-start
+```
+
+Fuses four signals into one report: structural diff, callers of removed
+symbols, file churn (how hot each changed file is), and — optionally — a prose
+check for stale symbol references:
+
+```bash
+runecho-ir truth-trail --since=session-start --text=my-notes.md
+```
+
+The `--text` variant exits with a non-zero code if the prose mentions symbols
+that no longer exist in the current IR.
 
 ### Back up the history database
 
@@ -241,6 +281,23 @@ behavior.
   RunEcho knows which directory to parse.
 
 For anything not covered here, see the [Technical Reference](TECHNICAL.md).
+
+## Exit Codes (for scripting)
+
+Every `runecho-ir` subcommand returns one of three exit codes:
+
+| Code | Meaning | Examples |
+|------|---------|---------|
+| `0` | Success — clean run, no notable findings | Diff with no drift; verify matches; truth-trail with no stale claims |
+| `1` | No-data / soft condition | Repo not enrolled; no matching snapshot; **stale or invented symbol references found** by `truth-trail --text` or `validate-claims` |
+| `2` | Hard error | Bad arguments; I/O failure; database error |
+
+Important: exit `1` from `validate-claims` or `truth-trail --text` means the check
+**ran and found a problem** — it is not a harmless no-op. Do not use `cmd || true`
+around those commands or you will silently swallow real hallucination findings.
+
+For pure no-data cases (not enrolled, no snapshot), `1` means "skip gracefully."
+To treat both gracefully: `code=$?; [ $code -le 1 ] && proceed`.
 
 ## FAQ
 

@@ -55,6 +55,7 @@ func runArgs(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "report violations but exit 0")
 	verbose := fs.Bool("verbose", false, "print every checked symbol")
 	hookMode := fs.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
+	outcomeMode := fs.Bool("outcome-mode", false, "Claude Code PostToolUse outcome recorder — reads JSON from stdin, logs approved if a recent ask exists for the edited file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -64,6 +65,10 @@ func runArgs(args []string) int {
 	if os.Getenv("RUNECHO_GUARD_SKIP") == "1" {
 		// hookDefer is a no-op, so there is nothing to write here either way.
 		return 0
+	}
+
+	if *outcomeMode {
+		return runOutcomeMode(io.LimitReader(os.Stdin, 16<<20))
 	}
 
 	if *hookMode {
@@ -217,6 +222,28 @@ func runArgs(args []string) int {
 // hookSpecificOutput.permissionDecision). Reads JSON from in, and either denies
 // the tool call (hallucinated symbol) or defers to the normal permission flow.
 // It NEVER emits "allow": a guard's job is to block, not to auto-approve every
+// runOutcomeMode handles --outcome-mode. It reads a PostToolUse JSON payload
+// from in, extracts the edited file path, and appends an approved-outcome
+// record to decisions.jsonl if a recent ask exists for that file. Always
+// exits 0 — outcome logging is observability-only and must never block a tool.
+// in is explicit (not os.Stdin) so tests can call it without a subprocess.
+func runOutcomeMode(in io.Reader) int {
+	var payload struct {
+		ToolInput struct {
+			FilePath string `json:"file_path"`
+		} `json:"tool_input"`
+	}
+	if err := json.NewDecoder(in).Decode(&payload); err != nil {
+		return 0
+	}
+	if payload.ToolInput.FilePath == "" {
+		return 0
+	}
+	logOutcomeForFile(payload.ToolInput.FilePath)
+	return 0
+}
+
+// runHookMode handles --hook-mode (Claude Code PreToolUse). It reads the tool
 // edit out from under the user's permission prompts. Exits 0 unconditionally —
 // the decision is communicated through the JSON written to out (or its absence).
 // in/out are explicit (not os.Stdin/os.Stdout) so the full decision contract is

@@ -363,19 +363,27 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 
 // runInstall installs git hooks in the current (or given) repo and optionally
 // a periodic reindex job (launchd on macOS, cron on Linux).
+// --periodic alone (no root) installs only the periodic job without touching hooks.
 func runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	periodic := fs.Bool("periodic", false, "also install an hourly reindex job (launchd on macOS, cron on Linux)")
 	force := fs.Bool("force", false, "overwrite existing hooks not created by runecho")
 	fs.Parse(args)
 
-	root, code := resolveRoot(fs.Args())
-	if code != 0 {
-		return code
+	// If a root path was given (or we're inside a git repo), install hooks.
+	if len(fs.Args()) > 0 || !*periodic {
+		root, code := resolveRoot(fs.Args())
+		if code != 0 {
+			return code
+		}
+		if err := installHooks(root, *force); err != nil {
+			if !*periodic {
+				return printErr(err)
+			}
+			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
+		}
 	}
-	if err := installHooks(root, *force); err != nil {
-		return printErr(err)
-	}
+
 	if *periodic {
 		if err := installPeriodic(); err != nil {
 			return printErr(err)

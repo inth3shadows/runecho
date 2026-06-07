@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +64,8 @@ func run() int {
 			return runRepo(os.Args[2:])
 		case "backup":
 			return runBackup(os.Args[2:])
+		case "install":
+			return runInstall(os.Args[2:])
 		case "truth-trail":
 			return runTruthTrail(os.Args[2:])
 		case "validate-claims":
@@ -91,8 +95,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name>")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic] [--force] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
@@ -126,6 +131,7 @@ func runRepoAdd(args []string) int {
 	name := fs.String("name", "", "repo name (default: derived from path)")
 	cap := fs.Int("cap", 0, "max files to index, 0 = unlimited")
 	sourceRoot := fs.String("source-root", "", "directory to walk for IR generation (default: same as path; use for bare-repo worktree layouts)")
+	noHooks := fs.Bool("no-hooks", false, "skip automatic git hook installation")
 	fs.Parse(args)
 
 	root, code := resolveRoot(fs.Args())
@@ -169,6 +175,21 @@ func runRepoAdd(args []string) int {
 		suffix = fmt.Sprintf(" (source-root: %s)", enrolled.SourceRoot)
 	}
 	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s%s\n", n, id, *cap, root, suffix)
+
+	// Auto-reindex immediately so the IR is ready without a separate step.
+	enrolled, err2 := db.GetRepoByName(n)
+	if err2 == nil && enrolled != nil {
+		fmt.Printf("Indexing %s...\n", n)
+		doReindex(db, enrolled)
+	}
+
+	// Auto-install all git hooks unless suppressed.
+	if !*noHooks {
+		if err := installHooks(root, false); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  Run manually: runecho-ir install\n")
+		}
+	}
 	return 0
 }
 
@@ -234,28 +255,88 @@ func runRepoRemove(args []string) int {
 	return 0
 }
 
-// runRepoReindex rebuilds an enrolled repo's IR and records a snapshot, by name.
-// Serial, fresh-per-repo. Cap is advisory: actual file count is reported and a
-// warning is logged when it exceeds the cap (honest coverage — no silent claim).
+// runRepoReindex rebuilds an enrolled repo's IR and records a snapshot.
+// Accepts a name, "." (CWD lookup), or --all to reindex every enrolled repo.
 func runRepoReindex(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo reindex <name>")
+	fs := flag.NewFlagSet("repo reindex", flag.ContinueOnError)
+	all := fs.Bool("all", false, "reindex all enrolled repos")
+	if err := fs.Parse(args); err != nil {
 		return ExitError
 	}
+
+	if *all {
+		return runRepoReindexAll()
+	}
+
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo reindex <name|.> [--all]")
+		return ExitError
+	}
+
 	db, code := mustOpenDB()
 	if code != 0 {
 		return code
 	}
 	defer db.Close()
-	repo, err := db.GetRepoByName(args[0])
+
+	arg := fs.Args()[0]
+	var repo *snapshot.Repo
+	var err error
+
+	if arg == "." || filepath.IsAbs(arg) {
+		root, rcode := resolveRoot(fs.Args())
+		if rcode != 0 {
+			return rcode
+		}
+		r, _, ok := db.ResolveRepo(root)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "No repo enrolled at %q — run: runecho-ir repo add .\n", root)
+			return ExitError
+		}
+		repo = r
+	} else {
+		repo, err = db.GetRepoByName(arg)
+		if err != nil {
+			return printErr(err)
+		}
+		if repo == nil {
+			fmt.Fprintf(os.Stderr, "No repo named %q\n", arg)
+			return ExitError
+		}
+	}
+
+	return doReindex(db, repo)
+}
+
+// runRepoReindexAll reindexes every enrolled repo in sequence.
+func runRepoReindexAll() int {
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
+	defer db.Close()
+
+	repos, err := db.ListRepos()
 	if err != nil {
 		return printErr(err)
 	}
-	if repo == nil {
-		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
-		return ExitError
+	if len(repos) == 0 {
+		fmt.Println("No repos enrolled.")
+		return ExitOK
 	}
 
+	exitCode := ExitOK
+	for i := range repos {
+		if c := doReindex(db, &repos[i]); c != 0 {
+			exitCode = c
+		}
+	}
+	return exitCode
+}
+
+// doReindex is the shared reindex implementation: builds IR, saves ir.json,
+// stores a snapshot, and updates the repo's last-indexed timestamp.
+func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 	srcRoot := repo.EffectiveSourceRoot()
 	irData, stats, code := buildIR(srcRoot, repo.FileCap)
 	if code != 0 {
@@ -278,6 +359,166 @@ func runRepoReindex(args []string) int {
 	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
 		repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
 	return 0
+}
+
+// runInstall installs git hooks in the current (or given) repo and optionally
+// a periodic reindex job (launchd on macOS, cron on Linux).
+func runInstall(args []string) int {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	periodic := fs.Bool("periodic", false, "also install an hourly reindex job (launchd on macOS, cron on Linux)")
+	force := fs.Bool("force", false, "overwrite existing hooks not created by runecho")
+	fs.Parse(args)
+
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	if err := installHooks(root, *force); err != nil {
+		return printErr(err)
+	}
+	if *periodic {
+		if err := installPeriodic(); err != nil {
+			return printErr(err)
+		}
+	}
+	return 0
+}
+
+// installHooks installs pre-commit (guard) and post-commit/post-merge/post-checkout
+// (background reindex) hooks into the git repo containing root.
+func installHooks(root string, force bool) error {
+	gitDir, err := gitutil.AbsGitDir(root)
+	if err != nil {
+		return fmt.Errorf("find git dir: %w", err)
+	}
+	hooksDir := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	irBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
+
+	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %q \"$@\"\n", guardBin)
+	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%q repo reindex . >/dev/null 2>&1 &\n", irBin)
+	// post-checkout: only reindex on branch switches ($3 == 1), not file checkouts.
+	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %q repo reindex . >/dev/null 2>&1 &\n", irBin)
+
+	hooks := map[string]string{
+		"pre-commit":    preCommit,
+		"post-commit":   reindex,
+		"post-merge":    reindex,
+		"post-checkout": postCheckout,
+	}
+	for name, content := range hooks {
+		if err := installHookFile(hooksDir, name, content, force); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("Hooks installed in %s\n", hooksDir)
+	return nil
+}
+
+// installHookFile writes a single hook script. Skips if an existing hook is not
+// a runecho hook (unless force). Overwrites existing runecho hooks always.
+func installHookFile(hooksDir, name, content string, force bool) error {
+	path := filepath.Join(hooksDir, name)
+	if existing, err := os.ReadFile(path); err == nil {
+		if !strings.Contains(string(existing), "runecho") && !force {
+			fmt.Fprintf(os.Stderr, "  Skipping %s: existing hook (use --force to overwrite)\n", name)
+			return nil
+		}
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		return fmt.Errorf("write %s hook: %w", name, err)
+	}
+	fmt.Printf("  Installed %s\n", name)
+	return nil
+}
+
+// installPeriodic installs an hourly reindex job via launchd (macOS) or cron (Linux).
+func installPeriodic() error {
+	irBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return installLaunchd(irBin)
+	default:
+		return installCron(irBin)
+	}
+}
+
+// installLaunchd writes a launchd plist and loads it (macOS).
+func installLaunchd(irBin string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	agentsDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		return fmt.Errorf("create LaunchAgents dir: %w", err)
+	}
+	plistPath := filepath.Join(agentsDir, "com.runecho.reindex.plist")
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.runecho.reindex</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>repo</string>
+		<string>reindex</string>
+		<string>--all</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>StandardOutPath</key>
+	<string>/tmp/runecho-reindex.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/runecho-reindex.log</string>
+</dict>
+</plist>
+`, irBin)
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	// Unload first (idempotent — ignore error if not loaded), then load.
+	_ = exec.Command("launchctl", "unload", plistPath).Run()
+	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+	fmt.Printf("Periodic reindex installed (hourly): %s\n", plistPath)
+	return nil
+}
+
+// installCron adds an hourly crontab entry on Linux/other.
+func installCron(irBin string) error {
+	entry := fmt.Sprintf("0 * * * * %q repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", irBin)
+	// Read existing crontab, strip any prior runecho entry, append new one.
+	existing, _ := exec.Command("crontab", "-l").Output()
+	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	filtered := lines[:0]
+	for _, l := range lines {
+		if !strings.Contains(l, "# runecho") {
+			filtered = append(filtered, l)
+		}
+	}
+	filtered = append(filtered, entry)
+	input := strings.Join(filtered, "\n") + "\n"
+	cmd := exec.Command("crontab", "-")
+	cmd.Stdin = strings.NewReader(input)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("install crontab: %w", err)
+	}
+	fmt.Println("Periodic reindex installed (hourly via cron)")
+	return nil
 }
 
 // runBackup writes an atomic backup of the central store via VACUUM INTO.

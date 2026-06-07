@@ -51,6 +51,13 @@ func TopLevel(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// AbsGitDir returns the absolute path to the git directory (common-dir) for the
+// repo containing dir. This is the correct location for hook files: it is stable
+// across all worktrees and is the path git itself reads hooks from.
+func AbsGitDir(dir string) (string, error) {
+	return CommonDir(dir)
+}
+
 // WorktreePaths returns all working-tree paths registered for the git repo
 // containing dir, parsed from `git worktree list --porcelain`. Returns nil on
 // any error (non-git dir, git not available).

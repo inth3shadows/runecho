@@ -190,18 +190,12 @@ export default function App() {
 }
 `,
 			// funcDeclRegex captures "App" (whitespace before "function").
-			// exportDeclRegex does NOT match "export default function App" because
-			// "default" is not in its keyword list (const|let|var|function|class|
-			// async function) — "default function" as a combined form is not handled.
-			// exportDefaultRegex matches "export default function App()" and
-			// captures "function" as the identifier (the first \w+ after "default").
-			// KNOWN: over-capture — "function" (a keyword) appears in Exports
-			// instead of "App".  The regex cannot distinguish "export default Foo"
-			// (plain ident) from "export default function Foo()" (declaration).
+			// exportDefaultRegex now uses alternation to capture the identifier
+			// after "function", so "App" lands in Exports correctly.
 			wantFuncs: []string{"App"},
 			wantClass: []string{},
-			wantExp:   []string{"function"},
-			note:      "KNOWN: 'export default function App()' captures keyword 'function' as export name, not 'App'",
+			wantExp:   []string{"App"},
+			note:      "",
 		},
 		{
 			name: "jsx_arrow_component",
@@ -408,16 +402,13 @@ export default class Controller {
 	handle() {}
 }
 `,
-			// classDeclRegex captures "Controller" (handles "export default class Name").
-			// exportDeclRegex does NOT match ("default" is not in its keyword list).
-			// exportDefaultRegex matches "export default class" and captures "class"
-			// as the identifier (same over-capture pattern as "export default function").
-			// KNOWN: over-capture — "class" (a keyword) appears in Exports instead
-			// of nothing or "Controller".
+			// classDeclRegex captures "Controller".
+			// exportDefaultRegex now uses alternation to capture the identifier
+			// after "class", so "Controller" lands in Exports correctly.
 			wantFuncs: []string{},
 			wantClass: []string{"Controller"},
-			wantExp:   []string{"class"},
-			note:      "KNOWN: 'export default class Name' captures keyword 'class' as export name, not 'Controller'",
+			wantExp:   []string{"Controller"},
+			note:      "",
 		},
 
 		// ------------------------------------------------------------------ //
@@ -449,18 +440,15 @@ export default function App() {
 
 export { ErrorBoundary };
 `,
-			// "useCounter" is top-level function declaration — captured.
-			// "App" is also captured by funcDeclRegex (whitespace before "function").
-			// "ErrorBoundary" is a class — captured.
-			// Exports: exportNamedRegex fires for "export { ErrorBoundary }";
-			// exportDefaultRegex fires for "export default function App()" and
-			// captures "function" (keyword) not "App" — same over-capture as the
-			// standalone jsx_default_export_function_component case.
-			// KNOWN: "export default function App()" contributes "function" to Exports.
+			// "useCounter" and "App" captured by funcDeclRegex.
+			// "ErrorBoundary" captured by classDeclRegex.
+			// exportNamedRegex fires for "export { ErrorBoundary }";
+			// exportDefaultRegex now correctly captures "App" from
+			// "export default function App()".
 			wantFuncs: []string{"App", "useCounter"},
 			wantClass: []string{"ErrorBoundary"},
-			wantExp:   []string{"ErrorBoundary", "function"},
-			note:      "KNOWN: 'export default function App()' contributes 'function' (keyword) to Exports, not 'App'",
+			wantExp:   []string{"App", "ErrorBoundary"},
+			note:      "",
 		},
 	}
 

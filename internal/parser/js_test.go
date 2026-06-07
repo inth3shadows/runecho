@@ -157,6 +157,53 @@ export { processUser };
 	}
 }
 
+func TestJSParser_ExportDefault_NamedFunctionAndClass(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantExp []string
+	}{
+		{
+			name:    "export default function",
+			source:  "export default function Foo() {}",
+			wantExp: []string{"Foo"},
+		},
+		{
+			name:    "export default async function",
+			source:  "export default async function Bar() {}",
+			wantExp: []string{"Bar"},
+		},
+		{
+			name:    "export default class",
+			source:  "export default class Baz {}",
+			wantExp: []string{"Baz"},
+		},
+		{
+			name:    "export default identifier unchanged",
+			source:  "export default MyComponent",
+			wantExp: []string{"MyComponent"},
+		},
+		{
+			name:    "export default anonymous function — no export name",
+			source:  "export default function() {}",
+			wantExp: []string{},
+		},
+	}
+
+	p := NewJSParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.Parse(tc.source)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !equalStringSlices(result.Exports, tc.wantExp) {
+				t.Errorf("Exports = %v, want %v", result.Exports, tc.wantExp)
+			}
+		})
+	}
+}
+
 func TestJSParser_SupportsExtension(t *testing.T) {
 	parser := NewJSParser()
 

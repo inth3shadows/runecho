@@ -34,8 +34,10 @@ var (
 	exportNamedRegex = regexp.MustCompile(`export\s+\{([^}]+)\}`)
 	// Matches: export const/let/var/function/class name
 	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function)\s+(\w+)`)
-	// Matches: export default name
-	exportDefaultRegex = regexp.MustCompile(`export\s+default\s+(\w+)`)
+	// Matches: export default function Foo / export default class Foo / export default ident.
+	// Three capture groups — first non-empty wins; keywords (function/class/async) in
+	// group 3 are discarded so anonymous defaults don't pollute Exports.
+	exportDefaultRegex = regexp.MustCompile(`export\s+default\s+(?:(?:async\s+)?function\s+(\w+)|class\s+(\w+)|(\w+))`)
 )
 
 // NewJSParser creates a new JavaScript/TypeScript parser.
@@ -238,11 +240,18 @@ func extractExports(source string) []string {
 		}
 	}
 
-	// Default exports: export default foo
+	// Default exports: export default [function|class] Foo
 	matches = exportDefaultRegex.FindAllStringSubmatch(source, -1)
 	for _, match := range matches {
-		if len(match) > 1 {
-			exports = append(exports, match[1])
+		name := match[1] // export default [async] function Foo
+		if name == "" {
+			name = match[2] // export default class Foo
+		}
+		if name == "" && match[3] != "function" && match[3] != "class" && match[3] != "async" {
+			name = match[3] // export default identifier
+		}
+		if name != "" {
+			exports = append(exports, name)
 		}
 	}
 

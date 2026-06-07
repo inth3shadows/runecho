@@ -241,10 +241,6 @@ is intentionally honest: gaps here are tracked issues, not silently accepted.
 
 **Known gaps in the JS/TS/JSX parser** (evidence for the AST go/no-go decision, issue #15):
 
-- `export default function Foo()` and `export default class Foo` — the
-  `exportDefaultRegex` captures the keyword (`function` / `class`) as the
-  export name instead of the identifier. The function/class itself is correctly
-  captured in Functions/Classes via its own regex. Over-capture in Exports.
 - `const Name: Type = (...) => …` — TypeScript-annotated arrow components are
   not captured in Functions. The `: Type` annotation between the variable name
   and `=` breaks `arrowFuncRegex`. Under-capture.

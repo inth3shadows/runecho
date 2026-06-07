@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/gitutil"
 )
 
 // Repo is an enrolled repository — the stable identity the oracle scopes all
@@ -251,5 +253,62 @@ func UniqueName(db *DB, desired string) (string, error) {
 			return name, nil
 		}
 		name = fmt.Sprintf("%s-%d", desired, i)
+	}
+}
+
+// ResolveRepo finds the enrolled repo whose git tree contains dir and returns
+// it with the enrolled path (repoRoot) and ok=true. Returns ok=false when no
+// enrolled repo is reachable from dir (not enrolled, non-git dir, or DB error).
+//
+// Three-tier resolution mirrors the guard's logic so CLI and guard always agree:
+//
+//  1. CommonDir fast path — git-common-dir keyed lookup. The common-dir is
+//     stable across all worktrees of a repo (bare or not), so a bare-repo
+//     claudew worktree resolves in O(1) once common_dir is populated.
+//  2. TopLevel tier — git rev-parse --show-toplevel → GetRepoByPath. Handles
+//     regular repos enrolled before V4 populated common_dir; backfills on hit.
+//  3. Worktree shim — git worktree list → try each registered worktree path.
+//     Covers bare-repo layouts where the enrollment used a specific worktree.
+//     Also backfills common_dir so the next call takes the fast path.
+//
+// repoRoot is the enrolled path (repo.Path) in all tiers — callers that need
+// a different directory (e.g. the user's actual cwd for live IR generation)
+// should ignore repoRoot and use their own path.
+func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
+	// Tier 1: common-dir fast path.
+	commonDir, cdErr := gitutil.CommonDir(dir)
+	if cdErr == nil {
+		if r, err := db.GetRepoByCommonDir(commonDir); err == nil && r != nil {
+			return r, r.Path, true
+		}
+	}
+	// Tier 2: git top-level → exact path lookup.
+	topLevel, err := gitutil.TopLevel(dir)
+	if err != nil {
+		return nil, "", false
+	}
+	if r, err := db.GetRepoByPath(topLevel); err == nil && r != nil {
+		db.backfillCommonDir(r.ID, commonDir, cdErr)
+		return r, topLevel, true
+	}
+	// Tier 3: worktree shim — check all registered worktree paths.
+	for _, wt := range gitutil.WorktreePaths(topLevel) {
+		if wt == topLevel {
+			continue
+		}
+		if r, err := db.GetRepoByPath(wt); err == nil && r != nil {
+			db.backfillCommonDir(r.ID, commonDir, cdErr)
+			return r, wt, true
+		}
+	}
+	return nil, "", false
+}
+
+// backfillCommonDir records common_dir on a repo resolved via a compat tier so
+// the next ResolveRepo call takes the O(1) fast path. Best-effort: errors are
+// silently dropped (the compat tier remains as fallback).
+func (db *DB) backfillCommonDir(repoID int64, commonDir string, cdErr error) {
+	if cdErr == nil && commonDir != "" {
+		_ = db.SetRepoCommonDir(repoID, commonDir)
 	}
 }

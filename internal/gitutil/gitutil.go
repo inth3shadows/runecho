@@ -37,3 +37,37 @@ func CommonDir(dir string) (string, error) {
 	}
 	return filepath.Clean(cd), nil
 }
+
+// TopLevel returns the absolute path of the git working tree containing dir
+// (equivalent to git rev-parse --show-toplevel). Returns an error when dir is
+// not inside a git working tree (e.g. a bare repository root or a non-git dir).
+func TopLevel(dir string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// WorktreePaths returns all working-tree paths registered for the git repo
+// containing dir, parsed from `git worktree list --porcelain`. Returns nil on
+// any error (non-git dir, git not available).
+func WorktreePaths(dir string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if after, ok := strings.CutPrefix(line, "worktree "); ok {
+			if p := strings.TrimSpace(after); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
+}

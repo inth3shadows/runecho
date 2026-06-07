@@ -469,18 +469,194 @@ func TestVerify_HappyPath(t *testing.T) {
 	}
 }
 
-// verify with no session-start snapshot must exit 0 and inform the user.
-// Issue #14 deferred: "no snapshot" exits 0 — lock it.
-func TestVerify_NoSnapshot_Exits0(t *testing.T) {
+// verify when repo is not enrolled must exit 0 and report on stderr.
+// Issue #14 deferred: "not enrolled" exits 0 — lock it.
+func TestVerify_NotEnrolled_Exits0(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir)
 
-	code, out, _ := runWith(t, home, []string{"runecho-ir", "verify", dir})
+	code, _, stderr := runWith(t, home, []string{"runecho-ir", "verify", dir})
 	if code != 0 {
-		t.Fatalf("verify no snapshot: got code %d, want 0 (issue #14 deferred inconsistency)", code)
+		t.Fatalf("verify not-enrolled: got code %d, want 0 (issue #14 deferred inconsistency)", code)
+	}
+	if !strings.Contains(stderr, "not enrolled") {
+		t.Errorf("stderr %q: expected \"not enrolled\"", stderr)
+	}
+}
+
+// verify with an enrolled repo but no session-start snapshot must exit 0.
+// Issue #14 deferred: "no snapshot" exits 0 — lock it.
+func TestVerify_EnrolledNoSessionStart_Exits0(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	// Enroll the repo without creating a session-start snapshot.
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", dir})
+	if code != 0 {
+		t.Fatalf("repo add: code %d, out=%q", code, out)
+	}
+
+	code, out, _ = runWith(t, home, []string{"runecho-ir", "verify", dir})
+	if code != 0 {
+		t.Fatalf("verify enrolled no session-start: got code %d, want 0 (issue #14 deferred)", code)
 	}
 	if !strings.Contains(out, "No session-start snapshot found") {
 		t.Errorf("stdout %q: expected \"No session-start snapshot found\"", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worktree identity e2e tests (issue #7)
+// ---------------------------------------------------------------------------
+
+// irGitInitWithCommit creates a git repo with one commit so git worktree add works.
+func irGitInitWithCommit(t *testing.T, dir string) {
+	t.Helper()
+	irGitInit(t, dir)
+	gitCmd(t, dir, "add", ".")
+	gitCmd(t, dir, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "init")
+}
+
+// gitCmd runs a git subcommand in dir and fatals on error.
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	full := append([]string{"-C", dir}, args...)
+	if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// gitWorktreeAdd creates a linked worktree at linkedDir with a new branch derived
+// from the repo's current HEAD (avoids needing a ref to exist first).
+func gitWorktreeAdd(t *testing.T, mainDir, linkedDir string) {
+	t.Helper()
+	gitCmd(t, mainDir, "worktree", "add", linkedDir, "-b", filepath.Base(linkedDir))
+}
+
+// enrolledRepoCount returns the number of data rows in `runecho-ir repo list` output.
+func enrolledRepoCount(t *testing.T, home string) int {
+	t.Helper()
+	_, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "list"})
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "NAME") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "No repos") {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// TestWorktree_LinkedWorktreeParity proves snapshot/diff/verify all resolve the
+// enrolled repo from a linked worktree without creating a duplicate enrollment.
+func TestWorktree_LinkedWorktreeParity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	home := t.TempDir()
+	mainDir := t.TempDir()
+	linkedDir := filepath.Join(t.TempDir(), "linked") // worktree add needs the leaf to not exist
+
+	irGitInitWithCommit(t, mainDir)
+	gitWorktreeAdd(t, mainDir, linkedDir)
+
+	// Enroll from the main worktree.
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", mainDir})
+	if code != 0 {
+		t.Fatalf("repo add from main: code %d, out=%q", code, out)
+	}
+
+	// snapshot from linked worktree — must resolve the same enrolled repo.
+	code, out, _ = runWith(t, home, []string{"runecho-ir", "snapshot", "--label=session-start", linkedDir})
+	if code != 0 {
+		t.Fatalf("snapshot from linked worktree: code %d, out=%q", code, out)
+	}
+	if !strings.Contains(out, "Snapshot saved") {
+		t.Errorf("snapshot output %q: expected \"Snapshot saved\"", out)
+	}
+
+	// diff --since from linked worktree — must work (exit 0, same repo's snapshots).
+	code, _, _ = runWith(t, home, []string{"runecho-ir", "diff", "--since=session-start", linkedDir})
+	if code != 0 {
+		t.Fatalf("diff --since from linked worktree: got code %d, want 0", code)
+	}
+
+	// verify from linked worktree — must find the session-start snapshot.
+	code, out, _ = runWith(t, home, []string{"runecho-ir", "verify", linkedDir})
+	if code != 0 {
+		t.Fatalf("verify from linked worktree: got code %d, want 0", code)
+	}
+	if !strings.Contains(out, "Verifying against snapshot") {
+		t.Errorf("verify output %q: expected \"Verifying against snapshot\"", out)
+	}
+
+	// No duplicate enrollment — still exactly 1 repo in the store.
+	if got := enrolledRepoCount(t, home); got != 1 {
+		t.Errorf("enrolled repo count = %d, want 1 (no duplicate from linked-worktree snapshot)", got)
+	}
+}
+
+// TestWorktree_NoDuplicateEnrollment verifies that auto-enroll from a linked
+// worktree of an already-enrolled repo reuses the existing enrollment.
+func TestWorktree_NoDuplicateEnrollment(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	home := t.TempDir()
+	mainDir := t.TempDir()
+	linkedDir := filepath.Join(t.TempDir(), "linked2")
+
+	irGitInitWithCommit(t, mainDir)
+	gitWorktreeAdd(t, mainDir, linkedDir)
+
+	// Enroll the main worktree explicitly.
+	code, _, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", mainDir})
+	if code != 0 {
+		t.Fatalf("repo add: code %d", code)
+	}
+
+	// snapshot from linked worktree triggers auto-enroll path — must reuse existing.
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=manual", linkedDir})
+	if code != 0 {
+		t.Fatalf("snapshot from linked worktree: code %d, out=%q", code, out)
+	}
+
+	if got := enrolledRepoCount(t, home); got != 1 {
+		t.Errorf("enrolled repo count = %d after linked-worktree snapshot, want 1", got)
+	}
+}
+
+// TestWorktree_AutoEnrollUsesTopLevel verifies that first-time auto-enroll from
+// a subdir uses the git top-level path, not the literal cwd, as the enrolled path.
+// This ensures future worktree lookups find the same enrollment.
+func TestWorktree_AutoEnrollUsesTopLevel(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	sub := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// snapshot from a subdir — auto-enrolls at the git top-level, not sub.
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=s", sub})
+	if code != 0 {
+		t.Fatalf("snapshot from subdir: code %d, out=%q", code, out)
+	}
+
+	// The enrolled path must be the git top-level (dir), not the subdir.
+	_, listOut, _ := runWith(t, home, []string{"runecho-ir", "repo", "list"})
+	if strings.Contains(listOut, sub) {
+		t.Errorf("repo list contains subdir %q — enrolled path should be the git top-level %q\nlist:\n%s", sub, dir, listOut)
+	}
+	if !strings.Contains(listOut, dir) {
+		t.Errorf("repo list does not contain git top-level %q\nlist:\n%s", dir, listOut)
 	}
 }

@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,11 +38,6 @@ import (
 )
 
 const version = "0.1.0"
-
-// gitTimeout caps each git subprocess in the hook path. If git blocks
-// (credential helper, network mount, locked index), the hook would otherwise
-// hang indefinitely.
-const gitTimeout = 3 * time.Second
 
 func main() {
 	os.Exit(run())
@@ -107,8 +101,8 @@ func runArgs(args []string) int {
 	}
 	defer db.Close()
 
-	// Resolve the enrolled repo for the current working tree. resolveRepo keys on
-	// the git-common-dir (stable across all worktrees), so bare-repo claudew
+	// Resolve the enrolled repo for the current working tree. ResolveRepo keys
+	// on git-common-dir (stable across all worktrees), so bare-repo claudew
 	// worktrees resolve in O(1). repoRoot is the enrolled repo's real working
 	// tree — where ParseStagedDiff and the ignorefile are read from.
 	cwd, err := os.Getwd()
@@ -116,7 +110,7 @@ func runArgs(args []string) int {
 		warnf("cannot determine working directory: %v", err)
 		return degradedExit(strict)
 	}
-	repo, repoRoot, ok := resolveRepo(db, cwd)
+	repo, repoRoot, ok := db.ResolveRepo(cwd)
 	if !ok {
 		// Repo not enrolled is always a silent skip — not a degraded state, just
 		// an unenrolled repo. RUNECHO_GUARD_STRICT=1 does not change this.
@@ -154,7 +148,7 @@ func runArgs(args []string) int {
 	}
 
 	// Parse staged diff.
-	diffCtx, diffCancel := context.WithTimeout(context.Background(), gitTimeout)
+	diffCtx, diffCancel := context.WithTimeout(context.Background(), gitutil.Timeout)
 	defer diffCancel()
 	diffs, partial, err := guard.ParseStagedDiff(diffCtx, repoRoot)
 	if err != nil {
@@ -420,7 +414,7 @@ func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath strin
 	}
 	defer db.Close()
 
-	repo, repoRoot, resolved := resolveRepo(db, dir)
+	repo, repoRoot, resolved := db.ResolveRepo(dir)
 	if !resolved {
 		// Not enrolled — silent skip, not a degraded state.
 		return nil, "", time.Time{}, "", "", true, false
@@ -488,136 +482,6 @@ func hookAsk(out io.Writer, reason string) {
 			"permissionDecisionReason": reason,
 		},
 	})
-}
-
-// resolveRepo finds the enrolled repo whose worktree contains dir, and the real
-// working-tree path (a git directory) to read the staged diff and ignorefile
-// from. It resolves in three tiers:
-//
-//  1. Fast path — git-common-dir. The common-dir is the stable identity shared
-//     by every worktree of a repo (bare or not), so a bare-repo claudew worktree
-//     resolves in O(1): one git subprocess plus one indexed query. This is the
-//     steady-state path for all repos enrolled under schema V4.
-//  2. Enrolled-path lookup — for repos enrolled before V4 populated common_dir
-//     (or when git-common-dir is unavailable). On a hit, common_dir is
-//     backfilled so subsequent fires take the fast path.
-//  3. Worktree-list compat shim — findEnrolledRepoViaWorktrees, for pre-V4
-//     bare-repo enrollments whose path is a specific worktree. Also backfills.
-//
-// repoRoot is always the enrolled repo.Path (a real working tree). The symbol
-// set is loaded by repo.ID downstream, independent of this path.
-func resolveRepo(db *snapshot.DB, dir string) (*snapshot.Repo, string, bool) {
-	commonDir, cdErr := gitutil.CommonDir(dir)
-	if cdErr == nil {
-		if repo, err := db.GetRepoByCommonDir(commonDir); err == nil && repo != nil {
-			return repo, repo.Path, true
-		}
-	}
-	// Compat tiers for pre-V4 repos (or when git-common-dir is unavailable).
-	repoRoot, err := gitTopLevelFor(dir)
-	if err != nil {
-		return nil, "", false
-	}
-	if repo, err := db.GetRepoByPath(repoRoot); err == nil && repo != nil {
-		backfillCommonDir(db, repo.ID, commonDir, cdErr)
-		return repo, repoRoot, true
-	}
-	if repo, enrolledRoot := findEnrolledRepoViaWorktrees(db, repoRoot); repo != nil {
-		backfillCommonDir(db, repo.ID, commonDir, cdErr)
-		return repo, enrolledRoot, true
-	}
-	return nil, "", false
-}
-
-// backfillCommonDir records common_dir on a repo resolved via a compat tier, so
-// the next guard fire takes resolveRepo's O(1) fast path. Best-effort: a write
-// error or an unavailable git-common-dir simply leaves the compat tier in place.
-func backfillCommonDir(db *snapshot.DB, repoID int64, commonDir string, cdErr error) {
-	if cdErr == nil && commonDir != "" {
-		_ = db.SetRepoCommonDir(repoID, commonDir)
-	}
-}
-
-// findEnrolledRepoViaWorktrees is the legacy compatibility shim for repos
-// enrolled before schema V4 populated common_dir (resolveRepo's tier 3). It
-// handles bare-repo worktrees (claudew agent dirs) where git show-toplevel
-// returns a transient worktree path that was never enrolled, trying:
-//  1. git-common-dir — the bare root for bare repos; the .git parent for regular
-//     linked worktrees. Covers regular non-bare linked-worktree repos cleanly.
-//  2. git worktree list — each registered worktree path. Covers bare-repo layouts
-//     where enrollment used a specific worktree (e.g. the `main` branch worktree).
-//
-// Returns both the matched repo and the enrolled root path (a real git
-// directory). resolveRepo backfills common_dir on a hit here, so this shim
-// self-retires after the first guard fire on each pre-V4 repo.
-func findEnrolledRepoViaWorktrees(db *snapshot.DB, worktreePath string) (*snapshot.Repo, string) {
-	if commonDir, err := gitCommonDirFor(worktreePath); err == nil {
-		if !filepath.IsAbs(commonDir) {
-			commonDir = filepath.Join(worktreePath, commonDir)
-		}
-		commonDir = filepath.Clean(commonDir)
-		// Non-bare repos: common-dir is the .git dir — strip to get the repo root.
-		if filepath.Base(commonDir) == ".git" {
-			commonDir = filepath.Dir(commonDir)
-		}
-		// Skip if common-dir resolved to worktreePath itself (bare repo main
-		// worktree: git returns "." which joins to worktreePath). That path was
-		// already tried by the caller; re-checking it wastes a DB roundtrip.
-		if commonDir != worktreePath {
-			if repo, err := db.GetRepoByPath(commonDir); err == nil && repo != nil {
-				return repo, commonDir
-			}
-		}
-	}
-	for _, wt := range gitWorktreePathsFor(worktreePath) {
-		if wt == worktreePath {
-			continue
-		}
-		if repo, err := db.GetRepoByPath(wt); err == nil && repo != nil {
-			return repo, wt
-		}
-	}
-	return nil, ""
-}
-
-func gitCommonDirFor(dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-common-dir").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// gitWorktreePathsFor returns all working-tree paths registered for the git
-// repo containing dir, parsed from `git worktree list --porcelain`.
-func gitWorktreePathsFor(dir string) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "worktree", "list", "--porcelain").Output()
-	if err != nil {
-		return nil
-	}
-	var paths []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if after, ok := strings.CutPrefix(line, "worktree "); ok {
-			if p := strings.TrimSpace(after); p != "" {
-				paths = append(paths, p)
-			}
-		}
-	}
-	return paths
-}
-
-func gitTopLevelFor(dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // runechoDir is the package-local alias to the shared store helper.

@@ -33,15 +33,15 @@ func enrolledStore(t *testing.T, root string, funcs []string) string {
 	}
 	defer db.Close()
 
-	top, err := gitTopLevelFor(root)
+	top, err := gitutil.TopLevel(root)
 	if err != nil {
-		t.Fatalf("gitTopLevelFor: %v", err)
+		t.Fatalf("gitutil.TopLevel: %v", err)
 	}
 	id, err := db.EnrollRepo("r", top, top, 0)
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
-	// Pin common_dir so resolveRepo takes the O(1) fast path (matches steady state).
+	// Pin common_dir so ResolveRepo takes the O(1) fast path (matches steady state).
 	if cd, err := gitutil.CommonDir(top); err == nil {
 		_ = db.SetRepoCommonDir(id, cd)
 	}
@@ -501,15 +501,15 @@ func TestStrictMode_HookMode_StoreDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open store: %v", err)
 	}
-	top, err := gitTopLevelFor(repoRoot)
+	top, err := gitutil.TopLevel(repoRoot)
 	if err != nil {
-		t.Fatalf("gitTopLevelFor: %v", err)
+		t.Fatalf("gitutil.TopLevel: %v", err)
 	}
 	id, err := db.EnrollRepo("r", top, top, 0)
 	if err != nil {
 		t.Fatalf("EnrollRepo: %v", err)
 	}
-	// Pin common_dir so resolveRepo resolves.
+	// Pin common_dir so ResolveRepo resolves.
 	if cd, err := gitutil.CommonDir(top); err == nil {
 		_ = db.SetRepoCommonDir(id, cd)
 	}

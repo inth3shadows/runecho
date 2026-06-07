@@ -32,12 +32,12 @@ func openTempDB(t *testing.T) *snapshot.DB {
 }
 
 // enrollTopLevel enrolls the git working tree containing root, using the path git
-// itself reports (the enrolled path must match gitTopLevelFor for the path tier).
+// itself reports (the enrolled path must match the path tier in ResolveRepo).
 func enrollTopLevel(t *testing.T, db *snapshot.DB, root string) (int64, string) {
 	t.Helper()
-	top, err := gitTopLevelFor(root)
+	top, err := gitutil.TopLevel(root)
 	if err != nil {
-		t.Fatalf("gitTopLevelFor: %v", err)
+		t.Fatalf("gitutil.TopLevel: %v", err)
 	}
 	id, err := db.EnrollRepo("r", top, top, 0)
 	if err != nil {
@@ -66,9 +66,9 @@ func TestResolveRepo_CommonDirFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repo, repoRoot, ok := resolveRepo(db, sub)
+	repo, repoRoot, ok := db.ResolveRepo(sub)
 	if !ok {
-		t.Fatal("resolveRepo did not resolve via common-dir fast path")
+		t.Fatal("db.ResolveRepo did not resolve via common-dir fast path")
 	}
 	if repo.ID != id {
 		t.Errorf("repo.ID = %d, want %d", repo.ID, id)
@@ -87,9 +87,9 @@ func TestResolveRepo_PathTierBackfillsCommonDir(t *testing.T) {
 	id, top := enrollTopLevel(t, db, root)
 	// Deliberately no SetRepoCommonDir — simulates a pre-V4 enrollment.
 
-	repo, repoRoot, ok := resolveRepo(db, top)
+	repo, repoRoot, ok := db.ResolveRepo(top)
 	if !ok {
-		t.Fatal("resolveRepo did not resolve via enrolled-path tier")
+		t.Fatal("db.ResolveRepo did not resolve via enrolled-path tier")
 	}
 	if repo.ID != id || repoRoot != top {
 		t.Errorf("got id=%d root=%q, want id=%d root=%q", repo.ID, repoRoot, id, top)
@@ -110,8 +110,8 @@ func TestResolveRepo_Unenrolled(t *testing.T) {
 	gitInit(t, root)
 	db := openTempDB(t)
 
-	if _, _, ok := resolveRepo(db, root); ok {
-		t.Error("resolveRepo resolved an unenrolled repo")
+	if _, _, ok := db.ResolveRepo(root); ok {
+		t.Error("db.ResolveRepo resolved an unenrolled repo")
 	}
 }
 

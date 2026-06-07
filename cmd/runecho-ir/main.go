@@ -28,6 +28,7 @@ import (
 //	runecho-ir log [--n=10] [root]
 //	runecho-ir verify [--session=""] [root]
 //	runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]
+//	runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]
 //	runecho-ir validate-claims --text=<file> [--ir=<path>]
 func main() {
 	os.Exit(run())
@@ -54,6 +55,8 @@ func run() int {
 			return runRepo(os.Args[2:])
 		case "backup":
 			return runBackup(os.Args[2:])
+		case "truth-trail":
+			return runTruthTrail(os.Args[2:])
 		case "validate-claims":
 			return runValidateClaims(os.Args[2:])
 		case "--help", "-h", "help":
@@ -84,6 +87,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name>")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
 }
 
@@ -886,6 +890,81 @@ func lookupRepoID(db *snapshot.DB, root string) int64 {
 		return -1
 	}
 	return repo.ID
+}
+
+// runTruthTrail fuses diff, callers, churn, and stale-claims into one change receipt.
+// Exit 0 always (informational), except exit 1 when --text is given and stale claims are found.
+func runTruthTrail(args []string) int {
+	fs := flag.NewFlagSet("truth-trail", flag.ExitOnError)
+	since := fs.String("since", "session-start", "baseline label (diff since latest snapshot with this label vs live code)")
+	sessionID := fs.String("session", "", "filter by session ID (used with --since)")
+	textFile := fs.String("text", "", "path to prose file to check for stale symbol refs")
+	fs.Parse(args)
+
+	root, code := resolveRoot(fs.Args())
+	if code != 0 {
+		return code
+	}
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
+	defer db.Close()
+
+	repoID := lookupRepoID(db, root)
+	if repoID < 0 {
+		fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
+		return 0
+	}
+
+	var meta *snapshot.SnapshotMeta
+	var err error
+	if *sessionID != "" {
+		meta, err = db.GetLatestByLabelSession(repoID, *since, *sessionID)
+	} else {
+		meta, err = db.GetLatestByLabel(repoID, *since)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	if meta == nil {
+		suffix := ""
+		if *sessionID != "" {
+			suffix = fmt.Sprintf(" (session %q)", *sessionID)
+		}
+		fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s\n", *since, suffix)
+		fmt.Fprintf(os.Stderr, "Run: runecho-ir snapshot --label=%s\n", *since)
+		return 0
+	}
+
+	liveIR, _, irCode := buildIR(root, repoFileCap(db, root))
+	if irCode != 0 {
+		return irCode
+	}
+
+	text := ""
+	if *textFile != "" {
+		data, err := os.ReadFile(*textFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read text file %q: %v\n", *textFile, err)
+			return 1
+		}
+		text = string(data)
+	}
+
+	trail, err := snapshot.TruthTrail(db, repoID, *meta, liveIR, 0, text)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	fmt.Print(snapshot.FormatTrail(trail))
+
+	if len(trail.StaleClaims) > 0 {
+		return 1
+	}
+	return 0
 }
 
 // printErr writes "Error: <err>" to stderr and returns exit code 1.

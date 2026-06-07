@@ -1,5 +1,7 @@
 # RunEcho
 
+[![CI](https://github.com/inth3shadows/runecho/actions/workflows/ci.yml/badge.svg)](https://github.com/inth3shadows/runecho/actions/workflows/ci.yml)
+
 RunEcho is a deterministic **code-truth oracle for AI coding agents**. It gives an
 assistant (Claude Code, Codex, or any MCP client) a ground-truth view of what
 symbols actually exist in a repo and what *structurally* changed between two
@@ -120,8 +122,9 @@ RunEcho is strongest when you want **deterministic structure and guardrails**,
 not general-purpose code intelligence.
 
 - It tracks top-level symbols and imports/exports, not full type information.
-- The JS/TS family parser is intentionally shallow. Complex syntax can still be
-  approximated rather than fully understood.
+- All parsers are intentionally shallow (line-regex, not AST). Each language has
+  known gaps — see the [Parser Capability Matrix](TECHNICAL.md#parser-capability-matrix)
+  for the per-language honest accounting.
 - The guard looks for the common hallucination shape: unresolved **bare calls**.
   It does not try to prove every qualified call or dynamic dispatch path.
 - Snapshots, diffs, and hash queries are local and deterministic. There is no

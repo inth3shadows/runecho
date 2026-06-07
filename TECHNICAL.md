@@ -146,7 +146,8 @@ scan, backfilling `common_dir` on a hit so the next fire takes the fast path.
 
 Residual false positives are intrinsic to shallow static analysis
 (dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
-~5% for Python — which is why hook mode asks instead of denying.
+~5% for Python across the 40-case guard test corpus — which is why hook mode
+asks instead of denying.
 
 ## Storage Schema
 

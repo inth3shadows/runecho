@@ -1,9 +1,9 @@
 package main
 
 // Entrypoint tests for runecho-ir. Each test sets os.Args and RUNECHO_HOME,
-// then calls run() directly — no subprocess, no process exit. Coverage targets
-// the behaviors locked by issue #14 (exit-code inconsistencies deliberately
-// preserved) plus the correctness-critical cross-repo diff refusal.
+// then calls run() directly — no subprocess, no process exit. Coverage locks
+// the exit-code contract (issue #14) and the correctness-critical cross-repo
+// diff refusal. Contract: ExitOK=0, ExitNoData=1, ExitError=2.
 //
 // Pattern mirrors cmd/runecho-guard/main_test.go: gitInit helper, TempDir for
 // both the git repo and the central store, RUNECHO_HOME to redirect the store.
@@ -126,8 +126,8 @@ func TestVersion(t *testing.T) {
 func TestUnknownFlag(t *testing.T) {
 	home := t.TempDir()
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "--bogus-flag"})
-	if code != 1 {
-		t.Fatalf("unknown flag: got code %d, want 1", code)
+	if code != ExitError {
+		t.Fatalf("unknown flag: got code %d, want %d (ExitError)", code, ExitError)
 	}
 	if !strings.Contains(stderr, "unknown flag") {
 		t.Errorf("stderr %q does not mention \"unknown flag\"", stderr)
@@ -245,10 +245,10 @@ func TestRepoRemove_Existing(t *testing.T) {
 
 func TestRepoRemove_Missing(t *testing.T) {
 	home := t.TempDir()
-	// No repos enrolled — rm must exit 1 and report "No repo named".
+	// No repos enrolled — rm must exit ExitError (bad reference) and report "No repo named".
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "repo", "rm", "does-not-exist"})
-	if code != 1 {
-		t.Fatalf("repo rm missing: got code %d, want 1", code)
+	if code != ExitError {
+		t.Fatalf("repo rm missing: got code %d, want %d (ExitError)", code, ExitError)
 	}
 	if !strings.Contains(stderr, "No repo named") {
 		t.Errorf("stderr %q: expected \"No repo named\"", stderr)
@@ -306,8 +306,7 @@ func TestSnapshot(t *testing.T) {
 // diff --since happy path
 // ---------------------------------------------------------------------------
 
-// diff --since with a matching snapshot must exit 0 — this is one of the
-// exit-code inconsistencies locked for issue #14 (no snapshot also exits 0).
+// diff --since with a matching snapshot must exit 0 (ExitOK).
 func TestDiffSince_HappyPath(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
@@ -326,9 +325,8 @@ func TestDiffSince_HappyPath(t *testing.T) {
 	}
 }
 
-// diff --since with no matching snapshot must exit 0.
-// Issue #14 deferred: "no data" exits 0 in this path — lock it here.
-func TestDiffSince_NoMatchingSnapshot_Exits0(t *testing.T) {
+// diff --since with no matching snapshot must exit ExitNoData (1).
+func TestDiffSince_NoMatchingSnapshot_Exits1(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir)
@@ -336,27 +334,26 @@ func TestDiffSince_NoMatchingSnapshot_Exits0(t *testing.T) {
 	// Enroll with a snapshot under a different label.
 	runWith(t, home, []string{"runecho-ir", "snapshot", "--label=other", dir})
 
-	// --since=missing-label → no snapshot found → must exit 0 (not 1).
+	// --since=missing-label → no snapshot found → ExitNoData.
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "diff", "--since=missing-label", dir})
-	if code != 0 {
-		t.Fatalf("diff --since no-match: got code %d, want 0 (issue #14 deferred inconsistency)", code)
+	if code != ExitNoData {
+		t.Fatalf("diff --since no-match: got code %d, want %d (ExitNoData)", code, ExitNoData)
 	}
 	if !strings.Contains(stderr, "No snapshot found") {
 		t.Errorf("stderr %q: expected \"No snapshot found\"", stderr)
 	}
 }
 
-// diff --since when the repo is not enrolled must exit 0.
-// Issue #14 deferred: "not enrolled" also exits 0 — lock it here.
-func TestDiffSince_UnenrolledRepo_Exits0(t *testing.T) {
+// diff --since when the repo is not enrolled must exit ExitNoData (1).
+func TestDiffSince_UnenrolledRepo_Exits1(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir)
 
 	// No enrollment, no snapshots.
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "diff", "--since=manual", dir})
-	if code != 0 {
-		t.Fatalf("diff --since unenrolled: got code %d, want 0 (issue #14 deferred inconsistency)", code)
+	if code != ExitNoData {
+		t.Fatalf("diff --since unenrolled: got code %d, want %d (ExitNoData)", code, ExitNoData)
 	}
 	if !strings.Contains(stderr, "not enrolled") {
 		t.Errorf("stderr %q: expected \"not enrolled\"", stderr)
@@ -367,15 +364,14 @@ func TestDiffSince_UnenrolledRepo_Exits0(t *testing.T) {
 // diff two-ID with missing snapshot (exits 1)
 // ---------------------------------------------------------------------------
 
-// diff <id-a> <id-b> where one ID doesn't exist must exit 1.
-// This is the correct non-zero side of the exit-code inconsistency: two-ID mode
-// treats a missing snapshot as an error (unlike --since, which exits 0).
-func TestDiffTwoID_MissingSnapshot_Exits1(t *testing.T) {
+// diff <id-a> <id-b> where one ID doesn't exist must exit ExitError (2).
+// An explicit snapshot ID that doesn't exist is a hard error (bad reference), not no-data.
+func TestDiffTwoID_MissingSnapshot_Exits2(t *testing.T) {
 	home := t.TempDir()
 	// Non-existent snapshot IDs — no DB rows exist.
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "diff", "9999", "9998"})
-	if code != 1 {
-		t.Fatalf("diff two-ID missing: got code %d, want 1", code)
+	if code != ExitError {
+		t.Fatalf("diff two-ID missing: got code %d, want %d (ExitError)", code, ExitError)
 	}
 	if !strings.Contains(stderr, "not found") {
 		t.Errorf("stderr %q: expected \"not found\"", stderr)
@@ -386,7 +382,7 @@ func TestDiffTwoID_MissingSnapshot_Exits1(t *testing.T) {
 // cross-repo diff refusal (correctness-critical)
 // ---------------------------------------------------------------------------
 
-// diff <id-a> <id-b> across different enrolled repos must exit 1 and print the
+// diff <id-a> <id-b> across different enrolled repos must exit ExitError (2) and print the
 // refusal message. This is correctness-critical: cross-repo diffs are semantically
 // invalid (main.go ~:482).
 func TestDiffCrossRepo_Refused(t *testing.T) {
@@ -422,8 +418,8 @@ func TestDiffCrossRepo_Refused(t *testing.T) {
 	}
 
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "diff", idA, idB})
-	if code != 1 {
-		t.Fatalf("cross-repo diff: got code %d, want 1", code)
+	if code != ExitError {
+		t.Fatalf("cross-repo diff: got code %d, want %d (ExitError)", code, ExitError)
 	}
 	if !strings.Contains(stderr, "Refusing cross-repo diff") {
 		t.Errorf("stderr %q: expected \"Refusing cross-repo diff\"", stderr)
@@ -469,25 +465,23 @@ func TestVerify_HappyPath(t *testing.T) {
 	}
 }
 
-// verify when repo is not enrolled must exit 0 and report on stderr.
-// Issue #14 deferred: "not enrolled" exits 0 — lock it.
-func TestVerify_NotEnrolled_Exits0(t *testing.T) {
+// verify when repo is not enrolled must exit ExitNoData (1) and report on stderr.
+func TestVerify_NotEnrolled_Exits1(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir)
 
 	code, _, stderr := runWith(t, home, []string{"runecho-ir", "verify", dir})
-	if code != 0 {
-		t.Fatalf("verify not-enrolled: got code %d, want 0 (issue #14 deferred inconsistency)", code)
+	if code != ExitNoData {
+		t.Fatalf("verify not-enrolled: got code %d, want %d (ExitNoData)", code, ExitNoData)
 	}
 	if !strings.Contains(stderr, "not enrolled") {
 		t.Errorf("stderr %q: expected \"not enrolled\"", stderr)
 	}
 }
 
-// verify with an enrolled repo but no session-start snapshot must exit 0.
-// Issue #14 deferred: "no snapshot" exits 0 — lock it.
-func TestVerify_EnrolledNoSessionStart_Exits0(t *testing.T) {
+// verify with an enrolled repo but no session-start snapshot must exit ExitNoData (1).
+func TestVerify_EnrolledNoSessionStart_Exits1(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir)
@@ -499,8 +493,8 @@ func TestVerify_EnrolledNoSessionStart_Exits0(t *testing.T) {
 	}
 
 	code, out, _ = runWith(t, home, []string{"runecho-ir", "verify", dir})
-	if code != 0 {
-		t.Fatalf("verify enrolled no session-start: got code %d, want 0 (issue #14 deferred)", code)
+	if code != ExitNoData {
+		t.Fatalf("verify enrolled no session-start: got code %d, want %d (ExitNoData)", code, ExitNoData)
 	}
 	if !strings.Contains(out, "No session-start snapshot found") {
 		t.Errorf("stdout %q: expected \"No session-start snapshot found\"", out)

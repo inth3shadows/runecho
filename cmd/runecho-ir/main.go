@@ -17,6 +17,13 @@ import (
 	"github.com/inth3shadows/runecho/internal/store"
 )
 
+// Exit codes returned by every runecho-ir subcommand.
+const (
+	ExitOK     = 0 // clean run — success or no notable findings
+	ExitNoData = 1 // soft condition: not enrolled, no matching snapshot, stale claims found
+	ExitError  = 2 // hard error: bad args, I/O failure, database error
+)
+
 // Usage: runecho-ir [root-path]
 // Generates .ai/ir.json for the project at root-path (default: current directory).
 // If .ai/ir.json already exists, performs incremental update (only re-parses changed files).
@@ -69,7 +76,7 @@ func run() int {
 			if strings.HasPrefix(os.Args[1], "-") {
 				fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", os.Args[1])
 				printUsage()
-				return 1
+				return ExitError
 			}
 		}
 	}
@@ -108,7 +115,7 @@ func runRepo(args []string) int {
 		return runRepoReindex(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "runecho-ir repo: unknown subcommand %q\n", args[0])
-		return 1
+		return ExitError
 	}
 }
 
@@ -205,7 +212,7 @@ func runRepoList(args []string) int {
 func runRepoRemove(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo rm <name>")
-		return 1
+		return ExitError
 	}
 	db, code := mustOpenDB()
 	if code != 0 {
@@ -218,7 +225,7 @@ func runRepoRemove(args []string) int {
 	}
 	if repo == nil {
 		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
-		return 1
+		return ExitError
 	}
 	if err := db.PurgeRepo(repo.ID); err != nil {
 		return printErr(err)
@@ -233,7 +240,7 @@ func runRepoRemove(args []string) int {
 func runRepoReindex(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo reindex <name>")
-		return 1
+		return ExitError
 	}
 	db, code := mustOpenDB()
 	if code != 0 {
@@ -246,7 +253,7 @@ func runRepoReindex(args []string) int {
 	}
 	if repo == nil {
 		fmt.Fprintf(os.Stderr, "No repo named %q\n", args[0])
-		return 1
+		return ExitError
 	}
 
 	srcRoot := repo.EffectiveSourceRoot()
@@ -338,7 +345,7 @@ func runIndex(args []string) int {
 		if strings.HasPrefix(args[1], "-") {
 			fmt.Fprintf(os.Stderr, "runecho-ir: unknown flag %q\n", args[1])
 			printUsage()
-			return 1
+			return ExitError
 		}
 		rootPath = args[1]
 	}
@@ -346,7 +353,7 @@ func runIndex(args []string) int {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve path %q: %v\n", rootPath, err)
-		return 1
+		return ExitError
 	}
 
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
@@ -384,12 +391,12 @@ func runIndex(args []string) int {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 
 	if err := result.Save(irPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to save IR: %v\n", err)
-		return 1
+		return ExitError
 	}
 
 	shortHash := result.RootHash
@@ -473,7 +480,7 @@ func runDiff(args []string) int {
 		repoID := lookupRepoID(db, root)
 		if repoID < 0 {
 			fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
-			return 0
+			return ExitNoData
 		}
 		var meta *snapshot.SnapshotMeta
 		var err error
@@ -484,7 +491,7 @@ func runDiff(args []string) int {
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			return ExitError
 		}
 		if meta == nil {
 			suffix := ""
@@ -492,7 +499,7 @@ func runDiff(args []string) int {
 				suffix = fmt.Sprintf(" (session %q)", *sessionID)
 			}
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s for root %q\n", *since, suffix, root)
-			return 0
+			return ExitNoData
 		}
 		irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		if irCode != 0 {
@@ -502,7 +509,7 @@ func runDiff(args []string) int {
 		result, diffErr = db.DiffLive(*meta, irData)
 		if diffErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", diffErr)
-			return 1
+			return ExitError
 		}
 	} else {
 		// Two positional ID mode.
@@ -510,38 +517,38 @@ func runDiff(args []string) int {
 		if len(positional) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: runecho-ir diff --since=<label> [root]")
 			fmt.Fprintln(os.Stderr, "       runecho-ir diff <id-a> <id-b> [root]")
-			return 1
+			return ExitError
 		}
 		idA, err := strconv.ParseInt(positional[0], 10, 64)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid snapshot ID %q\n", positional[0])
-			return 1
+			return ExitError
 		}
 		idB, err := strconv.ParseInt(positional[1], 10, 64)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid snapshot ID %q\n", positional[1])
-			return 1
+			return ExitError
 		}
 		metaA, err := db.GetByID(idA)
 		if err != nil || metaA == nil {
 			fmt.Fprintf(os.Stderr, "Snapshot %d not found\n", idA)
-			return 1
+			return ExitError
 		}
 		metaB, err := db.GetByID(idB)
 		if err != nil || metaB == nil {
 			fmt.Fprintf(os.Stderr, "Snapshot %d not found\n", idB)
-			return 1
+			return ExitError
 		}
 		// A diff must never cross repo boundaries (parity with the MCP oracle's
 		// scopedSnapshot). RepoID 0 means an unowned/legacy snapshot — refuse it.
 		if metaA.RepoID == 0 || metaA.RepoID != metaB.RepoID {
 			fmt.Fprintf(os.Stderr, "Refusing cross-repo diff: snapshots %d and %d are not in the same enrolled repo\n", idA, idB)
-			return 1
+			return ExitError
 		}
 		result, err = db.Diff(*metaA, *metaB)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			return ExitError
 		}
 	}
 
@@ -552,7 +559,7 @@ func runDiff(args []string) int {
 		out, err := json.MarshalIndent(snapshot.DiffPayload(result), "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			return ExitError
 		}
 		fmt.Println(string(out))
 	case *compact:
@@ -584,17 +591,17 @@ func runLog(args []string) int {
 
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
-		fmt.Println("No snapshots found.")
-		return 0
+		fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
+		return ExitNoData
 	}
 	metas, err := db.List(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 	if len(metas) == 0 {
 		fmt.Println("No snapshots found.")
-		return 0
+		return ExitNoData
 	}
 
 	fmt.Printf("%-5s  %-15s  %-25s  %-10s  %-8s  %s\n",
@@ -640,7 +647,7 @@ func runVerify(args []string) int {
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
-		return 0
+		return ExitNoData
 	}
 
 	var meta *snapshot.SnapshotMeta
@@ -652,7 +659,7 @@ func runVerify(args []string) int {
 		metas, listErr := db.List(repoID, 100)
 		if listErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", listErr)
-			return 1
+			return ExitError
 		}
 		for i := range metas {
 			if metas[i].Label == "session-start" && metas[i].SessionID == *sessionID {
@@ -664,14 +671,14 @@ func runVerify(args []string) int {
 		meta, err = db.GetLatestByLabel(repoID, "session-start")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			return ExitError
 		}
 	}
 
 	if meta == nil {
 		fmt.Println("No session-start snapshot found.")
 		fmt.Println("Run: runecho-ir snapshot --label=session-start")
-		return 0
+		return ExitNoData
 	}
 
 	irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
@@ -681,7 +688,7 @@ func runVerify(args []string) int {
 	result, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 
 	fmt.Printf("Verifying against snapshot id=%d label=%s session=%s ts=%s\n\n",
@@ -697,14 +704,14 @@ func resolveRoot(args []string) (string, int) {
 	if len(args) > 0 {
 		if strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(os.Stderr, "runecho-ir: unexpected flag %q where root path was expected\n", args[0])
-			return "", 1
+			return "", ExitError
 		}
 		rootPath = args[0]
 	}
 	abs, err := filepath.Abs(rootPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve root %q: %v\n", rootPath, err)
-		return "", 1
+		return "", ExitError
 	}
 	return abs, 0
 }
@@ -729,13 +736,13 @@ func runChurn(args []string) int {
 
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
-		fmt.Println("No snapshots found.")
-		return 0
+		fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
+		return ExitNoData
 	}
 	report, err := db.Churn(repoID, *n)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 
 	if *compact {
@@ -757,7 +764,7 @@ func runValidateClaims(args []string) int {
 
 	if *textFile == "" {
 		fmt.Fprintln(os.Stderr, "Error: --text=<file> required")
-		return 1
+		return ExitError
 	}
 
 	// Load text.
@@ -809,9 +816,9 @@ func runValidateClaims(args []string) int {
 	enc.SetIndent("", "  ")
 	enc.Encode(out)
 	if len(mismatches) > 0 {
-		return 1
+		return ExitNoData
 	}
-	return 0
+	return ExitOK
 }
 
 // runechoDir is the package-local alias to the shared store helper.
@@ -893,7 +900,8 @@ func lookupRepoID(db *snapshot.DB, root string) int64 {
 }
 
 // runTruthTrail fuses diff, callers, churn, and stale-claims into one change receipt.
-// Exit 0 always (informational), except exit 1 when --text is given and stale claims are found.
+// Exits ExitNoData (1) when --text finds stale claims, not enrolled, or no baseline snapshot.
+// Exits ExitError (2) on I/O or database failure.
 func runTruthTrail(args []string) int {
 	fs := flag.NewFlagSet("truth-trail", flag.ExitOnError)
 	since := fs.String("since", "session-start", "baseline label (diff since latest snapshot with this label vs live code)")
@@ -914,7 +922,7 @@ func runTruthTrail(args []string) int {
 	repoID := lookupRepoID(db, root)
 	if repoID < 0 {
 		fmt.Fprintf(os.Stderr, "Repo %q is not enrolled — run: runecho-ir repo add .\n", root)
-		return 0
+		return ExitNoData
 	}
 
 	var meta *snapshot.SnapshotMeta
@@ -926,7 +934,7 @@ func runTruthTrail(args []string) int {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 	if meta == nil {
 		suffix := ""
@@ -935,7 +943,7 @@ func runTruthTrail(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s\n", *since, suffix)
 		fmt.Fprintf(os.Stderr, "Run: runecho-ir snapshot --label=%s\n", *since)
-		return 0
+		return ExitNoData
 	}
 
 	liveIR, _, irCode := buildIR(root, repoFileCap(db, root))
@@ -948,7 +956,7 @@ func runTruthTrail(args []string) int {
 		data, err := os.ReadFile(*textFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot read text file %q: %v\n", *textFile, err)
-			return 1
+			return ExitError
 		}
 		text = string(data)
 	}
@@ -956,21 +964,21 @@ func runTruthTrail(args []string) int {
 	trail, err := snapshot.TruthTrail(db, repoID, *meta, liveIR, 0, text)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		return ExitError
 	}
 
 	fmt.Print(snapshot.FormatTrail(trail))
 
 	if len(trail.StaleClaims) > 0 {
-		return 1
+		return ExitNoData
 	}
-	return 0
+	return ExitOK
 }
 
-// printErr writes "Error: <err>" to stderr and returns exit code 1.
+// printErr writes "Error: <err>" to stderr and returns ExitError.
 // It replaces the old fatal() helper: instead of calling os.Exit directly,
 // callers return the code so main() (and tests) control process exit.
 func printErr(err error) int {
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-	return 1
+	return ExitError
 }

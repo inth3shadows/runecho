@@ -46,7 +46,7 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		return 0, fmt.Errorf("prepare file insert: %w", err)
 	}
 	defer fileStmt.Close()
-	symStmt, err := tx.Prepare(`INSERT INTO symbols (file_id, name, kind) VALUES (?, ?, ?)`)
+	symStmt, err := tx.Prepare(`INSERT INTO symbols (file_id, name, kind, sig_hash) VALUES (?, ?, ?, ?)`)
 	if err != nil {
 		return 0, fmt.Errorf("prepare symbol insert: %w", err)
 	}
@@ -70,7 +70,9 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 			return 0, fmt.Errorf("last insert id for file: %w", err)
 		}
 
-		// Insert symbols: functions, classes, exports, imports.
+		// Insert symbols: functions, classes, exports, imports. sig_hash is the
+		// per-symbol body hash (empty unless the parser produced one — only
+		// AST-extracted functions carry it today).
 		type entry struct {
 			name string
 			kind string
@@ -90,7 +92,8 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		}
 
 		for _, sym := range symbols {
-			if _, err := symStmt.Exec(fileID, sym.name, sym.kind); err != nil {
+			sigHash := file.SymbolHashes[sym.kind+":"+sym.name]
+			if _, err := symStmt.Exec(fileID, sym.name, sym.kind, sigHash); err != nil {
 				return 0, fmt.Errorf("insert symbol %q: %w", sym.name, err)
 			}
 		}
@@ -235,7 +238,7 @@ func (db *DB) loadFilesBySnapshot(snapshotID int64) (map[string]string, error) {
 // loadSymbolsBySnapshot returns path→[]SymbolDelta for all symbols in a snapshot.
 func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta, error) {
 	rows, err := db.conn.Query(
-		`SELECT f.path, s.name, s.kind
+		`SELECT f.path, s.name, s.kind, s.sig_hash
 		 FROM symbols s
 		 JOIN files f ON f.id = s.file_id
 		 WHERE f.snapshot_id = ?
@@ -249,11 +252,11 @@ func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta,
 
 	m := make(map[string][]SymbolDelta)
 	for rows.Next() {
-		var path, name, kind string
-		if err := rows.Scan(&path, &name, &kind); err != nil {
+		var path, name, kind, sigHash string
+		if err := rows.Scan(&path, &name, &kind, &sigHash); err != nil {
 			return nil, err
 		}
-		m[path] = append(m[path], SymbolDelta{Name: name, Kind: kind})
+		m[path] = append(m[path], SymbolDelta{Name: name, Kind: kind, Hash: sigHash})
 	}
 	return m, rows.Err()
 }

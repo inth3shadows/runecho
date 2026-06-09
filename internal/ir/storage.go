@@ -12,10 +12,12 @@ import (
 const DefaultIRPath = ".ai/ir.json"
 
 // IRVersion is the current IR format version. Version 2 added per-file Refs
-// (bare call sites). A loaded IR with an older version must be fully
-// regenerated, not incrementally updated — Update reuses entries for unchanged
-// files verbatim, which would leave their new fields empty forever.
-const IRVersion = 2
+// (bare call sites); version 3 added per-symbol body hashes (SymbolHashes) and
+// the AST-backed Python symbol set; version 4 added per-symbol start lines
+// (SymbolLines) for the repo map. A loaded IR with an older version must be
+// fully regenerated, not incrementally updated — Update reuses entries for
+// unchanged files verbatim, which would leave their new fields empty forever.
+const IRVersion = 4
 
 // IR represents the complete intermediate representation of a codebase.
 type IR struct {
@@ -37,6 +39,15 @@ type FileIR struct {
 	// never disagree: qualified calls, builtins, and (for Go) unexported names
 	// are excluded by the same rules at both ends.
 	Refs []string `json:"refs"`
+	// SymbolHashes maps "kind:name" to a hash of that symbol's source body, for
+	// parsers that extract per-symbol spans (IR v3). It drives modified-symbol
+	// diffing — see parser.FileStructure.SymbolHashes. Omitted when empty.
+	SymbolHashes map[string]string `json:"symbol_hashes,omitempty"`
+	// SymbolLines maps "kind:name" to the symbol's 1-based start line (IR v4),
+	// for `runecho-ir map`. Omitted when empty. The pre-existing functions/
+	// classes/exports/imports arrays are unchanged, so older consumers of
+	// .ai/ir.json keep working.
+	SymbolLines map[string]int `json:"symbol_lines,omitempty"`
 }
 
 // MarshalJSON implements deterministic JSON marshalling for IR.

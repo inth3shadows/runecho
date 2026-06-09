@@ -63,17 +63,24 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 	for path, file := range irData.Files {
 		files[path] = file.Hash
 		var deltas []SymbolDelta
+		add := func(name, kind string) {
+			deltas = append(deltas, SymbolDelta{
+				Name: name,
+				Kind: kind,
+				Hash: file.SymbolHashes[kind+":"+name],
+			})
+		}
 		for _, name := range file.Functions {
-			deltas = append(deltas, SymbolDelta{Name: name, Kind: "function"})
+			add(name, "function")
 		}
 		for _, name := range file.Classes {
-			deltas = append(deltas, SymbolDelta{Name: name, Kind: "class"})
+			add(name, "class")
 		}
 		for _, name := range file.Exports {
-			deltas = append(deltas, SymbolDelta{Name: name, Kind: "export"})
+			add(name, "export")
 		}
 		for _, name := range file.Imports {
-			deltas = append(deltas, SymbolDelta{Name: name, Kind: "import"})
+			add(name, "import")
 		}
 		symbols[path] = deltas
 	}
@@ -102,7 +109,7 @@ func computeDiff(
 	sort.Strings(paths)
 
 	var fileDiffs []FileDiff
-	totalAdded, totalRemoved := 0, 0
+	totalAdded, totalRemoved, totalModified := 0, 0, 0
 
 	for _, path := range paths {
 		aHash, inA := aFiles[path]
@@ -136,9 +143,17 @@ func computeDiff(
 		bSymSet := symbolSet(bSymbols[path])
 
 		for key, sym := range bSymSet {
-			if _, exists := aSymSet[key]; !exists {
+			aSym, exists := aSymSet[key]
+			switch {
+			case !exists:
 				fd.Added = append(fd.Added, sym)
 				totalAdded++
+			case aSym.Hash != "" && sym.Hash != "" && aSym.Hash != sym.Hash:
+				// Present in both, body hash changed in place. Only flagged when
+				// both sides carry a hash, so a cross-version diff (one side has
+				// no hash) never produces a false "modified".
+				fd.Modified = append(fd.Modified, sym)
+				totalModified++
 			}
 		}
 		for key, sym := range aSymSet {
@@ -149,16 +164,18 @@ func computeDiff(
 		}
 		sort.Slice(fd.Added, func(i, j int) bool { return fd.Added[i].Name < fd.Added[j].Name })
 		sort.Slice(fd.Removed, func(i, j int) bool { return fd.Removed[i].Name < fd.Removed[j].Name })
+		sort.Slice(fd.Modified, func(i, j int) bool { return fd.Modified[i].Name < fd.Modified[j].Name })
 
 		fileDiffs = append(fileDiffs, fd)
 	}
 
 	return DiffResult{
-		SnapshotA:    a,
-		SnapshotB:    b,
-		Files:        fileDiffs,
-		TotalAdded:   totalAdded,
-		TotalRemoved: totalRemoved,
+		SnapshotA:     a,
+		SnapshotB:     b,
+		Files:         fileDiffs,
+		TotalAdded:    totalAdded,
+		TotalRemoved:  totalRemoved,
+		TotalModified: totalModified,
 	}
 }
 
@@ -190,6 +207,10 @@ func FormatCompact(d DiffResult) string {
 	remStr := plural(d.TotalRemoved, "symbol")
 	fileStr := plural(modifiedCount, "file")
 
+	if d.TotalModified > 0 {
+		return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, ~%d, %s modified",
+			aShort, bShort, addStr, remStr, d.TotalModified, fileStr)
+	}
 	return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, %s modified",
 		aShort, bShort, addStr, remStr, fileStr)
 }
@@ -208,10 +229,11 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 		files = []FileDiff{}
 	}
 	return map[string]interface{}{
-		"summary":       FormatCompact(d),
-		"total_added":   d.TotalAdded,
-		"total_removed": d.TotalRemoved,
-		"files":         files,
+		"summary":        FormatCompact(d),
+		"total_added":    d.TotalAdded,
+		"total_removed":  d.TotalRemoved,
+		"total_modified": d.TotalModified,
+		"files":          files,
 	}
 }
 
@@ -259,6 +281,9 @@ func FormatFull(d DiffResult) string {
 			for _, sym := range f.Removed {
 				fmt.Fprintf(&sb, "    - %s\n", sym.Name)
 			}
+			for _, sym := range f.Modified {
+				fmt.Fprintf(&sb, "    ~ %s\n", sym.Name)
+			}
 		}
 	}
 
@@ -266,9 +291,10 @@ func FormatFull(d DiffResult) string {
 	writeGroup("added", groups["added"])
 	writeGroup("removed", groups["removed"])
 
-	fmt.Fprintf(&sb, "\nSummary: +%s, -%s across %s\n",
+	fmt.Fprintf(&sb, "\nSummary: +%s, -%s, ~%s across %s\n",
 		plural(d.TotalAdded, "symbol"),
 		plural(d.TotalRemoved, "symbol"),
+		plural(d.TotalModified, "symbol"),
 		plural(len(d.Files), "file"),
 	)
 	return sb.String()

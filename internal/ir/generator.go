@@ -291,12 +291,14 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	sort.Strings(structure.Exports)
 
 	return FileIR{
-		Hash:      hash,
-		Imports:   structure.Imports,
-		Functions: structure.Functions,
-		Classes:   structure.Classes,
-		Exports:   structure.Exports,
-		Refs:      extractRefs(path, string(content)),
+		Hash:         hash,
+		Imports:      structure.Imports,
+		Functions:    structure.Functions,
+		Classes:      structure.Classes,
+		Exports:      structure.Exports,
+		Refs:         extractRefs(path, string(content)),
+		SymbolHashes: structure.SymbolHashes,
+		SymbolLines:  structure.SymbolLines,
 	}, nil
 }
 

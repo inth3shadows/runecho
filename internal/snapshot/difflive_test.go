@@ -61,6 +61,100 @@ func TestDiffLive(t *testing.T) {
 	}
 }
 
+// TestDiffLive_ModifiedSymbol covers in-place symbol changes (Bug 2): a function
+// whose body hash changed while its name is unchanged is reported "modified", not
+// invisible. It also covers the new-function case and asserts the file hash alone
+// no longer hides symbol-level drift.
+func TestDiffLive_ModifiedSymbol(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/repos/r", "", 0)
+
+	// Baseline: reads.py defines get_scope (body hash hA) and set_scope.
+	baseIR := &ir.IR{
+		Version:  ir.IRVersion,
+		RootHash: "r1",
+		Files: map[string]ir.FileIR{
+			"reads.py": {
+				Hash:         "f1",
+				Functions:    []string{"get_scope", "set_scope"},
+				SymbolHashes: map[string]string{"function:get_scope": "hA", "function:set_scope": "hS"},
+			},
+		},
+	}
+	sid, err := db.SaveSnapshot(id, "s", "base", "/repos/r", baseIR)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	base, _ := db.GetByID(sid)
+
+	// Live: get_scope body changed (hA→hB), new _probe added, set_scope unchanged.
+	live := &ir.IR{
+		Version:  ir.IRVersion,
+		RootHash: "r2",
+		Files: map[string]ir.FileIR{
+			"reads.py": {
+				Hash:      "f2",
+				Functions: []string{"_probe", "get_scope", "set_scope"},
+				SymbolHashes: map[string]string{
+					"function:get_scope": "hB",
+					"function:set_scope": "hS",
+					"function:_probe":    "hP",
+				},
+			},
+		},
+	}
+	res, err := db.DiffLive(*base, live)
+	if err != nil {
+		t.Fatalf("DiffLive: %v", err)
+	}
+	if res.TotalAdded != 1 {
+		t.Errorf("TotalAdded = %d, want 1 (_probe)", res.TotalAdded)
+	}
+	if res.TotalModified != 1 {
+		t.Errorf("TotalModified = %d, want 1 (get_scope)", res.TotalModified)
+	}
+	if res.TotalRemoved != 0 {
+		t.Errorf("TotalRemoved = %d, want 0", res.TotalRemoved)
+	}
+	out := FormatFull(res)
+	if !strings.Contains(out, "+ _probe") || !strings.Contains(out, "~ get_scope") {
+		t.Errorf("FormatFull missing expected deltas:\n%s", out)
+	}
+}
+
+// TestDiffLive_NoFalseModified guarantees the cross-version safety rule: when one
+// side carries no body hash (e.g. a pre-v3 snapshot), a body change is NOT
+// reported "modified" — only a real hash-vs-hash difference qualifies.
+func TestDiffLive_NoFalseModified(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/repos/r", "", 0)
+
+	// Baseline written without symbol hashes (simulates an older snapshot).
+	baseIR := &ir.IR{
+		Version:  ir.IRVersion,
+		RootHash: "r1",
+		Files:    map[string]ir.FileIR{"reads.py": {Hash: "f1", Functions: []string{"get_scope"}}},
+	}
+	sid, _ := db.SaveSnapshot(id, "s", "base", "/repos/r", baseIR)
+	base, _ := db.GetByID(sid)
+
+	// Live now has a hash for get_scope, and the file hash changed.
+	live := &ir.IR{
+		Version:  ir.IRVersion,
+		RootHash: "r2",
+		Files: map[string]ir.FileIR{
+			"reads.py": {Hash: "f2", Functions: []string{"get_scope"}, SymbolHashes: map[string]string{"function:get_scope": "hB"}},
+		},
+	}
+	res, err := db.DiffLive(*base, live)
+	if err != nil {
+		t.Fatalf("DiffLive: %v", err)
+	}
+	if res.TotalModified != 0 {
+		t.Errorf("TotalModified = %d, want 0 (one side has no hash)", res.TotalModified)
+	}
+}
+
 // TestDiffLive_NoChange asserts an identical live IR reports zero drift and
 // FormatFull renders the "No structural changes" branch.
 func TestDiffLive_NoChange(t *testing.T) {

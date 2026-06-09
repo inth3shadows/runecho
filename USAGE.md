@@ -149,7 +149,41 @@ runecho-ir diff --since=reindex
 `reindex` is the label that `repo reindex` writes automatically — you can also use
 any label you created with `snapshot --label=<name>`, such as `session-start`.
 Empty diff output means nothing structural changed. Otherwise you get a per-file
-list of added and removed functions, classes, exports, and imports.
+list of added, removed, and modified (`~`) functions, classes, exports, and imports.
+
+### Locate symbols (repo map)
+
+A deterministic "where is X" map of every indexed symbol — no LLM, no guessing.
+Useful to hand an agent at the start of a task so it can find code without
+grepping:
+
+```bash
+runecho-ir map                      # symbol → file:line  (sorted, with a short body hash)
+runecho-ir map --by-file            # group symbols under their file
+runecho-ir map --since=reindex      # only symbols added or modified since a snapshot
+runecho-ir map --kind=class --dir=src/core
+runecho-ir map --json               # machine shape (parity with diff --json)
+```
+
+Each row is `name  kind  file:line  hash`. The 4-char hash is the symbol's body
+hash — the same value `diff` uses to detect in-place changes, so a consumer can
+tell whether a symbol moved or actually changed. A `?` line means that file
+hasn't been re-indexed since the symbol-line data was added (run `repo reindex`).
+Lines come from Python's AST; regex-parsed languages show `?` until they gain
+span support.
+
+For agents, prefer the MCP `locate` tool over loading the whole map — it answers
+a single "where is X" query without spending context on the full table:
+
+```jsonc
+// MCP tool call
+{"name": "locate", "arguments": {"repo": "myproject", "symbol": "fetch"}}
+// → matches Reader.fetch → src/reader.py:42 (exact, prefix, or last-segment match)
+```
+
+To prime a session without dumping the map, `runecho-ir map --header` prints a
+<200-token summary (file/symbol counts, busiest directories, and a pointer to
+`locate`) — suitable for a Claude Code SessionStart hook.
 
 ### Capture a new baseline snapshot
 

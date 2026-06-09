@@ -54,6 +54,8 @@ func run() int {
 			return runSnapshot(os.Args[2:])
 		case "diff":
 			return runDiff(os.Args[2:])
+		case "map":
+			return runMap(os.Args[2:])
 		case "log":
 			return runLog(os.Args[2:])
 		case "verify":
@@ -92,6 +94,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: runecho-ir [root-path]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir snapshot [--label=manual] [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir diff [--since=<label>] [--compact] [--json] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir map [--by-file] [--kind=func|class|export|import] [--dir=<p>] [--since=<label>] [--compact] [--json] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [root]")

@@ -125,6 +125,7 @@ var migrations = []migration{
 	migrateV5, // 4 → 5: add supported_seen — honest-coverage denominator
 	migrateV6, // 5 → 6: refs table — bare call sites per snapshot file
 	migrateV7, // 6 → 7: refs uniqueness — (file_id, name) enforced by the schema
+	migrateV8, // 7 → 8: symbols.sig_hash — per-symbol body hash for modified-symbol diff
 }
 
 // SchemaVersion is the latest schema version this binary understands.
@@ -283,6 +284,17 @@ func migrateV7(tx *sql.Tx) error {
 		`DELETE FROM refs WHERE id NOT IN (SELECT MIN(id) FROM refs GROUP BY file_id, name)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_refs_unique ON refs(file_id, name)`,
 		`DROP INDEX IF EXISTS idx_refs_file`,
+	}
+	return execAll(tx, stmts)
+}
+
+// migrateV8 adds the per-symbol body hash. Existing rows get sig_hash='' (the
+// column default), which the diff treats as "no hash available" — those symbols
+// fall back to add/remove only, never a false "modified". New snapshots written
+// after this migration carry real hashes for AST-extracted symbols.
+func migrateV8(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE symbols ADD COLUMN sig_hash TEXT NOT NULL DEFAULT ''`,
 	}
 	return execAll(tx, stmts)
 }

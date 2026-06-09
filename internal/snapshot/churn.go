@@ -48,6 +48,10 @@ func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 				key := fd.Path + "\x00" + sym.Kind + "\x00" + sym.Name
 				symbolChanges[key]++
 			}
+			for _, sym := range fd.Modified {
+				key := fd.Path + "\x00" + sym.Kind + "\x00" + sym.Name
+				symbolChanges[key]++
+			}
 		}
 	}
 

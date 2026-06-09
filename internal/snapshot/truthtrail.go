@@ -126,10 +126,11 @@ func FormatTrail(r TrailResult) string {
 	}
 
 	if len(r.Diff.Files) > 0 {
-		fmt.Fprintf(&sb, "\nCHANGED  %s  +%s  -%s\n",
+		fmt.Fprintf(&sb, "\nCHANGED  %s  +%s  -%s  ~%s\n",
 			plural(len(r.Diff.Files), "file"),
 			plural(r.Diff.TotalAdded, "symbol"),
 			plural(r.Diff.TotalRemoved, "symbol"),
+			plural(r.Diff.TotalModified, "symbol"),
 		)
 		for _, fd := range r.Diff.Files {
 			hotTag := hotLabel(r.FileHot[fd.Path], r.ChurnDiffs)
@@ -151,6 +152,9 @@ func FormatTrail(r TrailResult) string {
 					fmt.Fprintf(&sb, "    - %s  <- callers: %s%s\n",
 						sym.Name, strings.Join(shown, ", "), suffix)
 				}
+			}
+			for _, sym := range fd.Modified {
+				fmt.Fprintf(&sb, "    ~ %s\n", sym.Name)
 			}
 		}
 	}

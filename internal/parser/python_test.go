@@ -2,6 +2,7 @@ package parser
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,9 @@ func TestPythonParser_DottedImportThenBareParent(t *testing.T) {
 	}
 }
 
+// Private and dunder helpers ARE captured now (AST extraction). The old regex
+// pass dropped them, which broke symbol-level anchoring for downstream consumers
+// that need to know when a private helper a decision depends on changed.
 func TestPythonParser_Functions(t *testing.T) {
 	src := "def process_data(x):\n    return x\n\ndef _private_helper():\n    pass\n\ndef __dunder__():\n    pass\n"
 	p := NewPythonParser()
@@ -63,14 +67,119 @@ func TestPythonParser_Functions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if !slices.Contains(fs.Functions, "process_data") {
-		t.Error("missing function: process_data")
+	for _, want := range []string{"process_data", "_private_helper", "__dunder__"} {
+		if !slices.Contains(fs.Functions, want) {
+			t.Errorf("missing function: %s (got %v)", want, fs.Functions)
+		}
 	}
-	if slices.Contains(fs.Functions, "_private_helper") {
-		t.Error("private function should be excluded")
+}
+
+// Async defs, methods, and nested defs are all first-class function symbols.
+// Methods/nested are qualified by their enclosing scope so identical leaf names
+// in different classes never collide. This is the core Bug 1 regression guard.
+func TestPythonParser_AsyncMethodsNested(t *testing.T) {
+	src := "" +
+		"async def search(q):\n" +
+		"    return q\n" +
+		"\n" +
+		"class Reader:\n" +
+		"    def __init__(self):\n" +
+		"        pass\n" +
+		"\n" +
+		"    async def fetch(self, k):\n" +
+		"        def inner(x):\n" +
+		"            return x\n" +
+		"        return inner(k)\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if slices.Contains(fs.Functions, "__dunder__") {
-		t.Error("dunder function should be excluded")
+	for _, want := range []string{"search", "Reader.__init__", "Reader.fetch", "Reader.fetch.inner"} {
+		if !slices.Contains(fs.Functions, want) {
+			t.Errorf("missing function: %s (got %v)", want, fs.Functions)
+		}
+	}
+	if !slices.Contains(fs.Classes, "Reader") {
+		t.Errorf("missing class Reader (got %v)", fs.Classes)
+	}
+	// Every function symbol must carry a body hash so in-place edits are diffable.
+	for _, fn := range fs.Functions {
+		if fs.SymbolHashes["function:"+fn] == "" {
+			t.Errorf("function %s has no body hash", fn)
+		}
+	}
+}
+
+// A @property getter/setter/deleter share one qualified name and collapse to one
+// symbol; editing ANY variant must change the combined body hash (last-write-wins
+// would hide edits to all but the final variant). Also covers the decorator span:
+// a decorator change must be detected.
+func TestPythonParser_SameNameAndDecorator(t *testing.T) {
+	p := NewPythonParser()
+	base := "" +
+		"class Foo:\n" +
+		"    @property\n" +
+		"    def x(self):\n" +
+		"        return self._x\n" +
+		"\n" +
+		"    @x.setter\n" +
+		"    def x(self, v):\n" +
+		"        self._x = v\n"
+	a, _ := p.Parse(base)
+	// One symbol despite three (here two) defs of Foo.x.
+	count := 0
+	for _, fn := range a.Functions {
+		if fn == "Foo.x" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("Foo.x should collapse to one symbol, got %d in %v", count, a.Functions)
+	}
+	h0 := a.SymbolHashes["function:Foo.x"]
+	if h0 == "" {
+		t.Fatal("Foo.x has no combined body hash")
+	}
+
+	// Edit ONLY the getter body — combined hash must change.
+	editGetter := strings.Replace(base, "return self._x", "return self._x * 2", 1)
+	if got := mustHash(t, p, editGetter); got == h0 {
+		t.Error("editing the getter did not change the combined hash (last-write-wins regression)")
+	}
+
+	// Edit ONLY a decorator — must be detected (span includes the decorator).
+	editDecorator := strings.Replace(base, "@property", "@cached_property", 1)
+	if got := mustHash(t, p, editDecorator); got == h0 {
+		t.Error("editing a decorator did not change the body hash (decorator excluded from span)")
+	}
+}
+
+func mustHash(t *testing.T, p *PythonParser, src string) string {
+	t.Helper()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	return fs.SymbolHashes["function:Foo.x"]
+}
+
+// A function's body hash must change when its signature or body changes, and stay
+// stable otherwise — the mechanism behind modified-symbol diffing (Bug 2).
+func TestPythonParser_BodyHashChangesOnEdit(t *testing.T) {
+	p := NewPythonParser()
+	a, _ := p.Parse("def get_scope():\n    return 1\n")
+	b, _ := p.Parse("def get_scope(default=\"personal\"):\n    return 1\n")
+	c, _ := p.Parse("def get_scope():\n    return 1\n")
+	h := func(fs FileStructure) string { return fs.SymbolHashes["function:get_scope"] }
+	if h(a) == "" {
+		t.Fatal("no body hash produced")
+	}
+	if h(a) == h(b) {
+		t.Error("signature change did not change body hash")
+	}
+	if h(a) != h(c) {
+		t.Error("identical source produced different body hash")
 	}
 }
 

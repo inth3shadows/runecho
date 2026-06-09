@@ -56,10 +56,14 @@ type SnapshotMeta struct {
 	FileCount int
 }
 
-// SymbolDelta is a single symbol added or removed.
+// SymbolDelta is a single symbol added, removed, or modified.
 type SymbolDelta struct {
 	Name string
 	Kind string // "function" | "class" | "export" | "import"
+	// Hash is the symbol's body hash, when the parser produced one (AST-extracted
+	// functions). Empty means "no body hash available" — such a symbol can only be
+	// added/removed, never reported "modified". Not serialized in diff output.
+	Hash string `json:"-"`
 }
 
 // FileDiff is the structural diff for one file between two snapshots.
@@ -70,13 +74,18 @@ type FileDiff struct {
 	HashAfter  string
 	Added      []SymbolDelta
 	Removed    []SymbolDelta
+	// Modified lists symbols present in both snapshots whose body hash changed
+	// (e.g. a function whose signature or body was edited in place). Only symbols
+	// that carry a body hash on both sides can appear here.
+	Modified []SymbolDelta
 }
 
 // DiffResult is the full structural diff between two snapshots.
 type DiffResult struct {
-	SnapshotA    SnapshotMeta
-	SnapshotB    SnapshotMeta
-	Files        []FileDiff
-	TotalAdded   int
-	TotalRemoved int
+	SnapshotA     SnapshotMeta
+	SnapshotB     SnapshotMeta
+	Files         []FileDiff
+	TotalAdded    int
+	TotalRemoved  int
+	TotalModified int
 }

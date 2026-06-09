@@ -114,6 +114,63 @@ func TestOracleHashAndStructure(t *testing.T) {
 	}
 }
 
+func TestOracleLocate(t *testing.T) {
+	o, name, _ := newOracleRepo(t) // demo.go defines exported Alpha, Beta
+
+	// Targeted lookup returns just the match.
+	one := call(t, o.locate, `{"repo":"`+name+`","symbol":"Alpha"}`)
+	if one["count"].(float64) != 1 {
+		t.Fatalf("locate Alpha count = %v, want 1", one["count"])
+	}
+	syms := one["symbols"].([]any)
+	got := syms[0].(map[string]any)
+	if got["name"] != "Alpha" || got["kind"] != "function" {
+		t.Errorf("locate Alpha = %+v, want name=Alpha kind=function", got)
+	}
+	if got["file"] != "demo.go" {
+		t.Errorf("locate Alpha file = %v, want demo.go", got["file"])
+	}
+
+	// No symbol → all function+class symbols (Alpha, Beta).
+	all := call(t, o.locate, `{"repo":"`+name+`"}`)
+	if all["count"].(float64) != 2 {
+		t.Errorf("locate all count = %v, want 2", all["count"])
+	}
+	if all["truncated"].(bool) {
+		t.Error("2 symbols should not be truncated")
+	}
+
+	// No match → empty, not an error.
+	none := call(t, o.locate, `{"repo":"`+name+`","symbol":"Nonexistent"}`)
+	if none["count"].(float64) != 0 {
+		t.Errorf("locate miss count = %v, want 0", none["count"])
+	}
+
+	// Invalid kind is rejected.
+	if _, err := o.locate([]byte(`{"repo":"` + name + `","kind":"bogus"}`)); err == nil {
+		t.Error("expected error for invalid kind")
+	}
+}
+
+func TestSymbolMatches(t *testing.T) {
+	cases := []struct {
+		name, query string
+		want        bool
+	}{
+		{"Reader.fetch", "Reader.fetch", true}, // exact
+		{"Reader.fetch", "Reader", true},       // prefix
+		{"Reader.fetch", "fetch", true},        // last dotted segment
+		{"Reader.fetch", "etch", false},        // not a segment/prefix
+		{"get_scope", "get", true},             // prefix
+		{"get_scope", "scope", false},          // not a prefix, no dot
+	}
+	for _, c := range cases {
+		if got := symbolMatches(c.name, c.query); got != c.want {
+			t.Errorf("symbolMatches(%q, %q) = %v, want %v", c.name, c.query, got, c.want)
+		}
+	}
+}
+
 func TestOracleStatusAndHealth(t *testing.T) {
 	o, name, _ := newOracleRepo(t)
 

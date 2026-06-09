@@ -47,7 +47,9 @@ Three binaries make up the surface area:
 - **`runecho-ir`** — a CLI to enrol repos, index them, take snapshots, and inspect
   diffs and churn from the terminal.
 - **`runecho-mcp`** — a stdio MCP server that exposes read-only oracle tools
-  (`structure`, `diff`, `hash`, `status`, `health`) to an AI agent.
+  (`structure`, `diff`, `hash`, `status`, `health`, `locate`) to an AI agent.
+  `locate` answers "where is symbol X" deterministically (name → file:line), so
+  an agent finds definitions without grepping or guessing.
 - **`runecho-guard`** — a guard that checks new code against the indexed IR and
   flags references to symbols that don't exist (likely hallucinations). Runs as a
   git pre-commit hook, or as a Claude Code `PreToolUse` hook that vets every

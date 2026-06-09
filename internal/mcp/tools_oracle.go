@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/ir"
@@ -58,6 +59,12 @@ func (o *Oracle) Register(s *Server) {
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Handler:     o.health,
 	})
+	s.Register(Tool{
+		Name:        "locate",
+		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped). Defaults to functions+classes.",
+		InputSchema: locateSchema(),
+		Handler:     o.locate,
+	})
 }
 
 // --- argument helpers ---
@@ -85,6 +92,18 @@ func diffSchema() map[string]any {
 			"b":     map[string]any{"type": "integer", "description": "snapshot id B (with a)"},
 			"since":   map[string]any{"type": "string", "description": "diff latest snapshot with this label vs live code"},
 			"session": map[string]any{"type": "string", "description": "with `since`: pin the reference snapshot to this session id"},
+		},
+		"required": []string{"repo"},
+	}
+}
+
+func locateSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"repo":   map[string]any{"type": "string", "description": "name of an enrolled repo"},
+			"symbol": map[string]any{"type": "string", "description": "symbol to locate: matches by exact name, name prefix, or last dotted segment (e.g. \"fetch\" finds \"Reader.fetch\"). Omit to list all (capped)."},
+			"kind":   map[string]any{"type": "string", "description": "restrict to func|class|export|import (default: func+class)"},
 		},
 		"required": []string{"repo"},
 	}
@@ -316,6 +335,105 @@ func (o *Oracle) status(args json.RawMessage) (string, error) {
 		}
 	}
 	return jsonText(out)
+}
+
+// locateMatchCap bounds how many symbols a single locate call returns. A query
+// usually narrows to a handful; an unfiltered call on a large repo would dump
+// the whole table into the agent's context, defeating the on-demand design.
+const locateMatchCap = 200
+
+func (o *Oracle) locate(args json.RawMessage) (string, error) {
+	var a struct {
+		Repo   string `json:"repo"`
+		Symbol string `json:"symbol"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("bad arguments: %w", err)
+	}
+	kind, ok := normalizeLocateKind(a.Kind)
+	if !ok {
+		return "", fmt.Errorf("invalid kind %q (want func|class|export|import)", a.Kind)
+	}
+	repo, err := o.resolveRepo(a.Repo)
+	if err != nil {
+		return "", err
+	}
+	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
+	if err != nil {
+		return "", err
+	}
+
+	keep := func(k string) bool {
+		if kind != "" {
+			return k == kind
+		}
+		return k == "function" || k == "class"
+	}
+
+	var matches []ir.SymbolLoc
+	for _, s := range irData.SymbolLocations() { // deterministically sorted
+		if !keep(s.Kind) {
+			continue
+		}
+		if a.Symbol != "" && !symbolMatches(s.Name, a.Symbol) {
+			continue
+		}
+		// Shorten the hash for the wire — same 4-char convention as the CLI map.
+		if len(s.Hash) >= 4 {
+			s.Hash = s.Hash[:4]
+		}
+		matches = append(matches, s)
+	}
+
+	total := len(matches)
+	truncated := false
+	if len(matches) > locateMatchCap {
+		matches = matches[:locateMatchCap]
+		truncated = true
+	}
+	if matches == nil {
+		matches = []ir.SymbolLoc{}
+	}
+	return jsonText(map[string]any{
+		"repo":      repo.Name,
+		"query":     a.Symbol,
+		"count":     len(matches),
+		"total":     total,
+		"truncated": truncated,
+		"symbols":   matches,
+	})
+}
+
+// symbolMatches reports whether a symbol name satisfies a locate query: exact
+// match, name prefix, or an exact match on the last dotted segment (so "fetch"
+// finds the method "Reader.fetch").
+func symbolMatches(name, query string) bool {
+	if name == query || strings.HasPrefix(name, query) {
+		return true
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:] == query
+	}
+	return false
+}
+
+// normalizeLocateKind maps user-facing kind values to internal kind names.
+func normalizeLocateKind(k string) (string, bool) {
+	switch k {
+	case "":
+		return "", true
+	case "func", "function":
+		return "function", true
+	case "class", "cls":
+		return "class", true
+	case "export", "exp":
+		return "export", true
+	case "import", "imp":
+		return "import", true
+	default:
+		return "", false
+	}
 }
 
 func (o *Oracle) health(_ json.RawMessage) (string, error) {

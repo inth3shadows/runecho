@@ -39,7 +39,9 @@ func HashBytes(data []byte) string {
 
 // ComputeRootHash computes deterministic root hash from IR files.
 // For each file (sorted by normalized path):
-//   normalized_path + ":" + file_hash
+//
+//	normalized_path + ":" + file_hash
+//
 // Join with newlines, SHA256 hash, return lowercase hex.
 func ComputeRootHash(files map[string]FileIR) string {
 	if len(files) == 0 {
@@ -66,4 +68,3 @@ func ComputeRootHash(files map[string]FileIR) string {
 
 	return HashBytes([]byte(builder.String()))
 }
-

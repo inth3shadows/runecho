@@ -278,8 +278,10 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		return FileIR{}, fmt.Errorf("no parser for extension %s", ext)
 	}
 
-	// Parse structure
-	structure, err := p.Parse(string(content))
+	// Parse structure. Convert to string once and share with extractRefs below —
+	// a 10 MiB file would otherwise hold three live copies of the source.
+	src := string(content)
+	structure, err := p.Parse(src)
 	if err != nil {
 		return FileIR{}, fmt.Errorf("failed to parse file: %w", err)
 	}
@@ -296,7 +298,7 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		Functions:    structure.Functions,
 		Classes:      structure.Classes,
 		Exports:      structure.Exports,
-		Refs:         extractRefs(path, string(content)),
+		Refs:         extractRefs(path, src),
 		SymbolHashes: structure.SymbolHashes,
 		SymbolLines:  structure.SymbolLines,
 	}, nil
@@ -318,4 +320,3 @@ func extractRefs(path, content string) []string {
 	sort.Strings(refs)
 	return refs
 }
-

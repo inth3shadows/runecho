@@ -134,11 +134,12 @@ func runArgs(args []string) int {
 		return degradedExit(strict)
 	}
 
-	// Warn if IR is stale.
+	// Warn if IR is stale. A bad RUNECHO_GUARD_MAX_AGE must not block commits any
+	// harder than any other degraded state — fail open (exit 0) unless strict.
 	maxAge, err := guard.ParseMaxAge()
 	if err != nil {
 		warnf("%v", err)
-		return 1
+		return degradedExit(strict)
 	}
 	if age := time.Since(snaps[0].Timestamp); age > maxAge {
 		days := int(age.Hours() / 24)
@@ -218,10 +219,6 @@ func runArgs(args []string) int {
 	return 1
 }
 
-// runHookMode implements the Claude Code PreToolUse hook contract (2026 form:
-// hookSpecificOutput.permissionDecision). Reads JSON from in, and either denies
-// the tool call (hallucinated symbol) or defers to the normal permission flow.
-// It NEVER emits "allow": a guard's job is to block, not to auto-approve every
 // runOutcomeMode handles --outcome-mode. It reads a PostToolUse JSON payload
 // from in, extracts the edited file path, and appends an approved-outcome
 // record to decisions.jsonl if a recent ask exists for that file. Always

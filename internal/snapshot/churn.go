@@ -143,12 +143,13 @@ func FormatChurn(r ChurnReport, minChanges int) string {
 		}
 	}
 
-	// Stable count: files that exist in all diffs but never changed.
-	totalTracked := len(r.Files)
-	stableCount := totalTracked - len(hotFiles)
-	if stableCount > 0 {
-		sb.WriteString(fmt.Sprintf("\nStable: %d %s unchanged across all %d diffs.\n",
-			stableCount, pluralWord(stableCount, "file"), r.DiffCount))
+	// r.Files only holds files that changed at least once, so the non-hot remainder
+	// are files that changed but stayed below the hot threshold — NOT files that
+	// never changed (those are never tracked). Label it honestly.
+	coolCount := len(r.Files) - len(hotFiles)
+	if coolCount > 0 {
+		sb.WriteString(fmt.Sprintf("\nBelow threshold: %d %s changed in fewer than %d of %d diffs.\n",
+			coolCount, pluralWord(coolCount, "file"), minChanges, r.DiffCount))
 	}
 
 	return sb.String()

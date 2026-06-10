@@ -87,9 +87,9 @@ func diffSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo"},
-			"a":     map[string]any{"type": "integer", "description": "snapshot id A (with b)"},
-			"b":     map[string]any{"type": "integer", "description": "snapshot id B (with a)"},
+			"repo":    map[string]any{"type": "string", "description": "name of an enrolled repo"},
+			"a":       map[string]any{"type": "integer", "description": "snapshot id A (with b)"},
+			"b":       map[string]any{"type": "integer", "description": "snapshot id B (with a)"},
 			"since":   map[string]any{"type": "string", "description": "diff latest snapshot with this label vs live code"},
 			"session": map[string]any{"type": "string", "description": "with `since`: pin the reference snapshot to this session id"},
 		},

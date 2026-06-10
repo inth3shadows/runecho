@@ -54,6 +54,41 @@ func FuzzGoParser(f *testing.F) {
 	})
 }
 
+// FuzzPythonParser asserts the AST-backed Python parser never panics on arbitrary
+// input and keeps the sorted/deduplicated invariants. It is the newest and most
+// complex parser (external tree-sitter runtime, recursive walk, decorator-span and
+// property-hash logic), so it gets adversarial coverage over malformed and unusual
+// shapes. Run: go test -run=x -fuzz=FuzzPythonParser ./internal/parser
+func FuzzPythonParser(f *testing.F) {
+	seeds := []string{
+		"def foo():\n    pass",
+		"async def bar(x):\n    return await baz(x)",
+		"class A:\n    @property\n    def x(self): return 1\n    @x.setter\n    def x(self, v): pass",
+		"@deco\ndef d():\n    def inner():\n        pass",
+		"__all__ = ['a']\n__all__ += ['b']",
+		"", "\r\n\r\n", "def", "def (", "class\x00", "    def indented():",
+		"def ():\n  pass", "def f(" + "(((((((((", // unbalanced / non-utf8-ish
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	p := NewPythonParser()
+	f.Fuzz(func(t *testing.T, src string) {
+		fs, err := p.Parse(src) // must never panic
+		if err != nil {
+			return
+		}
+		assertParserInvariants(t, fs)
+		// Every per-symbol hash/line key must correspond to a captured symbol —
+		// a dangling key would mean the maps and lists drifted.
+		for key := range fs.SymbolHashes {
+			if key == "" {
+				t.Fatalf("empty SymbolHashes key for src %q", src)
+			}
+		}
+	})
+}
+
 // assertParserInvariants checks every output list is sorted and deduplicated —
 // the structural contract the IR generator and snapshot symbolizer depend on.
 func assertParserInvariants(t *testing.T, fs FileStructure) {

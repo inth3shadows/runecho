@@ -28,8 +28,8 @@ type AddedLine struct {
 // parseDiffOutput; the caller should treat the result as incomplete coverage.
 //
 // ctx is forwarded to the git subprocess so the caller's deadline (gitTimeout)
-// also bounds this last unbounded git call — the same 3-second cap used for
-// every other git subprocess in the hook path.
+// also bounds this last unbounded git call — the same cap (gitutil.Timeout) used
+// for every other git subprocess in the hook path.
 func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, partial bool, err error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "diff", "--cached", "--unified=0")
 	out, err := cmd.Output()

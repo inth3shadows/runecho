@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 )
 
 // DefaultIRPath is the default location for IR storage.
@@ -53,19 +52,9 @@ type FileIR struct {
 // MarshalJSON implements deterministic JSON marshalling for IR.
 // Files are sorted by path to ensure stable output across runs.
 func (ir *IR) MarshalJSON() ([]byte, error) {
-	paths := make([]string, 0, len(ir.Files))
-	for path := range ir.Files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	ordered := make(map[string]FileIR, len(paths))
-	for _, path := range paths {
-		ordered[path] = ir.Files[path]
-	}
-
-	// encoding/json sorts map keys before encoding (since Go 1.12) — that is
-	// what enforces stable file ordering in the output, not the map itself.
+	// encoding/json sorts map keys before encoding (since Go 1.12), so file
+	// ordering in the output is already deterministic — no need to pre-sort into
+	// a second map; marshal ir.Files directly.
 	return json.MarshalIndent(&struct {
 		Version  int               `json:"version"`
 		RootHash string            `json:"root_hash"`
@@ -73,7 +62,7 @@ func (ir *IR) MarshalJSON() ([]byte, error) {
 	}{
 		Version:  ir.Version,
 		RootHash: ir.RootHash,
-		Files:    ordered,
+		Files:    ir.Files,
 	}, "", "  ")
 }
 
@@ -116,9 +105,16 @@ func (ir *IR) Save(path string) error {
 		return fmt.Errorf("failed to marshal IR: %w", err)
 	}
 
-	// Write with consistent permissions
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Write atomically: a crash mid-write must never leave a half-written
+	// ir.json that fails to unmarshal. Write a sibling temp file, then rename
+	// (atomic on the same filesystem on Linux/macOS).
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return fmt.Errorf("failed to write IR file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) // best-effort cleanup; the real file is untouched
+		return fmt.Errorf("failed to replace IR file: %w", err)
 	}
 
 	return nil

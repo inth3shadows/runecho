@@ -1,13 +1,36 @@
 package parser
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+
+	ts "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-// JSParser implements shallow parsing for .js, .ts, .gs files.
-// Uses regex patterns - not semantically correct, but deterministic.
+// JSParser parses .js, .ts, .jsx, .tsx, .gs files. Imports and exports are
+// extracted with deterministic regex (line-oriented constructs). Functions and
+// classes use a real tree-sitter AST via a pure-Go (CGO-free) runtime when the
+// matching grammar is embedded in the build, so they carry per-symbol start
+// lines and function body hashes (matching the Python parser's FileStructure
+// contract). When the grammar is absent (a build without the grammar_subset_*
+// tags), it degrades to the former regex extraction — names only, no spans —
+// so symbol coverage never regresses.
+//
+// Altitude: like the Go parser, it captures top-level functions/classes plus
+// class methods (qualified as Class.method); it does not descend into function
+// bodies, so nested closures/callbacks are intentionally omitted.
+//
+// Best-effort: the shipped grammars are reduced "subset" grammars covering the
+// common surface (declarations, classes/interfaces/enums, methods, arrow and
+// function consts). Some advanced TypeScript syntax — notably a return-typed
+// arrow const, `const f = (x: T): R => ...` — does not parse cleanly and yields
+// fewer symbols. This matches the prior regex parser's gap (no regression); it
+// is documented rather than silently dropped.
 type JSParser struct{}
 
 var (
@@ -55,47 +78,224 @@ func (p *JSParser) SupportsExtension(ext string) bool {
 	}
 }
 
-// Parse extracts top-level structure from JavaScript/TypeScript source.
-// This is a shallow parse - it may miss nested declarations or misparse
-// complex syntax (JSX, template literals, decorators). Best-effort only.
+// Parse satisfies the Parser interface. Without the file extension it cannot
+// pick the most specific grammar, so it assumes JavaScript (the JS grammar also
+// parses JSX). The generator calls ParseExt instead (via the ExtAwareParser
+// interface), which selects typescript/tsx for .ts/.tsx.
 func (p *JSParser) Parse(source string) (FileStructure, error) {
-	fs := FileStructure{
-		Imports:   []string{},
-		Functions: []string{},
-		Classes:   []string{},
-		Exports:   []string{},
-	}
-
-	// Remove comments to avoid false matches
-	source = removeComments(source)
-
-	// Extract imports
-	fs.Imports = extractImports(source)
-
-	// Extract functions
-	fs.Functions = extractFunctions(source)
-
-	// Extract classes
-	fs.Classes = extractClasses(source)
-
-	// Extract exports
-	fs.Exports = extractExports(source)
-
-	// Sort all slices for determinism
-	sort.Strings(fs.Imports)
-	sort.Strings(fs.Functions)
-	sort.Strings(fs.Classes)
-	sort.Strings(fs.Exports)
-
-	// Deduplicate
-	fs.Imports = deduplicate(fs.Imports)
-	fs.Functions = deduplicate(fs.Functions)
-	fs.Classes = deduplicate(fs.Classes)
-	fs.Exports = deduplicate(fs.Exports)
-
-	return fs, nil
+	return p.parse(source, "")
 }
 
+// ParseExt is the extension-aware entry point (see ExtAwareParser). ext selects
+// the tree-sitter grammar: .ts → typescript, .tsx → tsx, everything else → js.
+func (p *JSParser) ParseExt(source, ext string) (FileStructure, error) {
+	return p.parse(source, ext)
+}
+
+func (p *JSParser) parse(source, ext string) (FileStructure, error) {
+	// Normalize line endings so spans/hashes are independent of CRLF vs LF
+	// (parity with the Python parser).
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+
+	// Imports and exports stay regex (line-oriented; same split as python.go).
+	// Run them on comment-stripped source so commented-out statements are ignored.
+	noComments := removeComments(source)
+	imports := extractImports(noComments)
+	exports := extractExports(noComments)
+
+	// Functions and classes: AST when the grammar is available, regex otherwise.
+	var (
+		functions, classes []string
+		hashes             map[string]string
+		lines              map[string]int
+	)
+	if lang := jsLanguageFor(ext); lang != nil {
+		functions, classes, hashes, lines = jsSymbolsFromAST(source, lang)
+	} else {
+		// No grammar embedded in this build — degrade to names only, no spans
+		// (preserves the regex-era contract; better than dropping JS symbols).
+		functions = extractFunctions(noComments)
+		classes = extractClasses(noComments)
+	}
+
+	sort.Strings(imports)
+	sort.Strings(functions)
+	sort.Strings(classes)
+	sort.Strings(exports)
+
+	return FileStructure{
+		Imports:      deduplicate(imports),
+		Functions:    deduplicate(functions),
+		Classes:      deduplicate(classes),
+		Exports:      deduplicate(exports),
+		SymbolHashes: hashes,
+		SymbolLines:  lines,
+	}, nil
+}
+
+// Grammar caches: each grammar is loaded once and the *Language is safe for
+// concurrent reads (a fresh ts.Parser is created per Parse since it is not
+// concurrency-safe). The accessors return nil when the corresponding
+// grammar_subset_* blob is not embedded in the build.
+var (
+	jsLangOnce, tsLangOnce, tsxLangOnce sync.Once
+	jsLang, tsLang, tsxLang             *ts.Language
+)
+
+// jsLanguageFor returns the tree-sitter grammar for the given file extension,
+// or nil if that grammar is not embedded in this build.
+func jsLanguageFor(ext string) *ts.Language {
+	switch ext {
+	case ".ts":
+		return cachedLang(&tsLangOnce, &tsLang, "typescript", grammars.TypescriptLanguage)
+	case ".tsx":
+		return cachedLang(&tsxLangOnce, &tsxLang, "tsx", grammars.TsxLanguage)
+	default: // .js, .jsx, .gs, "" — the JS grammar also parses JSX.
+		return cachedLang(&jsLangOnce, &jsLang, "javascript", grammars.JavascriptLanguage)
+	}
+}
+
+// cachedLang lazily loads a grammar under once, recovering from a decode panic
+// so a bad blob degrades to nil (no AST symbols) rather than crashing the first
+// Parse call — mirrors the Python parser's grammar-load guard.
+func cachedLang(once *sync.Once, dst **ts.Language, name string, load func() *ts.Language) *ts.Language {
+	once.Do(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "runecho: %s grammar failed to load (%v); %s symbols disabled\n", name, r, name)
+			}
+		}()
+		*dst = load()
+	})
+	return *dst
+}
+
+// jsSymbolsFromAST walks the JS/TS AST and returns every function and class
+// definition. Methods/nested defs are qualified by their enclosing scope (e.g.
+// "Widget.doThing"), matching the Python and Go parsers, so identical leaf names
+// in different scopes never collide. Functions/methods carry a body hash keyed
+// "function:<qualified name>" for modified-symbol diffing; classes, interfaces,
+// enums, and type aliases are located (start line) but not hashed (their changes
+// surface through their members).
+func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []string, hashes map[string]string, lines map[string]int) {
+	src := []byte(source)
+	tree, err := ts.NewParser(lang).Parse(src)
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		return nil, nil, nil, nil
+	}
+
+	hashes = make(map[string]string)
+	lines = make(map[string]int)
+
+	recordHash := func(key string, span []byte) {
+		h := hashBytesHex(span)
+		if existing, ok := hashes[key]; ok {
+			h = hashBytesHex([]byte(existing + h))
+		}
+		hashes[key] = h
+	}
+	recordLine := func(key string, line int) {
+		if _, ok := lines[key]; !ok {
+			lines[key] = line
+		}
+	}
+	recordFunc := func(full string, span *ts.Node) {
+		functions = append(functions, full)
+		recordHash("function:"+full, src[span.StartByte():span.EndByte()])
+		recordLine("function:"+full, int(span.StartPoint().Row)+1)
+	}
+	recordClass := func(full string, node *ts.Node) {
+		classes = append(classes, full)
+		recordLine("class:"+full, int(node.StartPoint().Row)+1)
+	}
+	fieldText := func(n *ts.Node, field string) string {
+		if f := n.ChildByFieldName(field, lang); f != nil {
+			return f.Text(src)
+		}
+		return ""
+	}
+	// childOfType returns the first named child of n whose type is in types.
+	childOfType := func(n *ts.Node, types ...string) *ts.Node {
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			for _, want := range types {
+				if c.Type(lang) == want {
+					return c
+				}
+			}
+		}
+		return nil
+	}
+
+	var walk func(n *ts.Node, prefix string)
+	walk = func(n *ts.Node, prefix string) {
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			switch c.Type(lang) {
+			case "function_declaration", "generator_function_declaration",
+				"method_definition", "method_signature":
+				// A named function/method. We do NOT recurse its body: like the Go
+				// parser (and unlike Python), JS/TS symbols are top-level decls plus
+				// class methods — capturing nested closures/callbacks would just add
+				// orientation noise. Bare function_expressions (e.g. a named
+				// callback `setTimeout(function tick(){})`) are intentionally NOT a
+				// case here; only those bound to a variable (below) are captured.
+				name := fieldText(c, "name")
+				if name == "" {
+					continue
+				}
+				recordFunc(qualify(prefix, name), c)
+
+			case "class_declaration", "abstract_class_declaration",
+				"interface_declaration", "enum_declaration", "type_alias_declaration":
+				name := fieldText(c, "name")
+				if name == "" {
+					continue
+				}
+				full := qualify(prefix, name)
+				recordClass(full, c)
+				walk(c, full) // descend into the body so methods become Class.method
+
+			case "variable_declarator":
+				// `const name = () => ...` / `= function(){}`: attribute the
+				// function to the bound variable name, spanning the function value
+				// so a body change flips the hash. Body is not recursed (top-level
+				// altitude — see the function case above).
+				name := fieldText(c, "name")
+				if fn := childOfType(c, "arrow_function", "function_expression"); fn != nil && name != "" {
+					recordFunc(qualify(prefix, name), fn)
+					continue
+				}
+				// `const X = class {...}` / `= class Named {...}`: record the class
+				// under the bound variable name and descend for its methods.
+				if cls := childOfType(c, "class", "class_expression"); cls != nil && name != "" {
+					full := qualify(prefix, name)
+					recordClass(full, cls)
+					walk(cls, full)
+					continue
+				}
+				walk(c, prefix)
+
+			default:
+				// Recurse through wrappers (export_statement, lexical_declaration,
+				// class_body, statement_block, and ERROR-recovery nodes) so
+				// declarations nested inside them are still found.
+				walk(c, prefix)
+			}
+		}
+	}
+	walk(tree.RootNode(), "")
+
+	if len(hashes) == 0 {
+		hashes = nil
+	}
+	if len(lines) == 0 {
+		lines = nil
+	}
+	return functions, classes, hashes, lines
+}
+
+// Parse extracts top-level structure from JavaScript/TypeScript source.
 // removeComments strips single-line and multi-line comments.
 // Multi-line /* … */ comments are removed via regex. Single-line // comments
 // are stripped per-line with string-literal awareness so that URLs inside
@@ -165,7 +365,8 @@ func extractImports(source string) []string {
 	return imports
 }
 
-// extractFunctions finds all top-level function declarations.
+// extractFunctions finds all top-level function declarations (regex fallback
+// used only when no tree-sitter grammar is embedded).
 func extractFunctions(source string) []string {
 	functions := []string{}
 
@@ -196,7 +397,7 @@ func extractFunctions(source string) []string {
 	return functions
 }
 
-// extractClasses finds all class declarations.
+// extractClasses finds all class declarations (regex fallback).
 func extractClasses(source string) []string {
 	classes := []string{}
 

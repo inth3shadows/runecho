@@ -142,18 +142,21 @@ export { processUser };
 `
 
 	parser := NewJSParser()
-	result, err := parser.Parse(source)
+	// TypeScript-specific syntax (type annotations, generics) needs the TS
+	// grammar, which the generator selects by extension via ParseExt.
+	result, err := parser.ParseExt(source, ".ts")
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	// Should extract function (may not extract interface/type - that's OK for v1)
+	// processUser function captured; interface User and class Service captured
+	// as classes (AST now extracts interfaces/type-likes too).
 	if len(result.Functions) == 0 {
-		t.Errorf("Expected to find processUser function")
+		t.Errorf("Expected to find processUser function, got %v", result.Functions)
 	}
 
 	if len(result.Classes) == 0 {
-		t.Errorf("Expected to find Service class")
+		t.Errorf("Expected to find Service class, got %v", result.Classes)
 	}
 }
 

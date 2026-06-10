@@ -347,7 +347,14 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	// Parse structure. Convert to string once and share with extractRefs below —
 	// a 10 MiB file would otherwise hold three live copies of the source.
 	src := string(content)
-	structure, err := p.Parse(src)
+	// Pass the extension to parsers that need it to pick a grammar (JS/TS);
+	// others use the plain Parse method.
+	var structure parser.FileStructure
+	if ep, ok := p.(parser.ExtAwareParser); ok {
+		structure, err = ep.ParseExt(src, ext)
+	} else {
+		structure, err = p.Parse(src)
+	}
 	if err != nil {
 		return FileIR{}, fmt.Errorf("failed to parse file: %w", err)
 	}

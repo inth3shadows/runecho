@@ -248,24 +248,31 @@ func runOutcomeMode(in io.Reader) int {
 // roll the repo's "auto" snapshot so the guard's next read reflects this edit.
 // It is strictly best-effort observability plumbing — every failure path is a
 // silent no-op so the PostToolUse hook can never alter a tool result or block.
-func refreshIRForFile(filePath string) {
+// The named return `outcome` carries a short token naming the branch this call
+// took; the deferred e6debug appends it to decisions.jsonl under RUNECHO_DEBUG=1.
+// Behavior is unchanged — every path is still a silent no-op for the hook — the
+// trace is opt-in observability only. Tokens are stable for grepping a dogfood
+// log: refreshed / bootstrapped / unchanged / no-repo / <something>-fail.
+func refreshIRForFile(filePath string) (outcome string) {
+	defer func() { e6debug(filePath, outcome) }()
+
 	storeDir, err := runechoDir()
 	if err != nil {
-		return
+		return "no-store-dir"
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		return
+		return "no-db"
 	}
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
-		return
+		return "open-fail"
 	}
 	defer db.Close()
 
 	repo, _, ok := db.ResolveRepo(filepath.Dir(filePath))
 	if !ok {
-		return
+		return "no-repo" // unenrolled repo — expected, not a failure
 	}
 	srcRoot := repo.EffectiveSourceRoot()
 	irPath := filepath.Join(srcRoot, ".ai", "ir.json")
@@ -275,33 +282,38 @@ func refreshIRForFile(filePath string) {
 
 	var updated *ir.IR
 	var changed bool
+	bootstrapped := false
 	if loadErr != nil || existing == nil || existing.Version != ir.IRVersion {
 		// No usable IR file yet — bootstrap with a full generate (one-time cost).
 		full, _, genErr := gen.Generate(srcRoot)
 		if genErr != nil {
-			return
+			return "generate-fail"
 		}
-		updated, changed = full, true
+		updated, changed, bootstrapped = full, true, true
 	} else if updated, changed, err = gen.UpdateFile(existing, srcRoot, filePath); err != nil {
-		return
+		return "update-fail"
 	}
 	if !changed {
-		return // nothing structural changed; leave the store and ir.json alone
+		return "unchanged" // nothing structural changed; leave the store and ir.json alone
 	}
 
 	if err := updated.Save(irPath); err != nil {
-		return
+		return "save-fail"
 	}
 	// Roll the single "auto" snapshot: delete the prior one, write the fresh one.
 	if err := db.DeleteAutoSnapshots(repo.ID); err != nil {
-		return
+		return "delete-auto-fail"
 	}
 	if _, err := db.SaveSnapshot(repo.ID, "", "auto", srcRoot, updated); err != nil {
-		return
+		return "snapshot-save-fail"
 	}
 	// Bump last_indexed so the staleness warning stays quiet; preserve the
 	// existing coverage counters (a single-file refresh doesn't re-walk).
 	_ = db.TouchRepo(repo.ID, time.Now(), repo.ParseErrors, repo.SupportedSeen)
+	if bootstrapped {
+		return "bootstrapped"
+	}
+	return "refreshed"
 }
 
 // runHookMode handles --hook-mode (Claude Code PreToolUse). It reads the tool

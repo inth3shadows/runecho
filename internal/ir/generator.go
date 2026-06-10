@@ -207,6 +207,72 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 	return updated, stats, nil
 }
 
+// UpdateFile refreshes a single file's entry in an existing IR and returns the
+// new IR plus whether anything changed. It reparses just filePath (added or
+// modified), drops it (deleted or no longer a supported source file), and leaves
+// every other entry untouched — O(1) in repo size, for the per-edit auto-fresh
+// hook where walking the whole tree on every keystroke would be wasteful.
+//
+// It is conservative: any condition it can't handle cleanly (file outside the
+// repo, stat/parse error, IR version mismatch) returns the IR unchanged with
+// changed=false, so the caller simply skips the refresh rather than corrupting
+// state. RootHash is recomputed; changed is RootHash != existing.RootHash.
+func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bool, error) {
+	if existing == nil || existing.Version != IRVersion {
+		return existing, false, nil
+	}
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return existing, false, nil
+	}
+	absRoot = filepath.Clean(absRoot)
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		return existing, false, nil
+	}
+	rel, err := filepath.Rel(absRoot, absFile)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return existing, false, nil // edited file is outside this repo
+	}
+	norm := normalizePath(rel)
+
+	// Copy the map so the returned IR is independent of existing (callers may
+	// keep using existing if changed=false).
+	files := make(map[string]FileIR, len(existing.Files))
+	for k, v := range existing.Files {
+		files[k] = v
+	}
+
+	info, statErr := os.Stat(absFile)
+	switch {
+	case statErr != nil:
+		if !os.IsNotExist(statErr) {
+			return existing, false, nil // transient stat error — leave IR alone
+		}
+		if _, ok := files[norm]; !ok {
+			return existing, false, nil // already absent
+		}
+		delete(files, norm) // file was deleted
+	case info.IsDir() || !g.supportsExtension(filepath.Ext(absFile)):
+		// Not an indexed source file. If it used to be one (extension changed),
+		// drop the stale entry; otherwise no-op.
+		if _, ok := files[norm]; !ok {
+			return existing, false, nil
+		}
+		delete(files, norm)
+	default:
+		fileIR, perr := g.parseFile(absFile)
+		if perr != nil {
+			return existing, false, nil // parse failed — keep the prior entry
+		}
+		files[norm] = fileIR
+	}
+
+	updated := &IR{Version: IRVersion, Files: files}
+	updated.RootHash = ComputeRootHash(files)
+	return updated, updated.RootHash != existing.RootHash, nil
+}
+
 // normalizePath applies all path normalization rules:
 // 1. Convert to forward slashes (filepath.ToSlash)
 // 2. Strip leading "./" if present

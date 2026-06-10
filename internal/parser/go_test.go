@@ -55,7 +55,9 @@ type myPrivate struct{}
 			t.Errorf("import[%d] = %q, want %q", i, fs.Imports[i], w)
 		}
 	}
-	wantFuncs := []string{"MyFunc", "MyMethod"}
+	// Methods are qualified by receiver type (Reader.Fetch style), matching the
+	// Python parser's scope-qualified names — see go.go Parse doc.
+	wantFuncs := []string{"MyFunc", "Receiver.MyMethod"}
 	if len(fs.Functions) != len(wantFuncs) {
 		t.Fatalf("functions: got %v, want %v", fs.Functions, wantFuncs)
 	}
@@ -128,6 +130,21 @@ func TestGoParser_ExportedVarConst(t *testing.T) {
 			src:         "package foo\n\nvar Zebra = 1\nvar Apple = 2\nvar Apple = 3\n",
 			wantExports: []string{"Apple", "Zebra"},
 		},
+		{
+			// Regex-era bug: `var X, Y = 1, 2` captured only X. The AST's
+			// ValueSpec.Names carries both, so this is fixed for free.
+			name:        "multi-name single-line var (regex bug fixed)",
+			src:         "package foo\n\nvar X, Y = 1, 2\n",
+			wantExports: []string{"X", "Y"},
+		},
+		{
+			// Regex-era bug: a `var (...)` block closed early on a nested `)`
+			// (e.g. a call initializer), dropping every name after it. The AST
+			// owns the block boundary, so B is no longer lost.
+			name:        "var block with call initializer (nested-paren bug fixed)",
+			src:         "package foo\n\nvar (\n\tAlpha = compute()\n\tBeta  = 1\n)\n",
+			wantExports: []string{"Alpha", "Beta"},
+		},
 	}
 
 	p := NewGoParser()
@@ -144,6 +161,89 @@ func TestGoParser_ExportedVarConst(t *testing.T) {
 				t.Errorf("exports not sorted: %v", fs.Exports)
 			}
 		})
+	}
+}
+
+// TestGoParser_SymbolLines verifies the per-symbol start lines that #19 adds —
+// the data behind `runecho-ir map` / `locate` showing real file:line for Go
+// (functions, qualified methods, types, and exported var/const).
+func TestGoParser_SymbolLines(t *testing.T) {
+	p := NewGoParser()
+	// Line numbers are 1-based; the layout below is hand-counted.
+	src := `package foo
+
+import "fmt"
+
+const Answer = 42
+
+type Widget struct{}
+
+func Top() {}
+
+func (w *Widget) Do() {}
+`
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{
+		"export:Answer":      5,
+		"class:Widget":       7,
+		"function:Top":       9,
+		"function:Widget.Do": 11,
+	}
+	for key, wantLine := range want {
+		if got := fs.SymbolLines[key]; got != wantLine {
+			t.Errorf("SymbolLines[%q] = %d, want %d", key, got, wantLine)
+		}
+	}
+	// Functions only (not classes) carry a body hash.
+	if fs.SymbolHashes["function:Top"] == "" {
+		t.Error("function:Top has no body hash")
+	}
+	if fs.SymbolHashes["function:Widget.Do"] == "" {
+		t.Error("function:Widget.Do has no body hash")
+	}
+	if _, ok := fs.SymbolHashes["class:Widget"]; ok {
+		t.Error("class:Widget should not be hashed (parity with Python classes)")
+	}
+}
+
+// TestGoParser_BodyHashChangesOnRewrite is the proof behind the `diff ~ modified`
+// acceptance criterion: a function's body hash changes when its body or signature
+// changes, and stays stable when a SIBLING function changes.
+func TestGoParser_BodyHashChangesOnRewrite(t *testing.T) {
+	p := NewGoParser()
+	hashOf := func(src, key string) string {
+		t.Helper()
+		fs, err := p.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fs.SymbolHashes[key]
+		if h == "" {
+			t.Fatalf("no hash for %q in:\n%s", key, src)
+		}
+		return h
+	}
+
+	base := "package foo\n\nfunc F() int { return 1 }\nfunc G() int { return 10 }\n"
+	bodyChange := "package foo\n\nfunc F() int { return 2 }\nfunc G() int { return 10 }\n"
+	sigChange := "package foo\n\nfunc F(x int) int { return 1 }\nfunc G() int { return 10 }\n"
+	siblingChange := "package foo\n\nfunc F() int { return 1 }\nfunc G() int { return 20 }\n"
+
+	baseF := hashOf(base, "function:F")
+	if hashOf(bodyChange, "function:F") == baseF {
+		t.Error("F body hash unchanged after body rewrite — diff would miss the change")
+	}
+	if hashOf(sigChange, "function:F") == baseF {
+		t.Error("F body hash unchanged after signature change")
+	}
+	if hashOf(siblingChange, "function:F") != baseF {
+		t.Error("F body hash changed when only sibling G changed — would over-report")
+	}
+	if hashOf(siblingChange, "function:G") == hashOf(base, "function:G") {
+		t.Error("G body hash unchanged after G was rewritten")
 	}
 }
 

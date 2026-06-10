@@ -1,45 +1,29 @@
 package parser
 
 import (
-	"regexp"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// GoParser implements shallow parsing for .go files.
-// Uses regex patterns — not semantically correct, but deterministic.
-// Only exported symbols (capitalized) are extracted for functions and types,
-// since unexported symbols rarely matter for IR-level codebase orientation.
+// GoParser implements structural parsing for .go files using the standard
+// library's go/parser + go/ast. This is a real AST (CGO-free, no build tags),
+// so unlike the former regex pass it emits per-symbol start lines and function
+// body hashes — matching the Python parser's FileStructure contract.
+//
+// Symbol routing (preserved from the regex era):
+//   - Exported funcs and methods → Functions. Methods are qualified by receiver
+//     type ("Reader.Fetch"), matching the Python parser's scope-qualified names,
+//     so identical method names on different types never collide.
+//   - Exported types → Classes (struct, interface, alias, etc.); located but not
+//     hashed (parity with Python classes — changes surface through members).
+//   - Exported top-level var/const → Exports; located, not hashed (no body).
+//
+// Only exported (capitalized) names are extracted, as before.
 type GoParser struct{}
-
-var (
-	// Single-line import: import "path" or import alias "path"
-	goImportSingleRegex = regexp.MustCompile(`^\s*import\s+(?:\w+\s+)?"([^"]+)"`)
-
-	// Inside an import block: "path" or alias "path"
-	goImportBlockItemRegex = regexp.MustCompile(`"([^"]+)"`)
-
-	// Top-level exported function: func FuncName(
-	goFuncRegex = regexp.MustCompile(`^func\s+([A-Z]\w*)\s*[\(\[]`)
-
-	// Exported method: func (recv Type) MethodName(
-	goMethodRegex = regexp.MustCompile(`^func\s+\([^)]+\)\s+([A-Z]\w*)\s*[\(\[]`)
-
-	// Exported type declaration: type TypeName struct|interface|...
-	goTypeRegex = regexp.MustCompile(`^type\s+([A-Z]\w*)\s+`)
-
-	// Single-line exported var/const, optionally typed, with a value or type:
-	//   var X = ...        const X = ...
-	//   var X int = ...    const X int = ...
-	//   var X int          (declaration without initializer)
-	// The trailing (\s|=|$) ensures we match a full identifier (not a prefix) and
-	// that a name is followed by a type, an assignment, or end-of-line.
-	goVarConstSingleRegex = regexp.MustCompile(`^(?:var|const)\s+([A-Z]\w*)(?:\s|=|$)`)
-
-	// Item inside a var(/const( block: an exported name at line start, followed
-	// by a type, an assignment, or end-of-line (iota-style bare names included).
-	goVarConstBlockItemRegex = regexp.MustCompile(`^([A-Z]\w*)(?:\s|=|,|$)`)
-)
 
 // NewGoParser creates a new Go parser.
 func NewGoParser() *GoParser {
@@ -51,111 +35,168 @@ func (p *GoParser) SupportsExtension(ext string) bool {
 	return ext == ".go"
 }
 
-// Parse extracts top-level exported structure from Go source.
-// Shallow pass — best-effort and line-based, not a real Go parser:
-//   - Handled: single-line/typed/grouped exported var & const declarations,
-//     import blocks, top-level funcs, methods, and type declarations.
-//   - Exports holds top-level exported var/const names. Go does NOT use Exports
-//     for exported funcs/types — those land in Functions/Classes respectively
-//     (per-parser semantics; other parsers populate Exports differently).
-//   - Not handled: build tags, cgo, multiline func/type signatures, or values
-//     that span lines. Only top-level declarations (no leading whitespace) are
-//     captured, so var/const inside a func body is correctly ignored.
+// Parse extracts top-level exported structure from Go source via go/ast.
+// Best-effort on parse errors: go/parser recovers to a partial *ast.File for
+// most single-error (mid-edit) buffers, and we walk whatever declarations it
+// produced — honoring the Parser interface's partial-structure contract without
+// a separate degraded path.
 func (p *GoParser) Parse(source string) (FileStructure, error) {
-	fs := FileStructure{
-		Imports:   []string{},
-		Functions: []string{},
-		Classes:   []string{}, // used for Go types (struct, interface, etc.)
-		Exports:   []string{}, // top-level exported var/const names (see doc above)
+	// Normalize CRLF→LF so per-symbol body hashes and start lines are
+	// line-ending-independent (parity with the Python parser; a CRLF checkout
+	// must index identically to an LF one).
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	src := []byte(source)
+
+	// Initialize non-nil so a file with no symbols yields [] rather than null,
+	// preserving the regex-era contract these slices have always honored.
+	imports := []string{}
+	functions := []string{}
+	classes := []string{}
+	exports := []string{}
+	hashes := make(map[string]string)
+	lines := make(map[string]int)
+
+	// recordLine anchors a symbol at its FIRST definition (parity with Python).
+	recordLine := func(key string, line int) {
+		if _, ok := lines[key]; !ok {
+			lines[key] = line
+		}
+	}
+	// recordHash combines on collision so a change in ANY variant of a collapsed
+	// name flips the hash (parity with Python's recordHash). Distinct receiver
+	// qualification makes Go method collisions rare, but same-name top-level funcs
+	// can still occur across build-tagged files parsed into one structure.
+	recordHash := func(key string, span []byte) {
+		h := hashBytesHex(span)
+		if existing, ok := hashes[key]; ok {
+			h = hashBytesHex([]byte(existing + h))
+		}
+		hashes[key] = h
 	}
 
-	lines := strings.Split(source, "\n")
-	inImportBlock := false
-	inVarConstBlock := false
-
-	for _, line := range lines {
-		line = stripLineComment(line)
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-
-		// Import block: import (
-		if trimmed == "import (" || strings.HasPrefix(trimmed, "import (\"") {
-			inImportBlock = true
-			// If there's a path on the same line as "import (", capture it below
-		}
-
-		if inImportBlock {
-			if trimmed == ")" {
-				inImportBlock = false
-				continue
+	fset := token.NewFileSet()
+	// SkipObjectResolution: we only walk top-level decls, so identifier object
+	// resolution is wasted work. The error is intentionally ignored — see doc.
+	f, _ := parser.ParseFile(fset, "", source, parser.SkipObjectResolution)
+	if f != nil {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				name := d.Name.Name
+				if !ast.IsExported(name) {
+					continue
+				}
+				full := name
+				if d.Recv != nil && len(d.Recv.List) > 0 {
+					// Qualify by receiver type: func (r *Reader) Fetch → "Reader.Fetch".
+					full = qualify(receiverTypeName(d.Recv.List[0].Type), name)
+				}
+				functions = append(functions, full)
+				key := "function:" + full
+				recordHash(key, nodeSpan(fset, src, d))
+				recordLine(key, fset.Position(d.Pos()).Line)
+			case *ast.GenDecl:
+				collectGenDecl(d, fset, &imports, &classes, &exports, recordLine)
 			}
-			if m := goImportBlockItemRegex.FindStringSubmatch(trimmed); m != nil {
-				fs.Imports = append(fs.Imports, m[1])
-			}
-			continue
-		}
-
-		// Single-line import
-		if m := goImportSingleRegex.FindStringSubmatch(line); m != nil {
-			fs.Imports = append(fs.Imports, m[1])
-			continue
-		}
-
-		// Grouped var/const block: var ( or const ( on its own line. Items
-		// inside are indented, so we match against the trimmed line; only
-		// exported (capitalized) names are captured.
-		if trimmed == "var (" || trimmed == "const (" {
-			inVarConstBlock = true
-			continue
-		}
-		if inVarConstBlock {
-			if trimmed == ")" {
-				inVarConstBlock = false
-				continue
-			}
-			if m := goVarConstBlockItemRegex.FindStringSubmatch(trimmed); m != nil {
-				fs.Exports = append(fs.Exports, m[1])
-			}
-			continue
-		}
-
-		// Single-line var/const (matched on the raw line so leading whitespace —
-		// i.e. a declaration inside a func body — is excluded; top-level only).
-		if m := goVarConstSingleRegex.FindStringSubmatch(line); m != nil {
-			fs.Exports = append(fs.Exports, m[1])
-			continue
-		}
-
-		// Method (check before bare func — both start with "func ")
-		if m := goMethodRegex.FindStringSubmatch(line); m != nil {
-			fs.Functions = append(fs.Functions, m[1])
-			continue
-		}
-
-		// Top-level function
-		if m := goFuncRegex.FindStringSubmatch(line); m != nil {
-			fs.Functions = append(fs.Functions, m[1])
-			continue
-		}
-
-		// Type declaration
-		if m := goTypeRegex.FindStringSubmatch(line); m != nil {
-			fs.Classes = append(fs.Classes, m[1])
-			continue
 		}
 	}
 
-	sort.Strings(fs.Imports)
-	sort.Strings(fs.Functions)
-	sort.Strings(fs.Classes)
-	sort.Strings(fs.Exports)
+	sort.Strings(imports)
+	sort.Strings(functions)
+	sort.Strings(classes)
+	sort.Strings(exports)
 
-	fs.Imports = deduplicate(fs.Imports)
-	fs.Functions = deduplicate(fs.Functions)
-	fs.Classes = deduplicate(fs.Classes)
-	fs.Exports = deduplicate(fs.Exports)
+	// Nil out empty maps so the IR omits them for files with no spanned symbols
+	// (parity with the Python parser and the regex-era nil contract).
+	if len(hashes) == 0 {
+		hashes = nil
+	}
+	if len(lines) == 0 {
+		lines = nil
+	}
 
-	return fs, nil
+	return FileStructure{
+		Imports:      deduplicate(imports),
+		Functions:    deduplicate(functions),
+		Classes:      deduplicate(classes),
+		Exports:      deduplicate(exports),
+		SymbolHashes: hashes,
+		SymbolLines:  lines,
+	}, nil
+}
+
+// collectGenDecl extracts imports, exported types, and exported top-level
+// var/const names from a general declaration. Iterating Specs is what fixes the
+// two regex-era bugs for free: `var X, Y = 1, 2` yields both names (a ValueSpec
+// carries all of them), and a `var (...)` / `import (...)` block's boundaries are
+// owned by the AST, so a nested `)` no longer closes the block early.
+func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, imports, classes, exports *[]string, recordLine func(string, int)) {
+	switch d.Tok {
+	case token.IMPORT:
+		for _, spec := range d.Specs {
+			s, ok := spec.(*ast.ImportSpec)
+			if !ok {
+				continue
+			}
+			// Path.Value is a quoted Go string literal (always double-quoted for
+			// import paths); Unquote yields the bare path.
+			if path, err := strconv.Unquote(s.Path.Value); err == nil {
+				*imports = append(*imports, path)
+			}
+		}
+	case token.TYPE:
+		for _, spec := range d.Specs {
+			s, ok := spec.(*ast.TypeSpec)
+			if !ok || !ast.IsExported(s.Name.Name) {
+				continue
+			}
+			*classes = append(*classes, s.Name.Name)
+			recordLine("class:"+s.Name.Name, fset.Position(s.Pos()).Line)
+		}
+	case token.VAR, token.CONST:
+		for _, spec := range d.Specs {
+			s, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, nm := range s.Names {
+				if !ast.IsExported(nm.Name) {
+					continue
+				}
+				*exports = append(*exports, nm.Name)
+				recordLine("export:"+nm.Name, fset.Position(nm.Pos()).Line)
+			}
+		}
+	}
+}
+
+// receiverTypeName returns the base type name of a method receiver, unwrapping
+// pointers and generic instantiations: *Reader → "Reader", Set[T] → "Set". An
+// unresolvable receiver yields "" (the method is then recorded under its bare
+// name, an acceptable degradation).
+func receiverTypeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return receiverTypeName(t.X)
+	case *ast.Ident:
+		return t.Name
+	case *ast.IndexExpr: // generic receiver with one type param: Set[T]
+		return receiverTypeName(t.X)
+	case *ast.IndexListExpr: // generic receiver with multiple params: Map[K, V]
+		return receiverTypeName(t.X)
+	}
+	return ""
+}
+
+// nodeSpan returns the exact source bytes covered by n. The offsets come from
+// the FileSet, so the span is the declaration as written (func keyword through
+// closing brace) — what the body hash is computed over. Returns nil on any
+// out-of-range result (defensive; should not happen for a node from this file).
+func nodeSpan(fset *token.FileSet, src []byte, n ast.Node) []byte {
+	start := fset.Position(n.Pos()).Offset
+	end := fset.Position(n.End()).Offset
+	if start < 0 || end > len(src) || start > end {
+		return nil
+	}
+	return src[start:end]
 }

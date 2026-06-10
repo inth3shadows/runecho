@@ -77,6 +77,33 @@ func TestExtractDefs_Python(t *testing.T) {
 	}
 }
 
+func TestExtractDefs_PythonAsync(t *testing.T) {
+	ls := lines(
+		`async def search(query):`,
+		`    return await run(query)`,
+	)
+	defs := ExtractDefs(LangPython, ls)
+	if len(defs) != 1 || defs[0] != "search" {
+		t.Errorf("async def not recognized as a definition: defs = %v", defs)
+	}
+}
+
+// An `async def` line defines a symbol; its own name must not be counted as a
+// call site (regression: the def-skip regex previously matched only plain `def`,
+// so async defs leaked into refs).
+func TestExtractRefs_Python_AsyncDefNotARef(t *testing.T) {
+	ls := lines(
+		`async def search(query):`,
+		`    return await run(query)`,
+	)
+	refs := ExtractRefs(LangPython, ls)
+	for _, r := range refs {
+		if r.Name == "search" {
+			t.Errorf("async def name leaked into refs: %+v", refs)
+		}
+	}
+}
+
 func TestExtractDefs_JS(t *testing.T) {
 	ls := lines(
 		`function processBar(x) {`,

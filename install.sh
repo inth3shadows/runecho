@@ -83,12 +83,15 @@ fi
 
 command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.24+)." >&2; exit 1; }
 
-# The Python symbol parser uses a pure-Go (CGO-free) tree-sitter runtime. Its
-# grammar package can embed all ~206 grammars (~20MB); these build tags embed
-# ONLY the Python blob (the one language runecho parses via AST — Go/JS stay
-# regex). runecho-guard does not import the parser, so the tags are a harmless
-# no-op there. Build stays CGO-free; do not set CGO_ENABLED=1.
-GRAMMAR_TAGS="grammar_subset grammar_subset_python"
+# The Python and JS/TS symbol parsers use a pure-Go (CGO-free) tree-sitter
+# runtime. Its grammar package can embed all ~206 grammars (~20MB); these build
+# tags embed ONLY the languages runecho parses via AST: Python and
+# JavaScript/TypeScript/TSX (~200 KiB total, ~1.3% of the binary). Go uses the
+# stdlib go/ast, no grammar needed. Without these tags the JS/TS parser degrades
+# to regex (names only, no per-symbol spans). runecho-guard does not import the
+# parser, so the tags are a harmless no-op there. Build stays CGO-free; do not
+# set CGO_ENABLED=1.
+GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"
 
 for cmd in runecho-ir runecho-mcp runecho-guard; do
   echo "Building $cmd..."

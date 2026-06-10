@@ -247,36 +247,42 @@ runecho-ir repo list                              # enrolled repos + index state
 
 ## Parser Capability Matrix
 
-One parser per language family; all are shallow (line-regex, not AST). The table
-is intentionally honest: gaps here are tracked issues, not silently accepted.
+One parser per language family. All are AST-based and CGO-free: Go uses the
+stdlib `go/parser`/`go/ast`; Python and JS/TS use a pure-Go tree-sitter runtime.
+Every parser emits per-symbol start lines and function body hashes — the data
+behind `map`/`locate` (`file:line`) and modified-symbol diff (`~ modified`).
+Imports/exports for the tree-sitter languages stay regex (line-oriented). The
+table is intentionally honest: gaps here are tracked, not silently accepted.
 
-| Language | Extensions | Definitions captured | Exports semantics | Nested declarations | Depth |
+| Language | Extensions | Definitions captured | Methods | Altitude | Backend |
 |---|---|---|---|---|---|
-| **Go** | `.go` | Top-level `func` and exported methods (→ Functions), `type` (→ Classes), exported `var`/`const` (→ Exports) | Exported `var`/`const` names only — exported funcs/types land in Functions/Classes, not Exports | Top-level only (no leading whitespace) | Shallow / line-regex |
-| **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` declarations, `const/let/var = function/arrow`, `class` declarations | `export { ... }`, `export const/let/var/function/class`, `export default <ident>` | Best-effort: named functions inside callback arguments are missed (leading `(` is not whitespace, so the regex anchor fails); local function expressions inside factory bodies are over-captured as top-level | Shallow / line-regex |
-| **Python** | `.py` | `def` functions, `class` declarations | Names in `__all__` when present; empty otherwise (no fallback) | Top-level only (`def`/`class` at column 0) | Shallow / line-regex |
+| **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch` (→ Functions) | Top-level decls + methods | `go/ast` (stdlib) |
+| **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via regex | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
+| **Python** | `.py` | `def` functions, `class` declarations; imports + `__all__` via regex | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 
-**Known gaps in the JS/TS/JSX parser** (evidence for the AST go/no-go decision, issue #15):
+Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
+consistent across parsers. Functions/methods are body-hashed; classes/types are
+located but not hashed (their changes surface through their members).
 
-- `const Name: Type = (...) => …` — TypeScript-annotated arrow components are
-  not captured in Functions. The `: Type` annotation between the variable name
-  and `=` breaks `arrowFuncRegex`. Under-capture.
-- `export * from './mod'` — star re-exports are not enumerable by regex; the
-  re-exported symbol set is silently dropped. Under-capture in Exports.
-- `export * as ns from './mod'` — namespace re-export not captured. Under-capture.
-- `export { local as alias }` — the pre-alias local name is recorded, not the
-  exported alias. Intentional (we index local definitions), but callers querying
-  by published API name will not find it.
-- Named callback functions (`setTimeout(function tick() {…})`) are **not**
-  promoted to top-level — the `(?:^|\s)` anchor before `function` correctly
-  excludes them. This is intentional under-capture (callbacks are not public
-  definitions) but it means factory-internal named function expressions are also
-  missed.
+**Known gaps:**
+
+- **JS/TS** `const f = (x: T): R => …` — a return-typed arrow const does not
+  parse cleanly under the reduced subset grammar and yields fewer symbols. Same
+  gap the prior regex parser had; documented, not silently dropped. (Plain and
+  parameter-typed arrows are captured.)
+- **JS/TS** `export * from './mod'` / `export * as ns from './mod'` — star
+  re-exports are not enumerable by the regex export pass; the re-exported set is
+  dropped. Under-capture in Exports.
+- **JS/TS** `export { local as alias }` — the pre-alias local name is recorded,
+  not the exported alias (we index local definitions).
+- **All** Imports/exports for JS/TS and Python are still regex; only function/
+  class/method *definitions* go through the AST.
 
 ## Known Limitations
 
-- **Languages:** Go, JS/TS/JSX/TSX, and Python only. Parsers are deliberately
-  shallow — top-level symbols, not nested scopes or full semantic resolution.
+- **Languages:** Go, JS/TS/JSX/TSX, and Python only. Parsers are AST-based but
+  scoped to definitions (functions, classes, methods) — not full semantic
+  resolution (no type inference, call-graph, or cross-file binding).
 - **File cap is enforced.** `repo add --cap N` stops indexing after N files (the
   walk continues counting supported files, so the coverage denominator stays
   honest). The root hash reflects only the capped file set — truncation changes

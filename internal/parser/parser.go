@@ -31,3 +31,13 @@ type Parser interface {
 	// SupportsExtension returns true if this parser handles the file extension.
 	SupportsExtension(ext string) bool
 }
+
+// ExtAwareParser is an optional extension implemented by parsers that need the
+// file extension to do their job — currently the JS/TS parser, which selects a
+// tree-sitter grammar by .js/.ts/.tsx. The generator passes the extension via
+// ParseExt when a parser implements this; parsers that don't are called via the
+// plain Parse method. Keeping it optional avoids churning the Go and Python
+// parsers (whose extension is unambiguous) and all their callers.
+type ExtAwareParser interface {
+	ParseExt(source, ext string) (FileStructure, error)
+}

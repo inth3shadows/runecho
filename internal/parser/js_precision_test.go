@@ -1,16 +1,19 @@
 package parser
 
-// Precision corpus for the JS/TS/JSX shallow (regex) parser.
+// Precision corpus for the JS/TS/JSX parser.
 //
-// PURPOSE: Document *current, honest* output for cases that sit at the edges
-// of what a line-regex approach can correctly classify.  This corpus is
-// evidence for the future AST go/no-go decision (issue #15).  Each case
-// carries a KNOWN: comment where the regex over- or under-captures; those
-// cases assert the imperfect output so that future refactors know what they
-// are changing.
+// PURPOSE: Pin the parser's output on cases that sit at the edges of symbol
+// classification. The parser is now AST-backed (tree-sitter, issue #19): it
+// captures top-level functions/classes plus class methods (qualified as
+// Class.method), at the same "top-level + methods" altitude as the Go parser —
+// nested closures inside function bodies are deliberately NOT captured.
+// Imports/exports are still extracted by regex. Cases here assert the AST
+// output; several previously documented regex over/under-captures (KNOWN:
+// notes) are now resolved and noted as such.
 //
-// SCOPE: Tests that expose a panic are fixed (a panic is never acceptable);
-// all other imperfections are left as-is and documented.
+// Note: cases call Parse() (no extension), which uses the JavaScript grammar.
+// The JS grammar also parses JSX. TypeScript-only syntax is covered separately
+// via ParseExt(".ts"/".tsx").
 
 import (
 	"testing"
@@ -77,12 +80,14 @@ function main() {
 	}
 }
 `,
-			// KNOWN: "helper" is nested inside an if-block but the line-regex
-			// has no scope awareness — it is promoted to top-level Functions.
-			wantFuncs: []string{"helper", "main"},
+			// AST: "helper" is nested inside main's body. The JS/TS parser uses a
+			// top-level altitude (top-level decls + class methods, no function-body
+			// recursion — see js.go), so helper is correctly NOT captured. The old
+			// regex wrongly promoted it.
+			wantFuncs: []string{"main"},
 			wantClass: []string{},
 			wantExp:   []string{},
-			note:      "KNOWN: nested function inside conditional promoted to top-level",
+			note:      "",
 		},
 		{
 			name: "callback_returning_named_function",
@@ -126,13 +131,13 @@ function makeCounter() {
 	return increment;
 }
 `,
-			// KNOWN: funcExprRegex captures "const increment = function()" even
-			// though "increment" is a local variable inside makeCounter, not a
-			// top-level definition.
-			wantFuncs: []string{"increment", "makeCounter"},
+			// AST: "increment" is a local function expression inside makeCounter's
+			// body; with the top-level altitude it is correctly NOT promoted. The
+			// old regex wrongly captured it.
+			wantFuncs: []string{"makeCounter"},
 			wantClass: []string{},
 			wantExp:   []string{},
-			note:      "KNOWN: local function expression inside factory promoted to top-level",
+			note:      "",
 		},
 
 		// ------------------------------------------------------------------ //
@@ -145,15 +150,14 @@ const Foo = class FooInternal {
 	method() {}
 };
 `,
-			// classDeclRegex matches "class <Name>" regardless of whether it is
-			// a declaration or expression, so "FooInternal" is captured.
-			// "Foo" (the variable binding) is NOT captured because classDeclRegex
-			// only looks for the "class" keyword, not the LHS of the assignment.
-			// This is a mild under-capture for the variable name.
-			wantFuncs: []string{},
-			wantClass: []string{"FooInternal"},
+			// AST: a class expression bound to a variable is recorded under the
+			// binding name "Foo" (how callers reference it), with its method
+			// qualified as "Foo.method". The internal class name (FooInternal) is
+			// not used.
+			wantFuncs: []string{"Foo.method"},
+			wantClass: []string{"Foo"},
 			wantExp:   []string{},
-			note:      "KNOWN: class-expression binding name (Foo) not captured; only the internal class name (FooInternal) is",
+			note:      "",
 		},
 		{
 			name: "class_expression_anonymous",
@@ -162,15 +166,13 @@ const Widget = class {
 	render() {}
 };
 `,
-			// Anonymous class expression: the "class" keyword is not followed by
-			// an identifier (it is followed by "{"), so classDeclRegex yields
-			// nothing.  "Widget" is not captured either (no class keyword before it).
-			// Under-capture: Widget is effectively a class but appears in neither
-			// Functions nor Classes.
-			wantFuncs: []string{},
-			wantClass: []string{},
+			// AST: an anonymous class expression bound to "Widget" is recorded
+			// under the binding name, with its method as "Widget.render". The old
+			// regex captured neither.
+			wantFuncs: []string{"Widget.render"},
+			wantClass: []string{"Widget"},
 			wantExp:   []string{},
-			note:      "KNOWN: anonymous class expression binding (Widget) not captured",
+			note:      "",
 		},
 
 		// ------------------------------------------------------------------ //
@@ -386,11 +388,10 @@ export class Service {
 	constructor() {}
 }
 `,
-			// classDeclRegex: "(?:^|\s)(?:export\s+(?:default\s+)?)?class\s+(\w+)"
-			// Matches "export class Service" — "Service" captured in Classes.
-			// exportDeclRegex: "export\s+(?:const|...|class|...)\s+(\w+)"
-			// Also matches — "Service" captured in Exports too.
-			wantFuncs: []string{},
+			// AST: "Service" class captured; its constructor is a method, recorded
+			// qualified as "Service.constructor" (parity with Python's __init__).
+			// "Service" is also in Exports via the regex export pass.
+			wantFuncs: []string{"Service.constructor"},
 			wantClass: []string{"Service"},
 			wantExp:   []string{"Service"},
 			note:      "",
@@ -402,10 +403,9 @@ export default class Controller {
 	handle() {}
 }
 `,
-			// classDeclRegex captures "Controller".
-			// exportDefaultRegex now uses alternation to capture the identifier
-			// after "class", so "Controller" lands in Exports correctly.
-			wantFuncs: []string{},
+			// AST: "Controller" class captured; its method "handle" recorded
+			// qualified as "Controller.handle". "Controller" also in Exports.
+			wantFuncs: []string{"Controller.handle"},
 			wantClass: []string{"Controller"},
 			wantExp:   []string{"Controller"},
 			note:      "",
@@ -440,12 +440,10 @@ export default function App() {
 
 export { ErrorBoundary };
 `,
-			// "useCounter" and "App" captured by funcDeclRegex.
-			// "ErrorBoundary" captured by classDeclRegex.
-			// exportNamedRegex fires for "export { ErrorBoundary }";
-			// exportDefaultRegex now correctly captures "App" from
-			// "export default function App()".
-			wantFuncs: []string{"App", "useCounter"},
+			// AST: top-level functions "useCounter" and "App"; class
+			// "ErrorBoundary" with its method qualified as
+			// "ErrorBoundary.componentDidCatch". Exports from the regex pass.
+			wantFuncs: []string{"App", "ErrorBoundary.componentDidCatch", "useCounter"},
 			wantClass: []string{"ErrorBoundary"},
 			wantExp:   []string{"App", "ErrorBoundary"},
 			note:      "",

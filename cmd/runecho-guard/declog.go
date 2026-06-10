@@ -64,6 +64,23 @@ func logDecision(rec decisionRecord) {
 	_, _ = f.Write(append(line, '\n'))
 }
 
+// e6debug appends one E6 auto-refresh trace record to decisions.jsonl, but only
+// when RUNECHO_DEBUG=1. The E6 refresh path (refreshIRForFile) is otherwise
+// fully silent and fail-open by design, which makes it un-dogfoodable: "no
+// complaints" is indistinguishable from "never ran" or "failed silently every
+// time". This opt-in trace records which branch the refresh took (refreshed,
+// unchanged, no-repo, or a specific failure token) so a dogfood session can
+// confirm the feature actually fires and rolls the auto snapshot. It is gated
+// (not always-on) so the normal hot path writes nothing extra and the decision
+// log stays clean for its primary consumer (the C3 learned-allow analysis).
+// outcome is a short token, not free text, so the log stays greppable.
+func e6debug(file, outcome string) {
+	if os.Getenv("RUNECHO_DEBUG") != "1" {
+		return
+	}
+	logDecision(decisionRecord{Mode: "e6", File: file, Decision: "refresh", Reason: outcome})
+}
+
 const (
 	maxOutcomeAge       = 5 * time.Minute
 	maxOutcomeReadBytes = int64(64 * 1024) // 64 KiB — covers ~500 recent entries

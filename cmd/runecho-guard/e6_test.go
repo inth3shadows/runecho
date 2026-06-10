@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,53 @@ import (
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
+
+// e6CountTraces returns how many "e6" records decisions.jsonl holds in home.
+func e6CountTraces(t *testing.T, home string) int {
+	t.Helper()
+	f, err := os.Open(filepath.Join(home, "decisions.jsonl"))
+	if err != nil {
+		return 0 // no log file yet == no traces
+	}
+	defer f.Close()
+	n := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var rec decisionRecord
+		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Mode == "e6" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestE6DebugTrace_Gating verifies the observability contract the dogfood plan
+// relies on: the E6 refresh path emits a trace record ONLY under RUNECHO_DEBUG=1
+// (so "no complaints" can be distinguished from "never ran"), and writes nothing
+// to decisions.jsonl otherwise (so the C3 learned-allow stream stays clean).
+func TestE6DebugTrace_Gating(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	// A path with no store/db exercises a deterministic early-return outcome
+	// ("no-db") without needing repo setup — the gating, not the branch, is the
+	// subject here.
+	missing := filepath.Join(t.TempDir(), "x.go")
+
+	// Disabled: no trace, regardless of outcome.
+	if got := refreshIRForFile(missing); got != "no-db" {
+		t.Fatalf("outcome = %q, want no-db (test precondition)", got)
+	}
+	if n := e6CountTraces(t, home); n != 0 {
+		t.Errorf("trace count with RUNECHO_DEBUG unset = %d, want 0", n)
+	}
+
+	// Enabled: exactly one trace, carrying the outcome token.
+	t.Setenv("RUNECHO_DEBUG", "1")
+	refreshIRForFile(missing)
+	if n := e6CountTraces(t, home); n != 1 {
+		t.Errorf("trace count with RUNECHO_DEBUG=1 = %d, want 1", n)
+	}
+}
 
 func e6Write(t *testing.T, path, content string) {
 	t.Helper()
@@ -85,7 +134,9 @@ func TestRefreshIRForFile_E6(t *testing.T) {
 	e6Write(t, filepath.Join(repo, "b.go"), "package x\n\nfunc BrandNew() {}\n")
 
 	// PostToolUse auto-fresh fires for just the edited file.
-	refreshIRForFile(filepath.Join(repo, "b.go"))
+	if got := refreshIRForFile(filepath.Join(repo, "b.go")); got != "refreshed" {
+		t.Errorf("first refresh outcome = %q, want refreshed", got)
+	}
 
 	db2, err := snapshot.Open(filepath.Join(home, "history.db"))
 	if err != nil {
@@ -117,7 +168,9 @@ func TestRefreshIRForFile_E6(t *testing.T) {
 	// A second edit must ROLL the auto snapshot (delete prior, write fresh) — not
 	// append — so history doesn't bloat with a snapshot per edit.
 	e6Write(t, filepath.Join(repo, "b.go"), "package x\n\nfunc BrandNew() {}\nfunc Another() {}\n")
-	refreshIRForFile(filepath.Join(repo, "b.go"))
+	if got := refreshIRForFile(filepath.Join(repo, "b.go")); got != "refreshed" {
+		t.Errorf("second refresh outcome = %q, want refreshed", got)
+	}
 	syms2, _ := db2.SymbolsForLatestSnapshot(id)
 	if !e6Has(syms2, "Another") {
 		t.Error("second auto-fresh did not surface Another")

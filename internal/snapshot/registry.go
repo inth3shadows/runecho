@@ -169,6 +169,38 @@ func (db *DB) PurgeRepo(id int64) error {
 	return tx.Commit()
 }
 
+// DeleteAutoSnapshots removes the repo's rolling auto-fresh snapshots (label
+// "auto") and their child rows. The PostToolUse auto-fresh hook (E6) calls this
+// before writing a new "auto" snapshot, so at most one exists per repo at a time:
+// the guard always reads the latest snapshot's symbols, but history is never
+// bloated by a snapshot-per-edit, and manual snapshots (reindex/session-start/…)
+// are never touched. Child rows are deleted explicitly because the schema has no
+// ON DELETE CASCADE yet.
+func (db *DB) DeleteAutoSnapshots(repoID int64) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete auto snapshots: %w", err)
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`DELETE FROM refs WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id
+			WHERE s.repo_id = ? AND s.label = 'auto')`,
+		`DELETE FROM symbols WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id
+			WHERE s.repo_id = ? AND s.label = 'auto')`,
+		`DELETE FROM files WHERE snapshot_id IN (
+			SELECT id FROM snapshots WHERE repo_id = ? AND label = 'auto')`,
+		`DELETE FROM snapshots WHERE repo_id = ? AND label = 'auto'`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s, repoID); err != nil {
+			return fmt.Errorf("delete auto snapshots for repo %d: %w", repoID, err)
+		}
+	}
+	return tx.Commit()
+}
+
 // TouchRepo records indexing state after a (re)index: when it last ran, how
 // many parse errors were seen, and how many supported files the walk
 // encountered (self-observing / honest-coverage guarantees).

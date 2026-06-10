@@ -33,6 +33,7 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/guard"
+	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
 )
@@ -237,7 +238,70 @@ func runOutcomeMode(in io.Reader) int {
 		return 0
 	}
 	logOutcomeForFile(payload.ToolInput.FilePath)
+	// E6 auto-fresh IR: reindex the edited file so the NEXT PreToolUse check sees
+	// symbols this edit added — closes the stale-IR false-positive class. Fail-open.
+	refreshIRForFile(payload.ToolInput.FilePath)
 	return 0
+}
+
+// refreshIRForFile is the E6 auto-fresh step: reparse just the edited file and
+// roll the repo's "auto" snapshot so the guard's next read reflects this edit.
+// It is strictly best-effort observability plumbing — every failure path is a
+// silent no-op so the PostToolUse hook can never alter a tool result or block.
+func refreshIRForFile(filePath string) {
+	storeDir, err := runechoDir()
+	if err != nil {
+		return
+	}
+	dbPath := filepath.Join(storeDir, "history.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := snapshot.OpenFast(dbPath)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+
+	repo, _, ok := db.ResolveRepo(filepath.Dir(filePath))
+	if !ok {
+		return
+	}
+	srcRoot := repo.EffectiveSourceRoot()
+	irPath := filepath.Join(srcRoot, ".ai", "ir.json")
+
+	gen := ir.NewGenerator(ir.GeneratorConfig{})
+	existing, loadErr := ir.Load(irPath)
+
+	var updated *ir.IR
+	var changed bool
+	if loadErr != nil || existing == nil || existing.Version != ir.IRVersion {
+		// No usable IR file yet — bootstrap with a full generate (one-time cost).
+		full, _, genErr := gen.Generate(srcRoot)
+		if genErr != nil {
+			return
+		}
+		updated, changed = full, true
+	} else if updated, changed, err = gen.UpdateFile(existing, srcRoot, filePath); err != nil {
+		return
+	}
+	if !changed {
+		return // nothing structural changed; leave the store and ir.json alone
+	}
+
+	if err := updated.Save(irPath); err != nil {
+		return
+	}
+	// Roll the single "auto" snapshot: delete the prior one, write the fresh one.
+	if err := db.DeleteAutoSnapshots(repo.ID); err != nil {
+		return
+	}
+	if _, err := db.SaveSnapshot(repo.ID, "", "auto", srcRoot, updated); err != nil {
+		return
+	}
+	// Bump last_indexed so the staleness warning stays quiet; preserve the
+	// existing coverage counters (a single-file refresh doesn't re-walk).
+	_ = db.TouchRepo(repo.ID, time.Now(), repo.ParseErrors, repo.SupportedSeen)
 }
 
 // runHookMode handles --hook-mode (Claude Code PreToolUse). It reads the tool

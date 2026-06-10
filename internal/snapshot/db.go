@@ -288,10 +288,10 @@ func migrateV7(tx *sql.Tx) error {
 	return execAll(tx, stmts)
 }
 
-// migrateV8 adds the per-symbol body hash. Existing rows get sig_hash='' (the
-// column default), which the diff treats as "no hash available" — those symbols
-// fall back to add/remove only, never a false "modified". New snapshots written
-// after this migration carry real hashes for AST-extracted symbols.
+// migrateV8 adds the per-symbol body hash. Existing rows get an empty sig_hash
+// (the column default), which the diff treats as "no hash available" — those
+// symbols fall back to add/remove only, never a false "modified". New snapshots
+// written after this migration carry real hashes for AST-extracted symbols.
 func migrateV8(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE symbols ADD COLUMN sig_hash TEXT NOT NULL DEFAULT ''`,

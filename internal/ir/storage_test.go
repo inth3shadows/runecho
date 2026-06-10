@@ -109,12 +109,14 @@ func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {
 		Version: IRVersion,
 		Files: map[string]FileIR{
 			"test.ts": {
-				Hash:      "abcdef123456",
-				Imports:   []string{"react", "lodash"},
-				Functions: []string{"foo", "bar"},
-				Classes:   []string{"Test"},
-				Exports:   []string{"foo", "bar"},
-				Refs:      []string{"baz", "qux"},
+				Hash:         "abcdef123456",
+				Imports:      []string{"react", "lodash"},
+				Functions:    []string{"foo", "bar"},
+				Classes:      []string{"Test"},
+				Exports:      []string{"foo", "bar"},
+				Refs:         []string{"baz", "qux"},
+				SymbolHashes: map[string]string{"function:foo": "h1", "function:bar": "h2"},
+				SymbolLines:  map[string]int{"function:foo": 3, "function:bar": 9, "class:Test": 1},
 			},
 		},
 	}
@@ -240,7 +242,33 @@ func equalFileIR(a, b FileIR) bool {
 		equalStringSlices(a.Functions, b.Functions) &&
 		equalStringSlices(a.Classes, b.Classes) &&
 		equalStringSlices(a.Exports, b.Exports) &&
-		equalStringSlices(a.Refs, b.Refs)
+		equalStringSlices(a.Refs, b.Refs) &&
+		equalStringMap(a.SymbolHashes, b.SymbolHashes) &&
+		equalIntMap(a.SymbolLines, b.SymbolLines)
+}
+
+func equalStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func equalIntMap(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func equalStringSlices(a, b []string) bool {

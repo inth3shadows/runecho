@@ -105,6 +105,11 @@ func liveSymbolSet(liveIR *ir.IR) map[string]bool {
 		for _, name := range file.Exports {
 			set[name] = true
 		}
+		// Imports are first-class symbols in SaveSnapshot/diff; include them here
+		// too, else a claim referencing an imported name is wrongly flagged stale.
+		for _, name := range file.Imports {
+			set[name] = true
+		}
 	}
 	return set
 }

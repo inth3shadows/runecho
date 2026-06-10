@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -496,7 +497,7 @@ func installLaunchd(irBin string) error {
 	<string>/tmp/runecho-reindex.log</string>
 </dict>
 </plist>
-`, irBin)
+`, html.EscapeString(irBin))
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -906,25 +907,15 @@ func runVerify(args []string) int {
 	var err error
 
 	if *sessionID != "" {
-		// Find session-start for this specific session.
-		// GetLatestByLabel doesn't filter by session, so we use List and filter.
-		metas, listErr := db.List(repoID, 100)
-		if listErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", listErr)
-			return ExitError
-		}
-		for i := range metas {
-			if metas[i].Label == "session-start" && metas[i].SessionID == *sessionID {
-				meta = &metas[i]
-				break
-			}
-		}
+		// Direct SQL lookup — a List(100) scan silently missed the snapshot when
+		// more than 100 newer snapshots existed.
+		meta, err = db.GetLatestByLabelSession(repoID, "session-start", *sessionID)
 	} else {
 		meta, err = db.GetLatestByLabel(repoID, "session-start")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return ExitError
-		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return ExitError
 	}
 
 	if meta == nil {

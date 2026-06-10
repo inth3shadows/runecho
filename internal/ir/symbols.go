@@ -44,7 +44,12 @@ func (ir *IR) SymbolLocations() []SymbolLoc {
 		if out[i].File != out[j].File {
 			return out[i].File < out[j].File
 		}
-		return out[i].Line < out[j].Line
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
+		}
+		// Kind tiebreaker: a Go func appears as both function and export at the
+		// same file/line(0); without this their order would be unstable.
+		return out[i].Kind < out[j].Kind
 	})
 	return out
 }

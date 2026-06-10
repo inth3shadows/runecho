@@ -3,6 +3,8 @@ package parser
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,8 +31,8 @@ var (
 	// from foo import bar (captures the module path)
 	pyFromImportRegex = regexp.MustCompile(`^from\s+([\w.]+)\s+import\s+`)
 
-	// __all__ = ["foo", "bar"] or ('foo', 'bar')
-	pyAllRegex = regexp.MustCompile(`__all__\s*=\s*[\[\(]([^\]\)]+)[\]\)]`)
+	// __all__ = ["foo", "bar"] or ('foo', 'bar'); also __all__ += [...]
+	pyAllRegex = regexp.MustCompile(`__all__\s*\+?=\s*[\[\(]([^\]\)]+)[\]\)]`)
 
 	// individual quoted names inside __all__
 	pyAllItemRegex = regexp.MustCompile(`["'](\w+)["']`)
@@ -45,7 +47,18 @@ var (
 )
 
 func pythonLanguage() *ts.Language {
-	pyLangOnce.Do(func() { pyLang = grammars.PythonLanguage() })
+	pyLangOnce.Do(func() {
+		// Recover so a grammar-decode panic doesn't propagate out of the first
+		// Parse call. sync.Once marks itself done even on panic, so an unrecovered
+		// panic here would also leave pyLang nil forever; recovering degrades to
+		// the nil-language path (no AST symbols) instead, which is fail-safe.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "runecho: Python grammar failed to load (%v); Python symbols disabled\n", r)
+			}
+		}()
+		pyLang = grammars.PythonLanguage()
+	})
 	return pyLang
 }
 
@@ -100,7 +113,8 @@ func pyImportsAndExports(source string) (imports, exports []string) {
 		}
 	}
 
-	if m := pyAllRegex.FindStringSubmatch(source); m != nil {
+	// FindAll, not FindString: a module may both assign and extend __all__.
+	for _, m := range pyAllRegex.FindAllStringSubmatch(source, -1) {
 		for _, item := range pyAllItemRegex.FindAllStringSubmatch(m[1], -1) {
 			exports = append(exports, item[1])
 		}

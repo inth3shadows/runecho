@@ -307,7 +307,6 @@ func TestRemoveRepo_NoSnapshots_Succeeds(t *testing.T) {
 	}
 }
 
-
 // TestGetLatestByLabel_TiebreakById asserts that when two snapshots share the
 // same RFC3339 timestamp, the one with the higher row id wins — deterministic
 // even in fast CI where sub-second collisions are possible.

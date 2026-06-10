@@ -35,7 +35,7 @@ func TestDiffPayloadShape(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	for _, key := range []string{"summary", "total_added", "total_removed", "files"} {
+	for _, key := range []string{"summary", "total_added", "total_removed", "total_modified", "files"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("missing top-level key %q in diff payload", key)
 		}

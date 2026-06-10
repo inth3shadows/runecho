@@ -57,9 +57,10 @@ func logDecision(rec decisionRecord) {
 	}
 	defer f.Close()
 
-	// O_APPEND single-write: on Linux, a write to an O_APPEND file is atomic
-	// up to PIPE_BUF (4096 bytes). A JSONL record is well under that limit.
-	// No additional locking is needed for this use case.
+	// O_APPEND single-write: on Linux, a write(2) to an O_APPEND regular file is
+	// atomic with no documented byte ceiling (PIPE_BUF is a pipe/FIFO guarantee,
+	// not a regular-file one); it holds in practice for single-page JSONL records
+	// like these. No additional locking is needed for this use case.
 	_, _ = f.Write(append(line, '\n'))
 }
 

@@ -2,6 +2,8 @@
 *.exe
 runecho
 /runecho-guard
+/runecho-ir
+/runecho-mcp
 phase0_demo
 verify_determinism
 validate_path_determinism

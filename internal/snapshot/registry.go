@@ -182,6 +182,17 @@ func (db *DB) DeleteAutoSnapshots(repoID int64) error {
 		return fmt.Errorf("begin delete auto snapshots: %w", err)
 	}
 	defer tx.Rollback()
+	if err := deleteAutoSnapshotsTx(tx, repoID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteAutoSnapshotsTx removes the repo's "auto" snapshots and their child rows
+// using the provided transaction. Shared by DeleteAutoSnapshots and the atomic
+// RollAutoSnapshot (which deletes + inserts in one tx). Child rows are deleted
+// explicitly because the schema has no ON DELETE CASCADE yet.
+func deleteAutoSnapshotsTx(tx *sql.Tx, repoID int64) error {
 	stmts := []string{
 		`DELETE FROM refs WHERE file_id IN (
 			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id
@@ -198,7 +209,7 @@ func (db *DB) DeleteAutoSnapshots(repoID int64) error {
 			return fmt.Errorf("delete auto snapshots for repo %d: %w", repoID, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // TouchRepo records indexing state after a (re)index: when it last ran, how

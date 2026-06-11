@@ -300,12 +300,10 @@ func refreshIRForFile(filePath string) (outcome string) {
 	if err := updated.Save(irPath); err != nil {
 		return "save-fail"
 	}
-	// Roll the single "auto" snapshot: delete the prior one, write the fresh one.
-	if err := db.DeleteAutoSnapshots(repo.ID); err != nil {
-		return "delete-auto-fail"
-	}
-	if _, err := db.SaveSnapshot(repo.ID, "", "auto", srcRoot, updated); err != nil {
-		return "snapshot-save-fail"
+	// Roll the single "auto" snapshot: delete the prior one and write the fresh
+	// one in ONE transaction, so concurrent PostToolUse hooks can't leave two.
+	if _, err := db.RollAutoSnapshot(repo.ID, "", srcRoot, updated); err != nil {
+		return "snapshot-roll-fail"
 	}
 	// Bump last_indexed so the staleness warning stays quiet; preserve the
 	// existing coverage counters (a single-file refresh doesn't re-walk).

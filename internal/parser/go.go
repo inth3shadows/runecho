@@ -63,9 +63,13 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 		}
 	}
 	// recordHash combines on collision so a change in ANY variant of a collapsed
-	// name flips the hash (parity with Python's recordHash). Distinct receiver
-	// qualification makes Go method collisions rare, but same-name top-level funcs
-	// can still occur across build-tagged files parsed into one structure.
+	// name flips the hash (parity with Python's recordHash). Receiver
+	// qualification keeps methods distinct, so a collision here needs two
+	// top-level decls with the same exported name — a compile error in valid Go.
+	// The combine is order-sensitive, but Parse runs on a single file and walks
+	// f.Decls in source order, so the result is deterministic across runs. (Do
+	// NOT merge multiple files' FileStructures into one without making this
+	// order-independent first.)
 	recordHash := func(key string, span []byte) {
 		h := hashBytesHex(span)
 		if existing, ok := hashes[key]; ok {

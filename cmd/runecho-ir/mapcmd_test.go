@@ -12,22 +12,20 @@ func mapTestIR() *ir.IR {
 		RootHash: "r",
 		Files: map[string]ir.FileIR{
 			"src/reads.py": {
-				Hash:      "h1",
-				Functions: []string{"get_scope", "search", "_helper"},
-				Classes:   []string{"Reader"},
-				Exports:   []string{"get_scope"},
-				SymbolLines: map[string]int{
-					"function:get_scope": 7, "function:search": 20, "function:_helper": 33,
-					"class:Reader": 4,
-				},
-				SymbolHashes: map[string]string{
-					"function:get_scope": "dfc7abcd", "function:search": "3359beef", "function:_helper": "620a0001",
+				Hash: "h1",
+				Symbols: []ir.Symbol{
+					{Name: "_helper", Kind: "function", Line: 33, Hash: "620a0001"},
+					{Name: "get_scope", Kind: "function", Line: 7, Hash: "dfc7abcd"},
+					{Name: "search", Kind: "function", Line: 20, Hash: "3359beef"},
+					{Name: "Reader", Kind: "class", Line: 4},
+					{Name: "get_scope", Kind: "export"},
 				},
 			},
 			"src/writes.py": {
-				Hash:        "h2",
-				Functions:   []string{"put_node"},
-				SymbolLines: map[string]int{"function:put_node": 12},
+				Hash: "h2",
+				Symbols: []ir.Symbol{
+					{Name: "put_node", Kind: "function", Line: 12},
+				},
 			},
 		},
 	}

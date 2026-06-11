@@ -42,7 +42,7 @@ func TestTruthTrail_RemovedSymbolWithCallers(t *testing.T) {
 		Version:  ir.IRVersion,
 		RootHash: "h1",
 		Files: map[string]ir.FileIR{
-			"main.go":   {Hash: "h1a", Functions: []string{"OldFunc"}},
+			"main.go":   {Hash: "h1a", Symbols: []ir.Symbol{{Name: "OldFunc", Kind: "function"}}},
 			"helper.go": {Hash: "h1b", Refs: []string{"OldFunc"}},
 		},
 	}
@@ -57,7 +57,7 @@ func TestTruthTrail_RemovedSymbolWithCallers(t *testing.T) {
 		Version:  ir.IRVersion,
 		RootHash: "h2",
 		Files: map[string]ir.FileIR{
-			"main.go":   {Hash: "h2a", Functions: []string{"NewFunc"}},
+			"main.go":   {Hash: "h2a", Symbols: []ir.Symbol{{Name: "NewFunc", Kind: "function"}}},
 			"helper.go": {Hash: "h2b", Refs: []string{}},
 		},
 	}

@@ -319,7 +319,7 @@ func TestGenerator_Update_IncrementalUpdate(t *testing.T) {
 	}
 
 	// Verify changed file has updated structure
-	if len(updatedIR.Files[changedPath].Functions) == 0 {
+	if len(updatedIR.Files[changedPath].namesOf("function")) == 0 {
 		t.Errorf("Changed file should have parsed functions")
 	}
 }

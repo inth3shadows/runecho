@@ -16,8 +16,8 @@ func twoFileIR(rootHash, hashA, hashB string, fnsA, fnsB []string) *ir.IR {
 		Version:  1,
 		RootHash: rootHash,
 		Files: map[string]ir.FileIR{
-			"a.go": {Hash: hashA, Functions: fnsA},
-			"b.go": {Hash: hashB, Functions: fnsB},
+			"a.go": {Hash: hashA, Symbols: fnsToSymbols(fnsA)},
+			"b.go": {Hash: hashB, Symbols: fnsToSymbols(fnsB)},
 		},
 	}
 }

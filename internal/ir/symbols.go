@@ -20,22 +20,15 @@ type SymbolLoc struct {
 func (ir *IR) SymbolLocations() []SymbolLoc {
 	var out []SymbolLoc
 	for path, f := range ir.Files {
-		emit := func(names []string, kind string) {
-			for _, name := range names {
-				key := kind + ":" + name
-				out = append(out, SymbolLoc{
-					Name: name,
-					Kind: kind,
-					File: path,
-					Line: f.SymbolLines[key],
-					Hash: f.SymbolHashes[key],
-				})
-			}
+		for _, s := range f.Symbols {
+			out = append(out, SymbolLoc{
+				Name: s.Name,
+				Kind: s.Kind,
+				File: path,
+				Line: s.Line,
+				Hash: s.Hash,
+			})
 		}
-		emit(f.Functions, "function")
-		emit(f.Classes, "class")
-		emit(f.Exports, "export")
-		emit(f.Imports, "import")
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {

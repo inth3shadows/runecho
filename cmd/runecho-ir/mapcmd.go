@@ -206,8 +206,14 @@ func emitMapHeader(irData *ir.IR) {
 	funcs, classes := 0, 0
 	dirFiles := make(map[string]int)
 	for path, f := range irData.Files {
-		funcs += len(f.Functions)
-		classes += len(f.Classes)
+		for _, s := range f.Symbols {
+			switch s.Kind {
+			case "function":
+				funcs++
+			case "class":
+				classes++
+			}
+		}
 		dir := path
 		if i := strings.IndexByte(path, '/'); i >= 0 {
 			dir = path[:i] + "/"

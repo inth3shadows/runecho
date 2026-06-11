@@ -233,13 +233,15 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 			c := n.NamedChild(i)
 			switch c.Type(lang) {
 			case "function_declaration", "generator_function_declaration",
-				"method_definition", "method_signature":
-				// A named function/method. We do NOT recurse its body: like the Go
-				// parser (and unlike Python), JS/TS symbols are top-level decls plus
-				// class methods — capturing nested closures/callbacks would just add
-				// orientation noise. Bare function_expressions (e.g. a named
-				// callback `setTimeout(function tick(){})`) are intentionally NOT a
-				// case here; only those bound to a variable (below) are captured.
+				"method_definition", "method_signature", "abstract_method_signature":
+				// A named function/method (incl. interface method_signature and
+				// `abstract foo(): void` abstract_method_signature). We do NOT recurse
+				// its body: like the Go parser (and unlike Python), JS/TS symbols are
+				// top-level decls plus class methods — capturing nested closures/
+				// callbacks would just add orientation noise. Bare function_expressions
+				// (e.g. a named callback `setTimeout(function tick(){})`) are
+				// intentionally NOT a case here; only those bound to a variable (below)
+				// are captured.
 				name := fieldText(c, "name")
 				if name == "" {
 					continue
@@ -247,7 +249,14 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				recordFunc(qualify(prefix, name), c)
 
 			case "class_declaration", "abstract_class_declaration",
-				"interface_declaration", "enum_declaration", "type_alias_declaration":
+				"interface_declaration", "enum_declaration", "type_alias_declaration",
+				"internal_module", "module":
+				// Class-like containers: classes, interfaces, enums, type aliases, and
+				// TS namespaces/modules (`namespace X {}` parses as internal_module,
+				// `module X {}` as module). Recorded as a class (located, not hashed)
+				// and descended with the qualified prefix so members become X.member —
+				// without this, namespace members would escape qualification and
+				// collide with identically-named top-level symbols.
 				name := fieldText(c, "name")
 				if name == "" {
 					continue

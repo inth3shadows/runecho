@@ -18,7 +18,49 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+	id, err := writeSnapshotTx(tx, repoID, sessionID, label, root, irData)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return id, nil
+}
 
+// RollAutoSnapshot atomically replaces the repo's single rolling "auto" snapshot:
+// it deletes any existing auto snapshots AND writes the new one in ONE
+// transaction. The E6 PostToolUse hook fires once per edit and can run
+// concurrently with another hook (parallel/overlapping edits); doing the
+// delete+insert as separate transactions left a window where two hooks could
+// interleave (A.del, B.del, A.ins, B.ins) and leave two auto snapshots. A single
+// transaction closes that window — SQLite serializes the writes, so the invariant
+// "at most one auto snapshot per repo" holds under concurrency. Manual snapshots
+// are never touched. Returns the new snapshot ID.
+func (db *DB) RollAutoSnapshot(repoID int64, sessionID, root string, irData *ir.IR) (int64, error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin roll tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := deleteAutoSnapshotsTx(tx, repoID); err != nil {
+		return 0, err
+	}
+	id, err := writeSnapshotTx(tx, repoID, sessionID, "auto", root, irData)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit roll: %w", err)
+	}
+	return id, nil
+}
+
+// writeSnapshotTx inserts a full IR snapshot using the provided transaction and
+// returns the new snapshot ID. The insert logic lives here so SaveSnapshot and
+// RollAutoSnapshot share it (one writes in its own tx; the other prepends an
+// atomic delete of the prior auto snapshot).
+func writeSnapshotTx(tx *sql.Tx, repoID int64, sessionID, label, root string, irData *ir.IR) (int64, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
 		`INSERT INTO snapshots (repo_id, session_id, label, timestamp, root, root_hash) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -89,9 +131,6 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
-	}
 	return snapshotID, nil
 }
 

@@ -126,6 +126,57 @@ export function build<T>(x: T): T { return x; }
 	}
 }
 
+// TestJSParser_NamespaceQualification covers the post-review fix: TS namespace/
+// module members must be qualified by the namespace name (NS.inner), not escape
+// to top level and collide with identically-named top-level symbols.
+func TestJSParser_NamespaceQualification(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	src := `export function inner() { return 1; }
+export namespace NS {
+  export function inner() { return 2; }
+  export class K {}
+}
+`
+	fs, err := p.ParseExt(src, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both inners must be distinct keys — no collision.
+	if !containsStr(fs.Functions, "inner") || !containsStr(fs.Functions, "NS.inner") {
+		t.Errorf("Functions = %v, want both 'inner' and 'NS.inner'", fs.Functions)
+	}
+	// The namespace member class is qualified too; the namespace itself is located.
+	if !containsStr(fs.Classes, "NS") || !containsStr(fs.Classes, "NS.K") {
+		t.Errorf("Classes = %v, want 'NS' and 'NS.K'", fs.Classes)
+	}
+	// Distinct keys => distinct body hashes (no collision-combine flattening).
+	if fs.SymbolHashes["function:inner"] == fs.SymbolHashes["function:NS.inner"] {
+		t.Error("top-level inner and NS.inner share a hash — collision not prevented")
+	}
+}
+
+// TestJSParser_AbstractMethod covers the post-review fix: abstract-class method
+// signatures (abstract_method_signature) must be captured, qualified by class.
+func TestJSParser_AbstractMethod(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	src := `export abstract class A {
+  abstract foo(): void;
+  bar(): void {}
+}
+`
+	fs, err := p.ParseExt(src, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"A.foo", "A.bar"} {
+		if !containsStr(fs.Functions, name) {
+			t.Errorf("Functions = %v, want it to contain %q", fs.Functions, name)
+		}
+	}
+}
+
 func containsStr(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {

@@ -158,7 +158,7 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	}
 	symCount := 0
 	for _, f := range irData.Files {
-		symCount += len(f.Functions) + len(f.Classes) + len(f.Exports) + len(f.Imports)
+		symCount += len(f.Symbols)
 	}
 	return jsonText(map[string]any{
 		"repo":         repo.Name,

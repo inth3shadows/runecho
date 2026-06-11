@@ -96,19 +96,11 @@ func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, churnN i
 func liveSymbolSet(liveIR *ir.IR) map[string]bool {
 	set := make(map[string]bool)
 	for _, file := range liveIR.Files {
-		for _, name := range file.Functions {
-			set[name] = true
-		}
-		for _, name := range file.Classes {
-			set[name] = true
-		}
-		for _, name := range file.Exports {
-			set[name] = true
-		}
-		// Imports are first-class symbols in SaveSnapshot/diff; include them here
-		// too, else a claim referencing an imported name is wrongly flagged stale.
-		for _, name := range file.Imports {
-			set[name] = true
+		// All kinds (functions, classes, exports, imports) are declared symbols.
+		// Imports must be included too, else a claim referencing an imported name
+		// is wrongly flagged stale.
+		for _, s := range file.Symbols {
+			set[s.Name] = true
 		}
 	}
 	return set

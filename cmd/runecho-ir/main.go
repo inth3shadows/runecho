@@ -1026,11 +1026,10 @@ func runValidateClaims(args []string) int {
 	}
 	knownSymbols := make(map[string]bool)
 	for _, fileEntry := range irData.Files {
-		for _, fn := range fileEntry.Functions {
-			knownSymbols[fn] = true
-		}
-		for _, cl := range fileEntry.Classes {
-			knownSymbols[cl] = true
+		for _, s := range fileEntry.Symbols {
+			if s.Kind == "function" || s.Kind == "class" {
+				knownSymbols[s.Name] = true
+			}
 		}
 	}
 

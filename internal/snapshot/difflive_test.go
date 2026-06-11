@@ -31,8 +31,8 @@ func TestDiffLive(t *testing.T) {
 		Version:  1,
 		RootHash: "h2",
 		Files: map[string]ir.FileIR{
-			"main.go": {Hash: "h2", Functions: []string{"Bar"}},
-			"new.go":  {Hash: "h3", Functions: []string{"Baz"}},
+			"main.go": {Hash: "h2", Symbols: []ir.Symbol{{Name: "Bar", Kind: "function"}}},
+			"new.go":  {Hash: "h3", Symbols: []ir.Symbol{{Name: "Baz", Kind: "function"}}},
 		},
 	}
 
@@ -75,9 +75,11 @@ func TestDiffLive_ModifiedSymbol(t *testing.T) {
 		RootHash: "r1",
 		Files: map[string]ir.FileIR{
 			"reads.py": {
-				Hash:         "f1",
-				Functions:    []string{"get_scope", "set_scope"},
-				SymbolHashes: map[string]string{"function:get_scope": "hA", "function:set_scope": "hS"},
+				Hash: "f1",
+				Symbols: []ir.Symbol{
+					{Name: "get_scope", Kind: "function", Hash: "hA"},
+					{Name: "set_scope", Kind: "function", Hash: "hS"},
+				},
 			},
 		},
 	}
@@ -93,12 +95,11 @@ func TestDiffLive_ModifiedSymbol(t *testing.T) {
 		RootHash: "r2",
 		Files: map[string]ir.FileIR{
 			"reads.py": {
-				Hash:      "f2",
-				Functions: []string{"_probe", "get_scope", "set_scope"},
-				SymbolHashes: map[string]string{
-					"function:get_scope": "hB",
-					"function:set_scope": "hS",
-					"function:_probe":    "hP",
+				Hash: "f2",
+				Symbols: []ir.Symbol{
+					{Name: "_probe", Kind: "function", Hash: "hP"},
+					{Name: "get_scope", Kind: "function", Hash: "hB"},
+					{Name: "set_scope", Kind: "function", Hash: "hS"},
 				},
 			},
 		},
@@ -133,7 +134,7 @@ func TestDiffLive_NoFalseModified(t *testing.T) {
 	baseIR := &ir.IR{
 		Version:  ir.IRVersion,
 		RootHash: "r1",
-		Files:    map[string]ir.FileIR{"reads.py": {Hash: "f1", Functions: []string{"get_scope"}}},
+		Files:    map[string]ir.FileIR{"reads.py": {Hash: "f1", Symbols: []ir.Symbol{{Name: "get_scope", Kind: "function"}}}},
 	}
 	sid, _ := db.SaveSnapshot(id, "s", "base", "/repos/r", baseIR)
 	base, _ := db.GetByID(sid)
@@ -143,7 +144,7 @@ func TestDiffLive_NoFalseModified(t *testing.T) {
 		Version:  ir.IRVersion,
 		RootHash: "r2",
 		Files: map[string]ir.FileIR{
-			"reads.py": {Hash: "f2", Functions: []string{"get_scope"}, SymbolHashes: map[string]string{"function:get_scope": "hB"}},
+			"reads.py": {Hash: "f2", Symbols: []ir.Symbol{{Name: "get_scope", Kind: "function", Hash: "hB"}}},
 		},
 	}
 	res, err := db.DiffLive(*base, live)
@@ -169,7 +170,7 @@ func TestDiffLive_NoChange(t *testing.T) {
 	live := &ir.IR{
 		Version:  1,
 		RootHash: "h1",
-		Files:    map[string]ir.FileIR{"main.go": {Hash: "h1", Functions: []string{"Foo"}}},
+		Files:    map[string]ir.FileIR{"main.go": {Hash: "h1", Symbols: []ir.Symbol{{Name: "Foo", Kind: "function"}}}},
 	}
 	res, err := db.DiffLive(*base, live)
 	if err != nil {

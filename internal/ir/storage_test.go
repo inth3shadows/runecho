@@ -13,25 +13,29 @@ func TestIR_MarshalJSON_Determinism(t *testing.T) {
 		Version: 1,
 		Files: map[string]FileIR{
 			"zebra.ts": {
-				Hash:      "abc123",
-				Imports:   []string{"react"},
-				Functions: []string{"foo", "bar"},
-				Classes:   []string{"Zulu"},
-				Exports:   []string{"foo"},
+				Hash: "abc123",
+				Symbols: []Symbol{
+					{Name: "Zulu", Kind: "class"},
+					{Name: "foo", Kind: "export"},
+					{Name: "bar", Kind: "function"},
+					{Name: "foo", Kind: "function"},
+					{Name: "react", Kind: "import"},
+				},
 			},
 			"alpha.ts": {
-				Hash:      "def456",
-				Imports:   []string{"lodash"},
-				Functions: []string{"baz"},
-				Classes:   []string{},
-				Exports:   []string{"baz"},
+				Hash: "def456",
+				Symbols: []Symbol{
+					{Name: "baz", Kind: "export"},
+					{Name: "baz", Kind: "function"},
+					{Name: "lodash", Kind: "import"},
+				},
 			},
 			"beta.js": {
-				Hash:      "ghi789",
-				Imports:   []string{},
-				Functions: []string{"test"},
-				Classes:   []string{"Test"},
-				Exports:   []string{},
+				Hash: "ghi789",
+				Symbols: []Symbol{
+					{Name: "Test", Kind: "class"},
+					{Name: "test", Kind: "function"},
+				},
 			},
 		},
 	}
@@ -109,14 +113,19 @@ func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {
 		Version: IRVersion,
 		Files: map[string]FileIR{
 			"test.ts": {
-				Hash:         "abcdef123456",
-				Imports:      []string{"react", "lodash"},
-				Functions:    []string{"foo", "bar"},
-				Classes:      []string{"Test"},
-				Exports:      []string{"foo", "bar"},
-				Refs:         []string{"baz", "qux"},
-				SymbolHashes: map[string]string{"function:foo": "h1", "function:bar": "h2"},
-				SymbolLines:  map[string]int{"function:foo": 3, "function:bar": 9, "class:Test": 1},
+				Hash: "abcdef123456",
+				// Canonical order: sortSymbols orders by kind (alphabetical:
+				// class, export, function, import) then name.
+				Symbols: []Symbol{
+					{Name: "Test", Kind: "class", Line: 1},
+					{Name: "bar", Kind: "export"},
+					{Name: "foo", Kind: "export"},
+					{Name: "bar", Kind: "function", Line: 9, Hash: "h2"},
+					{Name: "foo", Kind: "function", Line: 3, Hash: "h1"},
+					{Name: "lodash", Kind: "import"},
+					{Name: "react", Kind: "import"},
+				},
+				Refs: []string{"baz", "qux"},
 			},
 		},
 	}
@@ -238,33 +247,16 @@ func TestIR_Save_DefaultPath(t *testing.T) {
 
 func equalFileIR(a, b FileIR) bool {
 	return a.Hash == b.Hash &&
-		equalStringSlices(a.Imports, b.Imports) &&
-		equalStringSlices(a.Functions, b.Functions) &&
-		equalStringSlices(a.Classes, b.Classes) &&
-		equalStringSlices(a.Exports, b.Exports) &&
-		equalStringSlices(a.Refs, b.Refs) &&
-		equalStringMap(a.SymbolHashes, b.SymbolHashes) &&
-		equalIntMap(a.SymbolLines, b.SymbolLines)
+		equalSymbols(a.Symbols, b.Symbols) &&
+		equalStringSlices(a.Refs, b.Refs)
 }
 
-func equalStringMap(a, b map[string]string) bool {
+func equalSymbols(a, b []Symbol) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
-func equalIntMap(a, b map[string]int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
@@ -281,6 +273,41 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestFileIR_LegacyJSONUnmarshal is the IR v5 compat-shim guarantee: a pre-v5
+// ir.json (parallel functions/classes/exports/imports arrays + symbol_hashes/
+// symbol_lines maps, with NO `symbols` array) still loads, and its data is
+// reconstructed into the canonical Symbols slice with the right kinds, lines,
+// and hashes.
+func TestFileIR_LegacyJSONUnmarshal(t *testing.T) {
+	legacy := `{
+		"hash": "h1",
+		"imports": ["fmt"],
+		"functions": ["DoThing"],
+		"classes": ["Widget"],
+		"exports": ["MAX"],
+		"refs": ["println"],
+		"symbol_hashes": {"function:DoThing": "abc123"},
+		"symbol_lines": {"function:DoThing": 5, "class:Widget": 9, "export:MAX": 3}
+	}`
+	var f FileIR
+	if err := json.Unmarshal([]byte(legacy), &f); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if f.Hash != "h1" || !equalStringSlices(f.Refs, []string{"println"}) {
+		t.Errorf("hash/refs lost: hash=%q refs=%v", f.Hash, f.Refs)
+	}
+	// Sorted by (kind, name): class, export, function, import.
+	want := []Symbol{
+		{Name: "Widget", Kind: "class", Line: 9},
+		{Name: "MAX", Kind: "export", Line: 3},
+		{Name: "DoThing", Kind: "function", Line: 5, Hash: "abc123"},
+		{Name: "fmt", Kind: "import"},
+	}
+	if !equalSymbols(f.Symbols, want) {
+		t.Errorf("reconstructed Symbols = %+v, want %+v", f.Symbols, want)
+	}
 }
 
 func indexOf(s, substr string) int {

@@ -12,13 +12,26 @@ import (
 	"github.com/inth3shadows/runecho/internal/ir"
 )
 
+// fnsToSymbols converts a list of function names into a sorted []ir.Symbol of
+// kind "function" — the new canonical shape replacing the old Functions array.
+func fnsToSymbols(fns []string) []ir.Symbol {
+	if fns == nil {
+		return nil
+	}
+	out := make([]ir.Symbol, 0, len(fns))
+	for _, n := range fns {
+		out = append(out, ir.Symbol{Name: n, Kind: "function"})
+	}
+	return out
+}
+
 // makeIR builds a minimal IR with one file carrying the given function names.
 func makeIR(rootHash string, fns ...string) *ir.IR {
 	return &ir.IR{
 		Version:  1,
 		RootHash: rootHash,
 		Files: map[string]ir.FileIR{
-			"main.go": {Hash: rootHash, Functions: fns},
+			"main.go": {Hash: rootHash, Symbols: fnsToSymbols(fns)},
 		},
 	}
 }

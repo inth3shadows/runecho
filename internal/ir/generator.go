@@ -359,22 +359,29 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 		return FileIR{}, fmt.Errorf("failed to parse file: %w", err)
 	}
 
-	// Ensure all slices are sorted (parser should do this, but enforce here)
-	sort.Strings(structure.Imports)
-	sort.Strings(structure.Functions)
-	sort.Strings(structure.Classes)
-	sort.Strings(structure.Exports)
-
 	return FileIR{
-		Hash:         hash,
-		Imports:      structure.Imports,
-		Functions:    structure.Functions,
-		Classes:      structure.Classes,
-		Exports:      structure.Exports,
-		Refs:         extractRefs(path, src),
-		SymbolHashes: structure.SymbolHashes,
-		SymbolLines:  structure.SymbolLines,
+		Hash:    hash,
+		Symbols: symbolsFromStructure(structure),
+		Refs:    extractRefs(path, src),
 	}, nil
+}
+
+// symbolsFromStructure folds the parser's parallel arrays and "kind:name"-keyed
+// hash/line maps into the canonical, sorted []Symbol.
+func symbolsFromStructure(s parser.FileStructure) []Symbol {
+	var syms []Symbol
+	add := func(names []string, kind string) {
+		for _, n := range names {
+			key := kind + ":" + n
+			syms = append(syms, Symbol{Name: n, Kind: kind, Line: s.SymbolLines[key], Hash: s.SymbolHashes[key]})
+		}
+	}
+	add(s.Functions, "function")
+	add(s.Classes, "class")
+	add(s.Exports, "export")
+	add(s.Imports, "import")
+	sortSymbols(syms)
+	return syms
 }
 
 // extractRefs returns the sorted, deduplicated bare call targets in content,

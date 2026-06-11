@@ -17,6 +17,15 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
+// funcsToSymbols converts function names into the canonical []ir.Symbol shape.
+func funcsToSymbols(funcs []string) []ir.Symbol {
+	out := make([]ir.Symbol, 0, len(funcs))
+	for _, n := range funcs {
+		out = append(out, ir.Symbol{Name: n, Kind: "function"})
+	}
+	return out
+}
+
 // enrolledStore stands up a temp central store ($RUNECHO_HOME), enrolls the git
 // repo at root, and saves one snapshot whose symbol set is `funcs`. It returns
 // the enrolled working-tree path (the path lookupSymbolsFor resolves edits
@@ -49,7 +58,7 @@ func enrolledStore(t *testing.T, root string, funcs []string) string {
 	irData := &ir.IR{
 		Version: ir.IRVersion,
 		Files: map[string]ir.FileIR{
-			"known.go": {Hash: "deadbeef", Functions: funcs},
+			"known.go": {Hash: "deadbeef", Symbols: funcsToSymbols(funcs)},
 		},
 	}
 	if _, err := db.SaveSnapshot(id, "sess", "test", top, irData); err != nil {

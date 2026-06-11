@@ -62,25 +62,9 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 
 	for path, file := range irData.Files {
 		files[path] = file.Hash
-		var deltas []SymbolDelta
-		add := func(name, kind string) {
-			deltas = append(deltas, SymbolDelta{
-				Name: name,
-				Kind: kind,
-				Hash: file.SymbolHashes[kind+":"+name],
-			})
-		}
-		for _, name := range file.Functions {
-			add(name, "function")
-		}
-		for _, name := range file.Classes {
-			add(name, "class")
-		}
-		for _, name := range file.Exports {
-			add(name, "export")
-		}
-		for _, name := range file.Imports {
-			add(name, "import")
+		deltas := make([]SymbolDelta, 0, len(file.Symbols))
+		for _, s := range file.Symbols {
+			deltas = append(deltas, SymbolDelta{Name: s.Name, Kind: s.Kind, Hash: s.Hash})
 		}
 		symbols[path] = deltas
 	}

@@ -70,31 +70,13 @@ func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *
 			return 0, fmt.Errorf("last insert id for file: %w", err)
 		}
 
-		// Insert symbols: functions, classes, exports, imports. sig_hash is the
+		// Insert symbols (functions, classes, exports, imports). sig_hash is the
 		// per-symbol body hash (empty unless the parser produced one — only
-		// AST-extracted functions carry it today).
-		type entry struct {
-			name string
-			kind string
-		}
-		var symbols []entry
-		for _, name := range file.Functions {
-			symbols = append(symbols, entry{name, "function"})
-		}
-		for _, name := range file.Classes {
-			symbols = append(symbols, entry{name, "class"})
-		}
-		for _, name := range file.Exports {
-			symbols = append(symbols, entry{name, "export"})
-		}
-		for _, name := range file.Imports {
-			symbols = append(symbols, entry{name, "import"})
-		}
-
-		for _, sym := range symbols {
-			sigHash := file.SymbolHashes[sym.kind+":"+sym.name]
-			if _, err := symStmt.Exec(fileID, sym.name, sym.kind, sigHash); err != nil {
-				return 0, fmt.Errorf("insert symbol %q: %w", sym.name, err)
+		// AST-extracted functions/methods carry it today). FileIR.Symbols is the
+		// canonical, pre-correlated set, so no kind:name lookup is needed.
+		for _, sym := range file.Symbols {
+			if _, err := symStmt.Exec(fileID, sym.Name, sym.Kind, sym.Hash); err != nil {
+				return 0, fmt.Errorf("insert symbol %q: %w", sym.Name, err)
 			}
 		}
 

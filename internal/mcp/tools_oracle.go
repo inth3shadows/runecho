@@ -3,6 +3,8 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,8 +33,8 @@ func NewOracle(db *snapshot.DB, dbPath string) *Oracle {
 func (o *Oracle) Register(s *Server) {
 	s.Register(Tool{
 		Name:        "structure",
-		Description: "Deterministic structure (files + symbols) of an enrolled repo's current code. Use to ground claims about what functions/types/exports exist.",
-		InputSchema: repoSchema("name of an enrolled repo (see `health`/registry)"),
+		Description: "Deterministic structure (files + symbols) of an enrolled repo's current code. Use to ground claims about what functions/types/exports exist. Scope with `paths` globs and pick a `detail` level to keep responses small.",
+		InputSchema: structureSchema(),
 		Handler:     o.structure,
 	})
 	s.Register(Tool{
@@ -81,6 +83,57 @@ func repoSchema(desc string) map[string]any {
 		},
 		"required": []string{"repo"},
 	}
+}
+
+type structArg struct {
+	Repo   string   `json:"repo"`
+	Paths  []string `json:"paths"`
+	Detail string   `json:"detail"`
+}
+
+func structureSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo (see `health`/registry)"},
+			"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional glob filters; return only matching files (e.g. \"internal/mcp/**\" or \"*.go\"). `**` matches across directories. Omit for the whole repo."},
+			"detail": map[string]any{"type": "string", "enum": []string{"tree", "symbols", "full"},
+				"description": "tree = file paths + symbol counts only; symbols (default) = per-file symbols[] (name/kind/line/hash) + refs; full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
+		},
+		"required": []string{"repo"},
+	}
+}
+
+// matchAnyGlob reports whether p matches any of the patterns. Supports a single
+// "**" (matches across directory separators) plus stdlib path.Match for simple
+// patterns; a bare directory prefix (e.g. "internal/mcp") also matches its tree.
+func matchAnyGlob(patterns []string, p string) bool {
+	for _, pat := range patterns {
+		if matchGlob(pat, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchGlob(pattern, p string) bool {
+	if strings.Contains(pattern, "**") {
+		parts := strings.SplitN(pattern, "**", 2)
+		pre := strings.TrimSuffix(parts[0], "/")
+		suf := strings.TrimPrefix(parts[1], "/")
+		if pre != "" && !strings.HasPrefix(p, pre) {
+			return false
+		}
+		if suf != "" && !strings.HasSuffix(p, suf) {
+			return false
+		}
+		return true
+	}
+	if ok, _ := path.Match(pattern, p); ok {
+		return true
+	}
+	// allow a plain directory prefix to select its whole subtree
+	return strings.HasPrefix(p, strings.TrimSuffix(pattern, "/")+"/")
 }
 
 func diffSchema() map[string]any {
@@ -134,7 +187,11 @@ func liveIR(path string, fileCap int) (*ir.IR, error) {
 }
 
 func jsonText(v any) (string, error) {
-	b, err := json.MarshalIndent(v, "", "  ")
+	// Minified (no indentation): MCP responses are consumed by an LLM, which
+	// parses JSON identically regardless of whitespace. Dropping the 2-space
+	// indent measured ~23% fewer tokens on structure/diff/locate payloads,
+	// losslessly. See ~/.claude/plans/headroom-compression-eval-test-plan.md.
+	b, err := json.Marshal(v)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +201,7 @@ func jsonText(v any) (string, error) {
 // --- tools ---
 
 func (o *Oracle) structure(args json.RawMessage) (string, error) {
-	var a repoArg
+	var a structArg
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
 	}
@@ -152,20 +209,56 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	detail := a.Detail
+	if detail == "" {
+		detail = "symbols"
+	}
+	if detail != "tree" && detail != "symbols" && detail != "full" {
+		return "", fmt.Errorf("bad detail %q: want tree|symbols|full", detail)
+	}
 	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 	if err != nil {
 		return "", err
 	}
+
+	// Select (and sort) the file paths to include, applying `paths` globs.
+	paths := make([]string, 0, len(irData.Files))
+	for p := range irData.Files {
+		if len(a.Paths) == 0 || matchAnyGlob(a.Paths, p) {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+
+	// Project each file to the requested detail level. `symbols` (default) drops
+	// the legacy imports/functions/classes/exports arrays + symbol_hashes that
+	// FileIR.MarshalJSON emits for on-disk back-compat — all redundant with
+	// symbols[] — keeping responses lean without losing information.
 	symCount := 0
-	for _, f := range irData.Files {
+	files := make(map[string]any, len(paths))
+	for _, p := range paths {
+		f := irData.Files[p]
 		symCount += len(f.Symbols)
+		switch detail {
+		case "tree":
+			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(f.Symbols)}
+		case "symbols":
+			fv := map[string]any{"hash": f.Hash, "symbols": f.Symbols}
+			if len(f.Refs) > 0 {
+				fv["refs"] = f.Refs
+			}
+			files[p] = fv
+		case "full":
+			files[p] = f // FileIR.MarshalJSON -> legacy arrays + symbols
+		}
 	}
 	return jsonText(map[string]any{
 		"repo":         repo.Name,
 		"root_hash":    irData.RootHash,
-		"file_count":   len(irData.Files),
+		"file_count":   len(paths),
 		"symbol_count": symCount,
-		"files":        irData.Files,
+		"detail":       detail,
+		"files":        files,
 	})
 }
 

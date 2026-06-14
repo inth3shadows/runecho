@@ -114,6 +114,83 @@ func TestOracleHashAndStructure(t *testing.T) {
 	}
 }
 
+// TestOracleStructureProjection covers the token-reduction projection: detail
+// levels (tree|symbols|full) and `paths` glob scoping. The default (symbols)
+// must drop the legacy arrays that `full` keeps for on-disk back-compat.
+func TestOracleStructureProjection(t *testing.T) {
+	o, name, _ := newOracleRepo(t) // demo.go: funcs Alpha, Beta
+
+	fileOf := func(m map[string]any) map[string]any {
+		f, ok := m["files"].(map[string]any)["demo.go"].(map[string]any)
+		if !ok {
+			t.Fatalf("demo.go missing from files: %v", m["files"])
+		}
+		return f
+	}
+
+	// Default detail = symbols: symbols[] present, legacy functions[] dropped.
+	def := call(t, o.structure, `{"repo":"`+name+`"}`)
+	if def["detail"] != "symbols" {
+		t.Errorf("default detail = %v, want symbols", def["detail"])
+	}
+	f := fileOf(def)
+	if _, ok := f["symbols"]; !ok {
+		t.Error("symbols detail: expected symbols[]")
+	}
+	if _, ok := f["functions"]; ok {
+		t.Error("symbols detail: legacy functions[] should be dropped")
+	}
+
+	// detail=tree: hash + symbol_count only, no symbols[].
+	ft := fileOf(call(t, o.structure, `{"repo":"`+name+`","detail":"tree"}`))
+	if _, ok := ft["symbols"]; ok {
+		t.Error("tree detail: symbols[] should be absent")
+	}
+	if ft["symbol_count"].(float64) != 2 {
+		t.Errorf("tree symbol_count = %v, want 2", ft["symbol_count"])
+	}
+
+	// detail=full: legacy functions[] present (back-compat shape).
+	if _, ok := fileOf(call(t, o.structure, `{"repo":"`+name+`","detail":"full"}`))["functions"]; !ok {
+		t.Error("full detail: expected legacy functions[]")
+	}
+
+	// Unknown detail is rejected, not silently coerced.
+	if _, err := o.structure([]byte(`{"repo":"` + name + `","detail":"nope"}`)); err == nil {
+		t.Error("bad detail should error")
+	}
+
+	// paths glob scoping.
+	if hit := call(t, o.structure, `{"repo":"`+name+`","paths":["*.go"]}`); hit["file_count"].(float64) != 1 {
+		t.Errorf("paths=*.go file_count = %v, want 1", hit["file_count"])
+	}
+	if miss := call(t, o.structure, `{"repo":"`+name+`","paths":["nomatch/**"]}`); miss["file_count"].(float64) != 0 {
+		t.Errorf("paths=nomatch file_count = %v, want 0", miss["file_count"])
+	}
+}
+
+func TestMatchGlob(t *testing.T) {
+	cases := []struct {
+		pattern, p string
+		want       bool
+	}{
+		{"internal/mcp/**", "internal/mcp/tools_oracle.go", true},
+		{"internal/mcp/**", "internal/ir/storage.go", false},
+		{"internal/mcp/**", "internal/mcp2/x.go", false}, // sibling prefix must not match
+		{"**/storage.go", "internal/ir/storage.go", true},
+		{"**/storage.go", "internal/ir/mystorage.go", false}, // suffix must be on a boundary
+		{"*.go", "demo.go", true},
+		{"*.go", "internal/ir/storage.go", false}, // path.Match: * does not cross /
+		{"internal/ir", "internal/ir/storage.go", true}, // bare dir prefix selects subtree
+		{"internal/ir", "internal/irx/storage.go", false},
+	}
+	for _, c := range cases {
+		if got := matchGlob(c.pattern, c.p); got != c.want {
+			t.Errorf("matchGlob(%q,%q)=%v want %v", c.pattern, c.p, got, c.want)
+		}
+	}
+}
+
 func TestOracleLocate(t *testing.T) {
 	o, name, _ := newOracleRepo(t) // demo.go defines exported Alpha, Beta
 

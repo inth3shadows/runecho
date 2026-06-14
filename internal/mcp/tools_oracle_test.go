@@ -176,7 +176,9 @@ func TestMatchGlob(t *testing.T) {
 	}{
 		{"internal/mcp/**", "internal/mcp/tools_oracle.go", true},
 		{"internal/mcp/**", "internal/ir/storage.go", false},
+		{"internal/mcp/**", "internal/mcp2/x.go", false}, // sibling prefix must not match
 		{"**/storage.go", "internal/ir/storage.go", true},
+		{"**/storage.go", "internal/ir/mystorage.go", false}, // suffix must be on a boundary
 		{"*.go", "demo.go", true},
 		{"*.go", "internal/ir/storage.go", false}, // path.Match: * does not cross /
 		{"internal/ir", "internal/ir/storage.go", true}, // bare dir prefix selects subtree

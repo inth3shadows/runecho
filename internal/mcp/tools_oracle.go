@@ -121,10 +121,12 @@ func matchGlob(pattern, p string) bool {
 		parts := strings.SplitN(pattern, "**", 2)
 		pre := strings.TrimSuffix(parts[0], "/")
 		suf := strings.TrimPrefix(parts[1], "/")
-		if pre != "" && !strings.HasPrefix(p, pre) {
+		// Match on path-component boundaries so "internal/mcp/**" does not also
+		// match the sibling "internal/mcp2/...", nor "**/x.go" match "myx.go".
+		if pre != "" && p != pre && !strings.HasPrefix(p, pre+"/") {
 			return false
 		}
-		if suf != "" && !strings.HasSuffix(p, suf) {
+		if suf != "" && p != suf && !strings.HasSuffix(p, "/"+suf) {
 			return false
 		}
 		return true
@@ -243,7 +245,11 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 		case "tree":
 			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(f.Symbols)}
 		case "symbols":
-			fv := map[string]any{"hash": f.Hash, "symbols": f.Symbols}
+			syms := f.Symbols
+			if syms == nil {
+				syms = []ir.Symbol{} // emit [] not null, matching the full-shape normalization
+			}
+			fv := map[string]any{"hash": f.Hash, "symbols": syms}
 			if len(f.Refs) > 0 {
 				fv["refs"] = f.Refs
 			}

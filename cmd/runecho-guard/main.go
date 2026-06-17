@@ -17,6 +17,12 @@
 //	                            return exit 1; in hook mode, degraded conditions emit
 //	                            an advisory via additionalContext but still exit 0.
 //	                            Repo-not-enrolled is always a silent skip (not degraded).
+//	RUNECHO_GUARD_LEARN=1      enable C3 learned-allow: auto-suppress asks for
+//	                            symbols approved >= N times per repo (default OFF).
+//	RUNECHO_GUARD_LEARN_N=<n>  approval count before a symbol is trusted (default 2)
+//	RUNECHO_GUARD_LEARN_TTL_DAYS=<d>
+//	                            days a learned-allow entry survives without being
+//	                            re-approved before it decays away (default 14)
 package main
 
 import (
@@ -388,6 +394,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// hallucinated. Fold the current on-disk file's definitions into the known set
 	// to suppress that. Best-effort: a missing/oversized file simply adds nothing.
 	addInFileDefs(symbols, filePath, lang)
+
+	// C3 learned-allow: fold in symbols this repo has approved often enough to
+	// trust (count>=N, within TTL) so the guard stops re-asking about them.
+	// Gated and read-only — a no-op (no store read) unless RUNECHO_GUARD_LEARN=1.
+	if learnEnabled() {
+		if dir, err := runechoDir(); err == nil {
+			for s := range learnedAllowedSet(dir, repoName, time.Now()) {
+				symbols[s] = struct{}{}
+			}
+		}
+	}
 
 	diffs := []guard.FileDiff{{
 		Path:       filePath,

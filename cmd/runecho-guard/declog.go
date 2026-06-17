@@ -89,40 +89,59 @@ const (
 // logOutcomeForFile appends an approved-outcome record if a recent "ask"
 // entry exists for file in decisions.jsonl (within maxOutcomeAge). No-ops
 // silently when no matching ask is found or on any I/O error.
+//
+// C3 enrichment: the ask record carries the violating Symbols (and Repo); copy
+// them forward onto the outcome record so a later analysis (or recordApprovals
+// below) can attribute the approval to specific symbols without re-joining the
+// log. When the learned-allow feature is enabled, the approval is also folded
+// into the per-repo learned-allow store.
 func logOutcomeForFile(file string) {
 	dir, err := runechoDir()
 	if err != nil {
 		return
 	}
-	if !recentAskExists(filepath.Join(dir, "decisions.jsonl"), file) {
+	ask, ok := recentAsk(filepath.Join(dir, "decisions.jsonl"), file)
+	if !ok {
 		return
 	}
-	logDecision(decisionRecord{Mode: "hook", File: file, Decision: "outcome", Reason: "approved"})
+	logDecision(decisionRecord{
+		Mode:     "hook",
+		Repo:     ask.Repo,
+		File:     file,
+		Lang:     ask.Lang,
+		Decision: "outcome",
+		Reason:   "approved",
+		Symbols:  ask.Symbols,
+	})
+	recordApprovals(dir, ask.Repo, ask.Symbols, time.Now())
 }
 
-// recentAskExists reports whether decisions.jsonl contains an "ask" entry for
-// file within the last maxOutcomeAge. Reads only the tail of the file to keep
-// the hot path fast.
-func recentAskExists(path, file string) bool {
+// recentAsk returns the MOST RECENT "ask" record for file in decisions.jsonl
+// within the last maxOutcomeAge (and whether one was found). Reads only the tail
+// of the file to keep the hot path fast. The full record is returned (not just a
+// bool) so callers can copy its Symbols/Repo forward onto the outcome record.
+func recentAsk(path, file string) (decisionRecord, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return decisionRecord{}, false
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return false
+		return decisionRecord{}, false
 	}
 	offset := stat.Size() - maxOutcomeReadBytes
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return false
+		return decisionRecord{}, false
 	}
 
 	cutoff := time.Now().UTC().Add(-maxOutcomeAge)
+	var match decisionRecord
+	var found bool
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		var rec decisionRecord
@@ -137,8 +156,10 @@ func recentAskExists(path, file string) bool {
 			continue
 		}
 		if ts.After(cutoff) {
-			return true
+			// Keep scanning: the log is append-ordered, so the last in-window
+			// match is the most recent ask for this file.
+			match, found = rec, true
 		}
 	}
-	return false
+	return match, found
 }

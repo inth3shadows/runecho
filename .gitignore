@@ -49,3 +49,6 @@ coverage.html
 .env
 *.env
 .runecho-key
+
+# CodeGraph local index (machine-local, never commit)
+.codegraph/

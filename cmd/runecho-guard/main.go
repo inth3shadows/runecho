@@ -288,8 +288,16 @@ func refreshIRForFile(filePath string) (outcome string) {
 	// "../" prefix check and silently return unchanged. Relative paths are
 	// stable across linked worktrees, so swapping to the file's own worktree
 	// root makes UpdateFile's path arithmetic correct.
-	if wtRoot, wtErr := gitutil.TopLevel(filepath.Dir(filePath)); wtErr == nil {
-		srcRoot = filepath.Clean(wtRoot)
+	//
+	// Guard: only swap if the file's worktree shares the enrolled repo's
+	// common-dir. Without this, a nested .git (submodule, test fixture) in a
+	// subdirectory would silently redirect srcRoot to an unrelated repo root.
+	if repo.CommonDir != "" {
+		if wtRoot, wtErr := gitutil.TopLevel(filepath.Dir(filePath)); wtErr == nil {
+			if wcd, cdErr := gitutil.CommonDir(wtRoot); cdErr == nil && filepath.Clean(wcd) == filepath.Clean(repo.CommonDir) {
+				srcRoot = filepath.Clean(wtRoot)
+			}
+		}
 	}
 	irPath := filepath.Join(srcRoot, ".ai", "ir.json")
 

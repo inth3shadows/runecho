@@ -37,6 +37,56 @@ index abc..def 100644
 	}
 }
 
+func TestParseDiffOutput_QuotedPath(t *testing.T) {
+	// git emits a C-quoted path (octal-escaped UTF-8) when core.quotePath is on.
+	// "café.js" → "caf\303\251.js". Without unquoting, the file is silently
+	// skipped — a false-negative vector for the guard.
+	raw := "diff --git \"a/caf\\303\\251.js\" \"b/caf\\303\\251.js\"\n" +
+		"--- \"a/caf\\303\\251.js\"\n" +
+		"+++ \"b/caf\\303\\251.js\"\n" +
+		"@@ -0,0 +1 @@\n" +
+		"+export function brew() {}\n"
+	diffs, _, err := parseDiffOutput(raw)
+	if err != nil {
+		t.Fatalf("parseDiffOutput: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 FileDiff, got %d", len(diffs))
+	}
+	if diffs[0].Path != "café.js" {
+		t.Errorf("path = %q, want %q", diffs[0].Path, "café.js")
+	}
+	if len(diffs[0].AddedLines) != 1 {
+		t.Errorf("expected 1 added line, got %d", len(diffs[0].AddedLines))
+	}
+}
+
+func TestParseDiffOutput_DeletionTargetIgnored(t *testing.T) {
+	// A pure deletion targets /dev/null; it must not attach to the prior file.
+	raw := `diff --git a/keep.go b/keep.go
+--- a/keep.go
++++ b/keep.go
+@@ -0,0 +1 @@
++func Keep() {}
+diff --git a/gone.go b/gone.go
+deleted file mode 100644
+--- a/gone.go
++++ /dev/null
+@@ -1 +0,0 @@
+-func Gone() {}
+`
+	diffs, _, err := parseDiffOutput(raw)
+	if err != nil {
+		t.Fatalf("parseDiffOutput: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 FileDiff (deletion ignored), got %d: %+v", len(diffs), diffs)
+	}
+	if diffs[0].Path != "keep.go" {
+		t.Errorf("path = %q, want keep.go", diffs[0].Path)
+	}
+}
+
 func TestParseDiffOutput_MultiFile(t *testing.T) {
 	raw := `diff --git a/a.go b/a.go
 --- a/a.go

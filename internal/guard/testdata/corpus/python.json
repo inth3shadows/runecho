@@ -118,11 +118,10 @@
     "known_fp": ["handler"]
   },
   {
-    "name": "py-fp-async-def",
-    "desc": "KNOWN FP: `async def name(` is not recognized as a definition line",
+    "name": "py-async-def",
+    "desc": "`async def name(` is recognized as a definition, so the self-reference is not flagged",
     "file": "fetcher.py",
     "edit": "async def fetch_all(urls):\n    return [u for u in urls]\n",
-    "expect": [],
-    "known_fp": ["fetch_all"]
+    "expect": []
   }
 ]

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -38,6 +39,7 @@ func e6CountTraces(t *testing.T, home string) int {
 func TestE6DebugTrace_Gating(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "") // isolate from inherited session env
 	// A path with no store/db exercises a deterministic early-return outcome
 	// ("no-db") without needing repo setup — the gating, not the branch, is the
 	// subject here.
@@ -177,5 +179,102 @@ func TestRefreshIRForFile_E6(t *testing.T) {
 	}
 	if n := e6CountAuto(t, db2, id); n != 1 {
 		t.Errorf("auto snapshot count = %d after second refresh, want 1 (must roll, not append)", n)
+	}
+}
+
+// TestRefreshIRForFile_CrossWorktree reproduces the claudew/codexw pattern:
+// the enrolled repo points at one linked worktree ("master") while the user
+// edits in a different linked worktree of the same bare repo. Before the fix,
+// UpdateFile's "../" prefix guard always returned unchanged because the edited
+// file lived outside the registered srcRoot; after the fix, srcRoot is set to
+// the file's own worktree root and the refresh proceeds correctly.
+func TestRefreshIRForFile_CrossWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// wt1 = the enrolled worktree (regular git repo with one commit).
+	wt1 := t.TempDir()
+	for _, args := range [][]string{
+		{"git", "-C", wt1, "init"},
+		{"git", "-C", wt1, "config", "user.email", "test@test.com"},
+		{"git", "-C", wt1, "config", "user.name", "Test"},
+	} {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", args, err, out)
+		}
+	}
+	e6Write(t, filepath.Join(wt1, "a.go"), "package x\n\nfunc Existing() {}\n")
+	for _, args := range [][]string{
+		{"git", "-C", wt1, "add", "."},
+		{"git", "-C", wt1, "commit", "-m", "init"},
+	} {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", args, err, out)
+		}
+	}
+
+	// wt2 = a linked worktree of wt1 (the non-enrolled one, like a claudew branch).
+	// Use a path that doesn't yet exist so git worktree add can create it.
+	wt2 := filepath.Join(t.TempDir(), "wt2")
+	if out, err := exec.Command("git", "-C", wt1, "worktree", "add", "--detach", wt2).CombinedOutput(); err != nil {
+		t.Skipf("git worktree add: %v: %s", err, out)
+	}
+
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "1")
+
+	db, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	// Enroll wt1 and backfill common_dir so ResolveRepo resolves wt2 via Tier 1.
+	id, err := db.EnrollRepo("r", wt1, wt1, 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if cd, err := gitutil.CommonDir(wt1); err == nil {
+		_ = db.SetRepoCommonDir(id, cd)
+	}
+
+	// Baseline IR + snapshot from wt1 (contains only Existing).
+	gen := ir.NewGenerator(ir.GeneratorConfig{})
+	base, _, err := gen.Generate(wt1)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if err := base.Save(filepath.Join(wt1, ".ai", "ir.json")); err != nil {
+		t.Fatalf("save ir: %v", err)
+	}
+	if _, err := db.SaveSnapshot(id, "sess", "test", wt1, base); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	db.Close()
+
+	// Add a new symbol in wt2 — the non-enrolled linked worktree.
+	e6Write(t, filepath.Join(wt2, "b.go"), "package x\n\nfunc BrandNew() {}\n")
+
+	// Cross-worktree refresh: must return "refreshed" not "unchanged".
+	if got := refreshIRForFile(filepath.Join(wt2, "b.go")); got != "refreshed" && got != "bootstrapped" {
+		t.Errorf("cross-worktree refresh outcome = %q, want refreshed or bootstrapped", got)
+	}
+
+	db2, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+
+	syms, err := db2.SymbolsForLatestSnapshot(id)
+	if err != nil {
+		t.Fatalf("symbols: %v", err)
+	}
+	if !e6Has(syms, "BrandNew") {
+		t.Error("cross-worktree refresh did not surface BrandNew")
+	}
+	if !e6Has(syms, "Existing") {
+		t.Error("cross-worktree refresh dropped Existing")
 	}
 }

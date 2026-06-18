@@ -19,7 +19,7 @@ func storePath(t *testing.T) string {
 func TestRecordApprovals_NoOpWhenDisabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
-	// RUNECHO_GUARD_LEARN intentionally unset.
+	t.Setenv("RUNECHO_GUARD_LEARN", "") // isolate from inherited session env
 
 	recordApprovals(home, "r", []string{"Foo"}, time.Now())
 

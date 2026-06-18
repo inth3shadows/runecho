@@ -281,6 +281,16 @@ func refreshIRForFile(filePath string) (outcome string) {
 		return "no-repo" // unenrolled repo — expected, not a failure
 	}
 	srcRoot := repo.EffectiveSourceRoot()
+	// In bare-repo + multi-worktree setups (the claudew/codexw pattern) the
+	// registered srcRoot is the enrolled worktree (e.g. "master") while edits
+	// land in a different linked worktree. UpdateFile normalises the edited
+	// file path relative to srcRoot, so a cross-worktree path would fail the
+	// "../" prefix check and silently return unchanged. Relative paths are
+	// stable across linked worktrees, so swapping to the file's own worktree
+	// root makes UpdateFile's path arithmetic correct.
+	if wtRoot, wtErr := gitutil.TopLevel(filepath.Dir(filePath)); wtErr == nil {
+		srcRoot = filepath.Clean(wtRoot)
+	}
 	irPath := filepath.Join(srcRoot, ".ai", "ir.json")
 
 	gen := ir.NewGenerator(ir.GeneratorConfig{})

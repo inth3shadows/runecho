@@ -54,6 +54,7 @@ func outcomeJSON(t *testing.T, filePath string) string {
 func TestRunOutcomeMode_LogsWhenRecentAskExists(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "") // isolate from inherited session env
 
 	file := "/some/repo/main.go"
 	writeAskEntry(t, file)
@@ -87,6 +88,7 @@ func TestRunOutcomeMode_LogsWhenRecentAskExists(t *testing.T) {
 func TestRunOutcomeMode_NoOpWhenNoAskExists(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "") // isolate from inherited session env
 
 	before := countDecisionLogLines(t)
 	if code := runOutcomeMode(strings.NewReader(outcomeJSON(t, "/some/repo/main.go"))); code != 0 {
@@ -100,6 +102,7 @@ func TestRunOutcomeMode_NoOpWhenNoAskExists(t *testing.T) {
 func TestRunOutcomeMode_NoOpForDifferentFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "") // isolate from inherited session env
 
 	writeAskEntry(t, "/other/file.go")
 

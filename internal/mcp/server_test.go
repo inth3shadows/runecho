@@ -65,6 +65,36 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+// TestInitializeUnknownVersionFallsBack: a client requesting a protocol version
+// the server does not speak must NOT have it echoed back (that would falsely
+// claim support); the server advertises its default instead.
+func TestInitializeUnknownVersionFallsBack(t *testing.T) {
+	r := drive(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}`)
+	if len(r) != 1 {
+		t.Fatalf("want 1 response, got %d", len(r))
+	}
+	res := r[0]["result"].(map[string]any)
+	if res["protocolVersion"] != DefaultProtocolVersion {
+		t.Errorf("protocolVersion = %v, want default %q", res["protocolVersion"], DefaultProtocolVersion)
+	}
+}
+
+// TestInvalidJSONRPCVersion: a request whose jsonrpc field is present but not
+// "2.0" is rejected with -32600 rather than silently misinterpreted.
+func TestInvalidJSONRPCVersion(t *testing.T) {
+	r := drive(t, `{"jsonrpc":"1.0","id":7,"method":"tools/list"}`)
+	if len(r) != 1 {
+		t.Fatalf("want 1 response, got %d", len(r))
+	}
+	errObj, ok := r[0]["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("want error response, got %v", r[0])
+	}
+	if code := errObj["code"].(float64); code != -32600 {
+		t.Errorf("error code = %v, want -32600", code)
+	}
+}
+
 func TestNotificationNoReply(t *testing.T) {
 	// initialize (reply) + initialized notification (no reply) → exactly 1 response.
 	r := drive(t,

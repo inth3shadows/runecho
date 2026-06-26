@@ -6,9 +6,12 @@ package snapshot
 // real linked worktree created with git worktree add.
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -203,5 +206,37 @@ func TestResolveRepo_SameIDFromBothWorktrees(t *testing.T) {
 	}
 	if repoFromMain.ID != id {
 		t.Errorf("unexpected repo_id: got %d, want %d", repoFromMain.ID, id)
+	}
+}
+
+// TestResolveRepo_DBErrorWarnsAndFailsOpen pins finding #7: a real DB fault (not
+// "not enrolled") must stay fail-open (ok=false) but be surfaced on stderr rather
+// than swallowed, so a transient store error is debuggable instead of looking
+// identical to an unenrolled repo.
+func TestResolveRepo_DBErrorWarnsAndFailsOpen(t *testing.T) {
+	root := t.TempDir()
+	resolveGitInit(t, root)
+	db, _ := openTemp(t)
+	if _, err := db.EnrollRepo("r", root, root, 0); err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	// Closing the connection forces every lookup tier to return a DB error.
+	db.Close()
+
+	origErr := os.Stderr
+	rErr, wErr, _ := os.Pipe()
+	os.Stderr = wErr
+	_, _, ok := db.ResolveRepo(root)
+	wErr.Close()
+	os.Stderr = origErr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, rErr)
+	stderr := buf.String()
+
+	if ok {
+		t.Fatalf("ResolveRepo ok=true on closed DB; want fail-open ok=false")
+	}
+	if !strings.Contains(stderr, "lookup failed") {
+		t.Errorf("expected a DB-error warning on stderr, got %q", stderr)
 	}
 }

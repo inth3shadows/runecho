@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1046,6 +1047,9 @@ func runValidateClaims(args []string) int {
 			mismatches = append(mismatches, Mismatch{Ref: ref, Context: ctx})
 		}
 	}
+	// Stable output: refs is a map, so without an explicit sort the order is
+	// non-deterministic — unacceptable in a tool whose contract is determinism.
+	sort.Slice(mismatches, func(i, j int) bool { return mismatches[i].Ref < mismatches[j].Ref })
 
 	out := map[string]interface{}{
 		"checked":    len(refs),

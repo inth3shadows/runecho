@@ -84,5 +84,12 @@
     "edit": "function match(s) {\n  const re = /Foo(x)/;\n  return re.test(s);\n}\n",
     "expect": [],
     "known_fp": ["Foo"]
+  },
+  {
+    "name": "js-tn-standard-globals",
+    "desc": "Standard JS globals (URI encoders, base64, crypto, typed arrays, Intl, Function) are builtins, not hallucinated calls",
+    "file": "encode.js",
+    "edit": "function pack(s) {\n  const u = encodeURI(s) + decodeURI(s);\n  const b = btoa(s) + atob(s);\n  const id = crypto.randomUUID();\n  const buf = new Uint8Array(8);\n  const view = new DataView(new ArrayBuffer(8));\n  const fmt = Intl.NumberFormat();\n  const fn = Function(\"return 1\");\n  return [u, b, id, buf, view, fmt, fn];\n}\n",
+    "expect": []
   }
 ]

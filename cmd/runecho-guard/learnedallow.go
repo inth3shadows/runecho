@@ -135,27 +135,34 @@ func recordApprovals(dir, repo string, symbols []string, now time.Time) {
 	if !learnEnabled() || repo == "" || len(symbols) == 0 {
 		return
 	}
-	la := loadLearnedAllow(dir)
-	if la.Repos == nil {
-		la.Repos = map[string]map[string]learnedEntry{}
-	}
-	bucket := la.Repos[repo]
-	if bucket == nil {
-		bucket = map[string]learnedEntry{}
-		la.Repos[repo] = bucket
-	}
-	nowStr := now.UTC().Format(time.RFC3339)
-	for _, s := range symbols {
-		if s == "" {
-			continue
+	// Serialize the whole load-modify-save under a cross-process advisory lock:
+	// two PostToolUse hooks firing concurrently would otherwise each load, each
+	// increment, and the second save would clobber the first's increments
+	// (last-writer-wins). The atomic rename in saveLearnedAllow prevents a torn
+	// file but not lost updates — only the lock closes that window.
+	withFileLock(filepath.Join(dir, learnedAllowFile+".lock"), func() {
+		la := loadLearnedAllow(dir)
+		if la.Repos == nil {
+			la.Repos = map[string]map[string]learnedEntry{}
 		}
-		e := bucket[s]
-		e.Count++
-		e.LastSeen = nowStr
-		bucket[s] = e
-	}
-	pruneLearnedAllow(&la, now)
-	saveLearnedAllow(dir, la)
+		bucket := la.Repos[repo]
+		if bucket == nil {
+			bucket = map[string]learnedEntry{}
+			la.Repos[repo] = bucket
+		}
+		nowStr := now.UTC().Format(time.RFC3339)
+		for _, s := range symbols {
+			if s == "" {
+				continue
+			}
+			e := bucket[s]
+			e.Count++
+			e.LastSeen = nowStr
+			bucket[s] = e
+		}
+		pruneLearnedAllow(&la, now)
+		saveLearnedAllow(dir, la)
+	})
 }
 
 // pruneLearnedAllow drops entries whose last_seen is older than the TTL (or

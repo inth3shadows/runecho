@@ -131,6 +131,18 @@ func pyImportsAndExports(source string) (imports, exports []string) {
 // carries each symbol's 1-based start line, keyed "kind:<qualified name>", for the
 // repo map.
 func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int) {
+	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
+	// input; a panic here would otherwise propagate through parseFile→Generate
+	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
+	// (the same fail-safe path as a nil grammar) so one bad file can't take down
+	// the process. Named returns are reset so a panic mid-walk can't leak a
+	// partial, inconsistent symbol set.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "runecho: Python parse panicked (%v); AST symbols for this file disabled\n", r)
+			functions, classes, hashes, lines = nil, nil, nil, nil
+		}
+	}()
 	lang := pythonLanguage()
 	if lang == nil {
 		// Grammar unavailable (e.g. a grammar_subset build that omitted Python).

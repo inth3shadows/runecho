@@ -71,6 +71,95 @@ type myPrivate struct{}
 	}
 }
 
+// TestGoParser_InterfaceMethods covers extraction of exported interface method
+// signatures into Functions (qualified by interface type, parity with JS/TS
+// method_signature and Python class methods): the interface itself stays in
+// Classes, exported methods are located + hashed, and unexported methods,
+// embedded interfaces, and type-set constraints are skipped.
+func TestGoParser_InterfaceMethods(t *testing.T) {
+	p := NewGoParser()
+	src := `package foo
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+	Close() error
+	hidden() bool
+}
+
+type ReadWriter interface {
+	Reader
+	Write(p []byte) (int, error)
+}
+
+type Number interface {
+	~int | ~float64
+}
+`
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The interfaces themselves remain in Classes (located, not hashed).
+	wantClasses := []string{"Number", "ReadWriter", "Reader"}
+	if len(fs.Classes) != len(wantClasses) {
+		t.Fatalf("classes: got %v, want %v", fs.Classes, wantClasses)
+	}
+	for i, w := range wantClasses {
+		if fs.Classes[i] != w {
+			t.Errorf("class[%d] = %q, want %q", i, fs.Classes[i], w)
+		}
+	}
+	// Exported method signatures land in Functions qualified by interface type;
+	// hidden() (unexported), the embedded Reader, and the ~int|~float64 type-set
+	// constraint contribute nothing.
+	wantFuncs := []string{"ReadWriter.Write", "Reader.Close", "Reader.Read"}
+	if len(fs.Functions) != len(wantFuncs) {
+		t.Fatalf("functions: got %v, want %v", fs.Functions, wantFuncs)
+	}
+	for i, w := range wantFuncs {
+		if fs.Functions[i] != w {
+			t.Errorf("function[%d] = %q, want %q", i, fs.Functions[i], w)
+		}
+	}
+	// Read is on line 4 (1-based; package=1, blank=2, type=3, Read=4).
+	if got := fs.SymbolLines["function:Reader.Read"]; got != 4 {
+		t.Errorf("SymbolLines[function:Reader.Read] = %d, want 4", got)
+	}
+	// Signature span is hashed so a contract change surfaces.
+	if fs.SymbolHashes["function:Reader.Read"] == "" {
+		t.Error("function:Reader.Read has no signature hash")
+	}
+}
+
+// TestGoParser_InterfaceMethodSignatureHash proves a method's hash tracks its
+// signature: changing a parameter type flips the hash, an unrelated sibling does
+// not. This is what lets `diff` report an interface contract change.
+func TestGoParser_InterfaceMethodSignatureHash(t *testing.T) {
+	p := NewGoParser()
+	hashOf := func(src, key string) string {
+		t.Helper()
+		fs, err := p.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fs.SymbolHashes[key]
+		if h == "" {
+			t.Fatalf("no hash for %q in:\n%s", key, src)
+		}
+		return h
+	}
+	base := "package foo\n\ntype Store interface {\n\tGet(id int) string\n\tPut(v string) error\n}\n"
+	sigChange := "package foo\n\ntype Store interface {\n\tGet(id string) string\n\tPut(v string) error\n}\n"
+
+	baseGet := hashOf(base, "function:Store.Get")
+	if hashOf(sigChange, "function:Store.Get") == baseGet {
+		t.Error("Store.Get hash unchanged after parameter type change — diff would miss it")
+	}
+	if hashOf(sigChange, "function:Store.Put") != hashOf(base, "function:Store.Put") {
+		t.Error("Store.Put hash changed when only sibling Get changed — would over-report")
+	}
+}
+
 // TestGoParser_ExportedVarConst covers capture of top-level exported var/const
 // declarations into Exports: single-line, typed, grouped, iota groups, and the
 // filtering of unexported names and in-function declarations.

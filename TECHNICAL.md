@@ -256,7 +256,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 
 | Language | Extensions | Definitions captured | Methods | Altitude | Backend |
 |---|---|---|---|---|---|
-| **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch` (→ Functions) | Top-level decls + methods | `go/ast` (stdlib) |
+| **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures | `go/ast` (stdlib) |
 | **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via regex | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
 | **Python** | `.py` | `def` functions, `class` declarations; imports + `__all__` via regex | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 

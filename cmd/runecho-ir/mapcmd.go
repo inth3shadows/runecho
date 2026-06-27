@@ -54,7 +54,7 @@ func normalizeKind(k string) (string, bool) {
 // --since it scopes to symbols added or modified versus the named snapshot — a
 // "map of what changed", reusing the existing diff machinery.
 func runMap(args []string) int {
-	fs := flag.NewFlagSet("map", flag.ExitOnError)
+	fs := flag.NewFlagSet("map", flag.ContinueOnError)
 	byFile := fs.Bool("by-file", false, "group symbols under their file instead of a flat symbol index")
 	kindFlag := fs.String("kind", "", "restrict to one kind: func|class|export|import (default: func+class)")
 	dirPrefix := fs.String("dir", "", "only files under this path prefix")
@@ -63,7 +63,12 @@ func runMap(args []string) int {
 	compact := fs.Bool("compact", false, "terser output (omit the hash column)")
 	header := fs.Bool("header", false, "print a <200-token repo summary for session-start injection, not the full map")
 	asJSON := fs.Bool("json", false, "machine-readable JSON")
-	fs.Parse(args)
+	// ContinueOnError + parseSub (not ExitOnError) so a bad flag returns through
+	// the testable run() seam instead of calling os.Exit — consistent with every
+	// other subcommand and a prerequisite for integration-testing `map`.
+	if code, ok := parseSub(fs, args); !ok {
+		return code
+	}
 
 	kind, ok := normalizeKind(*kindFlag)
 	if !ok {

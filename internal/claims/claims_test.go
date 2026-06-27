@@ -119,6 +119,32 @@ func TestExtractSymbolRefs_DeclBlock_NestedAndKeys(t *testing.T) {
 	}
 }
 
+// Regression (forage): Python/JS/TS declaration keywords had no decl-pattern
+// parity with Go — only backtick coverage. class/function/let/def now extract,
+// accepting camelCase (these languages don't mark export by case) while
+// IsCodeSymbol still filters pure snake_case/lowercase noise.
+func TestExtractSymbolRefs_LangParity(t *testing.T) {
+	want := map[string]string{
+		"class MyHandler:":         "MyHandler",   // python/js class
+		"function processData() {": "processData", // js func, camelCase
+		"export class Widget {":    "Widget",      // export modifier before keyword
+		"let RetryCount = 3":       "RetryCount",  // js let
+		"async def DoWork(self):":  "DoWork",      // python async, CamelCase
+	}
+	for text, sym := range want {
+		refs := ExtractSymbolRefs(text)
+		if _, ok := refs[sym]; !ok {
+			t.Errorf("text %q: expected %q in refs, got %v", text, sym, refs)
+		}
+	}
+	// snake_case / lowercase decls stay filtered (consistent with Go behavior).
+	for _, text := range []string{"def fetch_data(self):", "function helper() {}"} {
+		if refs := ExtractSymbolRefs(text); len(refs) != 0 {
+			t.Errorf("text %q: expected no refs (noise), got %v", text, refs)
+		}
+	}
+}
+
 func TestExtractSymbolRefs_DeclPattern(t *testing.T) {
 	text := "The function func ValidateClaims handles this.\ntype MyHandler struct"
 	refs := ExtractSymbolRefs(text)

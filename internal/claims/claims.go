@@ -18,6 +18,13 @@ var (
 	// commas downstream. func/type take a single name (the `(` or body ends the
 	// list), so they are unaffected.
 	declRe = regexp.MustCompile(`\b(?:func|type|var|const)\s+(\p{Lu}[\p{L}\p{N}_]*(?:\s*,\s*\p{Lu}[\p{L}\p{N}_]*)*)`)
+	// Non-Go declaration keywords (Python/JS/TS), giving them decl-pattern parity
+	// with Go. Unlike Go, these languages don't signal export by case, so the name
+	// may start lowercase (camelCase `processData`); IsCodeSymbol still filters
+	// pure snake_case/lowercase noise. `export`/`async`/`default` modifiers precede
+	// the keyword, so the leading \b matches regardless. Single name only (class/
+	// function/def take one; multi-name `let a, b` is rare and left to backticks).
+	langDeclRe = regexp.MustCompile(`\b(?:class|function|let|def)\s+(\p{L}[\p{L}\p{N}_]*)`)
 	// Method declarations `func (r *Reader) Fetch()` — declRe can't see these
 	// because the receiver breaks the `func <name>` shape, so they extracted
 	// nothing. group 1 is the receiver type (pointer and generic args stripped),
@@ -34,10 +41,11 @@ var (
 )
 
 // ExtractSymbolRefs returns a map of symbol → context snippet from text.
-// Targets: backtick-quoted identifiers, func/type/var/const declarations
+// Targets: backtick-quoted identifiers, Go func/type/var/const declarations
 // (including every name of a multi-name decl and members of a parenthesized
-// `var (`/`const (`/`type (` block), and method declarations
-// `func (r *Reader) Fetch()` (emitted qualified as Reader.Fetch).
+// `var (`/`const (`/`type (` block), Go method declarations
+// `func (r *Reader) Fetch()` (emitted qualified as Reader.Fetch), and
+// Python/JS/TS class/function/let/def declarations.
 // Conservative: only flags CamelCase names (mixed upper+lower) to avoid
 // ALL_CAPS env vars, snake_case functions, and Python dunders.
 //
@@ -76,6 +84,9 @@ func ExtractSymbolRefs(text string) map[string]string {
 		}
 		for _, m := range declRe.FindAllStringSubmatch(line, -1) {
 			addList(line, m[1])
+		}
+		for _, m := range langDeclRe.FindAllStringSubmatch(line, -1) {
+			add(line, m[1])
 		}
 
 		if !inBlock {

@@ -182,7 +182,16 @@ var (
 func ExtractImports(lang Lang, lines []AddedLine) []string {
 	var names []string
 	inPyParen := false // inside a multi-line `from M import ( … )`
-	for _, l := range lines {
+	prevNo := 0
+	for i, l := range lines {
+		// A diff hunk's added lines may be non-contiguous; the multi-line import
+		// paren state cannot carry across a gap (mirrors the `open` reset in
+		// ExtractRefs). Without this, an import block split across two hunks would
+		// leave inPyParen set and misclassify the continuation hunk's first lines.
+		if i > 0 && l.LineNo != prevNo+1 {
+			inPyParen = false
+		}
+		prevNo = l.LineNo
 		text := l.Text
 		switch lang {
 		case LangPython:
@@ -501,6 +510,11 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 		// Python triple-quoted string (docstring / multi-line SQL).
 		if lang == LangPython && (hasAt(b, i, `"""`) || hasAt(b, i, `'''`)) {
 			delim := string(b[i : i+3])
+			// A triple-quoted f-string (f"""…{Call()}…""") interpolates just like a
+			// single-line one — blanking the whole interior would lose the call (an
+			// FN). When this opens an f-string, scan {…} regions instead of blanking
+			// them (same rule as the single-quote f-string branch below).
+			fstr := isFStringPrefix(b, i)
 			i += 3
 			for i < n {
 				if hasAt(b, i, delim) {
@@ -508,11 +522,42 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 					delim = ""
 					break
 				}
+				if fstr && i+1 < n && (hasAt(b, i, "{{") || hasAt(b, i, "}}")) {
+					// Escaped literal brace — not an interpolation; blank both.
+					out[i] = ' '
+					out[i+1] = ' '
+					i += 2
+					continue
+				}
+				if fstr && b[i] == '{' {
+					// Interpolation: leave bytes intact so reCallIdent sees the call.
+					// Track brace depth (dict literals can appear); stop at the delim.
+					depth := 1
+					i++
+					for i < n && depth > 0 && !hasAt(b, i, delim) {
+						if b[i] == '{' {
+							depth++
+						} else if b[i] == '}' {
+							depth--
+							if depth == 0 {
+								i++
+								break
+							}
+						}
+						i++
+					}
+					continue
+				}
 				out[i] = ' '
 				i++
 			}
 			if delim != "" {
-				return string(out), delim // opens multi-line state
+				// Multi-line triple-quote opens multi-line state. KNOWN limitation:
+				// the multi-line `open` token carries only the delimiter, not the
+				// f-string flag, so interpolations on continuation lines of a
+				// multi-line triple f-string are NOT scanned (rare; single-line
+				// triple f-strings are handled above).
+				return string(out), delim
 			}
 			continue
 		}

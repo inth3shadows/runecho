@@ -118,24 +118,61 @@ func matchAnyGlob(patterns []string, p string) bool {
 
 func matchGlob(pattern, p string) bool {
 	if strings.Contains(pattern, "**") {
-		parts := strings.SplitN(pattern, "**", 2)
-		pre := strings.TrimSuffix(parts[0], "/")
-		suf := strings.TrimPrefix(parts[1], "/")
-		// Match on path-component boundaries so "internal/mcp/**" does not also
-		// match the sibling "internal/mcp2/...", nor "**/x.go" match "myx.go".
-		if pre != "" && p != pre && !strings.HasPrefix(p, pre+"/") {
-			return false
-		}
-		if suf != "" && p != suf && !strings.HasSuffix(p, "/"+suf) {
-			return false
-		}
-		return true
+		// Split on every "**" (not just the first) so a pattern with two or more
+		// globstars matches correctly instead of leaving a literal "**" in the
+		// suffix that can never match a real path.
+		return matchGlobstar(strings.Split(pattern, "**"), p)
 	}
 	if ok, _ := path.Match(pattern, p); ok {
 		return true
 	}
 	// allow a plain directory prefix to select its whole subtree
 	return strings.HasPrefix(p, strings.TrimSuffix(pattern, "/")+"/")
+}
+
+// matchGlobstar matches p against a pattern that was split on "**". Each "**"
+// matches any number of path components (including zero); the literal segments
+// between globstars must appear in order, anchored on path-component boundaries
+// so "internal/mcp/**" does not match the sibling "internal/mcp2/...", nor
+// "**/x.go" match "myx.go". segs always has len >= 2 (one "**" → two segments).
+func matchGlobstar(segs []string, p string) bool {
+	// First segment is a prefix anchor.
+	if first := strings.TrimSuffix(segs[0], "/"); first != "" {
+		switch {
+		case p == first:
+			p = ""
+		case strings.HasPrefix(p, first+"/"):
+			p = strings.TrimPrefix(p, first) // keep the leading "/" for boundary search
+		default:
+			return false
+		}
+	}
+	// Middle segments must each appear, in order, on a component boundary.
+	for _, seg := range segs[1 : len(segs)-1] {
+		m := strings.Trim(seg, "/")
+		if m == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(p, m+"/"):
+			p = p[len(m):]
+		case strings.HasPrefix(p, "/"+m+"/"):
+			p = p[len(m)+1:]
+		default:
+			if idx := strings.Index(p, "/"+m+"/"); idx >= 0 {
+				p = p[idx+len(m)+1:]
+			} else {
+				return false
+			}
+		}
+	}
+	// Last segment is a suffix anchor.
+	if last := strings.TrimPrefix(segs[len(segs)-1], "/"); last != "" {
+		if p != last && !strings.HasSuffix(p, "/"+last) {
+			return false
+		}
+	}
+	return true
 }
 
 func diffSchema() map[string]any {

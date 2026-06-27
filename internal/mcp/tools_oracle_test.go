@@ -180,9 +180,14 @@ func TestMatchGlob(t *testing.T) {
 		{"**/storage.go", "internal/ir/storage.go", true},
 		{"**/storage.go", "internal/ir/mystorage.go", false}, // suffix must be on a boundary
 		{"*.go", "demo.go", true},
-		{"*.go", "internal/ir/storage.go", false}, // path.Match: * does not cross /
+		{"*.go", "internal/ir/storage.go", false},       // path.Match: * does not cross /
 		{"internal/ir", "internal/ir/storage.go", true}, // bare dir prefix selects subtree
 		{"internal/ir", "internal/irx/storage.go", false},
+		// Multiple globstars: literal segments must appear in order on boundaries.
+		{"internal/**/parser/**/go.go", "internal/x/parser/y/go.go", true},
+		{"internal/**/parser/**/go.go", "internal/x/y/go.go", false},          // missing middle "parser"
+		{"internal/**/parser/**/go.go", "internal/x/parser/y/mygo.go", false}, // suffix not on a boundary
+		{"a/**/b/**/c", "a/b/c", true},                                        // each ** matches zero components
 	}
 	for _, c := range cases {
 		if got := matchGlob(c.pattern, c.p); got != c.want {

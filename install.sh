@@ -93,9 +93,16 @@ command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not fou
 # set CGO_ENABLED=1.
 GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"
 
+# Stamp the version both binaries report (internal/version.Version) from the
+# latest git tag. Outside a git checkout (tarball install, no tags) git describe
+# fails and we fall back to "dev" — honest about being an unstamped build rather
+# than asserting a release number.
+RUNECHO_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+VERSION_LDFLAGS="-X github.com/inth3shadows/runecho/internal/version.Version=$RUNECHO_VERSION"
+
 for cmd in runecho-ir runecho-mcp runecho-guard; do
   echo "Building $cmd..."
-  go build -tags "$GRAMMAR_TAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
+  go build -tags "$GRAMMAR_TAGS" -ldflags "$VERSION_LDFLAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
   echo "  Built: $BIN_DIR/$cmd$EXE"
 done
 

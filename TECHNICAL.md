@@ -39,8 +39,8 @@ Key design decisions:
   scope by `repo_id`, never by the volatile root-path string.
 - **The oracle never answers from a cache.** `runecho-mcp` and the CLI's
   `snapshot`/`diff`/`verify`/`truth-trail` build a *fresh* IR on every call.
-  `.ai/ir.json` is only an incremental working artifact maintained by
-  `runecho-ir index`.
+  `.ai/ir.json` is only an incremental working artifact, written/updated by the
+  bare `runecho-ir [root-path]` invocation.
 
 ## User-Facing Surfaces
 
@@ -147,8 +147,8 @@ scan, backfilling `common_dir` on a hit so the next fire takes the fast path.
 
 Residual false positives are intrinsic to shallow static analysis
 (dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
-~5% for Python across the 40-case guard test corpus — which is why hook mode
-asks instead of denying.
+~5% for Python across the guard test corpus (`internal/guard/testdata/corpus/*.json`)
+— which is why hook mode asks instead of denying.
 
 ## Storage Schema
 

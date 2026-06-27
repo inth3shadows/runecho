@@ -46,9 +46,8 @@ import (
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
+	"github.com/inth3shadows/runecho/internal/version"
 )
-
-const version = "0.1.0"
 
 func main() {
 	os.Exit(run())
@@ -67,8 +66,14 @@ func runArgs(args []string) int {
 	verbose := fs.Bool("verbose", false, "print every checked symbol")
 	hookMode := fs.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
 	outcomeMode := fs.Bool("outcome-mode", false, "Claude Code PostToolUse outcome recorder — reads JSON from stdin, logs approved if a recent ask exists for the edited file")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if *showVersion {
+		fmt.Println(version.Version)
+		return 0
 	}
 
 	// Bypass check after flag parsing. In hook mode this defers (emits nothing),

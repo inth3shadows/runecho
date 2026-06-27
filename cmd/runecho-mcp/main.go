@@ -12,9 +12,8 @@ import (
 	"github.com/inth3shadows/runecho/internal/mcp"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 	"github.com/inth3shadows/runecho/internal/store"
+	"github.com/inth3shadows/runecho/internal/version"
 )
-
-const version = "0.1.0"
 
 func main() {
 	dir, err := runechoDir()
@@ -37,7 +36,7 @@ func main() {
 
 	// Diagnostics to stderr; stdout is reserved for JSON-RPC frames (stdio
 	// transport — a stray stdout write corrupts the protocol).
-	server := mcp.NewServer("runecho", version).WithLogWriter(os.Stderr)
+	server := mcp.NewServer("runecho", version.Version).WithLogWriter(os.Stderr)
 	mcp.NewOracle(db, dbPath).Register(server)
 
 	if err := server.Serve(os.Stdin, os.Stdout); err != nil {

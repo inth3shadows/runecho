@@ -324,6 +324,53 @@ func TestGenerator_Update_IncrementalUpdate(t *testing.T) {
 	}
 }
 
+// Regression (#33): the Update path streamed the entire file through SHA-256
+// (HashFile) before any size check, so a multi-GB file was fully read on every
+// Update only to be rejected at parse. Update now applies the maxParseBytes
+// guard before HashFile, matching Generate: an oversized file is dropped from
+// the IR and counted as a ParseError with an oversized warning. (The avoided
+// full read is structural — the guard's placement before HashFile — not
+// separately observable from a unit test.)
+func TestUpdate_OversizedFileGuardedBeforeHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	bigPath := filepath.Join(tmpDir, "big.go")
+	if err := os.WriteFile(bigPath, []byte("package main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := NewGenerator(GeneratorConfig{})
+	// Index while under the cap so the file lands in the initial IR.
+	initialIR, _, err := gen.Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if _, ok := initialIR.Files["big.go"]; !ok {
+		t.Fatalf("expected big.go in initial IR")
+	}
+
+	// Lower the cap so the same file is oversized on the next Update.
+	orig := maxParseBytes
+	maxParseBytes = 4
+	defer func() { maxParseBytes = orig }()
+
+	warnings := captureWarnings(gen)
+	updatedIR, stats, err := gen.Update(initialIR, tmpDir)
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if _, ok := updatedIR.Files["big.go"]; ok {
+		t.Errorf("oversized big.go should be dropped from updated IR")
+	}
+	if stats.ParseErrors != 1 {
+		t.Errorf("expected ParseErrors=1 for oversized file, got %d", stats.ParseErrors)
+	}
+	if !slices.ContainsFunc(*warnings, func(s string) bool {
+		return strings.Contains(s, "oversized")
+	}) {
+		t.Errorf("expected an 'oversized' warning, got %v", *warnings)
+	}
+}
+
 func TestGenerator_Generate_PathNormalization(t *testing.T) {
 	tmpDir := t.TempDir()
 

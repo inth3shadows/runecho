@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/xml"
 	"flag"
 	"fmt"
-	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,7 +148,7 @@ func installLaunchd(irBin string) error {
 	<string>/tmp/runecho-reindex.log</string>
 </dict>
 </plist>
-`, html.EscapeString(irBin))
+`, xmlEscape(irBin))
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -158,6 +159,16 @@ func installLaunchd(irBin string) error {
 	}
 	fmt.Printf("Periodic reindex installed (hourly): %s\n", plistPath)
 	return nil
+}
+
+// xmlEscape escapes s for inclusion in an XML text node, using encoding/xml so
+// the escaper matches the output format (the launchd file is a plist = XML).
+// Replaces an earlier html.EscapeString whose output was valid XML only by
+// coincidence and whose import misrepresented intent.
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
 }
 
 // installCron adds an hourly crontab entry on Linux/other.

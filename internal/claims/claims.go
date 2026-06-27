@@ -24,11 +24,19 @@ var (
 	// group 2 the method name; emitted as `Type.Name` to match how the parser
 	// and locate oracle store methods (mcp/tools_oracle.go symbolMatches).
 	methodRe = regexp.MustCompile(`\bfunc\s+\(\s*(?:[\p{L}_][\p{L}\p{N}_]*\s+)?\*?(\p{L}[\p{L}\p{N}_]*)(?:\[[^\]]*\])?\s*\)\s+(\p{Lu}[\p{L}\p{N}_]*)`)
+	// Opens a gofmt-style parenthesized decl block (`var (`, `const (`, `type (`).
+	// Member lines inside carry no keyword, so declRe can't see them.
+	blockOpenRe = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
+	// A member line inside such a block: leading exported name(s) followed by a
+	// type, `=`, or end of line. The trailing `(?:\s|=|$)` excludes composite
+	// literal field keys (`Host: "x"`), whose name is followed by a colon.
+	blockMemberRe = regexp.MustCompile(`^\s*(\p{Lu}[\p{L}\p{N}_]*(?:\s*,\s*\p{Lu}[\p{L}\p{N}_]*)*)(?:\s|=|$)`)
 )
 
 // ExtractSymbolRefs returns a map of symbol → context snippet from text.
 // Targets: backtick-quoted identifiers, func/type/var/const declarations
-// (including every name of a multi-name decl), and method declarations
+// (including every name of a multi-name decl and members of a parenthesized
+// `var (`/`const (`/`type (` block), and method declarations
 // `func (r *Reader) Fetch()` (emitted qualified as Reader.Fetch).
 // Conservative: only flags CamelCase names (mixed upper+lower) to avoid
 // ALL_CAPS env vars, snake_case functions, and Python dunders.
@@ -48,7 +56,17 @@ func ExtractSymbolRefs(text string) map[string]string {
 			}
 		}
 	}
+	// addList splits a comma-separated name list and adds each name.
+	addList := func(line, list string) {
+		for _, name := range strings.Split(list, ",") {
+			add(line, strings.TrimSpace(name))
+		}
+	}
 
+	// inBlock tracks membership in a parenthesized var/const/type block; depth
+	// counts parens so a member whose value spans lines (e.g. a multi-line
+	// regexp.MustCompile(...)) does not close the block at its inner `)`.
+	inBlock, depth := false, 0
 	for _, line := range strings.Split(text, "\n") {
 		for _, m := range backtickRe.FindAllStringSubmatch(line, -1) {
 			add(line, m[1])
@@ -57,9 +75,21 @@ func ExtractSymbolRefs(text string) map[string]string {
 			add(line, m[1]+"."+m[2]) // Receiver.Method, e.g. Reader.Fetch
 		}
 		for _, m := range declRe.FindAllStringSubmatch(line, -1) {
-			for _, name := range strings.Split(m[1], ",") {
-				add(line, strings.TrimSpace(name))
+			addList(line, m[1])
+		}
+
+		if !inBlock {
+			if blockOpenRe.MatchString(line) {
+				inBlock, depth = true, 1
 			}
+			continue
+		}
+		if m := blockMemberRe.FindStringSubmatch(line); m != nil {
+			addList(line, m[1])
+		}
+		depth += strings.Count(line, "(") - strings.Count(line, ")")
+		if depth <= 0 {
+			inBlock = false
 		}
 	}
 	return refs

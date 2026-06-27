@@ -42,6 +42,20 @@ func TestExtractSymbolRefs_Backtick(t *testing.T) {
 	}
 }
 
+// Regression (#34): a dotted span like `Reader.fetch` matched nothing because
+// backtickRe stopped at the first identifier; qualified/method refs were
+// silently dropped. Must be captured whole, symmetric with the locate oracle.
+func TestExtractSymbolRefs_DottedRef(t *testing.T) {
+	text := "Call `Reader.fetch` to load, not plain `Reader`."
+	refs := ExtractSymbolRefs(text)
+	if _, ok := refs["Reader.fetch"]; !ok {
+		t.Errorf("expected Reader.fetch in refs: %v", refs)
+	}
+	if _, ok := refs["Reader"]; !ok {
+		t.Errorf("expected bare Reader in refs: %v", refs)
+	}
+}
+
 func TestExtractSymbolRefs_DeclPattern(t *testing.T) {
 	text := "The function func ValidateClaims handles this.\ntype MyHandler struct"
 	refs := ExtractSymbolRefs(text)

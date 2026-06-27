@@ -8,7 +8,11 @@ import (
 )
 
 var (
-	backtickRe = regexp.MustCompile("`([\\p{L}_][\\p{L}\\p{N}_]*)`")
+	// Allows dotted segments so qualified/method refs like `Reader.fetch` are
+	// captured, symmetric with the locate oracle's last-dotted-segment matching
+	// (mcp/tools_oracle.go symbolMatches). Without this, qualified refs in
+	// backticks were silently dropped from validate-claims and truth-trail.
+	backtickRe = regexp.MustCompile("`([\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)*)`")
 	declRe     = regexp.MustCompile(`\b(?:func|type|var|const)\s+(\p{Lu}[\p{L}\p{N}_]*)`)
 )
 

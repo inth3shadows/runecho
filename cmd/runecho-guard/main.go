@@ -23,6 +23,10 @@
 //	RUNECHO_GUARD_LEARN_TTL_DAYS=<d>
 //	                            days a learned-allow entry survives without being
 //	                            re-approved before it decays away (default 14)
+//	RUNECHO_GUARD_DANGLING=1   enable E1 dangling-refs: ask when an edit removes a
+//	                            symbol definition that other files still reference
+//	                            (per the latest snapshot's refs index). Default OFF
+//	                            (dogfood gate); ask-posture, fail-open.
 package main
 
 import (
@@ -347,12 +351,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	var payload struct {
 		ToolName  string `json:"tool_name"`
 		ToolInput struct {
-			FilePath  string `json:"file_path"`
-			NewString string `json:"new_string"` // Edit tool
-			Content   string `json:"content"`    // Write tool
-			Edits     []struct {
-				NewString string `json:"new_string"`
-			} `json:"edits"` // MultiEdit tool
+			FilePath  string   `json:"file_path"`
+			OldString string   `json:"old_string"` // Edit tool (E1 dangling-refs)
+			NewString string   `json:"new_string"` // Edit tool
+			Content   string   `json:"content"`    // Write tool
+			Edits     []editOp `json:"edits"`      // MultiEdit tool
 		} `json:"tool_input"`
 	}
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
@@ -363,7 +366,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 
 	text := hookText(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits)
 	filePath := payload.ToolInput.FilePath
-	if text == "" || filePath == "" {
+	// removedText is the Edit/MultiEdit text being deleted (cheap, no IO). It is
+	// captured before the empty-input guard so a pure-deletion edit (empty
+	// new_string) still reaches the E1 dangling-refs check below instead of being
+	// dropped here. Empty (and inert) unless E1 is enabled. Write deletions are
+	// derived later from the on-disk file, not here.
+	var removedText string
+	if danglingEnabled() {
+		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
+	}
+	if filePath == "" || (text == "" && removedText == "") {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "empty-input"})
 		return 0
@@ -432,30 +444,59 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
-	if len(violations) == 0 {
-		// No hallucinated symbols. Defer to the normal permission flow, but if the
-		// IR is stale the check may be incomplete — say so via additionalContext
-		// (which informs Claude without forcing an allow/deny).
+
+	// E1 dangling-refs (gated OFF by default; see danglingEnabled). Does this edit
+	// remove a definition that *other* files still reference? Computed alongside the
+	// additive check so a pure-deletion edit (no hallucination) is still caught, and
+	// both findings feed a single ask. Fail-open: any store error yields no warning.
+	var dangling []danglingWarning
+	if danglingEnabled() {
+		oldText := removedText
+		if payload.ToolName == "Write" {
+			// Write replaces the file wholesale; the pre-edit on-disk content is the
+			// only record of what it removes. Best-effort read — the hook is
+			// PreToolUse, so the file is still the old version. Missing/oversized
+			// file simply yields no removed defs.
+			if data, err := os.ReadFile(filePath); err == nil && len(data) <= maxInFileBytes {
+				oldText = string(data)
+			}
+		}
+		if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+			dangling = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+		}
+	}
+
+	if len(violations) == 0 && len(dangling) == 0 {
+		// Nothing flagged. Defer to the normal permission flow, but if the IR is
+		// stale the check may be incomplete — say so via additionalContext (which
+		// informs Claude without forcing an allow/deny).
 		staleReason := hookDeferStale(out, latest)
 		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason})
 		return 0
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
-	for _, v := range violations {
-		// "snippet line N" is honest: in hook mode the guard scans the
-		// new_string/content snippet, not the whole file, so the number is
-		// relative to the edit hunk — not the file's absolute line number.
-		fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
+	var syms []string
+	if len(violations) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
+		for _, v := range violations {
+			// "snippet line N" is honest: in hook mode the guard scans the
+			// new_string/content snippet, not the whole file, so the number is
+			// relative to the edit hunk — not the file's absolute line number.
+			fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
+			syms = append(syms, v.Symbol)
+		}
 	}
-	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
+	if len(dangling) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d symbol(s) being removed are still referenced elsewhere — deleting may break callers:\n", len(dangling))
+		for _, d := range dangling {
+			fmt.Fprintf(&sb, "  %s — referenced by %s\n", d.Symbol, strings.Join(d.Referrers, ", "))
+			syms = append(syms, d.Symbol)
+		}
+	}
+	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	syms := make([]string, len(violations))
-	for i, v := range violations {
-		syms[i] = v.Symbol
-	}
-	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: "violations", Symbols: syms})
+	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0), Symbols: syms})
 	return 0
 }
 
@@ -487,12 +528,17 @@ func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang
 	}
 }
 
+// editOp is one MultiEdit edit. OldString is captured for the E1 dangling-refs
+// check (a removed definition); NewString for the additive hallucination check.
+type editOp struct {
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
 // hookText returns the new content to check for the given tool. For MultiEdit it
 // concatenates every edit's replacement text so symbols introduced in any edit
 // are validated.
-func hookText(toolName, newString, content string, edits []struct {
-	NewString string `json:"new_string"`
-}) string {
+func hookText(toolName, newString, content string, edits []editOp) string {
 	switch toolName {
 	case "Edit":
 		return newString

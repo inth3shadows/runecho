@@ -46,6 +46,12 @@ func runGit(dir string, args ...string) ([]byte, error) {
 // canonical key. dir must be absolute so a relative common-dir resolves
 // deterministically.
 func CommonDir(dir string) (string, error) {
+	// dir must be absolute: a relative dir with a relative common-dir would join
+	// to a relative (and cwd-dependent) key, silently breaking the V4 lookup. The
+	// contract was documented but unenforced — make it a hard error.
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("gitutil.CommonDir: dir must be absolute, got %q", dir)
+	}
 	out, err := runGit(dir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
@@ -57,15 +63,17 @@ func CommonDir(dir string) (string, error) {
 	return filepath.Clean(cd), nil
 }
 
-// TopLevel returns the absolute path of the git working tree containing dir
-// (equivalent to git rev-parse --show-toplevel). Returns an error when dir is
+// TopLevel returns the absolute, cleaned path of the git working tree containing
+// dir (equivalent to git rev-parse --show-toplevel). Returns an error when dir is
 // not inside a git working tree (e.g. a bare repository root or a non-git dir).
+// The result is filepath.Clean'd for symmetry with CommonDir, so callers that
+// compare or join the two never trip over an un-normalized separator.
 func TopLevel(dir string) (string, error) {
 	out, err := runGit(dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return filepath.Clean(strings.TrimSpace(string(out))), nil
 }
 
 // AbsGitDir returns the absolute path to the git directory (common-dir) for the

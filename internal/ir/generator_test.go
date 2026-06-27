@@ -76,16 +76,13 @@ func TestGenerate_WalkErrorWarns(t *testing.T) {
 // constructible here: walkSourceFiles always passes paths rooted at the cleaned
 // absRoot it walks, so Rel cannot fail — left untested by design.)
 func TestGenerate_ParseFailureWarns(t *testing.T) {
-	orig := maxParseBytes
-	maxParseBytes = 16 // forces the oversized-file parse failure
-	defer func() { maxParseBytes = orig }()
-
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "big.go"), []byte("package main // oversized"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	gen := NewGenerator(GeneratorConfig{})
+	gen.maxParseBytes = 16 // forces the oversized-file parse failure
 	warnings := captureWarnings(gen)
 
 	if _, _, err := gen.Generate(tmpDir); err != nil {
@@ -349,9 +346,7 @@ func TestUpdate_OversizedFileGuardedBeforeHash(t *testing.T) {
 	}
 
 	// Lower the cap so the same file is oversized on the next Update.
-	orig := maxParseBytes
-	maxParseBytes = 4
-	defer func() { maxParseBytes = orig }()
+	gen.maxParseBytes = 4
 
 	warnings := captureWarnings(gen)
 	updatedIR, stats, err := gen.Update(initialIR, tmpDir)
@@ -608,10 +603,6 @@ func TestGenerator_Generate_UnicodeNormalization(t *testing.T) {
 // TestGenerate_OversizedFileSkipped verifies that a file exceeding maxParseBytes
 // is silently skipped rather than causing Generate to fail.
 func TestGenerate_OversizedFileSkipped(t *testing.T) {
-	orig := maxParseBytes
-	maxParseBytes = 16 // any real source file exceeds this
-	defer func() { maxParseBytes = orig }()
-
 	tmpDir := t.TempDir()
 	big := filepath.Join(tmpDir, "big.go")
 	if err := os.WriteFile(big, []byte("package main // larger than cap"), 0644); err != nil {
@@ -623,6 +614,7 @@ func TestGenerate_OversizedFileSkipped(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{})
+	gen.maxParseBytes = 16 // any real source file exceeds this
 	result, _, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
@@ -705,10 +697,6 @@ func TestGenerate_FileCap(t *testing.T) {
 // files actually indexed, not files attempted: a leading unparseable file must
 // not eat a cap slot, so a cap of 2 still yields 2 successfully-indexed files.
 func TestGenerate_FileCap_ParseFailuresDontConsumeBudget(t *testing.T) {
-	orig := maxParseBytes
-	maxParseBytes = 24 // "package main // oversized" exceeds this; short files pass
-	defer func() { maxParseBytes = orig }()
-
 	tmpDir := t.TempDir()
 	// a.go sorts first and is oversized → parse failure (must not consume budget).
 	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main // oversized!!"), 0644); err != nil {
@@ -722,6 +710,7 @@ func TestGenerate_FileCap_ParseFailuresDontConsumeBudget(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{FileCap: 2})
+	gen.maxParseBytes = 24 // "package main // oversized" exceeds this; short files pass
 	result, stats, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
@@ -748,10 +737,6 @@ func TestGenerate_FileCap_ParseFailuresDontConsumeBudget(t *testing.T) {
 // TestGenerate_ParseErrorCount verifies that files failing to parse are counted
 // and excluded from the IR rather than causing Generate to fail.
 func TestGenerate_ParseErrorCount(t *testing.T) {
-	orig := maxParseBytes
-	maxParseBytes = 16 // "package main // oversized" (25 bytes) exceeds this
-	defer func() { maxParseBytes = orig }()
-
 	tmpDir := t.TempDir()
 	small := filepath.Join(tmpDir, "small.go")
 	if err := os.WriteFile(small, []byte("package x"), 0644); err != nil {
@@ -763,6 +748,7 @@ func TestGenerate_ParseErrorCount(t *testing.T) {
 	}
 
 	gen := NewGenerator(GeneratorConfig{})
+	gen.maxParseBytes = 16 // "package main // oversized" (25 bytes) exceeds this
 	result, stats, err := gen.Generate(tmpDir)
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)

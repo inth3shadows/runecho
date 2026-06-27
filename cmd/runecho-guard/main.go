@@ -382,14 +382,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		return 0
 	}
 
-	symbols, ignorePath, latest, repoName, warn, noRepo, ok := lookupSymbolsFor(filepath.Dir(filePath))
-	if !ok {
+	res := lookupSymbolsFor(filepath.Dir(filePath))
+	if !res.OK {
 		switch {
-		case warn != "":
+		case res.Warn != "":
 			// Schema-newer: already loud regardless of strict — surfaced always.
-			hookDeferContext(out, warn)
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
-		case noRepo:
+			hookDeferContext(out, res.Warn)
+			logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
+		case res.NoRepo:
 			// Not enrolled — silent skip; strict does not change this.
 			hookDefer()
 			logDecision(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"})
@@ -401,10 +401,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			} else {
 				hookDefer()
 			}
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
+			logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
 		}
 		return 0
 	}
+	// Destructure into the locals the rest of the flow already uses.
+	symbols, ignorePath, latest, repoName := res.Symbols, res.IgnorePath, res.Latest, res.RepoName
 
 	// An Edit/MultiEdit hunk sees only the changed region, not the rest of the
 	// file — so a call to a sibling function (or a nested/local def, or a private
@@ -527,43 +529,69 @@ func suggestionSuffix(suggestion string) string {
 // strict-mode advisory for unenrolled repos. repoName is the enrolled repo's name
 // whenever resolution succeeded (even if a later step degraded) — the decision log
 // needs it for per-repo analysis (C3 learned-allow).
-func lookupSymbolsFor(dir string) (symbols map[string]struct{}, ignorePath string, latest time.Time, repoName, warn string, noRepo bool, ok bool) {
+// lookupResult is the outcome of resolving the symbol set for an edit's repo.
+// Symbols/IgnorePath/Latest are meaningful only when OK is true. The other
+// fields carry the degraded-state contract the old 7-value return encoded in
+// argument position (and only in comments):
+//   - Warn != "": a schema-newer advisory that MUST surface even though OK is
+//     false (the guard binary is older than the store; validation is disabled).
+//   - NoRepo: the repo is not enrolled — an expected silent skip, distinct from
+//     a degraded state, so callers suppress the strict-mode advisory.
+//   - RepoName: set whenever the repo resolved (even if a later step degraded),
+//     so the decision log can attribute the record per-repo.
+type lookupResult struct {
+	Symbols    map[string]struct{}
+	IgnorePath string
+	Latest     time.Time
+	RepoName   string
+	Warn       string
+	NoRepo     bool
+	OK         bool
+}
+
+func lookupSymbolsFor(dir string) lookupResult {
 	storeDir, err := runechoDir()
 	if err != nil {
-		return nil, "", time.Time{}, "", "", false, false
+		return lookupResult{}
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil, "", time.Time{}, "", "", false, false
+		return lookupResult{}
 	}
 	// OpenFast skips the on-open integrity scan — this read path fires on every
 	// edit and must stay cheap; integrity is the writer's concern.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		if errors.Is(err, snapshot.ErrSchemaNewer) {
-			warn = "runecho-guard is older than the RunEcho store — symbol validation is DISABLED until the guard binary is rebuilt (bash install.sh)."
+			return lookupResult{Warn: "runecho-guard is older than the RunEcho store — symbol validation is DISABLED until the guard binary is rebuilt (bash install.sh)."}
 		}
-		return nil, "", time.Time{}, "", warn, false, false
+		return lookupResult{}
 	}
 	defer db.Close()
 
 	repo, repoRoot, resolved := db.ResolveRepo(dir)
 	if !resolved {
 		// Not enrolled — silent skip, not a degraded state.
-		return nil, "", time.Time{}, "", "", true, false
+		return lookupResult{NoRepo: true}
 	}
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return nil, "", time.Time{}, repo.Name, "", false, false
+		return lookupResult{RepoName: repo.Name}
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return nil, "", time.Time{}, repo.Name, "", false, false
+		return lookupResult{RepoName: repo.Name}
 	}
 
-	return syms, filepath.Join(repoRoot, ".runechoguardignore"), snaps[0].Timestamp, repo.Name, "", false, true
+	return lookupResult{
+		Symbols:    syms,
+		IgnorePath: filepath.Join(repoRoot, ".runechoguardignore"),
+		Latest:     snaps[0].Timestamp,
+		RepoName:   repo.Name,
+		OK:         true,
+	}
 }
 
 // hookDefer emits no decision, so Claude Code applies its normal permission flow.

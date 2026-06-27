@@ -152,6 +152,7 @@ not general-purpose code intelligence.
 
 - [Technical Reference](TECHNICAL.md) — architecture, storage schema, the IR, the MCP tools, maintenance
 - [Usage Guide](USAGE.md) — day-to-day operations: enrolling repos, integrations, reading drift, troubleshooting
+- [Changelog](CHANGELOG.md) — notable changes per release; versioning policy
 
 ## License
 

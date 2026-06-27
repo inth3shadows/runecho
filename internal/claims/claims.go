@@ -93,6 +93,10 @@ func ExtractSymbolRefs(text string) map[string]string {
 			if blockOpenRe.MatchString(line) {
 				inBlock, depth = true, 1
 			}
+			// KNOWN limitation: the continue means a member declared on the SAME
+			// line as the block opener (e.g. `var (MaxSize int`) is not captured —
+			// only members on subsequent lines are. Go's gofmt always puts the first
+			// member on its own line, so this is degenerate in practice.
 			continue
 		}
 		if m := blockMemberRe.FindStringSubmatch(line); m != nil {

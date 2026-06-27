@@ -223,6 +223,23 @@ func TestPythonParser_AllExportsSingleQuote(t *testing.T) {
 	}
 }
 
+// A multi-line __all__ (the bracket and members spanning several lines) must be
+// captured. The audit flagged this as a possible silent miss; in fact pyAllRegex's
+// negated class spans newlines, so it already works — this pins that behavior.
+func TestPythonParser_AllExportsMultiLine(t *testing.T) {
+	src := "__all__ = [\n    \"foo\",\n    \"bar\",\n    \"baz\",\n]\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, want := range []string{"foo", "bar", "baz"} {
+		if !slices.Contains(fs.Exports, want) {
+			t.Errorf("missing multi-line __all__ export %q: %v", want, fs.Exports)
+		}
+	}
+}
+
 func TestPythonParser_Sorted(t *testing.T) {
 	src := "import zlib\nimport abc\ndef zoo(): pass\ndef apple(): pass\nclass Zebra: pass\nclass Aardvark: pass\n"
 	p := NewPythonParser()

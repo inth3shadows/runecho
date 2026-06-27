@@ -510,6 +510,40 @@ func TestExtractImports_Python(t *testing.T) {
 	}
 }
 
+// A `from m import (` opens multi-line paren state; a non-contiguous line (a
+// LineNo jump, i.e. a separate diff hunk) must reset it so the continuation is
+// not misread as imported names. Mirrors the ExtractRefs multi-line-state reset.
+func TestExtractImports_PythonParenStateResetsOnLineGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: `from m import (`},
+		{LineNo: 50, Text: `    notAnImport,`}, // far away → paren state reset
+	}
+	for _, n := range ExtractImports(LangPython, ls) {
+		if n == "notAnImport" {
+			t.Errorf("paren state should reset across a line gap; bound %q", n)
+		}
+	}
+}
+
+// A single-line triple-quoted f-string interpolates: the call inside {…} is real
+// and must be extracted, while a non-f triple-quoted string's prose must not be.
+func TestExtractRefs_Python_TripleQuotedFString(t *testing.T) {
+	hasRef := func(rs []Ref, name string) bool {
+		for _, r := range rs {
+			if r.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	if got := ExtractRefs(LangPython, lines(`x = f"""pre {Build(y)} post"""`)); !hasRef(got, "Build") {
+		t.Errorf("call inside a single-line triple-quoted f-string should be extracted; got %v", got)
+	}
+	if got := ExtractRefs(LangPython, lines(`x = """just docs Build(y) here"""`)); hasRef(got, "Build") {
+		t.Errorf("text inside a non-f triple-quoted string must be blanked; got %v", got)
+	}
+}
+
 func TestExtractImports_JS(t *testing.T) {
 	ls := lines(
 		`import fs from 'fs'`,

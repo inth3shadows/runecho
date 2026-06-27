@@ -57,6 +57,8 @@ var (
 	exportNamedRegex = regexp.MustCompile(`export\s+\{([^}]+)\}`)
 	// Matches: export const/let/var/function/class name
 	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function)\s+(\w+)`)
+	// Matches: export * as ns from './m' — the namespace re-export binds `ns`.
+	exportStarAsRegex = regexp.MustCompile(`export\s+\*\s+as\s+(\w+)`)
 	// Matches: export default function Foo / export default class Foo / export default ident.
 	// Three capture groups — first non-empty wins; keywords (function/class/async) in
 	// group 3 are discarded so anonymous defaults don't pollute Exports.
@@ -443,9 +445,11 @@ func extractExports(source string) []string {
 			names := strings.Split(match[1], ",")
 			for _, name := range names {
 				name = strings.TrimSpace(name)
-				// Handle "as" syntax: export { foo as bar } -> extract "foo"
+				// Handle "as" syntax: `export { foo as Bar }` exports Bar, not the
+				// local foo — record the name AFTER "as", which is what consumers
+				// import. (Previously recorded the pre-alias local name.)
 				if idx := strings.Index(name, " as "); idx >= 0 {
-					name = strings.TrimSpace(name[:idx])
+					name = strings.TrimSpace(name[idx+len(" as "):])
 				}
 				if name != "" {
 					exports = append(exports, name)
@@ -456,6 +460,14 @@ func extractExports(source string) []string {
 
 	// Declaration exports: export const foo = ...
 	matches = exportDeclRegex.FindAllStringSubmatch(source, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			exports = append(exports, match[1])
+		}
+	}
+
+	// Namespace re-export: export * as ns from './m' binds ns.
+	matches = exportStarAsRegex.FindAllStringSubmatch(source, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
 			exports = append(exports, match[1])

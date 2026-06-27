@@ -284,15 +284,13 @@ function internal() {}
 
 export { internal as public };
 `,
-			// "export { internal as public }" — the handler takes the part
-			// before " as " which is "internal".  Correct behavior: the
-			// exported name at the use-site is "public" but we record the
-			// local name "internal".  This is a deliberate choice (we index
-			// local definitions, not the re-exported alias).
+			// "export { internal as public }" exports "public" — that is the
+			// name consumers import. The local function "internal" remains a
+			// local definition in Functions; the export records the alias.
 			wantFuncs: []string{"internal"},
 			wantClass: []string{},
-			wantExp:   []string{"internal"},
-			note:      "KNOWN: aliased export records pre-alias local name, not the exported alias",
+			wantExp:   []string{"public"},
+			note:      "",
 		},
 		{
 			name: "reexport_from_module_named",
@@ -328,16 +326,12 @@ export * from './utils';
 			source: `
 export * as utils from './utils';
 `,
-			// "export * as utils" — exportDeclRegex pattern is
-			// "export\s+(?:const|let|var|function|class|async\s+function)\s+(\w+)";
-			// "* as" does not match any of those keywords.
-			// exportNamedRegex requires "{...}" — not present here.
-			// KNOWN: "export * as utils" under-captured — "utils" does not appear
-			// in Exports even though it is a valid named re-export.
+			// "export * as utils from './utils'" binds the namespace "utils",
+			// captured by exportStarAsRegex.
 			wantFuncs: []string{},
 			wantClass: []string{},
-			wantExp:   []string{},
-			note:      "KNOWN: 'export * as name from' not captured in Exports",
+			wantExp:   []string{"utils"},
+			note:      "",
 		},
 		{
 			name: "export_default_arrow_function",

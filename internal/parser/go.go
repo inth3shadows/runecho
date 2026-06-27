@@ -20,6 +20,11 @@ import (
 //     so identical method names on different types never collide.
 //   - Exported types → Classes (struct, interface, alias, etc.); located but not
 //     hashed (parity with Python classes — changes surface through members).
+//   - Exported interface method signatures → Functions, qualified by the
+//     interface type ("Reader.Read"); located and hashed over the signature span
+//     so a contract change flips the hash (parity with the JS/TS parser, which
+//     records method_signature the same way). Embedded interfaces and type-set
+//     constraints carry no method name and are skipped.
 //   - Exported top-level var/const → Exports; located, not hashed (no body).
 //
 // Only exported (capitalized) names are extracted, as before.
@@ -100,7 +105,7 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 				recordHash(key, nodeSpan(fset, src, d))
 				recordLine(key, fset.Position(d.Pos()).Line)
 			case *ast.GenDecl:
-				collectGenDecl(d, fset, &imports, &classes, &exports, recordLine)
+				collectGenDecl(d, fset, src, &imports, &functions, &classes, &exports, recordLine, recordHash)
 			}
 		}
 	}
@@ -134,7 +139,7 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 // two regex-era bugs for free: `var X, Y = 1, 2` yields both names (a ValueSpec
 // carries all of them), and a `var (...)` / `import (...)` block's boundaries are
 // owned by the AST, so a nested `)` no longer closes the block early.
-func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, imports, classes, exports *[]string, recordLine func(string, int)) {
+func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, functions, classes, exports *[]string, recordLine func(string, int), recordHash func(string, []byte)) {
 	switch d.Tok {
 	case token.IMPORT:
 		for _, spec := range d.Specs {
@@ -156,6 +161,30 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, imports, classes, expor
 			}
 			*classes = append(*classes, s.Name.Name)
 			recordLine("class:"+s.Name.Name, fset.Position(s.Pos()).Line)
+			// Descend into an interface body so its method signatures become
+			// referenceable as Type.Method (parity with JS/TS interface methods
+			// and Python class methods). Only methods carry Names + a FuncType;
+			// embedded interfaces and type-set constraints have neither and fall
+			// through untouched.
+			iface, ok := s.Type.(*ast.InterfaceType)
+			if !ok || iface.Methods == nil {
+				continue
+			}
+			for _, m := range iface.Methods.List {
+				if _, ok := m.Type.(*ast.FuncType); !ok {
+					continue
+				}
+				for _, name := range m.Names {
+					if !ast.IsExported(name.Name) {
+						continue
+					}
+					full := qualify(s.Name.Name, name.Name)
+					*functions = append(*functions, full)
+					key := "function:" + full
+					recordHash(key, nodeSpan(fset, src, m))
+					recordLine(key, fset.Position(m.Pos()).Line)
+				}
+			}
 		}
 	case token.VAR, token.CONST:
 		for _, spec := range d.Specs {

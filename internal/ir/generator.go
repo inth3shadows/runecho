@@ -17,6 +17,10 @@ type Generator struct {
 	parsers      []parser.Parser
 	ignoredPaths map[string]bool
 	fileCap      int // 0 = unlimited; walk stops after this many files
+	// maxParseBytes is the per-file parse size limit (see defaultMaxParseBytes).
+	// A per-Generator field, not a package global, so a test that lowers it can
+	// never race a parallel test.
+	maxParseBytes int64
 	// warn routes non-fatal walk/parse diagnostics. Defaults to stderr (set by
 	// NewGenerator) so existing callers are unchanged; tests inject a sink to
 	// assert the otherwise-silent skip branches actually fire.
@@ -73,9 +77,10 @@ func NewGenerator(config GeneratorConfig) *Generator {
 		ignored[p] = true
 	}
 	return &Generator{
-		parsers:      []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
-		ignoredPaths: ignored,
-		fileCap:      config.FileCap,
+		parsers:       []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
+		ignoredPaths:  ignored,
+		fileCap:       config.FileCap,
+		maxParseBytes: defaultMaxParseBytes,
 		warn: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, format, args...)
 		},
@@ -186,7 +191,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 		// without this an oversized file is fully read on every Update only to be
 		// rejected at parse. Generate guards inside parseFile; mirror it here.
 		// A stat error falls through to HashFile, which surfaces it as before.
-		if info, serr := os.Stat(absPath); serr == nil && info.Size() > maxParseBytes {
+		if info, serr := os.Stat(absPath); serr == nil && info.Size() > g.maxParseBytes {
 			g.warn("Warning: failed to parse %s: skipping oversized file (%d bytes)\n", absPath, info.Size())
 			stats.ParseErrors++
 			return nil
@@ -322,10 +327,11 @@ func (g *Generator) parserFor(ext string) parser.Parser {
 	return nil
 }
 
-// maxParseBytes is the per-file size limit for source parsing. Files larger
-// than this are skipped with a warning — oversized files are usually generated
-// artifacts, not hand-authored source. var so tests can lower the cap.
-var maxParseBytes int64 = 10 * 1024 * 1024
+// defaultMaxParseBytes is the per-file size limit for source parsing. Files
+// larger than this are skipped with a warning — oversized files are usually
+// generated artifacts, not hand-authored source. It seeds Generator.maxParseBytes
+// in NewGenerator; tests lower the per-Generator field, never a shared global.
+const defaultMaxParseBytes int64 = 10 * 1024 * 1024
 
 // parseFile parses a single file and returns its IR.
 func (g *Generator) parseFile(path string) (FileIR, error) {
@@ -333,7 +339,7 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	if err != nil {
 		return FileIR{}, fmt.Errorf("failed to stat file: %w", err)
 	}
-	if info.Size() > maxParseBytes {
+	if info.Size() > g.maxParseBytes {
 		return FileIR{}, fmt.Errorf("skipping oversized file (%d bytes)", info.Size())
 	}
 

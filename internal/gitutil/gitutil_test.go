@@ -71,6 +71,15 @@ func TestCommonDir_NonRepo(t *testing.T) {
 	}
 }
 
+// TestCommonDir_RejectsRelativeDir asserts the absolute-dir contract is enforced
+// at runtime: a relative dir would join to a cwd-dependent key and silently break
+// the V4 lookup. The guard fires before any git invocation, so no repo is needed.
+func TestCommonDir_RejectsRelativeDir(t *testing.T) {
+	if _, err := CommonDir("relative/path"); err == nil {
+		t.Error("CommonDir with a relative dir should error")
+	}
+}
+
 // TestTopLevel returns the working-tree root and is cwd-stable. Compared via
 // EvalSymlinks because git resolves symlinks (e.g. /tmp -> /private/var) while
 // t.TempDir does not.

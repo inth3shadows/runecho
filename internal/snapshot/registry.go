@@ -216,12 +216,21 @@ func deleteAutoSnapshotsTx(tx *sql.Tx, repoID int64) error {
 // many parse errors were seen, and how many supported files the walk
 // encountered (self-observing / honest-coverage guarantees).
 func (db *DB) TouchRepo(id int64, lastIndexed time.Time, parseErrors, supportedSeen int) error {
-	_, err := db.conn.Exec(
+	res, err := db.conn.Exec(
 		`UPDATE repos SET last_indexed = ?, parse_errors = ?, supported_seen = ? WHERE id = ?`,
 		lastIndexed.UTC().Format(time.RFC3339), parseErrors, supportedSeen, id,
 	)
 	if err != nil {
 		return fmt.Errorf("touch repo %d: %w", id, err)
+	}
+	// A zero-row update means id matched no repo (stale/wrong ID). Surface it
+	// rather than reporting success — a silent no-op here hides a caller bug.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch repo %d: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("touch repo %d: no such repo", id)
 	}
 	return nil
 }

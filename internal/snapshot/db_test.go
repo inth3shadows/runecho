@@ -151,6 +151,11 @@ func TestRegistry(t *testing.T) {
 		t.Fatalf("TouchRepo not persisted: errs=%d seen=%d lastIndexed=%v want %v",
 			after.ParseErrors, after.SupportedSeen, after.LastIndexed, when)
 	}
+
+	// A TouchRepo against a non-existent repo ID must error, not silently no-op.
+	if err := db.TouchRepo(999999, when, 0, 0); err == nil {
+		t.Fatal("TouchRepo on a missing repo ID should error, got nil")
+	}
 }
 
 // TestRepoScopedHistory is the central-store guarantee: two repos in one DB keep

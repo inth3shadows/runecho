@@ -87,6 +87,38 @@ func TestExtractSymbolRefs_MultiNameDecl(t *testing.T) {
 	}
 }
 
+// Regression (forage): members of a parenthesized `var (` / `const (` / `type (`
+// block carry no keyword on their line, so declRe missed them entirely.
+func TestExtractSymbolRefs_DeclBlock(t *testing.T) {
+	text := "var (\n\tMaxSize = 100\n\tMinSize, MidSize int\n)\n" +
+		"type (\n\tReader interface{ Read() }\n\tWriter = io.Writer\n)"
+	refs := ExtractSymbolRefs(text)
+	for _, want := range []string{"MaxSize", "MinSize", "MidSize", "Reader", "Writer"} {
+		if _, ok := refs[want]; !ok {
+			t.Errorf("expected %q in refs: %v", want, refs)
+		}
+	}
+}
+
+// Regression (forage): a member value spanning lines (inner parens) must not
+// close the block early, and composite-literal field keys must NOT be captured.
+func TestExtractSymbolRefs_DeclBlock_NestedAndKeys(t *testing.T) {
+	text := "var (\n" +
+		"\tPattern = build(\n\t\t\"x\",\n\t)\n" + // multi-line value, inner ( )
+		"\tCfg = Config{\n\t\tHostName: \"h\",\n\t}\n" + // composite literal key
+		"\tTrailing = 1\n" + // must still be captured after the nested value
+		")"
+	refs := ExtractSymbolRefs(text)
+	for _, want := range []string{"Pattern", "Cfg", "Trailing"} {
+		if _, ok := refs[want]; !ok {
+			t.Errorf("expected %q in refs: %v", want, refs)
+		}
+	}
+	if _, ok := refs["HostName"]; ok {
+		t.Errorf("composite-literal field key HostName should not be captured: %v", refs)
+	}
+}
+
 func TestExtractSymbolRefs_DeclPattern(t *testing.T) {
 	text := "The function func ValidateClaims handles this.\ntype MyHandler struct"
 	refs := ExtractSymbolRefs(text)

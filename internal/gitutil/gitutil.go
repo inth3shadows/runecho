@@ -8,6 +8,7 @@ package gitutil
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,26 @@ import (
 // PreToolUse hook.
 const Timeout = 2 * time.Second
 
+// runGit runs `git -C dir <args...>` under Timeout and returns its stdout.
+// stderr is captured separately (not via CombinedOutput) so a warning git
+// prints on success can't corrupt the stdout we parse, while error returns
+// still carry git's diagnostic instead of a bare "exit status 128".
+func runGit(dir string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	var stderr strings.Builder
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 // CommonDir returns the absolute, cleaned git-common-dir for the repo
 // containing dir. This is the stable identity shared by every worktree of a
 // repo (bare or not): the bare root for bare repos, <root>/.git for regular
@@ -25,9 +46,7 @@ const Timeout = 2 * time.Second
 // canonical key. dir must be absolute so a relative common-dir resolves
 // deterministically.
 func CommonDir(dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-common-dir").Output()
+	out, err := runGit(dir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
@@ -42,9 +61,7 @@ func CommonDir(dir string) (string, error) {
 // (equivalent to git rev-parse --show-toplevel). Returns an error when dir is
 // not inside a git working tree (e.g. a bare repository root or a non-git dir).
 func TopLevel(dir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	out, err := runGit(dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
 	}
@@ -62,9 +79,7 @@ func AbsGitDir(dir string) (string, error) {
 // containing dir, parsed from `git worktree list --porcelain`. Returns nil on
 // any error (non-git dir, git not available).
 func WorktreePaths(dir string) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "worktree", "list", "--porcelain").Output()
+	out, err := runGit(dir, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil
 	}

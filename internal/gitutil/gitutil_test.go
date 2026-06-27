@@ -70,3 +70,87 @@ func TestCommonDir_NonRepo(t *testing.T) {
 		t.Error("CommonDir on a non-git dir should error")
 	}
 }
+
+// TestTopLevel returns the working-tree root and is cwd-stable. Compared via
+// EvalSymlinks because git resolves symlinks (e.g. /tmp -> /private/var) while
+// t.TempDir does not.
+func TestTopLevel(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	sub := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	top, err := TopLevel(sub)
+	if err != nil {
+		t.Fatalf("TopLevel: %v", err)
+	}
+	if !filepath.IsAbs(top) {
+		t.Errorf("TopLevel not absolute: %q", top)
+	}
+	want, _ := filepath.EvalSymlinks(dir)
+	got, _ := filepath.EvalSymlinks(top)
+	if got != want {
+		t.Errorf("TopLevel = %q, want repo root %q", got, want)
+	}
+}
+
+func TestTopLevel_NonRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := TopLevel(t.TempDir()); err == nil {
+		t.Error("TopLevel on a non-git dir should error")
+	}
+}
+
+// TestAbsGitDir is the hook-install path: it must equal CommonDir, since hooks
+// live in the stable common-dir shared across worktrees.
+func TestAbsGitDir(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+
+	gd, err := AbsGitDir(dir)
+	if err != nil {
+		t.Fatalf("AbsGitDir: %v", err)
+	}
+	cd, err := CommonDir(dir)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	if gd != cd {
+		t.Errorf("AbsGitDir = %q, want CommonDir %q", gd, cd)
+	}
+}
+
+// TestWorktreePaths lists the main worktree of a fresh repo; the repo root must
+// appear among the returned paths.
+func TestWorktreePaths(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+
+	paths := WorktreePaths(dir)
+	if len(paths) == 0 {
+		t.Fatalf("WorktreePaths returned none")
+	}
+	want, _ := filepath.EvalSymlinks(dir)
+	found := false
+	for _, p := range paths {
+		if ep, _ := filepath.EvalSymlinks(p); ep == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("repo root %q not in worktree paths %v", want, paths)
+	}
+}
+
+func TestWorktreePaths_NonRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if paths := WorktreePaths(t.TempDir()); paths != nil {
+		t.Errorf("WorktreePaths on a non-git dir should be nil, got %v", paths)
+	}
+}

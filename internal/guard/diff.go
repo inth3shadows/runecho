@@ -53,12 +53,18 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// New file boundary: +++ b/<path>
-		if strings.HasPrefix(line, "+++ b/") {
-			path := filepath.ToSlash(strings.TrimPrefix(line, "+++ b/"))
-			result = append(result, FileDiff{Path: path})
-			cur = &result[len(result)-1]
-			newLineNo = 0
+		// New file boundary: "+++ b/<path>" (or git's C-quoted form when
+		// core.quotePath escapes spaces / non-ASCII bytes).
+		if strings.HasPrefix(line, "+++ ") {
+			if path, ok := parseDiffNewPath(line); ok {
+				result = append(result, FileDiff{Path: path})
+				cur = &result[len(result)-1]
+				newLineNo = 0
+			} else {
+				// "+++ /dev/null" (deletion target) or an unparseable header:
+				// no file to attach added lines to.
+				cur = nil
+			}
 			continue
 		}
 		// Skip "--- a/..." and "diff --git ..." header lines
@@ -106,6 +112,31 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 		return nil, false, fmt.Errorf("scan diff: %w", err)
 	}
 	return result, false, nil
+}
+
+// parseDiffNewPath extracts the new-file path from a unified-diff "+++ " header.
+// It handles the normal "+++ b/<path>" form and git's C-quoted form
+// ("+++ \"b/<path>\"") emitted when core.quotePath escapes spaces, control bytes,
+// or non-ASCII (UTF-8) characters — without it, those files are silently skipped,
+// a false-negative vector for the guard. Returns ok=false for "+++ /dev/null"
+// (a deletion target) and any header that doesn't carry a b/ path.
+func parseDiffNewPath(line string) (string, bool) {
+	rest := strings.TrimPrefix(line, "+++ ")
+	if strings.HasPrefix(rest, "\"") {
+		// git-quoted path: C-style escapes (octal \nnn, \", \\) — the same
+		// grammar strconv.Unquote understands. On failure, fall through with the
+		// raw string so the b/ check below rejects it rather than mis-detecting.
+		if unq, err := strconv.Unquote(rest); err == nil {
+			rest = unq
+		}
+	}
+	if rest == "/dev/null" {
+		return "", false
+	}
+	if !strings.HasPrefix(rest, "b/") {
+		return "", false
+	}
+	return filepath.ToSlash(strings.TrimPrefix(rest, "b/")), true
 }
 
 // parseHunkStart extracts the new-file start line from a @@ header.

@@ -63,6 +63,12 @@ var jsBuiltins = setOf(
 	"JSON", "Math", "Promise", "Symbol", "Map", "Set", "WeakMap", "WeakSet",
 	"Date", "RegExp", "URL", "URLSearchParams", "Buffer", "Proxy", "Reflect",
 	"BigInt", "structuredClone", "queueMicrotask", "globalThis",
+	"Intl", "Function", "WeakRef", "FinalizationRegistry",
+	// binary data: ArrayBuffer/DataView + the typed-array constructors
+	"ArrayBuffer", "SharedArrayBuffer", "DataView",
+	"Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array",
+	"Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+	"BigInt64Array", "BigUint64Array",
 	// common browser/runtime globals seen as bare calls/constructors
 	"Notification", "EventSource", "WebSocket", "FormData", "Headers",
 	"Request", "Response", "AbortController", "TextEncoder", "TextDecoder",
@@ -70,8 +76,10 @@ var jsBuiltins = setOf(
 	"CustomEvent", "DOMParser", "XMLHttpRequest", "IntersectionObserver",
 	"MutationObserver", "ResizeObserver",
 	"parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent",
-	"decodeURIComponent", "setTimeout", "setInterval", "clearTimeout",
-	"clearInterval", "fetch",
+	"decodeURIComponent", "encodeURI", "decodeURI", "setTimeout", "setInterval",
+	"clearTimeout", "clearInterval", "fetch", "btoa", "atob", "crypto",
+	// browser dialog globals seen as bare calls
+	"alert", "confirm", "prompt",
 	"Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError",
 	"EvalError", "URIError", "AggregateError",
 	"undefined", "null", "true", "false",
@@ -124,7 +132,7 @@ func setOf(ss ...string) map[string]struct{} {
 var (
 	reGoDef     = regexp.MustCompile(`^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)\s*[(\[]`)
 	rePyDef     = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
-	reJSFuncDef = regexp.MustCompile(`^\s*function\s+([A-Za-z_$][\w$]*)\s*\(`)
+	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(`)
 	reJSVarDef  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
 )
 

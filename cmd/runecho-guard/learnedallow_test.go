@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -246,5 +247,32 @@ func TestRunHookMode_LearnedAllow_DisabledStillAsks(t *testing.T) {
 	_, _, d := runHook(t, payload(t, "Edit", goFile, "y := HallucinatedFunc()", "", nil))
 	if d.Hook.PermissionDec != "ask" {
 		t.Fatalf("with gate OFF the guard must still ask, got decision %q", d.Hook.PermissionDec)
+	}
+}
+
+// TestRecordApprovals_ConcurrentNoLostUpdates pins finding #4: concurrent
+// PostToolUse hooks must not lose increments. Without the advisory file lock the
+// load-modify-save races (last-writer-wins) and the final count drops below N;
+// the lock serializes them so every approval is counted exactly once. Runs under
+// -race in CI.
+func TestRecordApprovals_ConcurrentNoLostUpdates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const n = 24
+	now := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			recordApprovals(home, "r", []string{"Foo"}, now)
+		}()
+	}
+	wg.Wait()
+
+	if got := loadLearnedAllow(home).Repos["r"]["Foo"].Count; got != n {
+		t.Fatalf("Foo count = %d, want %d (lost updates under concurrency)", got, n)
 	}
 }

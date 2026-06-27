@@ -62,20 +62,18 @@
     "known_fp": ["fn"]
   },
   {
-    "name": "js-fp-export-function-decl",
-    "desc": "KNOWN FP: `export function Name(` is not recognized as a definition line",
+    "name": "js-export-function-decl",
+    "desc": "`export function Name(` is recognized as a definition, so the self-reference is not flagged",
     "file": "report.js",
     "edit": "export function buildReport(rows) {\n  return rows.length;\n}\n",
-    "expect": [],
-    "known_fp": ["buildReport"]
+    "expect": []
   },
   {
-    "name": "js-fp-async-function-decl",
-    "desc": "KNOWN FP: `async function Name(` is not recognized as a definition line",
+    "name": "js-async-function-decl",
+    "desc": "`async function Name(` is recognized as a definition, so the self-reference is not flagged",
     "file": "load.js",
     "edit": "async function loadConfig() {\n  return {};\n}\n",
-    "expect": [],
-    "known_fp": ["loadConfig"]
+    "expect": []
   },
   {
     "name": "js-fp-regex-literal",
@@ -84,5 +82,12 @@
     "edit": "function match(s) {\n  const re = /Foo(x)/;\n  return re.test(s);\n}\n",
     "expect": [],
     "known_fp": ["Foo"]
+  },
+  {
+    "name": "js-tn-standard-globals",
+    "desc": "Standard JS globals (URI encoders, base64, crypto, typed arrays, Intl, Function) are builtins, not hallucinated calls",
+    "file": "encode.js",
+    "edit": "function pack(s) {\n  const u = encodeURI(s) + decodeURI(s);\n  const b = btoa(s) + atob(s);\n  const id = crypto.randomUUID();\n  const buf = new Uint8Array(8);\n  const view = new DataView(new ArrayBuffer(8));\n  const fmt = Intl.NumberFormat();\n  const fn = Function(\"return 1\");\n  return [u, b, id, buf, view, fmt, fn];\n}\n",
+    "expect": []
   }
 ]

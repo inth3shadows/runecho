@@ -18,8 +18,18 @@ import (
 // default can be redirected once at construction.
 var stderrSink io.Writer = os.Stderr
 
-// DefaultProtocolVersion is returned when the client does not request one.
+// DefaultProtocolVersion is returned when the client does not request one (or
+// requests one we don't speak).
 const DefaultProtocolVersion = "2025-06-18"
+
+// supportedProtocolVersions is the set of MCP protocol revisions this server
+// will echo back on initialize. A client asking for anything outside this set
+// gets DefaultProtocolVersion instead of a false claim of support.
+var supportedProtocolVersions = map[string]bool{
+	"2025-06-18": true,
+	"2025-03-26": true,
+	"2024-11-05": true,
+}
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -183,6 +193,15 @@ func errFrame(code int, msg string) response {
 // handle dispatches one request. The bool is false for notifications (no reply).
 func (s *Server) handle(req request) (response, bool) {
 	isNotification := len(req.ID) == 0
+	// JSON-RPC 2.0 requires "jsonrpc":"2.0". Be lenient on an omitted field
+	// (minimal clients), but reject a present-and-wrong version on a request so
+	// a non-2.0 peer fails loudly instead of being silently misinterpreted.
+	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
+		if isNotification {
+			return response{}, false
+		}
+		return s.errResp(req.ID, -32600, "invalid Request: jsonrpc must be \"2.0\""), true
+	}
 	switch req.Method {
 	case "initialize":
 		return s.ok(req.ID, s.initResult(req.Params)), !isNotification
@@ -211,8 +230,11 @@ func (s *Server) initResult(params json.RawMessage) map[string]any {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err == nil && p.ProtocolVersion != "" {
-			ver = p.ProtocolVersion // echo client's version
+		// Echo the client's requested version ONLY if we actually speak it;
+		// otherwise advertise our default. Blindly echoing would falsely claim
+		// support for a version we don't implement.
+		if err := json.Unmarshal(params, &p); err == nil && supportedProtocolVersions[p.ProtocolVersion] {
+			ver = p.ProtocolVersion
 		}
 	}
 	return map[string]any{

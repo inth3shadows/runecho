@@ -318,10 +318,23 @@ func UniqueName(db *DB, desired string) (string, error) {
 // a different directory (e.g. the user's actual cwd for live IR generation)
 // should ignore repoRoot and use their own path.
 func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
+	// The Get* helpers return (nil, nil) for "not enrolled" (sql.ErrNoRows), so a
+	// non-nil error here is ALWAYS a real DB fault. We still degrade to ok=false
+	// (callers — guard included — must stay fail-open), but a transient DB error
+	// is otherwise indistinguishable from "not enrolled"; warn so the fault is
+	// debuggable rather than silent. Matches the package's degraded-state warnings.
+	warnResolve := func(tier string, err error) {
+		fmt.Fprintf(os.Stderr, "runecho: ResolveRepo %s lookup failed (treating as not-enrolled): %v\n", tier, err)
+	}
+
 	// Tier 1: common-dir fast path.
 	commonDir, cdErr := gitutil.CommonDir(dir)
 	if cdErr == nil {
-		if r, err := db.GetRepoByCommonDir(commonDir); err == nil && r != nil {
+		r, err := db.GetRepoByCommonDir(commonDir)
+		switch {
+		case err != nil:
+			warnResolve("common-dir", err)
+		case r != nil:
 			return r, r.Path, true
 		}
 	}
@@ -330,7 +343,9 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 	if err != nil {
 		return nil, "", false
 	}
-	if r, err := db.GetRepoByPath(topLevel); err == nil && r != nil {
+	if r, err := db.GetRepoByPath(topLevel); err != nil {
+		warnResolve("top-level", err)
+	} else if r != nil {
 		db.backfillCommonDir(r.ID, commonDir, cdErr)
 		return r, topLevel, true
 	}
@@ -339,7 +354,9 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 		if wt == topLevel {
 			continue
 		}
-		if r, err := db.GetRepoByPath(wt); err == nil && r != nil {
+		if r, err := db.GetRepoByPath(wt); err != nil {
+			warnResolve("worktree", err)
+		} else if r != nil {
 			db.backfillCommonDir(r.ID, commonDir, cdErr)
 			return r, wt, true
 		}

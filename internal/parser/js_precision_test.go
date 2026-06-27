@@ -42,18 +42,16 @@ function outer() {
 	});
 }
 `,
-			// funcDeclRegex requires (?:^|\s) before the "function" keyword.
-			// In "forEach(function inner(x)", the character before "function"
-			// is "(" — not whitespace — so "inner" is NOT captured.  "outer" is
-			// captured (it follows a newline).
-			// Correct behavior: callback-argument named functions are silently
-			// missed, not over-promoted.  The under-capture cost is an FN for
-			// indexing (inner is not recorded); the alternative (no anchor) would
-			// add noise from every named callback.
+			// AST: "inner" is a named function expression used as a callback
+			// argument. The walker captures top-level declarations and class
+			// methods only — it does not recurse function bodies, and bare
+			// function_expressions not bound to a variable are intentionally
+			// skipped (see js.go) — so "inner" is correctly NOT captured.
+			// "outer" is a top-level declaration.
 			wantFuncs: []string{"outer"},
 			wantClass: []string{},
 			wantExp:   []string{},
-			note:      "KNOWN: named function in callback argument not captured (character before 'function' is '(', not whitespace)",
+			note:      "named function in a callback argument is not captured (body-level function_expression)",
 		},
 		{
 			name: "nested_arrow_inside_map",
@@ -61,11 +59,10 @@ function outer() {
 const transform = (items) => items.map(x => x * 2);
 const process = items => items.filter(y => y > 0);
 `,
-			// KNOWN: arrowFuncRegex requires "const|let|var <name> = ... =>".
-			// The inner "x => x*2" and "y => y>0" do not start with a
-			// declaration keyword, so they are correctly NOT captured.
-			// "transform" IS captured (const decl + arrow); "process" IS
-			// captured (const decl + single-param arrow without parens).
+			// AST: "transform" and "process" are top-level arrow consts (a
+			// variable_declarator bound to an arrow_function). The inner
+			// "x => x*2" and "y => y>0" live inside those bodies, which are not
+			// recursed, so they are correctly NOT captured.
 			wantFuncs: []string{"process", "transform"},
 			wantClass: []string{},
 			wantExp:   []string{},
@@ -96,14 +93,14 @@ setTimeout(function tick() {
 	refresh();
 }, 1000);
 `,
-			// funcDeclRegex requires (?:^|\s) before "function".  In
-			// "setTimeout(function tick()", the "(" before "function" is not
-			// whitespace, so "tick" is NOT captured.  Consistent with the
-			// forEach case: neither over-promotes callback-argument functions.
+			// AST: "tick" is a named function expression passed as a call
+			// argument. Bare function_expressions not bound to a variable are
+			// intentionally not captured (see js.go), consistent with the
+			// forEach case — neither over-promotes callback-argument functions.
 			wantFuncs: []string{},
 			wantClass: []string{},
 			wantExp:   []string{},
-			note:      "KNOWN: named callback function not captured (leading '(' is not whitespace)",
+			note:      "named callback function is not captured (body-level function_expression)",
 		},
 
 		// ------------------------------------------------------------------ //
@@ -116,8 +113,9 @@ function makeAdder(n) {
 	return (x) => x + n;
 }
 `,
-			// The returned arrow is anonymous (no name after "=>"), so it is
-			// not captured.  Only "makeAdder" appears.  Correct behavior.
+			// AST: the returned arrow is anonymous and lives inside makeAdder's
+			// body (not a top-level binding, body not recursed), so only
+			// "makeAdder" is captured.
 			wantFuncs: []string{"makeAdder"},
 			wantClass: []string{},
 			wantExp:   []string{},
@@ -191,9 +189,9 @@ export default function App() {
 	);
 }
 `,
-			// funcDeclRegex captures "App" (whitespace before "function").
-			// exportDefaultRegex now uses alternation to capture the identifier
-			// after "function", so "App" lands in Exports correctly.
+			// AST captures "App" (a top-level function declaration). Exports are
+			// still a regex pass: exportDefaultRegex's alternation captures the
+			// identifier after "function", so "App" also lands in Exports.
 			wantFuncs: []string{"App"},
 			wantClass: []string{},
 			wantExp:   []string{"App"},
@@ -210,14 +208,10 @@ const Button = ({ label, onClick }) => (
 
 export { Button };
 `,
-			// arrowFuncRegex: "(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*=>"
-			// In "const Button = ({ label, onClick }) =>":
-			//   \([^)]*\) matches "({ label, onClick }" — the pattern uses [^)]*
-			//   which matches everything up to the first ")", giving "{ label, onClick ".
-			//   The outer ")" then closes the group, and \s*=> matches " =>".
-			// So "Button" IS captured in Functions — the destructuring does not
-			// prevent the match because [^)]* greedily stops at the first ")".
-			// Correct behavior: arrow components with simple destructuring are indexed.
+			// AST: "Button" is a top-level arrow const (a variable_declarator
+			// bound to an arrow_function), captured regardless of the
+			// destructured-object parameter. Exports come from the regex pass
+			// ("export { Button }").
 			wantFuncs: []string{"Button"},
 			wantClass: []string{},
 			wantExp:   []string{"Button"},
@@ -232,7 +226,8 @@ const Icon = (props) => <span>{props.name}</span>;
 
 export { Icon };
 `,
-			// "(props)" matches \([^)]*\) so "Icon" IS captured as a function.
+			// AST: "Icon" is a top-level arrow const; the single parenthesized
+			// parameter is irrelevant to capture. Exports come from the regex pass.
 			wantFuncs: []string{"Icon"},
 			wantClass: []string{},
 			wantExp:   []string{"Icon"},
@@ -253,19 +248,17 @@ const Header: React.FC<Props> = ({ title }) => (
 
 export default Header;
 `,
-			// The LHS is "const Header: React.FC<Props> = ..."; arrowFuncRegex
-			// looks for "const <word> =" but the colon annotation between the
-			// name and "=" breaks the match pattern
-			// ("(?:const|let|var)\s+(\w+)\s*=").  The ": React.FC<Props>" is
-			// between name and "=", so the regex does NOT match.
-			//
-			// KNOWN: typed arrow component under-captured — "Header" not in Functions.
-			// exportDefaultRegex would capture the plain "export default Header"
-			// but "Header" is the identifier so it IS in Exports.
+			// This case calls Parse() (no extension), so it uses the JavaScript
+			// grammar, which does not understand the TypeScript annotation in
+			// "const Header: React.FC<Props> = ...". The annotated binding does
+			// not parse as a clean arrow-const, so "Header" is NOT captured in
+			// Functions. Real .tsx parsing is covered via ParseExt(".tsx").
+			// Exports still come from the regex pass: "export default Header"
+			// records the identifier "Header".
 			wantFuncs: []string{},
 			wantClass: []string{},
 			wantExp:   []string{"Header"},
-			note:      "KNOWN: TypeScript-annotated arrow component (const Name: Type = ...) not captured in Functions",
+			note:      "TS-annotated arrow component not captured under the bare JS grammar (use ParseExt for .ts/.tsx)",
 		},
 
 		// ------------------------------------------------------------------ //

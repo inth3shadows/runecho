@@ -178,6 +178,18 @@ func cachedLang(once *sync.Once, dst **ts.Language, name string, load func() *ts
 // enums, and type aliases are located (start line) but not hashed (their changes
 // surface through their members).
 func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []string, hashes map[string]string, lines map[string]int) {
+	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
+	// input; a panic here would otherwise propagate through parseFile→Generate
+	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
+	// (the same fail-safe path as a nil grammar) so one bad file can't take down
+	// the process. Named returns are reset so a panic mid-walk can't leak a
+	// partial, inconsistent symbol set.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "runecho: JS/TS parse panicked (%v); AST symbols for this file disabled\n", r)
+			functions, classes, hashes, lines = nil, nil, nil, nil
+		}
+	}()
 	src := []byte(source)
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {

@@ -12,7 +12,14 @@ import (
 // points; duplicate copies in cmd packages caused divergence risk.
 func RunechoDir() (string, error) {
 	if h := os.Getenv("RUNECHO_HOME"); h != "" {
-		return h, nil
+		// Normalize to an absolute, cleaned path so a relative RUNECHO_HOME
+		// resolves to one stable location instead of differing per caller cwd —
+		// symmetric with gitutil's canonical-key rigor.
+		abs, err := filepath.Abs(h)
+		if err != nil {
+			return "", fmt.Errorf("resolve RUNECHO_HOME %q: %w", h, err)
+		}
+		return abs, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

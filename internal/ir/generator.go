@@ -181,6 +181,16 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 		if g.capReached(len(updated.Files)) {
 			return nil // count only; cap bounds parse work, not the denominator
 		}
+		// Guard size before hashing: HashFile streams the whole file through
+		// SHA-256, and parseFile rejects anything over maxParseBytes anyway, so
+		// without this an oversized file is fully read on every Update only to be
+		// rejected at parse. Generate guards inside parseFile; mirror it here.
+		// A stat error falls through to HashFile, which surfaces it as before.
+		if info, serr := os.Stat(absPath); serr == nil && info.Size() > maxParseBytes {
+			g.warn("Warning: failed to parse %s: skipping oversized file (%d bytes)\n", absPath, info.Size())
+			stats.ParseErrors++
+			return nil
+		}
 		currentHash, err := HashFile(absPath)
 		if err != nil {
 			g.warn("Warning: failed to hash %s: %v\n", absPath, err)

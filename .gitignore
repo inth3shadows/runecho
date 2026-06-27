@@ -50,5 +50,5 @@ coverage.html
 *.env
 .runecho-key
 
-# CodeGraph local index (machine-local, never commit)
-.codegraph/
+# CodeGraph local index (machine-local, never commit) — dir in main worktree, symlink in others
+.codegraph

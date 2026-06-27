@@ -120,6 +120,13 @@ export function build<T>(x: T): T { return x; }
 			t.Errorf("Functions = %v, want it to contain %q", fs.Functions, name)
 		}
 	}
+	// Every `export <kind> Name` form is enumerable in Exports — including the
+	// TS-only type/interface/enum kinds, which previously landed only in Classes.
+	for _, name := range []string{"Shape", "ID", "Color", "Server", "build"} {
+		if !containsStr(fs.Exports, name) {
+			t.Errorf("Exports = %v, want it to contain %q", fs.Exports, name)
+		}
+	}
 	// The class itself is located, not hashed.
 	if fs.SymbolLines["class:Server"] == 0 {
 		t.Error("class:Server has no line")

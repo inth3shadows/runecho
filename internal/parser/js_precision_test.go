@@ -309,6 +309,33 @@ export { foo, bar } from './other';
 			note:      "KNOWN: re-export from './other' adds to Exports with no local definition",
 		},
 		{
+			name: "reexport_type_only_from_module",
+			source: `
+export type { UserDto, ApiResponse } from './types';
+`,
+			// TS type-only re-export: the `type` keyword sits between export and the
+			// brace (idiomatic under isolatedModules / verbatimModuleSyntax).
+			// exportNamedRegex now tolerates the optional `type ` so the re-exported
+			// names land in Exports, matching the value form `export { ... } from`.
+			// No local definition exists (same as reexport_from_module_named).
+			wantFuncs: []string{},
+			wantClass: []string{},
+			wantExp:   []string{"ApiResponse", "UserDto"},
+			note:      "TS export type { ... } from re-export now captured",
+		},
+		{
+			name: "export_type_only_aliased",
+			source: `
+export type { Internal as Public } from './types';
+`,
+			// The "as" alias handling applies to type-only re-exports too: the
+			// consumer-visible name (Public) is recorded, not the local one.
+			wantFuncs: []string{},
+			wantClass: []string{},
+			wantExp:   []string{"Public"},
+			note:      "TS export type { X as Y } records the alias",
+		},
+		{
 			name: "reexport_star_from_module",
 			source: `
 export * from './utils';

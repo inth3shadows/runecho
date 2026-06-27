@@ -53,10 +53,16 @@ var (
 	classDeclRegex = regexp.MustCompile(`(?:^|\s)(?:export\s+(?:default\s+)?)?class\s+(\w+)`)
 
 	// Export patterns
-	// Matches: export { name1, name2 }
-	exportNamedRegex = regexp.MustCompile(`export\s+\{([^}]+)\}`)
-	// Matches: export const/let/var/function/class name
-	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function)\s+(\w+)`)
+	// Matches: export { name1, name2 } and the TS type-only re-export
+	// export type { name1, name2 } — the `type` keyword sits before the brace
+	// (idiomatic under isolatedModules / verbatimModuleSyntax). The optional
+	// group leaves the value form untouched.
+	exportNamedRegex = regexp.MustCompile(`export\s+(?:type\s+)?\{([^}]+)\}`)
+	// Matches: export const/let/var/function/class/type/interface/enum name.
+	// type/interface/enum land in Exports the same way `export class` does — the
+	// AST records them in Classes, this regex records the exported name (so a TS
+	// `export interface Shape {}` is enumerable as both a class and an export).
+	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function|type|interface|enum)\s+(\w+)`)
 	// Matches: export * as ns from './m' — the namespace re-export binds `ns`.
 	exportStarAsRegex = regexp.MustCompile(`export\s+\*\s+as\s+(\w+)`)
 	// Matches: export default function Foo / export default class Foo / export default ident.

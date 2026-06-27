@@ -116,9 +116,7 @@ func TestResolveRepo_Unenrolled(t *testing.T) {
 }
 
 func TestHookText_ByTool(t *testing.T) {
-	edits := []struct {
-		NewString string `json:"new_string"`
-	}{{NewString: "a := Foo()"}, {NewString: ""}, {NewString: "b := Bar()"}}
+	edits := []editOp{{NewString: "a := Foo()"}, {NewString: ""}, {NewString: "b := Bar()"}}
 
 	if got := hookText("Edit", "x := Edited()", "ignored", nil); got != "x := Edited()" {
 		t.Errorf("Edit text = %q", got)

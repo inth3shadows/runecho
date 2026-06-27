@@ -56,6 +56,37 @@ func TestExtractSymbolRefs_DottedRef(t *testing.T) {
 	}
 }
 
+// Regression (forage): method declarations `func (r *Reader) Fetch()` extracted
+// nothing — declRe can't see past the receiver. They must yield the qualified
+// Type.Name, symmetric with how the parser and oracle store methods.
+func TestExtractSymbolRefs_MethodDecl(t *testing.T) {
+	cases := []struct {
+		text string
+		want string
+	}{
+		{"func (r *Reader) Fetch() error", "Reader.Fetch"},   // pointer receiver + var
+		{"func (Reader) Close()", "Reader.Close"},            // value receiver, no var
+		{"func (s *Set[T]) Add(v T)", "Set.Add"},             // generic receiver
+	}
+	for _, tc := range cases {
+		refs := ExtractSymbolRefs(tc.text)
+		if _, ok := refs[tc.want]; !ok {
+			t.Errorf("text %q: expected %q in refs, got %v", tc.text, tc.want, refs)
+		}
+	}
+}
+
+// Regression (forage): a multi-name decl captured only the first name, silently
+// dropping the rest from claim validation.
+func TestExtractSymbolRefs_MultiNameDecl(t *testing.T) {
+	refs := ExtractSymbolRefs("var MaxSize, MinSize int")
+	for _, want := range []string{"MaxSize", "MinSize"} {
+		if _, ok := refs[want]; !ok {
+			t.Errorf("expected %q in refs: %v", want, refs)
+		}
+	}
+}
+
 func TestExtractSymbolRefs_DeclPattern(t *testing.T) {
 	text := "The function func ValidateClaims handles this.\ntype MyHandler struct"
 	refs := ExtractSymbolRefs(text)

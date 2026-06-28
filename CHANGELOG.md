@@ -16,7 +16,7 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-06-27
+## [0.5.0] — 2026-06-28
 
 First changelog-tracked release; establishes monotonic versioning and a build
 version stamp. Notable recent changes folded into this baseline:
@@ -28,6 +28,18 @@ version stamp. Notable recent changes folded into this baseline:
   qualified by type (`Reader.Read`), located and hashed.
 - JS/TS parser captures `export type { … }` re-exports and
   `export type`/`interface`/`enum` declarations in Exports.
+- Python: when a module declares no `__all__`, exports fall back to the
+  best-practice no-underscore convention — top-level public functions/classes
+  plus module-level `UPPER_CASE` constants. An explicit `__all__` (even empty)
+  stays authoritative.
+- Fuzz harnesses for the guard diff parser and the claims symbol extractor,
+  matching the existing parser fuzzers.
+
+### Changed
+- IR generation is time-bounded by a context deadline (default 30s, applied when
+  the caller sets none; the MCP oracle passes a per-request deadline), so a
+  pathological repo or stalled filesystem can no longer hang the indexer. A walk
+  that exceeds the deadline returns an error instead of blocking indefinitely.
 
 ### Fixed
 - Documentation referenced a non-existent `runecho-ir index` subcommand and a

@@ -36,6 +36,24 @@ var (
 
 	// individual quoted names inside __all__
 	pyAllItemRegex = regexp.MustCompile(`["'](\w+)["']`)
+
+	// An __all__ *assignment* (statement-leading, any indentation) — including an
+	// empty `__all__ = []` that pyAllRegex (which requires list content) misses
+	// and an annotated `__all__: list[str] = [...]`. Presence makes __all__
+	// authoritative and suppresses the no-underscore fallback below. Requiring the
+	// `=` avoids a docstring that merely *mentions* __all__ falsely suppressing the
+	// fallback; allowing leading indentation keeps presence-detection consistent
+	// with pyAllRegex's unanchored name extraction, so a conditionally-declared
+	// `__all__` (e.g. inside `if TYPE_CHECKING:`) is not extracted-then-discarded.
+	pyAllPresentRegex = regexp.MustCompile(`(?m)^\s*__all__\s*(?::[^=\n]*)?\+?=`)
+
+	// module-level UPPER_CASE constant assignment, used only for the __all__-absent
+	// fallback. Anchored at column 0 (no indent = module scope); captures NAME in
+	// `NAME = ...` and annotated `NAME: T = ...`. The trailing [^=] rejects `==`
+	// comparisons. Like the import/export regexes this is line-oriented and will
+	// also match an assignment-shaped line inside a triple-quoted string — the same
+	// cheap-and-deterministic tradeoff the rest of this parser accepts.
+	pyConstRegex = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)\s*(?::[^=\n]*)?=[^=]`)
 )
 
 // pythonLang lazily loads and caches the tree-sitter Python grammar. The grammar
@@ -71,8 +89,17 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 	// per-symbol body hashes must not depend on line-ending style.
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 
-	imports, exports := pyImportsAndExports(source)
+	imports, exports, hasAll := pyImportsAndExports(source)
 	functions, classes, hashes, lines := pySymbolsFromAST(source)
+
+	// When __all__ is absent, a module's public surface is conventionally its
+	// non-underscore top-level names (the rule `from m import *`, PEP 8, and
+	// autodoc use). Fall back to that so no-__all__ modules stop under-reporting
+	// exports relative to the Go/JS parsers. An explicit __all__ — even an empty
+	// one — is a deliberate declaration and stays authoritative.
+	if !hasAll {
+		exports = pyFallbackExports(source, functions, classes)
+	}
 
 	sort.Strings(imports)
 	sort.Strings(functions)
@@ -93,7 +120,10 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 
 // pyImportsAndExports extracts module imports (line regex) and __all__ exports
 // (whole-source regex) — the line-oriented parts the AST pass does not own.
-func pyImportsAndExports(source string) (imports, exports []string) {
+// hasAll reports whether the module declares __all__ at all, so the caller can
+// distinguish "no declared export surface" (fall back to the no-underscore
+// convention) from "deliberately exports nothing" (`__all__ = []`).
+func pyImportsAndExports(source string) (imports, exports []string, hasAll bool) {
 	importSet := make(map[string]bool)
 	for _, line := range strings.Split(source, "\n") {
 		if m := pyImportRegex.FindStringSubmatch(line); m != nil {
@@ -119,7 +149,37 @@ func pyImportsAndExports(source string) (imports, exports []string) {
 			exports = append(exports, item[1])
 		}
 	}
-	return imports, exports
+	return imports, exports, pyAllPresentRegex.MatchString(source)
+}
+
+// pyFallbackExports derives a module's public API when __all__ is absent, using
+// the best-practice no-underscore convention: top-level (unqualified) functions
+// and classes whose names don't start with "_", plus module-level UPPER_CASE
+// constants. functions/classes come from the AST pass (already qualified, so
+// nested defs and methods carry a "." and are excluded); constants are matched
+// from source since the AST walk only records def/class nodes.
+func pyFallbackExports(source string, functions, classes []string) []string {
+	var exports []string
+	for _, name := range functions {
+		if isPyPublicTopLevel(name) {
+			exports = append(exports, name)
+		}
+	}
+	for _, name := range classes {
+		if isPyPublicTopLevel(name) {
+			exports = append(exports, name)
+		}
+	}
+	for _, m := range pyConstRegex.FindAllStringSubmatch(source, -1) {
+		exports = append(exports, m[1])
+	}
+	return exports
+}
+
+// isPyPublicTopLevel reports whether a qualified AST name is a module-level public
+// symbol: unqualified (no enclosing scope) and not underscore-prefixed.
+func isPyPublicTopLevel(qualified string) bool {
+	return !strings.Contains(qualified, ".") && !strings.HasPrefix(qualified, "_")
 }
 
 // pySymbolsFromAST walks the Python AST and returns every function and class

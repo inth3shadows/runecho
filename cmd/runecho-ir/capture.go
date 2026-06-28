@@ -5,9 +5,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/ir"
 )
+
+// generateTimeoutEnv is the env var that overrides the IR-generation wall-clock
+// deadline for the CLI. A Go duration ("5m", "90s") raises or lowers the ceiling;
+// "0", "off", or "none" disables it for a one-shot index of a huge/slow-FS repo.
+const generateTimeoutEnv = "RUNECHO_GENERATE_TIMEOUT"
+
+// cliGenerateTimeout reads generateTimeoutEnv into an ir.GeneratorConfig value:
+// unset → 0 (the package default applies); "0"/"off"/"none" → ir.Unbounded; a
+// valid Go duration → that value. An unparseable value warns and falls through
+// to the default rather than failing the command. Env parsing lives at the CLI
+// boundary so the ir package stays free of process-environment coupling.
+func cliGenerateTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(generateTimeoutEnv))
+	if raw == "" {
+		return 0
+	}
+	switch strings.ToLower(raw) {
+	case "0", "off", "none":
+		return ir.Unbounded
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		fmt.Fprintf(os.Stderr, "Warning: ignoring invalid %s=%q (want a Go duration like 5m, or off): %v\n", generateTimeoutEnv, raw, err)
+		return 0
+	}
+	return d
+}
 
 // runBackup writes an atomic backup of the central store via VACUUM INTO.
 func runBackup(args []string) int {
@@ -49,8 +77,9 @@ func buildIR(root string, fileCap int) (*ir.IR, ir.Stats, int) {
 		return nil, ir.Stats{}, printErr(err)
 	}
 	result, stats, err := ir.NewGenerator(ir.GeneratorConfig{
-		IgnoredPaths: ir.DefaultIgnoredPaths,
-		FileCap:      fileCap,
+		IgnoredPaths:    ir.DefaultIgnoredPaths,
+		FileCap:         fileCap,
+		GenerateTimeout: cliGenerateTimeout(),
 	}).Generate(abs)
 	if err != nil {
 		return nil, ir.Stats{}, printErr(fmt.Errorf("generate IR for %q: %w", abs, err))
@@ -87,7 +116,7 @@ func runIndex(args []string) int {
 
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
 
-	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths})
+	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, GenerateTimeout: cliGenerateTimeout()})
 
 	var result *ir.IR
 	var stats ir.Stats

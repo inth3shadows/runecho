@@ -258,7 +258,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 |---|---|---|---|---|---|
 | **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures | `go/ast` (stdlib) |
 | **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via regex | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
-| **Python** | `.py` | `def` functions, `class` declarations; imports + `__all__` via regex | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
+| **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
 consistent across parsers. Functions/methods are body-hashed; classes/types are
@@ -277,6 +277,11 @@ located but not hashed (their changes surface through their members).
   not the exported alias (we index local definitions).
 - **All** Imports/exports for JS/TS and Python are still regex; only function/
   class/method *definitions* go through the AST.
+- **Python** no-`__all__` export fallback is line-oriented: tuple-target constants
+  (`A, B = 1, 2`) are not captured, and an assignment-shaped line inside a
+  triple-quoted string can be matched — the same cheap-and-deterministic tradeoff
+  the import/`__all__` regexes already accept. An explicit `__all__` (even empty)
+  is authoritative and disables the fallback.
 
 ## Known Limitations
 

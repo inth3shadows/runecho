@@ -240,6 +240,88 @@ func TestPythonParser_AllExportsMultiLine(t *testing.T) {
 	}
 }
 
+// When __all__ is absent, exports fall back to the no-underscore convention:
+// top-level public functions/classes plus module-level UPPER_CASE constants.
+// Private (_-prefixed), nested, and method symbols are excluded.
+func TestPythonParser_FallbackExportsNoAll(t *testing.T) {
+	src := "" +
+		"MAX_SIZE = 100\n" +
+		"DEFAULT_NAME: str = \"x\"\n" +
+		"_PRIVATE_CONST = 1\n" +
+		"lowercase_var = 2\n" +
+		"\n" +
+		"def public_fn():\n" +
+		"    def nested():\n" +
+		"        pass\n" +
+		"    return nested\n" +
+		"\n" +
+		"def _private_fn():\n" +
+		"    pass\n" +
+		"\n" +
+		"class PublicClass:\n" +
+		"    def method(self):\n" +
+		"        pass\n" +
+		"\n" +
+		"class _PrivateClass:\n" +
+		"    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, want := range []string{"MAX_SIZE", "DEFAULT_NAME", "public_fn", "PublicClass"} {
+		if !slices.Contains(fs.Exports, want) {
+			t.Errorf("missing fallback export %q (got %v)", want, fs.Exports)
+		}
+	}
+	for _, notWant := range []string{"_PRIVATE_CONST", "lowercase_var", "_private_fn", "_PrivateClass", "nested", "method", "PublicClass.method", "public_fn.nested"} {
+		if slices.Contains(fs.Exports, notWant) {
+			t.Errorf("fallback exports should not include %q (got %v)", notWant, fs.Exports)
+		}
+	}
+}
+
+// An explicit __all__ is authoritative even when it lists nothing: `__all__ = []`
+// means "no public API" and must suppress the no-underscore fallback rather than
+// re-deriving exports from public symbols.
+func TestPythonParser_EmptyAllSuppressesFallback(t *testing.T) {
+	src := "" +
+		"__all__ = []\n" +
+		"PUBLIC_CONST = 1\n" +
+		"def public_fn():\n    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(fs.Exports) != 0 {
+		t.Errorf("explicit empty __all__ must export nothing, got %v", fs.Exports)
+	}
+}
+
+// A non-empty __all__ stays authoritative and is NOT augmented by the fallback:
+// a public symbol omitted from __all__ stays unexported.
+func TestPythonParser_AllSuppressesFallback(t *testing.T) {
+	src := "" +
+		"__all__ = [\"public_fn\"]\n" +
+		"PUBLIC_CONST = 1\n" +
+		"def public_fn():\n    pass\n" +
+		"def other_public():\n    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Contains(fs.Exports, "public_fn") {
+		t.Errorf("declared export public_fn missing: %v", fs.Exports)
+	}
+	for _, notWant := range []string{"PUBLIC_CONST", "other_public"} {
+		if slices.Contains(fs.Exports, notWant) {
+			t.Errorf("non-empty __all__ must not be augmented; got %q in %v", notWant, fs.Exports)
+		}
+	}
+}
+
 func TestPythonParser_Sorted(t *testing.T) {
 	src := "import zlib\nimport abc\ndef zoo(): pass\ndef apple(): pass\nclass Zebra: pass\nclass Aardvark: pass\n"
 	p := NewPythonParser()

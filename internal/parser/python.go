@@ -37,10 +37,15 @@ var (
 	// individual quoted names inside __all__
 	pyAllItemRegex = regexp.MustCompile(`["'](\w+)["']`)
 
-	// __all__ declared at all — including an empty `__all__ = []` that pyAllRegex
-	// (which requires content) misses. Presence makes __all__ authoritative and
-	// suppresses the no-underscore fallback below.
-	pyAllPresentRegex = regexp.MustCompile(`(?m)^__all__\b`)
+	// An __all__ *assignment* (statement-leading, any indentation) — including an
+	// empty `__all__ = []` that pyAllRegex (which requires list content) misses
+	// and an annotated `__all__: list[str] = [...]`. Presence makes __all__
+	// authoritative and suppresses the no-underscore fallback below. Requiring the
+	// `=` avoids a docstring that merely *mentions* __all__ falsely suppressing the
+	// fallback; allowing leading indentation keeps presence-detection consistent
+	// with pyAllRegex's unanchored name extraction, so a conditionally-declared
+	// `__all__` (e.g. inside `if TYPE_CHECKING:`) is not extracted-then-discarded.
+	pyAllPresentRegex = regexp.MustCompile(`(?m)^\s*__all__\s*(?::[^=\n]*)?\+?=`)
 
 	// module-level UPPER_CASE constant assignment, used only for the __all__-absent
 	// fallback. Anchored at column 0 (no indent = module scope); captures NAME in

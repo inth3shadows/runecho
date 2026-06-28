@@ -322,6 +322,53 @@ func TestPythonParser_AllSuppressesFallback(t *testing.T) {
 	}
 }
 
+// A conditionally-declared __all__ (indented, e.g. inside `if TYPE_CHECKING:`)
+// is still authoritative: pyAllRegex extracts its names regardless of indent, so
+// presence detection must too — otherwise the declared list is extracted and then
+// silently overwritten by the fallback. Regression guard for the anchoring mismatch.
+func TestPythonParser_IndentedAllIsAuthoritative(t *testing.T) {
+	src := "" +
+		"import typing\n" +
+		"if typing.TYPE_CHECKING:\n" +
+		"    __all__ = [\"Declared\"]\n" +
+		"\n" +
+		"def helper():\n    pass\n" +
+		"\n" +
+		"class Declared:\n    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Contains(fs.Exports, "Declared") {
+		t.Errorf("indented __all__ should be honored: %v", fs.Exports)
+	}
+	if slices.Contains(fs.Exports, "helper") {
+		t.Errorf("declared __all__ must suppress the fallback; got fallback symbol helper in %v", fs.Exports)
+	}
+}
+
+// A docstring (or comment) that merely mentions __all__ at column 0 must NOT be
+// mistaken for a declaration: there is no assignment, so the no-underscore
+// fallback still applies. Regression guard against false suppression.
+func TestPythonParser_DocstringMentionDoesNotSuppressFallback(t *testing.T) {
+	src := "" +
+		"\"\"\"This module sets no __all__.\n" +
+		"\n" +
+		"__all__ would normally enumerate the public API.\n" +
+		"\"\"\"\n" +
+		"\n" +
+		"def public_fn():\n    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Contains(fs.Exports, "public_fn") {
+		t.Errorf("a prose mention of __all__ must not suppress the fallback: %v", fs.Exports)
+	}
+}
+
 func TestPythonParser_Sorted(t *testing.T) {
 	src := "import zlib\nimport abc\ndef zoo(): pass\ndef apple(): pass\nclass Zebra: pass\nclass Aardvark: pass\n"
 	p := NewPythonParser()

@@ -40,6 +40,8 @@ version stamp. Notable recent changes folded into this baseline:
   the caller sets none; the MCP oracle passes a per-request deadline), so a
   pathological repo or stalled filesystem can no longer hang the indexer. A walk
   that exceeds the deadline returns an error instead of blocking indefinitely.
+  The CLI honors `RUNECHO_GENERATE_TIMEOUT` (a Go duration, or `off`/`none`/`0`
+  to disable) to raise or remove the ceiling for a large/slow-filesystem repo.
 
 ### Fixed
 - Documentation referenced a non-existent `runecho-ir index` subcommand and a

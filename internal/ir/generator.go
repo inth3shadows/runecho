@@ -15,22 +15,33 @@ import (
 )
 
 // DefaultGenerateTimeout bounds a single IR generation/update walk when the
-// caller supplies no deadline of its own. It is a wall-clock ceiling on the
-// whole walk (not per file), so a pathological repo or a stalled filesystem can
-// no longer hang the indexer — or, critically, an MCP request that rebuilds a
-// fresh IR on every call. Per insight-remediation assumption A-3, truncating a
-// genuinely huge repo at the deadline is preferable to an unbounded hang;
-// per-file cost is independently bounded by maxParseBytes.
+// caller supplies neither a context deadline nor a GeneratorConfig override. It
+// is a wall-clock ceiling on the whole walk (not per file), so a pathological
+// repo or a stalled filesystem can no longer hang the indexer — or, critically,
+// an MCP request that rebuilds a fresh IR on every call. Per insight-remediation
+// assumption A-3, truncating a genuinely huge repo at the deadline is preferable
+// to an unbounded hang; per-file cost is independently bounded by maxParseBytes.
 const DefaultGenerateTimeout = 30 * time.Second
 
-// withDefaultDeadline returns ctx unchanged (with a no-op cancel) when it already
-// carries a deadline, otherwise a child bounded by DefaultGenerateTimeout. The
-// returned cancel must always be called.
-func withDefaultDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+// Unbounded is the GeneratorConfig.GenerateTimeout value that disables the
+// default walk deadline entirely (a caller-supplied ctx deadline still applies).
+// Any negative duration has the same effect; this is the canonical name callers
+// should use. For a one-shot CLI index of a legitimately huge or slow-FS repo
+// where the default ceiling is too tight and a hang is acceptable.
+const Unbounded = time.Duration(-1)
+
+// withDeadline returns ctx unchanged (with a no-op cancel) when it already
+// carries a deadline; otherwise a child bounded by the Generator's configured
+// timeout, unless that timeout is the unbounded sentinel (no deadline applied).
+// The returned cancel must always be called.
+func (g *Generator) withDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, DefaultGenerateTimeout)
+	if g.genTimeout < 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, g.genTimeout)
 }
 
 // Generator creates and updates IR from source files.
@@ -46,12 +57,22 @@ type Generator struct {
 	// NewGenerator) so existing callers are unchanged; tests inject a sink to
 	// assert the otherwise-silent skip branches actually fire.
 	warn func(format string, args ...any)
+	// genTimeout is the default wall-clock bound on a Generate/Update walk when the
+	// caller passes no ctx deadline. NewGenerator resolves it: 0 → DefaultGenerateTimeout,
+	// <0 → unbounded (the walk gets no default deadline). See withDeadline.
+	genTimeout time.Duration
 }
 
 // GeneratorConfig configures IR generation behavior.
 type GeneratorConfig struct {
 	IgnoredPaths []string // Directory names to ignore
 	FileCap      int      // Max files to index; 0 = unlimited. Walk stops after this many files are processed.
+	// GenerateTimeout overrides the default wall-clock bound on a Generate/Update
+	// walk (applied only when the caller passes no ctx deadline):
+	// 0 → DefaultGenerateTimeout, >0 → that value, <0 → unbounded. The CLI maps
+	// the RUNECHO_GENERATE_TIMEOUT env var onto this so a huge/slow-FS repo can
+	// raise or disable the ceiling without a code change.
+	GenerateTimeout time.Duration
 }
 
 // Stats reports honest-coverage counters from a Generate/Update walk.
@@ -97,11 +118,18 @@ func NewGenerator(config GeneratorConfig) *Generator {
 	for _, p := range paths {
 		ignored[p] = true
 	}
+	// Resolve the timeout once: 0 means "unset" → the default ceiling; a negative
+	// value is the explicit unbounded sentinel and is preserved as-is.
+	genTimeout := config.GenerateTimeout
+	if genTimeout == 0 {
+		genTimeout = DefaultGenerateTimeout
+	}
 	return &Generator{
 		parsers:       []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
 		ignoredPaths:  ignored,
 		fileCap:       config.FileCap,
 		maxParseBytes: defaultMaxParseBytes,
+		genTimeout:    genTimeout,
 		warn: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, format, args...)
 		},
@@ -167,7 +195,7 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 // context is cancelled or its deadline passes, the walk stops between files, the
 // partial result is discarded, and the (wrapped) ctx error is returned.
 func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stats, error) {
-	ctx, cancel := withDefaultDeadline(ctx)
+	ctx, cancel := g.withDeadline(ctx)
 	defer cancel()
 
 	absRoot, err := filepath.Abs(rootPath)
@@ -222,7 +250,7 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 	if existingIR == nil || existingIR.Version != IRVersion {
 		return g.GenerateCtx(ctx, rootPath)
 	}
-	ctx, cancel := withDefaultDeadline(ctx)
+	ctx, cancel := g.withDeadline(ctx)
 	defer cancel()
 
 	absRoot, err := filepath.Abs(rootPath)

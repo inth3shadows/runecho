@@ -55,6 +55,26 @@ func TestGenerator_GenerateCtxDeadlineExceeded(t *testing.T) {
 	}
 }
 
+// GeneratorConfig.GenerateTimeout is honored as the default deadline when the
+// caller passes no ctx deadline: a tiny positive timeout trips DeadlineExceeded,
+// and the Unbounded sentinel disables the bound so a normal walk completes.
+func TestGenerator_ConfigTimeout(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tiny := NewGenerator(GeneratorConfig{GenerateTimeout: time.Nanosecond})
+	if _, _, err := tiny.Generate(dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("tiny config timeout should trip DeadlineExceeded, got: %v", err)
+	}
+
+	none := NewGenerator(GeneratorConfig{GenerateTimeout: Unbounded})
+	if _, _, err := none.Generate(dir); err != nil {
+		t.Fatalf("unbounded config timeout should not bound a normal walk, got: %v", err)
+	}
+}
+
 // captureWarnings replaces a generator's warn sink with an in-memory collector
 // and returns a pointer to the captured lines. Exercises the otherwise-silent
 // skip branches (walk-access error, rel-path failure, parse/hash failures).

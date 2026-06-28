@@ -302,7 +302,11 @@ located but not hashed (their changes surface through their members).
   between files, so a pathological repo or stalled filesystem can't hang the
   indexer — most importantly an MCP request, which rebuilds a fresh IR on every
   call. A genuinely huge repo can hit the deadline and return a
-  `context.DeadlineExceeded` error rather than blocking indefinitely.
+  `context.DeadlineExceeded` error rather than blocking indefinitely. For a
+  legitimately large or slow-filesystem repo where 30s is too tight, the CLI
+  honors `RUNECHO_GENERATE_TIMEOUT` (a Go duration like `5m`, or `off`/`none`/`0`
+  to disable the bound). The MCP server keeps the fixed 30s budget — repos that
+  large should be enrolled with a `--cap` instead.
 - **The guard checks bare calls only.** Qualified calls (`pkg.Foo()`,
   `obj.method()`) are assumed external and skipped; dynamically-assigned
   callables can't be resolved statically. It catches the common hallucination

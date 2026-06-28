@@ -297,6 +297,12 @@ located but not hashed (their changes surface through their members).
 - **Single-connection store.** Correct and torn-read-free, but reads do not run
   concurrently with writes. Fine at single-operator scale; not built for many
   concurrent indexers.
+- **IR generation is time-bounded.** Each walk runs under a wall-clock deadline
+  (`ir.DefaultGenerateTimeout`, 30s, applied when the caller sets none) checked
+  between files, so a pathological repo or stalled filesystem can't hang the
+  indexer — most importantly an MCP request, which rebuilds a fresh IR on every
+  call. A genuinely huge repo can hit the deadline and return a
+  `context.DeadlineExceeded` error rather than blocking indefinitely.
 - **The guard checks bare calls only.** Qualified calls (`pkg.Foo()`,
   `obj.method()`) are assumed external and skipped; dynamically-assigned
   callables can't be resolved statically. It catches the common hallucination

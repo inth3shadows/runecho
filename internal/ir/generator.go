@@ -1,16 +1,37 @@
 package ir
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/parser"
 	"golang.org/x/text/unicode/norm"
 )
+
+// DefaultGenerateTimeout bounds a single IR generation/update walk when the
+// caller supplies no deadline of its own. It is a wall-clock ceiling on the
+// whole walk (not per file), so a pathological repo or a stalled filesystem can
+// no longer hang the indexer — or, critically, an MCP request that rebuilds a
+// fresh IR on every call. Per insight-remediation assumption A-3, truncating a
+// genuinely huge repo at the deadline is preferable to an unbounded hang;
+// per-file cost is independently bounded by maxParseBytes.
+const DefaultGenerateTimeout = 30 * time.Second
+
+// withDefaultDeadline returns ctx unchanged (with a no-op cancel) when it already
+// carries a deadline, otherwise a child bounded by DefaultGenerateTimeout. The
+// returned cancel must always be called.
+func withDefaultDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, DefaultGenerateTimeout)
+}
 
 // Generator creates and updates IR from source files.
 type Generator struct {
@@ -94,8 +115,15 @@ type walkerFunc func(absPath, normalizedPath string) error
 
 // walkSourceFiles walks absRoot, calling fn for each supported source file.
 // It skips ignored directories, symlinked directories, and unsupported extensions.
-func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
+// The walk is checked for cancellation before each entry, so a done ctx
+// (deadline or explicit cancel) aborts it between files and propagates ctx.Err()
+// to the caller. Per-file granularity is sufficient: a single oversized file is
+// already bounded by maxParseBytes.
+func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc) error {
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
 			return nil
@@ -127,7 +155,21 @@ func (g *Generator) walkSourceFiles(absRoot string, fn walkerFunc) error {
 // Generate creates IR for all supported files in the given root directory.
 // When FileCap > 0, indexing stops after that many files; the walk continues
 // counting supported files so Stats reports honest coverage.
+//
+// It is the context-free entry point and applies DefaultGenerateTimeout. Use
+// GenerateCtx to supply a caller deadline (e.g. a per-request MCP budget).
 func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
+	return g.GenerateCtx(context.Background(), rootPath)
+}
+
+// GenerateCtx is Generate with an explicit context. If ctx carries no deadline,
+// DefaultGenerateTimeout is applied so generation is always bounded. When the
+// context is cancelled or its deadline passes, the walk stops between files, the
+// partial result is discarded, and the (wrapped) ctx error is returned.
+func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stats, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
+
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to resolve absolute path: %w", err)
@@ -137,7 +179,7 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 	result := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
 
-	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(result.Files)) {
 			return nil // count only; cap bounds parse work, not the denominator
@@ -169,9 +211,20 @@ func (g *Generator) Generate(rootPath string) (*IR, Stats, error) {
 // versions (e.g. v2 refs) empty forever. Guarding here — not just at call
 // sites — means no caller can perpetuate a stale format by mistake.
 func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) {
+	return g.UpdateCtx(context.Background(), existingIR, rootPath)
+}
+
+// UpdateCtx is Update with an explicit context, bounded the same way as
+// GenerateCtx (DefaultGenerateTimeout when ctx has no deadline). The
+// version-mismatch fallback forwards ctx to GenerateCtx so the bound holds on
+// either path.
+func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath string) (*IR, Stats, error) {
 	if existingIR == nil || existingIR.Version != IRVersion {
-		return g.Generate(rootPath)
+		return g.GenerateCtx(ctx, rootPath)
 	}
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
+
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to resolve absolute path: %w", err)
@@ -181,7 +234,7 @@ func (g *Generator) Update(existingIR *IR, rootPath string) (*IR, Stats, error) 
 	updated := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
 
-	if err := g.walkSourceFiles(absRoot, func(absPath, normPath string) error {
+	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(updated.Files)) {
 			return nil // count only; cap bounds parse work, not the denominator

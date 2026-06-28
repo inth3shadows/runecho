@@ -1,6 +1,8 @@
 package ir
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +10,50 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+// A cancelled context aborts the walk cleanly: GenerateCtx returns an error that
+// wraps context.Canceled and no partial IR. This is the A4 cancellation guard —
+// it proves the deadline plumbing actually short-circuits generation rather than
+// running to completion and ignoring the context.
+func TestGenerator_GenerateCtxCancelled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGenerator(GeneratorConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before the walk starts
+
+	irData, _, err := g.GenerateCtx(ctx, dir)
+	if err == nil {
+		t.Fatal("expected an error from a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error should wrap context.Canceled, got: %v", err)
+	}
+	if irData != nil {
+		t.Errorf("cancelled generation must return no IR, got %d files", len(irData.Files))
+	}
+}
+
+// A past deadline is honored verbatim (not overridden by DefaultGenerateTimeout)
+// and surfaces as context.DeadlineExceeded — the per-request MCP budget path.
+func TestGenerator_GenerateCtxDeadlineExceeded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGenerator(GeneratorConfig{})
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer cancel()
+
+	_, _, err := g.GenerateCtx(ctx, dir)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error should wrap context.DeadlineExceeded, got: %v", err)
+	}
+}
 
 // captureWarnings replaces a generator's warn sink with an in-memory collector
 // and returns a pointer to the captured lines. Exercises the otherwise-silent

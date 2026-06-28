@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -221,7 +222,13 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 // A mismatch here would make every diff/hash report phantom drift for capped repos.
 func liveIR(path string, fileCap int) (*ir.IR, error) {
 	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, FileCap: fileCap})
-	irData, _, err := gen.Generate(path)
+	// A fresh IR is built on every MCP call, so an unbounded walk (huge repo,
+	// stalled FS) would hang the agent's request with no recourse. Set the
+	// per-request deadline explicitly here — rather than leaning on the package
+	// default — so the MCP budget is visible at the hot path.
+	ctx, cancel := context.WithTimeout(context.Background(), ir.DefaultGenerateTimeout)
+	defer cancel()
+	irData, _, err := gen.GenerateCtx(ctx, path)
 	return irData, err
 }
 

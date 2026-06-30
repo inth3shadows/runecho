@@ -34,6 +34,28 @@ func TestCapturedLoadsAndScores(t *testing.T) {
 	}
 }
 
+// realCorpus is the harvested observed corpus: ~15 hand-verified hallucinations
+// (and real references) mined from session transcripts, each backed by an
+// in-session compiler/runtime error. All-observed, so it clears the floor.
+const realCorpus = "captured/corpus.json"
+
+// TestCapturedRealCorpus loads the harvested corpus, prints its scorecard
+// (the actual finding), and asserts only that it loads cleanly and meets the
+// observed-majority floor. Catch-rate is NOT gated: low catch-rate here is the
+// finding (the guard's narrow positional scope), not a regression.
+func TestCapturedRealCorpus(t *testing.T) {
+	cases, err := LoadCaptured(realCorpus)
+	if err != nil {
+		t.Fatalf("loading %s: %v", realCorpus, err)
+	}
+	report := ScoreCaptured(cases)
+	t.Logf("\n%s", report.Format())
+
+	if got := report.observedFraction(); got < ObservedFloor {
+		t.Errorf("observed fraction %.0f%% below floor %.0f%%", 100*got, 100*ObservedFloor)
+	}
+}
+
 // TestCapturedRejectsMislabel pins the load-time consistency guard: a case
 // labeled "real" whose symbol is absent from its own known_symbols is a labeling
 // bug and must be rejected, not silently scored.

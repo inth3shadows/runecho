@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/inth3shadows/runecho/internal/guard"
@@ -130,28 +131,59 @@ func (cc CapturedCase) toCase() Case {
 }
 
 // CapturedReport holds the stratified confusion matrices. Strata are never
-// merged into one headline number (rule 5); language is a secondary cut.
+// merged into one headline number (rule 5); language and reference-position are
+// secondary cuts. ByPosition is the load-bearing one: it shows WHICH syntactic
+// positions the guard covers vs misses, which is the real finding.
 type CapturedReport struct {
-	ByStratum map[Stratum]*Counts
-	ByLang    map[guard.Lang]*Counts
-	N         int
+	ByStratum  map[Stratum]*Counts
+	ByLang     map[guard.Lang]*Counts
+	ByPosition map[string]*Counts
+	N          int
 }
 
 // ScoreCaptured replays each case through the same guard classifier as the
-// synthetic benchmark (guardFlags) and tallies counts per stratum and language.
+// synthetic benchmark (guardFlags) and tallies counts per stratum, language, and
+// reference position (parsed from the fixture's notes).
 func ScoreCaptured(cases []CapturedCase) CapturedReport {
 	r := CapturedReport{
-		ByStratum: map[Stratum]*Counts{},
-		ByLang:    map[guard.Lang]*Counts{},
-		N:         len(cases),
+		ByStratum:  map[Stratum]*Counts{},
+		ByLang:     map[guard.Lang]*Counts{},
+		ByPosition: map[string]*Counts{},
+		N:          len(cases),
 	}
 	for _, cc := range cases {
 		c := cc.toCase()
 		strat, _ := stratumOf(cc.Provenance)
-		tally(get(r.ByStratum, strat), c.Label, guardFlags(c))
-		tally(get(r.ByLang, c.Lang), c.Label, guardFlags(c))
+		flagged := guardFlags(c)
+		tally(get(r.ByStratum, strat), c.Label, flagged)
+		tally(get(r.ByLang, c.Lang), c.Label, flagged)
+		tally(getStr(r.ByPosition, parsePosition(cc.Notes)), c.Label, flagged)
 	}
 	return r
+}
+
+func getStr(m map[string]*Counts, k string) *Counts {
+	if m[k] == nil {
+		m[k] = &Counts{}
+	}
+	return m[k]
+}
+
+// parsePosition pulls the "position=<kind>" tag out of a fixture's notes field
+// ("unknown" if absent). This is how the report shows the guard's coverage by
+// syntactic position without a dedicated schema field.
+func parsePosition(notes string) string {
+	i := strings.Index(notes, "position=")
+	if i < 0 {
+		return "unknown"
+	}
+	rest := notes[i+len("position="):]
+	for j, r := range rest {
+		if r == ';' || r == ' ' || r == ',' {
+			return rest[:j]
+		}
+	}
+	return rest
 }
 
 func tally(c *Counts, label Label, flagged bool) {
@@ -209,6 +241,18 @@ func (r CapturedReport) Format() string {
 		c := r.ByLang[k]
 		fmt.Fprintf(&b, "    %-3s  caught %d/%d ; fp %d/%d\n",
 			string(k), c.TP, c.TP+c.FN, c.FP, c.FP+c.TN)
+	}
+
+	fmt.Fprintf(&b, "\n  by reference position (the coverage map):\n")
+	positions := make([]string, 0, len(r.ByPosition))
+	for k := range r.ByPosition {
+		positions = append(positions, k)
+	}
+	sort.Strings(positions)
+	for _, k := range positions {
+		c := r.ByPosition[k]
+		fmt.Fprintf(&b, "    %-16s  caught %d/%d ; fp %d/%d  (n=%d)\n",
+			k, c.TP, c.TP+c.FN, c.FP, c.FP+c.TN, c.n())
 	}
 
 	fmt.Fprintf(&b, "\n  caveats: small N — counts, not rates; strata kept separate;\n")

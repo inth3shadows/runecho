@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -38,7 +39,19 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 		return nil // nothing was imported in the removed text; no work
 	}
 	newImps := nameSet(ExtractImports(lang, TextToAddedLines(newText)))
-	localDefs := nameSet(ExtractDefs(lang, TextToAddedLines(newText)))
+
+	// bound = every name the new text re-provides locally: top-level definitions
+	// PLUS any binding form (assignment LHS, for/comprehension target, with/except
+	// `as`, walrus, function params, JS const/let/var + destructuring + catch). A
+	// dropped import whose name is rebound here is NOT a bug. This is the
+	// false-positive guard, and it is deliberately OVER-inclusive: an over-
+	// suppressed real drop is a recoverable miss (the additive check or the runtime
+	// still catches it), whereas a false alarm trains users to ignore the guard —
+	// the adoption-killer. Precision over recall.
+	bound := locallyBoundNames(lang, newText)
+	for _, d := range ExtractDefs(lang, TextToAddedLines(newText)) {
+		bound[d] = struct{}{}
+	}
 
 	newLines := TextToAddedLines(newText)
 	var out []DroppedImport
@@ -46,8 +59,8 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 		if _, still := newImps[name]; still {
 			continue // the import survived in the new text
 		}
-		if _, def := localDefs[name]; def {
-			continue // the name is now provided by a local definition
+		if _, b := bound[name]; b {
+			continue // the name is now provided by a local definition or binding
 		}
 		if ln := firstUnqualifiedUse(lang, newLines, name); ln > 0 {
 			out = append(out, DroppedImport{Name: name, LineNo: ln})
@@ -117,4 +130,96 @@ func containsUnqualifiedWord(s, name string) bool {
 func isWordByte(b byte) bool {
 	return b == '_' || b == '$' ||
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// Binding-form patterns for locallyBoundNames. Each captures the binding TARGET
+// region; identifiers within are extracted with reIdentAll. Definition-position
+// only — none match call-argument parens, so a dropped import passed as an
+// argument is still flagged, not suppressed.
+var (
+	reIdentAll      = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+	rePyForTarget   = regexp.MustCompile(`^\s*for\s+(.+?)\s+in\b`)
+	reAsBind        = regexp.MustCompile(`\bas\s+([A-Za-z_]\w*)`) // with/except ... as x
+	reWalrus        = regexp.MustCompile(`([A-Za-z_]\w*)\s*:=`)
+	rePyDefParams   = regexp.MustCompile(`^\s*(?:async\s+)?def\s+\w+\s*\(([^)]*)\)`)
+	reJSDecl        = regexp.MustCompile(`\b(?:const|let|var)\s+([^=;]+?)\s*=`)
+	reJSFnParams    = regexp.MustCompile(`function\b[^(]*\(([^)]*)\)`)
+	reJSArrowParams = regexp.MustCompile(`\(([^)]*)\)\s*=>`)
+	reJSForDecl     = regexp.MustCompile(`\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)`)
+	reJSCatch       = regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)`)
+)
+
+// locallyBoundNames collects names the new text binds locally by any common
+// construct, so a dropped import that is actually rebound (replaced by a local
+// assignment, loop variable, with-as, parameter, destructure, …) does not
+// false-positive. Over-inclusive by design (see DroppedImportRefs).
+func locallyBoundNames(lang Lang, text string) map[string]struct{} {
+	m := make(map[string]struct{})
+	add := func(s string) {
+		for _, id := range reIdentAll.FindAllString(s, -1) {
+			m[id] = struct{}{}
+		}
+	}
+	for _, l := range TextToAddedLines(text) {
+		s := stripLiterals(lang, l.Text)
+		if lhs := assignLHS(s); lhs != "" {
+			add(lhs)
+		}
+		switch lang {
+		case LangPython:
+			if mm := rePyForTarget.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+			for _, mm := range reAsBind.FindAllStringSubmatch(s, -1) {
+				m[mm[1]] = struct{}{}
+			}
+			for _, mm := range reWalrus.FindAllStringSubmatch(s, -1) {
+				m[mm[1]] = struct{}{}
+			}
+			if mm := rePyDefParams.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+		case LangJS:
+			if mm := reJSDecl.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+			if mm := reJSFnParams.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+			if mm := reJSArrowParams.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+			if mm := reJSForDecl.FindStringSubmatch(s); mm != nil {
+				m[mm[1]] = struct{}{}
+			}
+			if mm := reJSCatch.FindStringSubmatch(s); mm != nil {
+				m[mm[1]] = struct{}{}
+			}
+		}
+	}
+	return m
+}
+
+// assignLHS returns the substring left of the first plain assignment '=' on a
+// line, or "" if there is none. It excludes comparison and arrow operators
+// (==, !=, <=, >=, =>) and the walrus ':=' so only true assignment targets are
+// captured.
+func assignLHS(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '=' {
+			continue
+		}
+		if i+1 < len(s) && (s[i+1] == '=' || s[i+1] == '>') {
+			i++ // ==, =>
+			continue
+		}
+		if i > 0 {
+			switch s[i-1] {
+			case '=', '!', '<', '>', ':':
+				continue // second char of ==, !=, <=, >=, :=
+			}
+		}
+		return s[:i]
+	}
+	return ""
 }

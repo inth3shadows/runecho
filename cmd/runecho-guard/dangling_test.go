@@ -60,17 +60,21 @@ func TestHookOldText(t *testing.T) {
 
 func TestAskReason(t *testing.T) {
 	cases := []struct {
-		v, d bool
-		want string
+		v, d, i bool
+		want    string
 	}{
-		{true, false, "violations"},
-		{false, true, "dangling"},
-		{true, true, "violations+dangling"},
-		{false, false, "violations"}, // not called in practice when both false
+		{true, false, false, "violations"},
+		{false, true, false, "dangling"},
+		{false, false, true, "dropped-import"},
+		{true, true, false, "violations+dangling"},
+		{true, false, true, "violations+dropped-import"},
+		{false, true, true, "dangling+dropped-import"},
+		{true, true, true, "violations+dangling+dropped-import"},
+		{false, false, false, "violations"}, // not called in practice when all false
 	}
 	for _, c := range cases {
-		if got := askReason(c.v, c.d); got != c.want {
-			t.Errorf("askReason(%v,%v) = %q, want %q", c.v, c.d, got, c.want)
+		if got := askReason(c.v, c.d, c.i); got != c.want {
+			t.Errorf("askReason(%v,%v,%v) = %q, want %q", c.v, c.d, c.i, got, c.want)
 		}
 	}
 }

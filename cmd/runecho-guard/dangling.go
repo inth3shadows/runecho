@@ -29,6 +29,11 @@ const maxDanglingReferrers = 5
 // change — so it is inert until explicitly enabled for dogfooding.
 func danglingEnabled() bool { return os.Getenv("RUNECHO_GUARD_DANGLING") == "1" }
 
+// droppedImportEnabled reports whether the dropped-import check is on
+// (RUNECHO_GUARD_DROPPED_IMPORT=1). Same dogfood-first discipline as E1: inert
+// until explicitly enabled, so it can be exercised before becoming default.
+func droppedImportEnabled() bool { return os.Getenv("RUNECHO_GUARD_DROPPED_IMPORT") == "1" }
+
 // danglingWarning is one removed definition that is still referenced elsewhere.
 type danglingWarning struct {
 	Symbol    string
@@ -179,15 +184,22 @@ func excludeSelf(paths []string, self string) []string {
 	return out
 }
 
-// askReason names the decision-log reason for an E1/additive ask so the dogfood
-// stream is greppable by which check fired.
-func askReason(hasViolations, hasDangling bool) string {
-	switch {
-	case hasViolations && hasDangling:
-		return "violations+dangling"
-	case hasDangling:
-		return "dangling"
-	default:
+// askReason names the decision-log reason for an ask so the dogfood stream is
+// greppable by which check(s) fired. Joins the active checks with '+' so any
+// combination is represented (e.g. "violations+dropped-import").
+func askReason(hasViolations, hasDangling, hasDropped bool) string {
+	var parts []string
+	if hasViolations {
+		parts = append(parts, "violations")
+	}
+	if hasDangling {
+		parts = append(parts, "dangling")
+	}
+	if hasDropped {
+		parts = append(parts, "dropped-import")
+	}
+	if len(parts) == 0 {
 		return "violations"
 	}
+	return strings.Join(parts, "+")
 }

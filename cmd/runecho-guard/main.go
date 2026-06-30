@@ -377,7 +377,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// dropped here. Empty (and inert) unless E1 is enabled. Write deletions are
 	// derived later from the on-disk file, not here.
 	var removedText string
-	if danglingEnabled() {
+	if danglingEnabled() || droppedImportEnabled() {
 		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
 	}
 	if filePath == "" || (text == "" && removedText == "") {
@@ -450,28 +450,35 @@ func runHookMode(in io.Reader, out io.Writer) int {
 
 	violations := guard.Run(symbols, ignorePath, diffs)
 
-	// E1 dangling-refs (gated OFF by default; see danglingEnabled). Does this edit
-	// remove a definition that *other* files still reference? Computed alongside the
-	// additive check so a pure-deletion edit (no hallucination) is still caught, and
-	// both findings feed a single ask. Fail-open: any store error yields no warning.
+	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
+	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
+	// Write, which replaces wholesale so the old file is the only record of what it
+	// removes (best-effort read; the hook is PreToolUse, so the file is still old).
+	// Both feed the single ask. Fail-open: any error yields no warning.
 	var dangling []danglingWarning
-	if danglingEnabled() {
+	var droppedImps []guard.DroppedImport
+	if danglingEnabled() || droppedImportEnabled() {
 		oldText := removedText
 		if payload.ToolName == "Write" {
-			// Write replaces the file wholesale; the pre-edit on-disk content is the
-			// only record of what it removes. Best-effort read — the hook is
-			// PreToolUse, so the file is still the old version. Missing/oversized
-			// file simply yields no removed defs.
 			if data, err := os.ReadFile(filePath); err == nil && len(data) <= maxInFileBytes {
 				oldText = string(data)
 			}
 		}
-		if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
-			dangling = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+		// E1: does this edit remove a definition that *other* files still reference?
+		if danglingEnabled() {
+			if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+				dangling = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+			}
+		}
+		// Dropped-import: does this edit remove an import whose name the new text
+		// still uses unqualified? Complements the additive check, which at edit time
+		// still sees the old import on disk and so stays silent.
+		if droppedImportEnabled() {
+			droppedImps = guard.DroppedImportRefs(lang, oldText, text)
 		}
 	}
 
-	if len(violations) == 0 && len(dangling) == 0 {
+	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 {
 		// Nothing flagged. Defer to the normal permission flow, but if the IR is
 		// stale the check may be incomplete — say so via additionalContext (which
 		// informs Claude without forcing an allow/deny).
@@ -499,9 +506,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			syms = append(syms, d.Symbol)
 		}
 	}
+	if len(droppedImps) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d import(s) removed by this edit are still used below — likely a dropped import (will fail at runtime):\n", len(droppedImps))
+		for _, di := range droppedImps {
+			fmt.Fprintf(&sb, "  %s — still used at snippet line %d\n", di.Name, di.LineNo)
+			syms = append(syms, di.Name)
+		}
+	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0), Symbols: syms})
+	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0), Symbols: syms})
 	return 0
 }
 

@@ -134,11 +134,21 @@ var (
 	rePyDef     = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
 	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(`)
 	reJSVarDef  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
+	// rePyClassDef / rePyConstDef capture Python class and SCREAMING_SNAKE module
+	// constant definitions so that references to them elsewhere in the file are
+	// not mistaken for hallucinations once const/class references are extracted.
+	rePyClassDef = regexp.MustCompile(`^\s*class\s+([A-Za-z_]\w*)`)
+	rePyConstDef = regexp.MustCompile(`^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\s*[:=]`)
+	// reJSTypeDef captures TS type-level definitions (interface/type/enum/class) so
+	// that a local type used in an annotation resolves instead of false-positiving.
+	reJSTypeDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:interface|type|enum|class)\s+([A-Za-z_$][\w$]*)`)
 )
 
-// ExtractDefs extracts top-level function/method names being *defined* on the
-// given lines (irrespective of language). Used in pass 1 to include same-commit
-// definitions in the known set.
+// ExtractDefs extracts the names being *defined* on the given lines (functions,
+// methods, and — for Python/TS — classes, module constants, and type-level
+// declarations). Used in pass 1 to include same-commit definitions in the known
+// set, so a reference to something defined elsewhere in the edit/file does not
+// read as a hallucination.
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
 	var defs []string
 	for _, l := range lines {
@@ -150,11 +160,17 @@ func ExtractDefs(lang Lang, lines []AddedLine) []string {
 		case LangPython:
 			if m := rePyDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
+			} else if m := rePyClassDef.FindStringSubmatch(l.Text); m != nil {
+				defs = append(defs, m[1])
+			} else if m := rePyConstDef.FindStringSubmatch(l.Text); m != nil {
+				defs = append(defs, m[1])
 			}
 		case LangJS:
 			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
 			} else if m := reJSVarDef.FindStringSubmatch(l.Text); m != nil {
+				defs = append(defs, m[1])
+			} else if m := reJSTypeDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
 			}
 		}
@@ -324,6 +340,76 @@ func parseJSBindingTarget(s string) []string {
 // The negative lookbehind is emulated by checking the character before the match.
 var reCallIdent = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\(`)
 
+// reUpperSnakeRef matches a SCREAMING_SNAKE_CASE identifier (requires at least
+// one underscore-joined segment). These are module-constant references — a
+// high-signal, low-false-positive class: a hallucinated constant (often a dropped
+// import) reads as one, while ordinary locals almost never use this casing.
+var reUpperSnakeRef = regexp.MustCompile(`\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b`)
+
+// reTSParamType matches a `paramName: PascalType` annotation — a lowercase-led
+// binding annotated with a PascalCase type. Narrow on purpose: requiring the
+// lowercase binding before the colon excludes object-literal keys like
+// `Component: X` and most non-type colons.
+var reTSParamType = regexp.MustCompile(`\b[a-z_$][\w$]*\??\s*:\s*([A-Z][A-Za-z0-9_$]*)`)
+
+// tsTypeBuiltins are TS primitive and utility type names that must never be
+// flagged in a type-annotation position. (jsBuiltins also covers Array, Promise,
+// Map, Set, Date, etc., and is consulted too.)
+var tsTypeBuiltins = setOf(
+	"string", "number", "boolean", "any", "unknown", "never", "void", "object",
+	"symbol", "bigint", "null", "undefined", "this", "true", "false",
+	"Record", "Partial", "Required", "Readonly", "Pick", "Omit", "Exclude",
+	"Extract", "NonNullable", "ReturnType", "Parameters", "InstanceType",
+	"Awaited", "ReadonlyArray", "ThisType", "Uppercase", "Lowercase",
+	"Capitalize", "Uncapitalize", "Iterable", "Iterator", "AsyncIterable",
+)
+
+// appendConstRefs adds SCREAMING_SNAKE constant references found in the (already
+// literal-stripped) scan to refs. Skips qualified attrs (`x.MAX`), definition
+// targets (`MAX =` / `MAX:`), and builtins.
+func appendConstRefs(refs []Ref, scan string, lineNo int, builtins map[string]struct{}) []Ref {
+	for _, idx := range reUpperSnakeRef.FindAllStringSubmatchIndex(scan, -1) {
+		s, e := idx[2], idx[3]
+		name := scan[s:e]
+		if s > 0 && scan[s-1] == '.' {
+			continue // qualified attribute access
+		}
+		rest := strings.TrimLeft(scan[e:], " \t")
+		if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
+			continue // assignment / annotation target — a definition, not a use
+		}
+		if _, ok := builtins[name]; ok {
+			continue
+		}
+		refs = append(refs, Ref{Name: name, LineNo: lineNo})
+	}
+	return refs
+}
+
+// appendTypeRefs adds PascalCase type-annotation references (`param: TypeName`)
+// found in the scan to refs. Skips qualified types, single-char generic params
+// (T/K/V), TS primitive/utility types, and JS builtins.
+func appendTypeRefs(refs []Ref, scan string, lineNo int) []Ref {
+	for _, idx := range reTSParamType.FindAllStringSubmatchIndex(scan, -1) {
+		s, e := idx[2], idx[3]
+		name := scan[s:e]
+		if len(name) < 2 {
+			continue // single-letter generic type parameter
+		}
+		if s > 0 && scan[s-1] == '.' {
+			continue // qualified type (ns.Type)
+		}
+		if _, ok := tsTypeBuiltins[name]; ok {
+			continue
+		}
+		if _, ok := jsBuiltins[name]; ok {
+			continue
+		}
+		refs = append(refs, Ref{Name: name, LineNo: lineNo})
+	}
+	return refs
+}
+
 // Ref is a function-call reference extracted from a line.
 type Ref struct {
 	Name   string
@@ -385,6 +471,21 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 				continue
 			}
 			refs = append(refs, Ref{Name: name, LineNo: l.LineNo})
+		}
+
+		// High-signal non-call references, kept narrow to protect precision. Import
+		// lines are skipped (their identifiers are bindings, not uses); definition
+		// lines are NOT skipped, because a function signature's parameter types are
+		// genuine references worth checking. The per-extractor guards (assignment-
+		// target for consts, the `param: Type` shape for types) keep a definition's
+		// own name from self-flagging.
+		if !isImportLine(lang, text) {
+			switch lang {
+			case LangPython:
+				refs = appendConstRefs(refs, scan, l.LineNo, builtins)
+			case LangJS:
+				refs = appendTypeRefs(refs, scan, l.LineNo)
+			}
 		}
 	}
 	return refs
@@ -714,9 +815,32 @@ func isDefLine(lang Lang, text string) bool {
 	case LangGo:
 		return reGoDef.MatchString(text)
 	case LangPython:
-		return rePyDef.MatchString(text)
+		return rePyDef.MatchString(text) || rePyClassDef.MatchString(text) || rePyConstDef.MatchString(text)
 	case LangJS:
-		return reJSFuncDef.MatchString(text) || reJSVarDef.MatchString(text)
+		return reJSFuncDef.MatchString(text) || reJSVarDef.MatchString(text) || reJSTypeDef.MatchString(text)
+	}
+	return false
+}
+
+// isImportLine reports whether a line is an import/require statement. References
+// extracted from non-call positions skip these, since the names there are
+// bindings, not uses.
+func isImportLine(lang Lang, text string) bool {
+	switch lang {
+	case LangPython:
+		return rePyFrom.MatchString(text) || rePyImport.MatchString(text)
+	case LangJS:
+		t := strings.TrimSpace(text)
+		if strings.HasPrefix(t, "import ") {
+			return true
+		}
+		// `export ... from '…'` is a re-export (binding); but `export function|const|
+		// class|interface …` is a definition whose param/annotation types we DO want
+		// to check, so only treat export-with-from as an import line.
+		if strings.HasPrefix(t, "export ") && strings.Contains(t, " from ") {
+			return true
+		}
+		return reJSRequire.MatchString(text)
 	}
 	return false
 }

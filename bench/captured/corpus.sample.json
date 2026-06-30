@@ -1,0 +1,80 @@
+[
+  {
+    "id": "sample-go-001",
+    "lang": "go",
+    "repo": "example/svc",
+    "ref": "<commit>",
+    "source_line": "\tresult := store.FlushCache(ctx)",
+    "referenced_symbol": "FlushCache",
+    "label": "hallucinated",
+    "label_source": "hand-verified: no FlushCache method on store at <commit>",
+    "known_symbols": ["ParseConfig", "LoadManifest", "FetchUser", "RenderTemplate", "ValidateSchema", "OpenSnapshot"],
+    "provenance": "transcript:sample-session-a",
+    "notes": "SAMPLE. Qualified call (store.FlushCache) — guard skips qualified refs by design, so this is a KNOWN BLIND SPOT the captured corpus must surface (expected miss/FN)."
+  },
+  {
+    "id": "sample-go-002",
+    "lang": "go",
+    "repo": "example/svc",
+    "ref": "<commit>",
+    "source_line": "\tcfg := ParseConfg(path)",
+    "referenced_symbol": "ParseConfg",
+    "label": "hallucinated",
+    "label_source": "hand-verified: only ParseConfig exists at <commit>",
+    "known_symbols": ["ParseConfig", "LoadManifest", "FetchUser", "RenderTemplate", "ValidateSchema", "OpenSnapshot"],
+    "provenance": "transcript:sample-session-a",
+    "notes": "SAMPLE. Bare-call typo of ParseConfig — in scope, expected catch (TP)."
+  },
+  {
+    "id": "sample-go-003",
+    "lang": "go",
+    "repo": "example/svc",
+    "ref": "<commit>",
+    "source_line": "\tcfg := ParseConfig(path)",
+    "referenced_symbol": "ParseConfig",
+    "label": "real",
+    "label_source": "hand-verified: ParseConfig exists at <commit>",
+    "known_symbols": ["ParseConfig", "LoadManifest", "FetchUser", "RenderTemplate", "ValidateSchema", "OpenSnapshot"],
+    "provenance": "transcript:sample-session-a",
+    "notes": "SAMPLE. Real reference — must pass untouched (TN). A flag here is a false positive."
+  },
+  {
+    "id": "sample-js-001",
+    "lang": "ts",
+    "repo": "example/web",
+    "ref": "<commit>",
+    "source_line": "  const u = fetchUserById(id);",
+    "referenced_symbol": "fetchUserById",
+    "label": "hallucinated",
+    "label_source": "hand-verified: only fetchUser exists at <commit>",
+    "known_symbols": ["parseConfig", "loadManifest", "fetchUser", "renderTemplate", "validateSchema"],
+    "provenance": "elicited:deepseek-chat",
+    "notes": "SAMPLE. Plausible-affix invention of fetchUser — in scope, expected catch (TP)."
+  },
+  {
+    "id": "sample-js-002",
+    "lang": "ts",
+    "repo": "example/web",
+    "ref": "<commit>",
+    "source_line": "  const u = fetchUser(id);",
+    "referenced_symbol": "fetchUser",
+    "label": "real",
+    "label_source": "hand-verified: fetchUser exists at <commit>",
+    "known_symbols": ["parseConfig", "loadManifest", "fetchUser", "renderTemplate", "validateSchema"],
+    "provenance": "transcript:sample-session-b",
+    "notes": "SAMPLE. Real reference — must pass (TN)."
+  },
+  {
+    "id": "sample-py-001",
+    "lang": "py",
+    "repo": "example/etl",
+    "ref": "<commit>",
+    "source_line": "    rows = load_recrds(db)",
+    "referenced_symbol": "load_recrds",
+    "label": "hallucinated",
+    "label_source": "hand-verified: only load_records exists at <commit>",
+    "known_symbols": ["parse_config", "load_manifest", "load_records", "fetch_user"],
+    "provenance": "elicited:deepseek-chat",
+    "notes": "SAMPLE. Typo of load_records — in scope, expected catch (TP)."
+  }
+]

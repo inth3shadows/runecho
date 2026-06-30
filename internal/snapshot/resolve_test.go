@@ -209,6 +209,58 @@ func TestResolveRepo_SameIDFromBothWorktrees(t *testing.T) {
 	}
 }
 
+// TestResolveRepo_MultiEnrolledWorktreesDisambiguateByPath pins issue #61: when a
+// bare repo's worktrees are EACH independently enrolled, they share one
+// common-dir, so the common-dir lookup matches several rows. Each worktree must
+// resolve to ITS OWN enrollment (so it is validated against its own snapshot),
+// not to whichever row the common-dir query returns first.
+func TestResolveRepo_MultiEnrolledWorktreesDisambiguateByPath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	mainDir := t.TempDir()
+	linkedDir := filepath.Join(t.TempDir(), "linked61")
+
+	resolveGitInit(t, mainDir)
+	resolveGitCommit(t, mainDir)
+	full := []string{"-C", mainDir, "worktree", "add", linkedDir, "-b", "linked-61"}
+	if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	db, _ := openTemp(t)
+	cd, err := gitutil.CommonDir(mainDir)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	// Enroll BOTH worktrees separately, each with the SAME shared common-dir.
+	mainID, err := db.EnrollRepo("main", mainDir, mainDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo main: %v", err)
+	}
+	linkedID, err := db.EnrollRepo("linked", linkedDir, linkedDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo linked: %v", err)
+	}
+	for _, id := range []int64{mainID, linkedID} {
+		if err := db.SetRepoCommonDir(id, cd); err != nil {
+			t.Fatalf("SetRepoCommonDir %d: %v", id, err)
+		}
+	}
+
+	fromMain, _, okM := db.ResolveRepo(mainDir)
+	fromLinked, _, okL := db.ResolveRepo(linkedDir)
+	if !okM || !okL {
+		t.Fatalf("resolution failed: main=%v linked=%v", okM, okL)
+	}
+	if fromMain.ID != mainID {
+		t.Errorf("main worktree resolved to id %d, want its own %d", fromMain.ID, mainID)
+	}
+	if fromLinked.ID != linkedID {
+		t.Errorf("linked worktree resolved to id %d, want its own %d (issue #61: common-dir shadowed the path)", fromLinked.ID, linkedID)
+	}
+}
+
 // TestResolveRepo_DBErrorWarnsAndFailsOpen pins finding #7: a real DB fault (not
 // "not enrolled") must stay fail-open (ok=false) but be surfaced on stderr rather
 // than swallowed, so a transient store error is debuggable instead of looking

@@ -1,5 +1,14 @@
 # Captured-LLM Benchmark — First Findings (2026-06-30)
 
+> **Update (#56 landed):** the "achievable in-design" gap below is now closed.
+> Extending the guard to extract bare **const references** and **type
+> annotations** moved the captured catch-rate from **1/9 → 4/9** with false
+> positives unchanged at **0/6**, and the synthetic tripwire held at 100%/0%.
+> The remaining 5 misses are all qualified positions (out of scope by design).
+> The body below is the original first-measurement writeup; numbers in the
+> tables are pre-#56 and annotated where they moved.
+
+
 The first measurement of RunEcho's headline claim against **real** model
 hallucinations, not synthetic ones. N=15 hand-verified cases (9 hallucinated,
 6 real) mined from session transcripts, each backed by an in-session compiler or
@@ -25,8 +34,8 @@ anything preceded by a dot. Real hallucinations land mostly elsewhere:
 | reference position | caught | example | in RunEcho's design? |
 |---|---|---|---|
 | **bare-call** | **1/1** | `str(ULID())` — invented constructor | ✅ covered |
-| const-ref | 0/1 | `TASTING_ROOM_KIND[t]` — dropped import | ⬜ achievable |
-| type-ref | 0/2 | `ctx: RouteContext<…>` — ambient type absent | ⬜ achievable |
+| const-ref | 0/1 → **1/1** | `TASTING_ROOM_KIND[t]` — dropped import | ✅ closed by #56 |
+| type-ref | 0/2 → **2/2** | `ctx: RouteContext<…>` — ambient type absent | ✅ closed by #56 |
 | qualified-attr | 0/3 | `series.pearson_corr(…)`, `df.groupby(…)` | ❌ needs type resolution |
 | qualified-method | 0/1 | `tree.Root()` — wrong method name | ❌ needs type resolution |
 | qualified-prop | 0/1 | `import.meta.env` — missing type aug | ❌ needs type resolution |

@@ -646,3 +646,113 @@ func TestLangFor(t *testing.T) {
 		}
 	}
 }
+
+// --- #56: non-call reference extraction (const refs + type annotations) ---
+// Positives prove the new catches; the negatives are the load-bearing half —
+// they pin that the false-positive surface stayed flat.
+
+func TestExtractRefs_Python_ConstRef(t *testing.T) {
+	ls := lines(`            kind = TASTING_ROOM_KIND[t]`)
+	refs := ExtractRefs(LangPython, ls)
+	if !containsAll(refs, "TASTING_ROOM_KIND") {
+		t.Errorf("expected SCREAMING_SNAKE const ref, got %v", refNames(refs))
+	}
+}
+
+func TestExtractRefs_Python_ConstDefNotARef(t *testing.T) {
+	// A constant definition line is a def, not a use — must not self-flag, and
+	// ExtractDefs must capture it so references elsewhere resolve.
+	ls := lines(`MAX_SIZE = 100`)
+	if refs := ExtractRefs(LangPython, ls); !containsNone(refs, "MAX_SIZE") {
+		t.Errorf("const definition should not be a ref, got %v", refNames(refs))
+	}
+	if defs := ExtractDefs(LangPython, ls); !containsStr(defs, "MAX_SIZE") {
+		t.Errorf("ExtractDefs should capture the const def, got %v", defs)
+	}
+}
+
+func TestExtractRefs_Python_ConstNegatives(t *testing.T) {
+	ls := lines(
+		`data[i] = row`,       // lowercase local — not a const
+		`cfg.MAX_RETRIES = 3`, // qualified attribute — skip
+		`HTTP = 1`,            // single segment, no underscore — not matched
+	)
+	refs := ExtractRefs(LangPython, ls)
+	if !containsNone(refs, "MAX_RETRIES", "HTTP", "data", "row") {
+		t.Errorf("const negatives leaked, got %v", refNames(refs))
+	}
+}
+
+func TestExtractRefs_JS_TypeRef(t *testing.T) {
+	ls := lines(`  ctx: RouteContext<"/api/x">`)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsAll(refs, "RouteContext") {
+		t.Errorf("expected type-annotation ref, got %v", refNames(refs))
+	}
+}
+
+func TestExtractRefs_JS_TypeNegatives(t *testing.T) {
+	ls := lines(
+		`  name: string`,         // primitive type
+		`  items: Array<number>`, // jsBuiltin generic
+		`  cfg: Partial<Config>`, // utility type (Partial); Config not after a param colon
+		`  x: T`,                 // single-char generic param
+		`  cb: ns.Handler`,       // qualified type
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsNone(refs, "string", "Array", "Partial", "T", "Handler") {
+		t.Errorf("type negatives leaked, got %v", refNames(refs))
+	}
+}
+
+func TestExtractDefs_JS_TypeDecls(t *testing.T) {
+	ls := lines(
+		`export interface Props {`,
+		`type RouteId = string`,
+		`enum Color { Red }`,
+		`export class Widget {}`,
+	)
+	defs := ExtractDefs(LangJS, ls)
+	for _, want := range []string{"Props", "RouteId", "Color", "Widget"} {
+		if !containsStr(defs, want) {
+			t.Errorf("ExtractDefs should capture %q, got %v", want, defs)
+		}
+	}
+}
+
+// End-to-end via Run: a locally-defined type/const used in annotation/subscript
+// position must NOT be flagged, while an undefined one must be — the FP-safety
+// proof, not just extraction.
+func TestRun_NonCallRefs_ResolveAgainstLocalDefs(t *testing.T) {
+	diffs := []FileDiff{{
+		Path: "x.ts",
+		AddedLines: lines(
+			`interface LocalCfg {}`,
+			`function h(c: LocalCfg, ctx: RouteContext) {}`,
+		),
+	}}
+	v := Run(map[string]struct{}{}, "", diffs)
+	if names := violationSymbols(v); containsStr(names, "LocalCfg") {
+		t.Errorf("locally-defined type must not be flagged, got %v", names)
+	}
+	if names := violationSymbols(v); !containsStr(names, "RouteContext") {
+		t.Errorf("undefined type must be flagged, got %v", names)
+	}
+}
+
+func violationSymbols(vs []Violation) []string {
+	out := make([]string, len(vs))
+	for i, v := range vs {
+		out[i] = v.Symbol
+	}
+	return out
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

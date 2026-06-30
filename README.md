@@ -127,15 +127,14 @@ not general-purpose code intelligence.
 - All parsers are intentionally shallow (line-regex, not AST). Each language has
   known gaps — see the [Parser Capability Matrix](TECHNICAL.md#parser-capability-matrix)
   for the per-language honest accounting.
-- The guard validates references in **call position** — unresolved **bare
-  calls** like `foo(...)`. It does **not** flag qualified references
-  (`obj.method(...)`, `pkg.Thing`), type annotations (`x: SomeType`), or bare
-  constant references — qualified refs would need receiver-type resolution
-  (semantic analysis RunEcho deliberately avoids), and the non-call positions are
-  an extraction gap that is tracked, not yet closed. This is measured, not
-  asserted: see [`bench/FINDINGS.md`](bench/FINDINGS.md), where a corpus of real
-  transcript-observed hallucinations shows the guard catches bare-call
-  hallucinations and misses the qualified/type/const ones.
+- The guard validates **unqualified** references: bare **calls** (`foo(...)`),
+  bare **type annotations** (`x: SomeType`), and SCREAMING_SNAKE **constant**
+  references. It does **not** flag **qualified** references (`obj.method(...)`,
+  `pkg.Thing`, `x.attr`) — those would need receiver-type resolution, semantic
+  analysis RunEcho deliberately avoids. This boundary is measured, not asserted:
+  see [`bench/FINDINGS.md`](bench/FINDINGS.md), where a corpus of real
+  transcript-observed hallucinations places the guard's catch-rate by reference
+  position (the qualified positions are the deliberate gap).
 - Snapshots, diffs, and hash queries are local and deterministic. There is no
   semantic search, embedding index, or hosted control plane here.
 

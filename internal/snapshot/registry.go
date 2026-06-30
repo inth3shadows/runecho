@@ -89,6 +89,34 @@ func (db *DB) GetRepoByCommonDir(commonDir string) (*Repo, error) {
 		 FROM repos WHERE common_dir = ?`, commonDir))
 }
 
+// GetReposByCommonDir returns all repos sharing the given git-common-dir, ordered
+// by id. Usually a single row, but a bare repo whose worktrees are each
+// independently enrolled yields several — ResolveRepo disambiguates those by the
+// current worktree's path (issue #61). Empty commonDir matches nothing (a pre-V4
+// NULL row must never match).
+func (db *DB) GetReposByCommonDir(commonDir string) ([]*Repo, error) {
+	if commonDir == "" {
+		return nil, nil
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, name, path, source_root, common_dir, file_cap, enrolled_at, last_indexed, parse_errors, supported_seen
+		 FROM repos WHERE common_dir = ? ORDER BY id`, commonDir)
+	if err != nil {
+		return nil, fmt.Errorf("repos by common_dir: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Repo
+	for rows.Next() {
+		r, err := scanRepoRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // SetRepoCommonDir records a repo's git-common-dir (schema V4). Used both at
 // enroll time and as a lazy backfill the first time the guard resolves a pre-V4
 // repo via the worktree-list shim, after which lookup keys on common_dir in O(1).
@@ -336,15 +364,32 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 		fmt.Fprintf(os.Stderr, "runecho: ResolveRepo %s lookup failed (treating as not-enrolled): %v\n", tier, err)
 	}
 
-	// Tier 1: common-dir fast path.
+	// Tier 1: common-dir fast path. A bare repo's worktrees share one common-dir,
+	// so several independently-enrolled worktrees can match here (issue #61). When
+	// they do, disambiguate to the enrollment whose path is THIS worktree's
+	// top-level, so the edit is validated against its own snapshot rather than a
+	// sibling worktree's (which may be on different code). A single match keeps the
+	// O(1) fast path; the path tie-break only runs in the rare multi-enrollment case.
 	commonDir, cdErr := gitutil.CommonDir(dir)
 	if cdErr == nil {
-		r, err := db.GetRepoByCommonDir(commonDir)
+		repos, err := db.GetReposByCommonDir(commonDir)
 		switch {
 		case err != nil:
 			warnResolve("common-dir", err)
-		case r != nil:
-			return r, r.Path, true
+		case len(repos) == 1:
+			return repos[0], repos[0].Path, true
+		case len(repos) > 1:
+			if top, e := gitutil.TopLevel(dir); e == nil {
+				for _, r := range repos {
+					if filepath.Clean(r.Path) == filepath.Clean(top) {
+						return r, r.Path, true
+					}
+				}
+			}
+			// No worktree-specific enrollment matched (e.g. an unenrolled sibling
+			// worktree): fall back to the canonical lowest-id row so resolution
+			// still succeeds, preferring the oldest enrollment deterministically.
+			return repos[0], repos[0].Path, true
 		}
 	}
 	// Tier 2: git top-level → exact path lookup.

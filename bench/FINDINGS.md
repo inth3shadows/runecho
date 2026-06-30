@@ -61,8 +61,14 @@ type, or constant reference.
 
 A frequent sub-pattern across both classes: the hallucination was a **dropped
 import** (`ULID`, `TASTING_ROOM_KIND`) — the agent referenced a real symbol but
-removed its import. Cross-checking references against the file's own import set
-is a cheap, structural, in-design signal worth exploring.
+removed its import. **Implemented** as `guard.DroppedImportRefs`: when an edit
+removes an import binding whose name the new text still uses unqualified (and does
+not re-define), the hook warns "dropped import, still used." It is the file-scoped
+mirror of the E1 dangling-refs check and complements the additive check, which at
+edit time still sees the old import on disk and stays silent. Gated OFF by default
+(`RUNECHO_GUARD_DROPPED_IMPORT=1`) for dogfood-first rollout, same as E1. Note: it
+is a hook-level check (operates on edit old-vs-new text), so it is not exercised by
+this benchmark's `guard.Run` path — its validation is the unit suite.
 
 ## Honest caveats (read before quoting the 1/9)
 

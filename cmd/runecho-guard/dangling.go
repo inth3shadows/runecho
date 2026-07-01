@@ -187,7 +187,7 @@ func excludeSelf(paths []string, self string) []string {
 // askReason names the decision-log reason for an ask so the dogfood stream is
 // greppable by which check(s) fired. Joins the active checks with '+' so any
 // combination is represented (e.g. "violations+dropped-import").
-func askReason(hasViolations, hasDangling, hasDropped bool) string {
+func askReason(hasViolations, hasDangling, hasDropped, hasDuplicate bool) string {
 	var parts []string
 	if hasViolations {
 		parts = append(parts, "violations")
@@ -197,6 +197,9 @@ func askReason(hasViolations, hasDangling, hasDropped bool) string {
 	}
 	if hasDropped {
 		parts = append(parts, "dropped-import")
+	}
+	if hasDuplicate {
+		parts = append(parts, "duplicate-symbol")
 	}
 	if len(parts) == 0 {
 		return "violations"

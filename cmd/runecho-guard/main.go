@@ -27,6 +27,11 @@
 //	                            symbol definition that other files still reference
 //	                            (per the latest snapshot's refs index). Default OFF
 //	                            (dogfood gate); ask-posture, fail-open.
+//	RUNECHO_GUARD_DUPLICATE=1  enable E5 duplicate-symbol guard: ask when an edit
+//	                            introduces a symbol definition whose name is
+//	                            already defined in a different file (per the
+//	                            latest snapshot's symbol index). Default OFF
+//	                            (dogfood gate); ask-posture, fail-open.
 package main
 
 import (
@@ -377,7 +382,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// dropped here. Empty (and inert) unless E1 is enabled. Write deletions are
 	// derived later from the on-disk file, not here.
 	var removedText string
-	if danglingEnabled() || droppedImportEnabled() {
+	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
 		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
 	}
 	if filePath == "" || (text == "" && removedText == "") {
@@ -457,7 +462,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// Both feed the single ask. Fail-open: any error yields no warning.
 	var dangling []danglingWarning
 	var droppedImps []guard.DroppedImport
-	if danglingEnabled() || droppedImportEnabled() {
+	var duplicates []duplicateWarning
+	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
 		oldText := removedText
 		if payload.ToolName == "Write" {
 			if data, err := os.ReadFile(filePath); err == nil && len(data) <= maxInFileBytes {
@@ -476,9 +482,19 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		if droppedImportEnabled() {
 			droppedImps = guard.DroppedImportRefs(lang, oldText, text)
 		}
+		// E5: does this edit introduce a symbol not previously defined anywhere in
+		// this file, whose name is already defined in a DIFFERENT file? Uses the
+		// whole on-disk pre-edit file (wholeFileText), not oldText/removedText —
+		// see wholeFileText's doc comment for why the hunk-scoped variable above
+		// is not reusable here.
+		if duplicateEnabled() {
+			if added := addedDefs(lang, wholeFileText(filePath), text); len(added) > 0 {
+				duplicates = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+			}
+		}
 	}
 
-	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 {
+	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 {
 		// Nothing flagged. Defer to the normal permission flow, but if the IR is
 		// stale the check may be incomplete — say so via additionalContext (which
 		// informs Claude without forcing an allow/deny).
@@ -513,9 +529,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			syms = append(syms, di.Name)
 		}
 	}
+	if len(duplicates) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d new symbol(s) already exist as definitions elsewhere — possible duplicate/reimplementation:\n", len(duplicates))
+		for _, d := range duplicates {
+			fmt.Fprintf(&sb, "  %s — also defined in %s\n", d.Symbol, strings.Join(d.Locations, ", "))
+			syms = append(syms, d.Symbol)
+		}
+	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0), Symbols: syms})
+	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0), Symbols: syms})
 	return 0
 }
 

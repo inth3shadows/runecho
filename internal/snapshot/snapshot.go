@@ -196,6 +196,44 @@ func (db *DB) RefsToName(snapshotID int64, name string) ([]string, error) {
 	return paths, rows.Err()
 }
 
+// DefsOfName returns the sorted, de-duplicated file paths in snapshot
+// snapshotID whose indexed symbols include a definition named name — "who
+// else defines X" as of that snapshot. The mirror of RefsToName ("who calls
+// X"), against the symbols table instead of refs.
+//
+// kind != 'import' excludes import/require rows: those record that some file
+// imports a module named name (e.g. `import os`), which is a reference, not a
+// definition, and belongs to RefsToName's world, not this one.
+//
+// DISTINCT is required here (unlike RefsToName, which relies on the V7
+// (file_id,name) unique index on refs): symbols carries no such uniqueness —
+// a single file can have two rows for the same name under different kinds
+// (an exported TS interface/type/enum lands in both "class" and "export", see
+// internal/parser/js.go), so an unfiltered join would double-count that file.
+func (db *DB) DefsOfName(snapshotID int64, name string) ([]string, error) {
+	rows, err := db.conn.Query(
+		`SELECT DISTINCT f.path FROM symbols s
+		 JOIN files f ON s.file_id = f.id
+		 WHERE f.snapshot_id = ? AND s.name = ? AND s.kind != 'import'
+		 ORDER BY f.path`,
+		snapshotID, name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("defs of %q: %w", name, err)
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
 // GetByID returns a snapshot by its primary key.
 func (db *DB) GetByID(id int64) (*SnapshotMeta, error) {
 	row := db.conn.QueryRow(

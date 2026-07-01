@@ -60,21 +60,23 @@ func TestHookOldText(t *testing.T) {
 
 func TestAskReason(t *testing.T) {
 	cases := []struct {
-		v, d, i bool
-		want    string
+		v, d, i, u bool
+		want       string
 	}{
-		{true, false, false, "violations"},
-		{false, true, false, "dangling"},
-		{false, false, true, "dropped-import"},
-		{true, true, false, "violations+dangling"},
-		{true, false, true, "violations+dropped-import"},
-		{false, true, true, "dangling+dropped-import"},
-		{true, true, true, "violations+dangling+dropped-import"},
-		{false, false, false, "violations"}, // not called in practice when all false
+		{true, false, false, false, "violations"},
+		{false, true, false, false, "dangling"},
+		{false, false, true, false, "dropped-import"},
+		{false, false, false, true, "duplicate-symbol"},
+		{true, true, false, false, "violations+dangling"},
+		{true, false, true, false, "violations+dropped-import"},
+		{true, false, false, true, "violations+duplicate-symbol"},
+		{false, true, true, false, "dangling+dropped-import"},
+		{true, true, true, true, "violations+dangling+dropped-import+duplicate-symbol"},
+		{false, false, false, false, "violations"}, // not called in practice when all false
 	}
 	for _, c := range cases {
-		if got := askReason(c.v, c.d, c.i); got != c.want {
-			t.Errorf("askReason(%v,%v,%v) = %q, want %q", c.v, c.d, c.i, got, c.want)
+		if got := askReason(c.v, c.d, c.i, c.u); got != c.want {
+			t.Errorf("askReason(%v,%v,%v,%v) = %q, want %q", c.v, c.d, c.i, c.u, got, c.want)
 		}
 	}
 }

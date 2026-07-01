@@ -130,6 +130,7 @@ func TestExtractSymbolRefs_LangParity(t *testing.T) {
 		"export class Widget {":    "Widget",      // export modifier before keyword
 		"let RetryCount = 3":       "RetryCount",  // js let
 		"async def DoWork(self):":  "DoWork",      // python async, CamelCase
+		"const processData = (x) => x": "processData", // js/ts const, camelCase
 	}
 	for text, sym := range want {
 		refs := ExtractSymbolRefs(text)
@@ -137,8 +138,9 @@ func TestExtractSymbolRefs_LangParity(t *testing.T) {
 			t.Errorf("text %q: expected %q in refs, got %v", text, sym, refs)
 		}
 	}
-	// snake_case / lowercase decls stay filtered (consistent with Go behavior).
-	for _, text := range []string{"def fetch_data(self):", "function helper() {}"} {
+	// snake_case / lowercase decls stay filtered (consistent with Go behavior);
+	// ALL_CAPS const stays filtered too (no mixed case, same as Go's declRe path).
+	for _, text := range []string{"def fetch_data(self):", "function helper() {}", "const MAX_SIZE = 5"} {
 		if refs := ExtractSymbolRefs(text); len(refs) != 0 {
 			t.Errorf("text %q: expected no refs (noise), got %v", text, refs)
 		}

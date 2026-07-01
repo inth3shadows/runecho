@@ -69,7 +69,8 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 - A POSIX or Windows shell. Storage lives under `~/.runecho/` by default.
 - No external services, no API keys.
 
-Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, and Python**.
+Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, Google Apps
+Script (`.gs`), and Python**.
 Extraction is intentionally shallow and deterministic: top-level structure, not
 full semantic analysis.
 
@@ -117,6 +118,13 @@ full semantic analysis.
    It blocks commits that call functions which exist nowhere in the indexed code
    (with a "did you mean …?" suggestion when there's a close match). Bypass any
    single commit with `RUNECHO_GUARD_SKIP=1 git commit …`.
+7. (Maintainers/forks only) If you cut release tags from this repo, install the
+   tag-monotonicity safety net:
+   ```bash
+   bash install.sh --hook-pre-push
+   ```
+   Rejects a `vX.Y.Z` tag push that isn't semver-greater than the highest
+   existing tag — see [issue #51](https://github.com/inth3shadows/runecho/issues/51).
 
 ## Current Boundaries
 

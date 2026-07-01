@@ -285,7 +285,7 @@ located but not hashed (their changes surface through their members).
 
 ## Known Limitations
 
-- **Languages:** Go, JS/TS/JSX/TSX, and Python only. Parsers are AST-based but
+- **Languages:** Go, JS/TS/JSX/TSX/GAS (`.gs`), and Python only. Parsers are AST-based but
   scoped to definitions (functions, classes, methods) — not full semantic
   resolution (no type inference, call-graph, or cross-file binding).
 - **File cap is enforced.** `repo add --cap N` stops indexing after N files (the

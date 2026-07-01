@@ -8,4 +8,4 @@
 # Release Tags
 
 - Release tags must be monotonic (`vX.Y.Z`, semver-increasing) — non-monotonic tags previously broke `git describe`/version stamping (issue #51).
-- Enforced by a `pre-push` hook that rejects a tag push that isn't semver-greater than the highest existing tag. Tracked source: `githooks/pre-push`. It is not auto-installed by git — copy or symlink it to the real hooks dir (`$(git rev-parse --git-common-dir)/hooks/pre-push`) on each machine/worktree setup that pushes tags.
+- Enforced by a `pre-push` hook that rejects a tag push that isn't semver-greater than the highest existing tag. Tracked source: `githooks/pre-push`. Not auto-installed by git — run `bash install.sh --hook-pre-push` from the repo root on each machine/worktree setup that pushes tags (installs into `$(git rev-parse --git-common-dir)/hooks/pre-push`).

@@ -18,6 +18,14 @@ jobs:
           go-version-file: go.mod
       - name: Vet
         run: go vet ./...
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Test (race + coverage, includes guard corpus gate)
         run: go test ./... -race -cover
       - name: Installer syntax

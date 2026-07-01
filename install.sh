@@ -11,12 +11,19 @@
 #   bash install.sh --hook     # also install the GIT pre-commit hook in the cwd repo
 #   bash install.sh --hook --force      # overwrite an existing pre-commit hook
 #   bash install.sh --print-hook-config # print the Claude Code PreToolUse snippet
+#   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
+#                                        # (this repo's own release safety net, #51/#63)
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
 #   --print-hook-config  emits the Claude Code PreToolUse settings.json snippet
 #                        (--hook-mode; fires on every Edit/Write/MultiEdit). This
 #                        is the primary, edit-time integration the docs describe.
+#
+# --hook-pre-push is unrelated to runecho-guard: it installs THIS repo's own
+# githooks/pre-push (rejects a non-monotonic vX.Y.Z tag push) into the repo you
+# invoke it from. Relevant to runecho maintainers/forks cutting tags, not to
+# consumers of the oracle.
 
 set -euo pipefail
 
@@ -30,11 +37,13 @@ cd "$SCRIPT_DIR"
 INSTALL_HOOK=0
 FORCE_HOOK=0
 PRINT_HOOK_CONFIG=0
+INSTALL_PRE_PUSH=0
 for arg in "$@"; do
   case "$arg" in
     --hook)  INSTALL_HOOK=1 ;;
     --force) FORCE_HOOK=1 ;;
     --print-hook-config) PRINT_HOOK_CONFIG=1 ;;
+    --hook-pre-push) INSTALL_PRE_PUSH=1 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -147,6 +156,39 @@ HOOK
   echo "  Bypass any commit with: RUNECHO_GUARD_SKIP=1 git commit ..."
 fi
 
+# --hook-pre-push: install THIS repo's own release-safety hook into the repo the
+# user invoked us from. Hooks live in the git-common-dir (shared across all
+# worktrees of a repo), never per-worktree, so this uses --git-common-dir rather
+# than --hook's --absolute-git-dir.
+if [ "$INSTALL_PRE_PUSH" -eq 1 ]; then
+  echo ""
+  COMMON_DIR="$(git -C "$INVOKE_DIR" rev-parse --git-common-dir 2>/dev/null)" || {
+    echo "install.sh: ERROR: --hook-pre-push requires a git repository in the directory you ran it from." >&2
+    exit 1
+  }
+  case "$COMMON_DIR" in
+    /*) ;;
+    *) COMMON_DIR="$INVOKE_DIR/$COMMON_DIR" ;;
+  esac
+  PP_HOOK_DIR="$COMMON_DIR/hooks"
+  PP_HOOK_FILE="$PP_HOOK_DIR/pre-push"
+  mkdir -p "$PP_HOOK_DIR"
+
+  if [ -f "$PP_HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ]; then
+    if ! grep -q "issue #51" "$PP_HOOK_FILE" 2>/dev/null; then
+      echo "install.sh: ERROR: $PP_HOOK_FILE already exists and is not this repo's pre-push hook." >&2
+      echo "  Use --force to overwrite, or inspect and integrate manually." >&2
+      exit 1
+    fi
+  fi
+
+  cp "$SCRIPT_DIR/githooks/pre-push" "$PP_HOOK_FILE"
+  chmod +x "$PP_HOOK_FILE"
+  echo "Pre-push tag-monotonicity hook installed: $PP_HOOK_FILE"
+  echo "  Rejects a vX.Y.Z tag push that isn't semver-greater than the highest"
+  echo "  existing tag (see issue #51). Only relevant if you cut releases here."
+fi
+
 cat <<EOF
 
 Quick start:
@@ -160,6 +202,9 @@ Install the GIT pre-commit guard in a repo (commit-time):
 
 Wire the Claude Code PreToolUse guard (edit-time — the primary integration):
   bash install.sh --print-hook-config   # prints the settings.json snippet
+
+(Maintainers/forks only) Guard release tags against non-monotonic pushes:
+  bash install.sh --hook-pre-push       # run from the target repo's root
 
 Register the oracle MCP server (manual — edits your agent config):
   # Claude Code:

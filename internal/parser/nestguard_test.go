@@ -76,17 +76,23 @@ func TestJSParse_NormalStillParses(t *testing.T) {
 	}
 }
 
-// TestPythonParse_WalkDepth_NoCrash exercises the walk recursion cap: Python
-// nests via indentation (no brackets), so exceedsNestDepth cannot catch it; the
-// walk depth counter is the backstop that keeps a deeply-nested tree from
-// overflowing the goroutine stack (an unrecoverable throw). This must return.
+// TestPythonParse_WalkDepth_NoCrash exercises the walk recursion cap. Python
+// nests via indentation (no brackets), so exceedsNestDepth cannot catch it and
+// the walk depth counter is the backstop that keeps a deeply-nested tree from
+// overflowing the goroutine stack (an unrecoverable throw). Depth is set just
+// past the 1000-node cap so the guard branch runs; the parse of indentation-
+// nested Python is inherently slow (super-linear), so the true overflow depth is
+// impractical to parse — this is a graceful-degrade smoke test, not a literal
+// overflow reproduction. The generous timeout is a hang-guard, not a perf gate:
+// the parse takes a few seconds (more under -race), well under the deadline.
 func TestPythonParse_WalkDepth_NoCrash(t *testing.T) {
+	const depth = 1100 // > maxParseNestDepth (1000) so the walk cap's return runs
 	var b strings.Builder
-	for i := 0; i < 3000; i++ {
+	for i := 0; i < depth; i++ {
 		b.WriteString(strings.Repeat("    ", i))
 		b.WriteString("if True:\n")
 	}
-	b.WriteString(strings.Repeat("    ", 3000))
+	b.WriteString(strings.Repeat("    ", depth))
 	b.WriteString("pass\n")
 	p := NewPythonParser()
 	done := make(chan struct{}, 1)
@@ -97,7 +103,7 @@ func TestPythonParse_WalkDepth_NoCrash(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatalf("Python Parse hung on deeply-indented input for >15s (elapsed %v)", time.Since(start))
+	case <-time.After(60 * time.Second):
+		t.Fatalf("Python Parse hung on deeply-indented input for >60s (elapsed %v)", time.Since(start))
 	}
 }

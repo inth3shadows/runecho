@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/inth3shadows/runecho/internal/version"
 )
 
 // Exit codes returned by every runecho-ir subcommand.
@@ -80,7 +82,7 @@ func run() int {
 			printUsage()
 			return 0
 		case "--version", "-v":
-			fmt.Println("runecho-ir dev")
+			fmt.Println("runecho-ir " + version.Version)
 			return 0
 		default:
 			if strings.HasPrefix(os.Args[1], "-") {

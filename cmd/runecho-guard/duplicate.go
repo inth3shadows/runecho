@@ -2,11 +2,9 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/inth3shadows/runecho/internal/guard"
-	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
 // E5 duplicate-symbol: warn when an edit introduces a NEW symbol definition
@@ -40,13 +38,26 @@ type duplicateWarning struct {
 // untouched part of the file would be misreported as new. Deliberately
 // independent of the shared removedText/oldText used by E1/dropped-import:
 // broadening THOSE to whole-file would break their hunk-symmetric comparisons.
-// Best-effort: a missing or oversized file yields "" (fail-open).
-func wholeFileText(filePath string) string {
+//
+// definitive distinguishes WHY the text came back empty, because the two
+// causes need opposite treatment downstream. A missing file (new file being
+// created) means "nothing was defined before" — "" is the correct, complete
+// answer, safe for addedDefs to treat as ground truth (definitive=true). An
+// existing file that's unreadable or exceeds the cap means "we don't know
+// what was defined before" — treating that "" as ground truth would make
+// addedDefs report every def in the edit as newly added, including ones the
+// file already had (false positives on exactly the large/generated files a
+// dogfood-first guard should stay quietest on), so the caller must skip the
+// check entirely instead (definitive=false).
+func wholeFileText(filePath string) (text string, definitive bool) {
 	data, err := os.ReadFile(filePath)
-	if err != nil || len(data) > maxInFileBytes {
-		return ""
+	if err != nil {
+		return "", os.IsNotExist(err)
 	}
-	return string(data)
+	if len(data) > maxInFileBytes {
+		return "", false
+	}
+	return string(data), true
 }
 
 // addedDefs returns the definitions present in newText that are NOT present in
@@ -73,38 +84,17 @@ func addedDefs(lang guard.Lang, oldText, newText string) []string {
 
 // checkDuplicateDefs returns one warning per added def that is already defined
 // by a file OTHER than the one being edited, per the latest snapshot's symbol
-// index. Structurally identical to checkDanglingRefs (same store-open,
-// resolve-repo, latest-snapshot, self-exclusion, cap, fail-open pattern) —
-// only the query (DefsOfName vs RefsToName) differs.
+// index. Shares openLatestSnapshot with checkDanglingRefs — only the query
+// (DefsOfName vs RefsToName) and the warning shape differ.
 func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning {
 	if len(added) == 0 {
 		return nil
 	}
-	storeDir, err := runechoDir()
-	if err != nil {
-		return nil
-	}
-	dbPath := filepath.Join(storeDir, "history.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil
-	}
-	db, err := snapshot.OpenFast(dbPath)
-	if err != nil {
+	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
+	if !ok {
 		return nil
 	}
 	defer db.Close()
-
-	repo, _, resolved := db.ResolveRepo(dir)
-	if !resolved {
-		return nil
-	}
-	snaps, err := db.List(repo.ID, 1)
-	if err != nil || len(snaps) == 0 {
-		return nil
-	}
-	snapID := snaps[0].ID
-
-	self := repoRelPath(filePath)
 
 	var warns []duplicateWarning
 	for _, a := range added {

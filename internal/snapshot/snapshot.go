@@ -201,9 +201,21 @@ func (db *DB) RefsToName(snapshotID int64, name string) ([]string, error) {
 // else defines X" as of that snapshot. The mirror of RefsToName ("who calls
 // X"), against the symbols table instead of refs.
 //
-// kind != 'import' excludes import/require rows: those record that some file
-// imports a module named name (e.g. `import os`), which is a reference, not a
-// definition, and belongs to RefsToName's world, not this one.
+// kind IN ('function','class') — narrower than "not import" — is deliberate,
+// not just import-exclusion: an "export" row can be a genuine value binding
+// (`export const Foo = 1`) OR a pure re-export pass-through with no local
+// definition at all (`export { Foo } from './other'`; internal/parser/js.go's
+// exportNamedRegex stores both identically under kind="export", a known
+// parser limitation — see js_precision_test.go's reexport_from_module_named
+// case). There is no way to tell those apart from the Symbol alone, so
+// "export" can't be trusted as evidence of a definition here. function/class
+// both still catch every "did someone reimplement X" case this exists for
+// (exported TS interface/type/enum lands in class too — see RefsToName's
+// sibling comment) without the re-export false-positive; the cost is losing
+// duplicate-detection for plain exported const/var/const-only names (Go's
+// top-level const/var, JS/TS non-function exports), which is an accepted,
+// lower-value trade — those recur legitimately across files far more often
+// than functions/types do.
 //
 // DISTINCT is required here (unlike RefsToName, which relies on the V7
 // (file_id,name) unique index on refs): symbols carries no such uniqueness —
@@ -214,7 +226,7 @@ func (db *DB) DefsOfName(snapshotID int64, name string) ([]string, error) {
 	rows, err := db.conn.Query(
 		`SELECT DISTINCT f.path FROM symbols s
 		 JOIN files f ON s.file_id = f.id
-		 WHERE f.snapshot_id = ? AND s.name = ? AND s.kind != 'import'
+		 WHERE f.snapshot_id = ? AND s.name = ? AND s.kind IN ('function', 'class')
 		 ORDER BY f.path`,
 		snapshotID, name,
 	)

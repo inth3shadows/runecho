@@ -54,6 +54,11 @@ var (
 	// also match an assignment-shaped line inside a triple-quoted string — the same
 	// cheap-and-deterministic tradeoff the rest of this parser accepts.
 	pyConstRegex = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)\s*(?::[^=\n]*)?=[^=]`)
+	// pyTupleConstRegex matches a module-level tuple/parallel assignment of
+	// uppercase constants (`MIN, MAX = 0, 100`). pyConstRegex — anchored to a
+	// single name immediately before `=` — cannot see these, so both names would
+	// otherwise be silently dropped from the no-__all__ fallback export list.
+	pyTupleConstRegex = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*(?:\s*,\s*[A-Z][A-Z0-9_]*)+)\s*=[^=]`)
 )
 
 // pythonLang lazily loads and caches the tree-sitter Python grammar. The grammar
@@ -172,6 +177,11 @@ func pyFallbackExports(source string, functions, classes []string) []string {
 	}
 	for _, m := range pyConstRegex.FindAllStringSubmatch(source, -1) {
 		exports = append(exports, m[1])
+	}
+	for _, m := range pyTupleConstRegex.FindAllStringSubmatch(source, -1) {
+		for _, name := range strings.Split(m[1], ",") {
+			exports = append(exports, strings.TrimSpace(name))
+		}
 	}
 	return exports
 }

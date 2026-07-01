@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/ir"
@@ -179,6 +180,68 @@ func TestRefreshIRForFile_E6(t *testing.T) {
 	}
 	if n := e6CountAuto(t, db2, id); n != 1 {
 		t.Errorf("auto snapshot count = %d after second refresh, want 1 (must roll, not append)", n)
+	}
+}
+
+// TestRefreshIRForFile_BootstrapRefreshesCoverage pins the fix for the stale
+// SupportedSeen bug: the bootstrap branch does a FULL-tree walk, so it must write
+// back the fresh supported-file count — not the pre-walk value. Otherwise a repo
+// that grew since its last CLI reindex reports coverage > 100% (FileCount from the
+// fresh snapshot over a stale, smaller SupportedSeen denominator).
+func TestRefreshIRForFile_BootstrapRefreshesCoverage(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	// Two supported source files → a full walk sees 2.
+	e6Write(t, filepath.Join(repo, "a.go"), "package x\n\nfunc A() {}\n")
+	e6Write(t, filepath.Join(repo, "b.go"), "package x\n\nfunc B() {}\n")
+
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	db, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	top, err := gitutil.TopLevel(repo)
+	if err != nil {
+		t.Fatalf("toplevel: %v", err)
+	}
+	id, err := db.EnrollRepo("r", top, top, 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if cd, err := gitutil.CommonDir(top); err == nil {
+		_ = db.SetRepoCommonDir(id, cd)
+	}
+	// Simulate a stale index from an earlier, smaller tree: supported_seen = 1.
+	if err := db.TouchRepo(id, time.Now(), 0, 1); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	db.Close()
+
+	// No .ai/ir.json exists → refreshIRForFile takes the bootstrap (full-walk) branch.
+	if got := refreshIRForFile(filepath.Join(repo, "a.go")); got != "bootstrapped" {
+		t.Fatalf("outcome = %q, want bootstrapped", got)
+	}
+
+	db2, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+	r, _, ok := db2.ResolveRepo(repo)
+	if !ok {
+		t.Fatal("resolve repo failed")
+	}
+	latest, err := db2.List(id, 1)
+	if err != nil || len(latest) == 0 {
+		t.Fatalf("list: %v", err)
+	}
+	if r.SupportedSeen < latest[0].FileCount {
+		t.Errorf("supported_seen = %d < snapshot FileCount = %d → coverage would exceed 100%%",
+			r.SupportedSeen, latest[0].FileCount)
+	}
+	if cov := snapshot.CoveragePercent(latest[0].FileCount, r.SupportedSeen); cov > 100 {
+		t.Errorf("coverage = %.1f%%, want <= 100 after bootstrap re-walk", cov)
 	}
 }
 

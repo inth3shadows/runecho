@@ -415,3 +415,15 @@ func TestPythonParser_CRLFLineEndings(t *testing.T) {
 		t.Errorf("CRLF line endings should be handled; got functions: %v", fs.Functions)
 	}
 }
+
+// Regression: module constants declared via tuple assignment (`MIN, MAX = 0, 100`)
+// must appear in the no-__all__ fallback export list. The single-name pyConstRegex
+// cannot match a name followed by a comma, so both were previously dropped.
+func TestPyFallbackExports_TupleConstants(t *testing.T) {
+	got := pyFallbackExports("MIN, MAX = 0, 100\nTHRESHOLD = 5\n", nil, nil)
+	for _, want := range []string{"MIN", "MAX", "THRESHOLD"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("want constant %q in fallback exports, got %v", want, got)
+		}
+	}
+}

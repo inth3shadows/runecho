@@ -77,7 +77,10 @@ func ExtractSymbolRefs(text string) map[string]string {
 	// inBlock tracks membership in a parenthesized var/const/type block; depth
 	// counts parens so a member whose value spans lines (e.g. a multi-line
 	// regexp.MustCompile(...)) does not close the block at its inner `)`.
-	inBlock, depth := false, 0
+	// braceDepth tracks `{`/`}` so a struct/interface nested inside a `type (...)`
+	// group — whose FIELD lines also match blockMemberRe — is not mistaken for
+	// block-level declarations (fields are captured only at brace depth 0).
+	inBlock, depth, braceDepth := false, 0, 0
 	for _, line := range strings.Split(text, "\n") {
 		for _, m := range backtickRe.FindAllStringSubmatch(line, -1) {
 			add(line, m[1])
@@ -94,7 +97,7 @@ func ExtractSymbolRefs(text string) map[string]string {
 
 		if !inBlock {
 			if blockOpenRe.MatchString(line) {
-				inBlock, depth = true, 1
+				inBlock, depth, braceDepth = true, 1, 0
 			}
 			// KNOWN limitation: the continue means a member declared on the SAME
 			// line as the block opener (e.g. `var (MaxSize int`) is not captured —
@@ -102,8 +105,18 @@ func ExtractSymbolRefs(text string) map[string]string {
 			// member on its own line, so this is degenerate in practice.
 			continue
 		}
-		if m := blockMemberRe.FindStringSubmatch(line); m != nil {
-			addList(line, m[1])
+		// Only capture members at the block's top level. Inside a nested struct or
+		// interface (brace depth > 0) the matching lines are FIELDS/method sigs, not
+		// declarations. The name of the struct itself sits at brace depth 0 (before
+		// its opening `{` on the same line), so it is still captured.
+		if braceDepth == 0 {
+			if m := blockMemberRe.FindStringSubmatch(line); m != nil {
+				addList(line, m[1])
+			}
+		}
+		braceDepth += strings.Count(line, "{") - strings.Count(line, "}")
+		if braceDepth < 0 {
+			braceDepth = 0
 		}
 		depth += strings.Count(line, "(") - strings.Count(line, ")")
 		if depth <= 0 {

@@ -1,2 +1,8 @@
 # SQL keywords that appear in string literals — not code symbols
 VALUES
+
+# stdlib pathlib.Path — bare constructor call (Path(...)) not resolved against
+# `from pathlib import Path`; method calls like Path.cwd() resolve fine, so
+# this is a gap in the Python import-regex bare-call cross-ref, not a real
+# dropped/dangling reference (scripts/codegraph_render.py)
+Path

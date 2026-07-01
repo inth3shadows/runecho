@@ -24,7 +24,10 @@ var (
 	// pure snake_case/lowercase noise. `export`/`async`/`default` modifiers precede
 	// the keyword, so the leading \b matches regardless. Single name only (class/
 	// function/def take one; multi-name `let a, b` is rare and left to backticks).
-	langDeclRe = regexp.MustCompile(`\b(?:class|function|let|def)\s+(\p{L}[\p{L}\p{N}_]*)`)
+	// `const` is JS/TS-only here (Go's is covered by declRe, which requires an
+	// uppercase name); a lowercase `const MAX_SIZE` is still filtered by
+	// IsCodeSymbol's mixed-case requirement, so this adds no noise.
+	langDeclRe = regexp.MustCompile(`\b(?:class|function|let|const|def)\s+(\p{L}[\p{L}\p{N}_]*)`)
 	// Method declarations `func (r *Reader) Fetch()` — declRe can't see these
 	// because the receiver breaks the `func <name>` shape, so they extracted
 	// nothing. group 1 is the receiver type (pointer and generic args stripped),
@@ -45,7 +48,7 @@ var (
 // (including every name of a multi-name decl and members of a parenthesized
 // `var (`/`const (`/`type (` block), Go method declarations
 // `func (r *Reader) Fetch()` (emitted qualified as Reader.Fetch), and
-// Python/JS/TS class/function/let/def declarations.
+// Python/JS/TS class/function/let/const/def declarations.
 // Conservative: only flags CamelCase names (mixed upper+lower) to avoid
 // ALL_CAPS env vars, snake_case functions, and Python dunders.
 //

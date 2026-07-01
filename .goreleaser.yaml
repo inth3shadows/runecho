@@ -1,0 +1,52 @@
+version: 2
+project_name: runecho
+
+# Build flags mirror install.sh exactly: CGO-free, the grammar_subset tags that
+# embed only the Python + JS/TS/TSX tree-sitter grammars (without them JS/TS
+# degrades to regex — names only, no spans), and the same version stamp path.
+builds:
+  - id: runecho-ir
+    main: ./cmd/runecho-ir
+    binary: runecho-ir
+    env: [CGO_ENABLED=0]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - { goos: windows, goarch: arm64 }
+  - id: runecho-mcp
+    main: ./cmd/runecho-mcp
+    binary: runecho-mcp
+    env: [CGO_ENABLED=0]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - { goos: windows, goarch: arm64 }
+  - id: runecho-guard
+    main: ./cmd/runecho-guard
+    binary: runecho-guard
+    env: [CGO_ENABLED=0]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - { goos: windows, goarch: arm64 }
+
+# One archive per OS/arch containing all three binaries — download, extract,
+# drop on PATH. No Go toolchain required.
+archives:
+  - id: runecho
+    ids: [runecho-ir, runecho-mcp, runecho-guard]
+    name_template: "runecho_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, LICENSE, install.sh]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  draft: false
+  prerelease: auto

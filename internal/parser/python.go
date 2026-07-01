@@ -211,6 +211,12 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 		return nil, nil, nil, nil
 	}
 	src := []byte(source)
+	// Reject pathologically-nested input before the super-linear tree-sitter
+	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
+	if exceedsNestDepth(src) {
+		fmt.Fprintf(os.Stderr, "runecho: Python source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
+		return nil, nil, nil, nil
+	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
 		return nil, nil, nil, nil
@@ -243,8 +249,8 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 	// for the hashed body and start line. spanNode differs from defNode only for a
 	// decorated definition, where it is the decorator-inclusive wrapper so that a
 	// decorator change (e.g. an edited @app.route path) is detected.
-	var walk func(n *ts.Node, prefix string)
-	record := func(defNode, spanNode *ts.Node, prefix string) {
+	var walk func(n *ts.Node, prefix string, depth int)
+	record := func(defNode, spanNode *ts.Node, prefix string, depth int) {
 		name := pyFieldText(defNode, "name", lang, src)
 		if name == "" {
 			return
@@ -264,32 +270,38 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 			return
 		}
 		if body := defNode.ChildByFieldName("body", lang); body != nil {
-			walk(body, full)
+			walk(body, full, depth+1)
 		}
 	}
 
-	walk = func(n *ts.Node, prefix string) {
+	walk = func(n *ts.Node, prefix string, depth int) {
+		// Bound recursion so a deeply-nested AST (Python nests via indentation, not
+		// brackets, so the byte-level guard above doesn't catch it) can't overflow
+		// the goroutine stack — a runtime throw the recover() above cannot catch.
+		if depth > maxParseNestDepth {
+			return
+		}
 		for i := 0; i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			switch c.Type(lang) {
 			case "function_definition", "class_definition":
-				record(c, c, prefix)
+				record(c, c, prefix, depth)
 			case "decorated_definition":
 				// Hash/line span the whole decorated block; name comes from the
 				// inner definition.
 				if def := c.ChildByFieldName("definition", lang); def != nil {
-					record(def, c, prefix)
+					record(def, c, prefix, depth)
 				} else {
-					walk(c, prefix)
+					walk(c, prefix, depth+1)
 				}
 			default:
 				// Recurse through wrappers (if/try/with blocks etc.) so
 				// conditionally-defined symbols are still seen.
-				walk(c, prefix)
+				walk(c, prefix, depth+1)
 			}
 		}
 	}
-	walk(tree.RootNode(), "")
+	walk(tree.RootNode(), "", 0)
 
 	if len(hashes) == 0 {
 		hashes = nil

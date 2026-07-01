@@ -32,6 +32,48 @@ type Parser interface {
 	SupportsExtension(ext string) bool
 }
 
+// maxParseNestDepth bounds the bracket/brace/paren nesting depth that the
+// tree-sitter-backed parsers (jsSymbolsFromAST, pySymbolsFromAST) will accept,
+// and the maximum AST recursion depth their walk functions descend. The vendored
+// pure-Go tree-sitter runtime is super-linear in nesting depth — a crafted
+// ~100 KB source file of nested brackets parses for minutes, hanging the indexer
+// or MCP server (a local denial of service). Separately, an AST nested deeper
+// than the goroutine stack can hold overflows with a runtime throw, which the
+// parsers' recover() guards cannot catch, crashing the process. Real
+// hand-authored code nests only a few dozen deep; 1000 leaves generous headroom
+// while capping worst-case parse time to tens of milliseconds and walk recursion
+// to a safe stack depth. Input over the cap degrades to no AST symbols (the same
+// fail-safe as a parser panic). The check is a pure function of the bytes —
+// unlike a wall-clock timeout, it preserves RunEcho's same-input-same-output
+// determinism guarantee.
+const maxParseNestDepth = 1000
+
+// exceedsNestDepth reports whether src nests (), [], or {} deeper than
+// maxParseNestDepth. It is a single linear byte scan tracking the running count
+// of all three opener classes together — a sound upper bound on AST nesting,
+// which is all that's needed to reject pathological input cheaply before the
+// expensive parse. It does not match bracket kinds; brackets inside string or
+// comment literals inflate the count, but only ever toward skipping a parse we
+// would rather skip anyway (a 1000-deep run of literal brackets is not
+// hand-authored source).
+func exceedsNestDepth(src []byte) bool {
+	depth := 0
+	for _, b := range src {
+		switch b {
+		case '(', '[', '{':
+			depth++
+			if depth > maxParseNestDepth {
+				return true
+			}
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 // ExtAwareParser is an optional extension implemented by parsers that need the
 // file extension to do their job — currently the JS/TS parser, which selects a
 // tree-sitter grammar by .js/.ts/.tsx. The generator passes the extension via

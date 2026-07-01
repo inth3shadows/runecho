@@ -199,6 +199,12 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 		}
 	}()
 	src := []byte(source)
+	// Reject pathologically-nested input before the super-linear tree-sitter
+	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
+	if exceedsNestDepth(src) {
+		fmt.Fprintf(os.Stderr, "runecho: JS/TS source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
+		return nil, nil, nil, nil
+	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
 		return nil, nil, nil, nil
@@ -247,8 +253,15 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 		return nil
 	}
 
-	var walk func(n *ts.Node, prefix string)
-	walk = func(n *ts.Node, prefix string) {
+	var walk func(n *ts.Node, prefix string, depth int)
+	walk = func(n *ts.Node, prefix string, depth int) {
+		// Bound recursion so a deeply-nested AST can't overflow the goroutine
+		// stack (a runtime throw the recover() above cannot catch). The nesting
+		// guard above already caps bracket depth, but this is the direct stack
+		// backstop.
+		if depth > maxParseNestDepth {
+			return
+		}
 		for i := 0; i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			switch c.Type(lang) {
@@ -283,7 +296,7 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				}
 				full := qualify(prefix, name)
 				recordClass(full, c)
-				walk(c, full) // descend into the body so methods become Class.method
+				walk(c, full, depth+1) // descend into the body so methods become Class.method
 
 			case "variable_declarator":
 				// `const name = () => ...` / `= function(){}`: attribute the
@@ -300,20 +313,20 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				if cls := childOfType(c, "class", "class_expression"); cls != nil && name != "" {
 					full := qualify(prefix, name)
 					recordClass(full, cls)
-					walk(cls, full)
+					walk(cls, full, depth+1)
 					continue
 				}
-				walk(c, prefix)
+				walk(c, prefix, depth+1)
 
 			default:
 				// Recurse through wrappers (export_statement, lexical_declaration,
 				// class_body, statement_block, and ERROR-recovery nodes) so
 				// declarations nested inside them are still found.
-				walk(c, prefix)
+				walk(c, prefix, depth+1)
 			}
 		}
 	}
-	walk(tree.RootNode(), "")
+	walk(tree.RootNode(), "", 0)
 
 	if len(hashes) == 0 {
 		hashes = nil

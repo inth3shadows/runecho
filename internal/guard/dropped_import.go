@@ -3,7 +3,6 @@ package guard
 import (
 	"regexp"
 	"sort"
-	"strings"
 )
 
 // DroppedImport names an imported symbol whose import binding an edit removes
@@ -53,8 +52,11 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 		bound[d] = struct{}{}
 	}
 
-	newLines := TextToAddedLines(newText)
-	var out []DroppedImport
+	// Collect the imports that were actually dropped (removed and not rebound)
+	// before touching the new text. Most edits drop nothing, so this keeps the
+	// common case at zero identifier scans — the per-name check used to be lazy,
+	// and we preserve that fast path rather than eagerly indexing every edit.
+	var dropped []string
 	for name := range oldImps {
 		if _, still := newImps[name]; still {
 			continue // the import survived in the new text
@@ -62,7 +64,19 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 		if _, b := bound[name]; b {
 			continue // the name is now provided by a local definition or binding
 		}
-		if ln := firstUnqualifiedUse(lang, newLines, name); ln > 0 {
+		dropped = append(dropped, name)
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+
+	// Index every unqualified identifier use in one pass so each dropped name is an
+	// O(1) lookup below. Rescanning the whole new text per dropped import was
+	// O(distinct-imports × text-length) — quadratic on a crafted diff.
+	uses := firstUnqualifiedUseLines(lang, TextToAddedLines(newText))
+	var out []DroppedImport
+	for _, name := range dropped {
+		if ln := uses[name]; ln > 0 {
 			out = append(out, DroppedImport{Name: name, LineNo: ln})
 		}
 	}
@@ -78,12 +92,20 @@ func nameSet(names []string) map[string]struct{} {
 	return m
 }
 
-// firstUnqualifiedUse returns the 1-based line number of the first use of name as
-// an unqualified identifier in lines, ignoring import lines and string/comment
-// content (which are blanked by the same stateful literal stripper the reference
-// extractor uses). Returns 0 if name is not used. The import-line skip is what
-// keeps the binding line itself from counting as a "use".
-func firstUnqualifiedUse(lang Lang, lines []AddedLine, name string) int {
+// firstUnqualifiedUseLines returns, for every identifier used as an unqualified
+// (non-attribute) whole word anywhere in lines, the 1-based number of its FIRST
+// such use. Import lines and string/comment content are ignored (the latter
+// blanked by the same stateful literal stripper the reference extractor uses);
+// the import-line skip keeps a binding line from counting as a "use". This is the
+// single-pass form: callers resolve many candidate names in O(1) each instead of
+// rescanning the text per name, which was quadratic in distinct-imports × length.
+//
+// A maximal run of identifier bytes already satisfies the word-boundary
+// conditions the old per-name check enforced, so the only extra test is that the
+// run is not preceded by '.' (which would make it a qualified attribute, e.g.
+// `x.Name`) — semantics identical to the former containsUnqualifiedWord.
+func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
+	uses := make(map[string]int)
 	open := ""
 	prevNo := 0
 	for i, l := range lines {
@@ -96,35 +118,24 @@ func firstUnqualifiedUse(lang Lang, lines []AddedLine, name string) int {
 		if isImportLine(lang, l.Text) {
 			continue
 		}
-		if containsUnqualifiedWord(scan, name) {
-			return l.LineNo
+		for j := 0; j < len(scan); {
+			if !isWordByte(scan[j]) {
+				j++
+				continue
+			}
+			start := j
+			for j < len(scan) && isWordByte(scan[j]) {
+				j++
+			}
+			if start > 0 && scan[start-1] == '.' {
+				continue // qualified attribute, e.g. x.Name
+			}
+			if id := scan[start:j]; uses[id] == 0 {
+				uses[id] = l.LineNo
+			}
 		}
 	}
-	return 0
-}
-
-// containsUnqualifiedWord reports whether name appears in s as a whole identifier
-// not preceded by '.' (which would make it a qualified attribute, e.g. `x.Name`).
-func containsUnqualifiedWord(s, name string) bool {
-	for from := 0; from < len(s); {
-		rel := strings.Index(s[from:], name)
-		if rel < 0 {
-			return false
-		}
-		i := from + rel
-		var before, after byte = ' ', ' '
-		if i > 0 {
-			before = s[i-1]
-		}
-		if i+len(name) < len(s) {
-			after = s[i+len(name)]
-		}
-		if before != '.' && !isWordByte(before) && !isWordByte(after) {
-			return true
-		}
-		from = i + 1
-	}
-	return false
+	return uses
 }
 
 func isWordByte(b byte) bool {

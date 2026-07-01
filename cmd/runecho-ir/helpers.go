@@ -21,7 +21,11 @@ func mustOpenDB() (*snapshot.DB, int) {
 	if err != nil {
 		return nil, printErr(err)
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700: the central store aggregates paths, filenames, and symbol names across
+	// every enrolled repo; keep other local users out of it on a shared host. The
+	// dir mode gates traversal, so it also covers history.db and its WAL/SHM
+	// sidecars without per-file chmod. (Only newly-created dirs are affected.)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, printErr(fmt.Errorf("create %s: %w", dir, err))
 	}
 	db, err := snapshot.Open(filepath.Join(dir, "history.db"))

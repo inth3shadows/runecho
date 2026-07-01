@@ -65,10 +65,10 @@ func installHooks(root string, force bool) error {
 	}
 	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
 
-	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %q \"$@\"\n", guardBin)
-	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%q repo reindex . >/dev/null 2>&1 &\n", irBin)
+	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %s \"$@\"\n", shellQuote(guardBin))
+	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
 	// post-checkout: only reindex on branch switches ($3 == 1), not file checkouts.
-	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %q repo reindex . >/dev/null 2>&1 &\n", irBin)
+	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
 
 	hooks := map[string]string{
 		"pre-commit":    preCommit,
@@ -171,9 +171,21 @@ func xmlEscape(s string) string {
 	return buf.String()
 }
 
+// shellQuote wraps s in single quotes for safe literal use in a POSIX shell,
+// escaping any embedded single quote with the standard close-escape-reopen
+// sequence. Unlike Go's %q (which produces a Go string literal), single-quoting
+// neutralizes $, backticks, and backslashes — all still active inside shell
+// double quotes. The interpolated value is os.Executable() (the operator's own
+// install path, not attacker-controlled), so this is robustness hardening, not a
+// reachable vulnerability: it makes a binary path containing shell metacharacters
+// install a correct hook/cron line instead of a broken or surprising one.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // installCron adds an hourly crontab entry on Linux/other.
 func installCron(irBin string) error {
-	entry := fmt.Sprintf("0 * * * * %q repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", irBin)
+	entry := fmt.Sprintf("0 * * * * %s repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", shellQuote(irBin))
 	// Read existing crontab, strip any prior runecho entry, append new one.
 	existing, _ := exec.Command("crontab", "-l").Output()
 	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")

@@ -10,9 +10,20 @@ import (
 	"github.com/inth3shadows/runecho/internal/ir"
 )
 
+// autoSnapshotLabel is the reserved label for the E6 rolling snapshot. It is
+// owned exclusively by RollAutoSnapshot / deleteAutoSnapshotsTx, which delete
+// every row carrying it on each edit. SaveSnapshot rejects it so a user
+// `snapshot --label=auto` cannot plant a "manual" snapshot that the next
+// auto-roll silently deletes (violating the "manual snapshots are never touched"
+// invariant) or that masquerades as the guard's freshness baseline in the interim.
+const autoSnapshotLabel = "auto"
+
 // SaveSnapshot persists a full IR snapshot in a single transaction, scoped to
 // repoID (the stable repo identity). Returns the new snapshot ID.
 func (db *DB) SaveSnapshot(repoID int64, sessionID, label, root string, irData *ir.IR) (int64, error) {
+	if label == autoSnapshotLabel {
+		return 0, fmt.Errorf("label %q is reserved for the auto-fresh rolling snapshot", label)
+	}
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
@@ -46,7 +57,7 @@ func (db *DB) RollAutoSnapshot(repoID int64, sessionID, root string, irData *ir.
 	if err := deleteAutoSnapshotsTx(tx, repoID); err != nil {
 		return 0, err
 	}
-	id, err := writeSnapshotTx(tx, repoID, sessionID, "auto", root, irData)
+	id, err := writeSnapshotTx(tx, repoID, sessionID, autoSnapshotLabel, root, irData)
 	if err != nil {
 		return 0, err
 	}

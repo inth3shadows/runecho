@@ -51,7 +51,9 @@ func logDecision(rec decisionRecord) {
 	}
 
 	path := filepath.Join(dir, "decisions.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// 0600: the decision log records repo paths, filenames, and symbol names;
+	// keep it owner-only (defense-in-depth alongside the 0700 store dir).
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}

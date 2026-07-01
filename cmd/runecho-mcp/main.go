@@ -21,7 +21,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "runecho-mcp: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700: keep other local users out of the central store on a shared host (the
+	// dir mode gates traversal to history.db and its sidecars). Matches runecho-ir.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "runecho-mcp: create %s: %v\n", dir, err)
 		os.Exit(1)
 	}

@@ -49,7 +49,9 @@ func runBackup(args []string) int {
 			return printErr(err)
 		}
 		dest = filepath.Join(dir, "backups", "history-backup.db")
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		// 0700: the backup is a full copy of history.db (same repo paths and symbol
+		// names); keep it owner-only, consistent with the central store dir.
+		if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
 			return printErr(err)
 		}
 	}

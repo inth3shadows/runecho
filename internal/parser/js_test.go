@@ -207,6 +207,83 @@ func TestJSParser_ExportDefault_NamedFunctionAndClass(t *testing.T) {
 	}
 }
 
+func TestJSParser_ExportDestructure(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantExp []string
+	}{
+		{
+			name:    "object destructure",
+			source:  "export const { foo, bar } = config;",
+			wantExp: []string{"bar", "foo"},
+		},
+		{
+			name:    "array destructure",
+			source:  "export const [ first, second ] = arr;",
+			wantExp: []string{"first", "second"},
+		},
+		{
+			name:    "renamed object destructure keeps bound names",
+			source:  "export const { a: renamedA, b: renamedB } = x;",
+			wantExp: []string{"renamedA", "renamedB"},
+		},
+		{
+			name:    "object destructure with defaults",
+			source:  "export const { a = 1, b = 2 } = x;",
+			wantExp: []string{"a", "b"},
+		},
+		{
+			name:    "array destructure with defaults",
+			source:  "export const [ a = 1, b = 2 ] = y;",
+			wantExp: []string{"a", "b"},
+		},
+		{
+			name:    "renamed with default keeps bound name",
+			source:  "export const { a: renamedA = 1 } = x;",
+			wantExp: []string{"renamedA"},
+		},
+		{
+			name:    "export let destructure",
+			source:  "export let { foo, bar } = x;",
+			wantExp: []string{"bar", "foo"},
+		},
+		{
+			name:    "export var destructure",
+			source:  "export var [ a, b ] = y;",
+			wantExp: []string{"a", "b"},
+		},
+		{
+			name:    "object rest element binds trailing name",
+			source:  "export const { a, ...rest } = x;",
+			wantExp: []string{"a", "rest"},
+		},
+		{
+			name:    "array rest element binds trailing name",
+			source:  "export const [ first, ...others ] = arr;",
+			wantExp: []string{"first", "others"},
+		},
+		{
+			name:    "plain export const still works (no regression)",
+			source:  "export const Widget = 1;",
+			wantExp: []string{"Widget"},
+		},
+	}
+
+	p := NewJSParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.Parse(tc.source)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !equalStringSlices(result.Exports, tc.wantExp) {
+				t.Errorf("Exports = %v, want %v", result.Exports, tc.wantExp)
+			}
+		})
+	}
+}
+
 func TestJSParser_MultiNameDeclExport(t *testing.T) {
 	cases := []struct {
 		name    string

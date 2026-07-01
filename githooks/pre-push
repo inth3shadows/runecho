@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Refuse to push a vX.Y.Z tag that isn't semver-greater than the highest
+# existing tag (guards issue #51: non-monotonic release tags).
+#
+# Not auto-installed by git — copy or symlink to the hooks dir git actually
+# uses (`git rev-parse --git-common-dir`/hooks/pre-push) after cloning.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/tags/v[0-9]*.[0-9]*.[0-9]*)
+      tag="${local_ref#refs/tags/}"
+      highest="$(git tag -l 'v*' | grep -vFx "$tag" | sort -V | tail -1)"
+      if [ -n "$highest" ]; then
+        newest="$(printf '%s\n%s\n' "$highest" "$tag" | sort -V | tail -1)"
+        if [ "$newest" != "$tag" ]; then
+          echo "pre-push: refusing $tag — not semver-greater than existing tag $highest (see issue #51)" >&2
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+done
+exit 0

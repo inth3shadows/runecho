@@ -125,11 +125,11 @@ func TestExtractSymbolRefs_DeclBlock_NestedAndKeys(t *testing.T) {
 // IsCodeSymbol still filters pure snake_case/lowercase noise.
 func TestExtractSymbolRefs_LangParity(t *testing.T) {
 	want := map[string]string{
-		"class MyHandler:":         "MyHandler",   // python/js class
-		"function processData() {": "processData", // js func, camelCase
-		"export class Widget {":    "Widget",      // export modifier before keyword
-		"let RetryCount = 3":       "RetryCount",  // js let
-		"async def DoWork(self):":  "DoWork",      // python async, CamelCase
+		"class MyHandler:":             "MyHandler",   // python/js class
+		"function processData() {":     "processData", // js func, camelCase
+		"export class Widget {":        "Widget",      // export modifier before keyword
+		"let RetryCount = 3":           "RetryCount",  // js let
+		"async def DoWork(self):":      "DoWork",      // python async, CamelCase
 		"const processData = (x) => x": "processData", // js/ts const, camelCase
 	}
 	for text, sym := range want {

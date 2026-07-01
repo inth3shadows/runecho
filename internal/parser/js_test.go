@@ -207,6 +207,53 @@ func TestJSParser_ExportDefault_NamedFunctionAndClass(t *testing.T) {
 	}
 }
 
+func TestJSParser_MultiNameDeclExport(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantExp []string
+	}{
+		{
+			name:    "multi_name_const",
+			source:  "export const A = 1, B = 2, C = 3;",
+			wantExp: []string{"A", "B", "C"},
+		},
+		{
+			name:    "multi_name_let",
+			source:  "export let X = 1, Y = 2;",
+			wantExp: []string{"X", "Y"},
+		},
+		{
+			name:    "single_name_const_unaffected",
+			source:  "export const Widget = 1;",
+			wantExp: []string{"Widget"},
+		},
+		{
+			name:    "initializer_with_internal_commas",
+			source:  "export const A = f(1, 2), B = 3;",
+			wantExp: []string{"A", "B"},
+		},
+		{
+			name:    "single_name_var_unaffected",
+			source:  "export var Count = 0;",
+			wantExp: []string{"Count"},
+		},
+	}
+
+	p := NewJSParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.Parse(tc.source)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !equalStringSlices(result.Exports, tc.wantExp) {
+				t.Errorf("Exports = %v, want %v", result.Exports, tc.wantExp)
+			}
+		})
+	}
+}
+
 func TestJSParser_SupportsExtension(t *testing.T) {
 	parser := NewJSParser()
 

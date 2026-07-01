@@ -145,6 +145,9 @@ not general-purpose code intelligence.
   position (the qualified positions are the deliberate gap).
 - Snapshots, diffs, and hash queries are local and deterministic. There is no
   semantic search, embedding index, or hosted control plane here.
+- The guard runs unattended on every commit/edit with no sandboxing — see
+  [SECURITY.md](SECURITY.md) for the threat model, what's stored, and how to
+  report a vulnerability.
 
 ## Project Structure
 

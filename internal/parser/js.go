@@ -58,15 +58,28 @@ var (
 	// (idiomatic under isolatedModules / verbatimModuleSyntax). The optional
 	// group leaves the value form untouched.
 	exportNamedRegex = regexp.MustCompile(`export\s+(?:type\s+)?\{([^}]+)\}`)
-	// Matches: export const/let/var/function/class/type/interface/enum name.
+	// Matches: export function/class/type/interface/enum name. const/let/var
+	// are handled separately by exportMultiDeclRegex below, because a single
+	// declaration can bind more than one name (`export const A = 1, B = 2;`).
 	// type/interface/enum land in Exports the same way `export class` does — the
 	// AST records them in Classes, this regex records the exported name (so a TS
 	// `export interface Shape {}` is enumerable as both a class and an export).
-	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function|type|interface|enum)\s+(\w+)`)
+	exportDeclRegex = regexp.MustCompile(`export\s+(?:function|class|async\s+function|type|interface|enum)\s+(\w+)`)
+	// Matches: export const/let/var NAME[: Type][ = value][, NAME2 ...];
+	// Captures the whole declarator list up to the statement terminator so
+	// multi-name declarations can be split on TOP-LEVEL commas only (see
+	// splitTopLevelDeclNames) — a naive split on every comma would shatter an
+	// initializer like `f(1, 2)` into a phantom declarator name.
+	exportMultiDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var)\s+([^;\n]+)`)
+	// Matches the declarator name at the start of one comma-separated segment
+	// of a declarator list, stopping at the first non-identifier character
+	// (the `:` of a type annotation or the `=` of an initializer).
+	declNameRegex = regexp.MustCompile(`^\w+`)
 	// Matches the binding list of a destructured object export:
 	// export const { foo, bar } = x. The trailing `=` distinguishes a
-	// destructuring assignment from an object type; exportDeclRegex only
-	// captures a single \w+ binding, so these were previously dropped.
+	// destructuring assignment from an object type; the single-\w+ decl regexes
+	// above don't capture these bindings, and splitTopLevelDeclNames yields
+	// nothing for a `{`/`[`-leading segment, so the two paths never double-count.
 	exportObjDestructureRegex = regexp.MustCompile(`export\s+(?:const|let|var)\s*\{([^}]*)\}\s*=`)
 	// Matches the binding list of a destructured array export:
 	// export const [ a, b ] = y.
@@ -485,11 +498,20 @@ func extractExports(source string) []string {
 		}
 	}
 
-	// Declaration exports: export const foo = ...
+	// Declaration exports: export function foo() / export class Foo / etc.
 	matches = exportDeclRegex.FindAllStringSubmatch(source, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
 			exports = append(exports, match[1])
+		}
+	}
+
+	// Declaration exports: export const/let/var foo = ..., bar = ...;
+	// May bind more than one name per statement — split on top-level commas.
+	matches = exportMultiDeclRegex.FindAllStringSubmatch(source, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			exports = append(exports, splitTopLevelDeclNames(match[1])...)
 		}
 	}
 
@@ -528,6 +550,58 @@ func extractExports(source string) []string {
 	}
 
 	return exports
+}
+
+// splitTopLevelDeclNames splits a `const`/`let`/`var` declarator list (the
+// text after the keyword, up to the statement terminator) into its bound
+// names. Commas inside (), [], {}, or a string/template literal are NOT
+// split boundaries — only a comma at depth 0 separates declarators — so an
+// initializer's own commas (e.g. `f(1, 2)`) don't get mistaken for another
+// declarator. Each segment's name is its leading identifier; a trailing
+// `: Type` annotation or `= value` is discarded by declNameRegex. A segment
+// that leads with `{` or `[` (a destructuring pattern) yields no name here —
+// exportObjDestructureRegex / exportArrDestructureRegex own that case.
+func splitTopLevelDeclNames(decl string) []string {
+	var names []string
+	depth := 0
+	inStr := false
+	var strChar byte
+	start := 0
+	flush := func(end int) {
+		seg := strings.TrimSpace(decl[start:end])
+		if name := declNameRegex.FindString(seg); name != "" {
+			names = append(names, name)
+		}
+	}
+	for i := 0; i < len(decl); i++ {
+		c := decl[i]
+		if inStr {
+			if c == '\\' {
+				i++ // skip the escaped character
+				continue
+			}
+			if c == strChar {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			inStr = true
+			strChar = c
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				flush(i)
+				start = i + 1
+			}
+		}
+	}
+	flush(len(decl))
+	return names
 }
 
 // destructuredNames extracts the bound identifiers from the inner text of a

@@ -81,9 +81,10 @@ full semantic analysis.
 1. Get the binaries. Either **download a prebuilt release** (no Go needed) — pick
    your OS/arch from the [latest release](https://github.com/inth3shadows/runecho/releases/latest):
    ```bash
-   # example: macOS arm64 — adjust the asset name for your platform
-   VER=v0.5.0
-   curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${VER}/runecho_${VER}_darwin_arm64.tar.gz" | tar -xz
+   # example: macOS arm64 — adjust the asset name for your platform.
+   # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
+   TAG=v0.6.0; NUM=0.6.0
+   curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
    …or **build from source** (needs Go 1.24+), which also installs the guard hooks:

@@ -172,13 +172,13 @@ func xmlEscape(s string) string {
 }
 
 // shellQuote wraps s in single quotes for safe literal use in a POSIX shell,
-// escaping any embedded single quote as the standard '\'' idiom. Unlike Go's %q
-// (which produces a Go string literal), single-quoting neutralizes $, backticks,
-// and backslashes — all still active inside shell double quotes. The interpolated
-// value is os.Executable() (the operator's own install path, not
-// attacker-controlled), so this is robustness hardening, not a reachable
-// vulnerability: it makes a binary path containing shell metacharacters install a
-// correct hook/cron line instead of a broken or surprising one.
+// escaping any embedded single quote with the standard close-escape-reopen
+// sequence. Unlike Go's %q (which produces a Go string literal), single-quoting
+// neutralizes $, backticks, and backslashes — all still active inside shell
+// double quotes. The interpolated value is os.Executable() (the operator's own
+// install path, not attacker-controlled), so this is robustness hardening, not a
+// reachable vulnerability: it makes a binary path containing shell metacharacters
+// install a correct hook/cron line instead of a broken or surprising one.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

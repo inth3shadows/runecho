@@ -442,10 +442,15 @@ func TestSaveSnapshot_RefsToName(t *testing.T) {
 
 // TestSaveSnapshot_DefsOfName verifies symbols answer "who defines X"
 // deterministically (the mirror of TestSaveSnapshot_RefsToName), that
-// import-kind rows (module references, not definitions) are excluded, and
-// that a name carried under two kinds in one file (the exported TS
-// interface/type/enum pattern — see internal/parser/js.go) collapses to a
-// single definer row rather than double-counting that file.
+// import-kind rows (module references, not definitions) are excluded, that a
+// name carried under two kinds in one file (the exported TS interface/type
+// pattern — see internal/parser/js.go) collapses to a single definer row
+// rather than double-counting that file, and that an export-only row (which
+// may be a genuine value export OR a pure re-export pass-through — the two
+// are indistinguishable at the Symbol level, see js_precision_test.go's
+// reexport_from_module_named case) is NOT trusted as a definer, since a
+// re-export would otherwise produce a false "duplicate definition" report
+// against a barrel/index file that never actually defines anything.
 func TestSaveSnapshot_DefsOfName(t *testing.T) {
 	db, _ := openTemp(t)
 	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
@@ -460,6 +465,10 @@ func TestSaveSnapshot_DefsOfName(t *testing.T) {
 		"d.go": {Hash: "h4", Symbols: []ir.Symbol{
 			{Name: "Config", Kind: "class"}, {Name: "Config", Kind: "export"},
 		}},
+		// export-only (no class/function row) — e.g. `export { Reexported } from
+		// './impl'` in a barrel file, or a plain `export const Reexported = 1` —
+		// must NOT count as a definer either way; see doc comment above.
+		"e.go": {Hash: "h5", Symbols: []ir.Symbol{{Name: "Reexported", Kind: "export"}}},
 	}}
 	snapID, err := db.SaveSnapshot(id, "s", "v1", "/tmp/r", irData)
 	if err != nil {
@@ -475,6 +484,9 @@ func TestSaveSnapshot_DefsOfName(t *testing.T) {
 	}
 	if got, _ := db.DefsOfName(snapID, "Config"); len(got) != 1 || got[0] != "d.go" {
 		t.Errorf("definers of Config = %v, want [d.go] deduplicated across kinds", got)
+	}
+	if got, _ := db.DefsOfName(snapID, "Reexported"); len(got) != 0 {
+		t.Errorf("definers of Reexported = %v, want empty (export-only row is not trusted as a definition)", got)
 	}
 	if got, _ := db.DefsOfName(snapID, "Nope"); len(got) != 0 {
 		t.Errorf("definers of Nope = %v, want empty", got)

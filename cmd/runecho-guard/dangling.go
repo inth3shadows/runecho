@@ -93,6 +93,49 @@ func defSet(lang guard.Lang, text string) map[string]struct{} {
 	return m
 }
 
+// openLatestSnapshot opens the central store, resolves the repo containing
+// dir, and returns its latest snapshot ID plus the edited file's self-path
+// (for self-exclusion) — the shared preamble for every deletion/definition-
+// side check (checkDanglingRefs, checkDuplicateDefs). ok=false on any
+// failure (missing store, unenrolled repo, no snapshot) — fail-open, never a
+// false block; the caller is expected to just return nil warnings.
+//
+// KNOWN GAP, not fixed here: a schema-newer store (OpenFast returning
+// snapshot.ErrSchemaNewer) is folded into the same silent ok=false as "no
+// store" — main()/lookupSymbolsFor instead surface that case as a "rebuild
+// the guard binary" advisory, but these deletion/definition-side checks have
+// no channel back to the ask message to do the same. Worth threading through
+// if it turns out to matter in dogfooding; not done here to keep this a pure
+// de-duplication of the two existing call sites' behavior, not a behavior change.
+func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, self string, ok bool) {
+	storeDir, err := runechoDir()
+	if err != nil {
+		return nil, 0, "", false
+	}
+	dbPath := filepath.Join(storeDir, "history.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, 0, "", false
+	}
+	// OpenFast skips the on-open integrity scan — this fires only on
+	// deletion/definition edits, but still on a latency-sensitive path;
+	// integrity is the writer's job.
+	db, err = snapshot.OpenFast(dbPath)
+	if err != nil {
+		return nil, 0, "", false
+	}
+	repo, _, resolved := db.ResolveRepo(dir)
+	if !resolved {
+		db.Close()
+		return nil, 0, "", false
+	}
+	snaps, err := db.List(repo.ID, 1)
+	if err != nil || len(snaps) == 0 {
+		db.Close()
+		return nil, 0, "", false
+	}
+	return db, snaps[0].ID, repoRelPath(filePath), true
+}
+
 // checkDanglingRefs returns one warning per deleted def that is still referenced
 // by a file OTHER than the one being edited, per the latest snapshot's refs
 // index. The self-exclusion is the key false-positive killer: deleting a def
@@ -106,33 +149,11 @@ func checkDanglingRefs(dir, filePath string, deleted []string) []danglingWarning
 	if len(deleted) == 0 {
 		return nil
 	}
-	storeDir, err := runechoDir()
-	if err != nil {
-		return nil
-	}
-	dbPath := filepath.Join(storeDir, "history.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil
-	}
-	// OpenFast skips the on-open integrity scan — this fires only on deletion
-	// edits, but still on a latency-sensitive path; integrity is the writer's job.
-	db, err := snapshot.OpenFast(dbPath)
-	if err != nil {
+	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
+	if !ok {
 		return nil
 	}
 	defer db.Close()
-
-	repo, _, resolved := db.ResolveRepo(dir)
-	if !resolved {
-		return nil
-	}
-	snaps, err := db.List(repo.ID, 1)
-	if err != nil || len(snaps) == 0 {
-		return nil
-	}
-	snapID := snaps[0].ID
-
-	self := repoRelPath(filePath)
 
 	var warns []danglingWarning
 	for _, d := range deleted {

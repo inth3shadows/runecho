@@ -379,10 +379,13 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// removedText is the Edit/MultiEdit text being deleted (cheap, no IO). It is
 	// captured before the empty-input guard so a pure-deletion edit (empty
 	// new_string) still reaches the E1 dangling-refs check below instead of being
-	// dropped here. Empty (and inert) unless E1 is enabled. Write deletions are
-	// derived later from the on-disk file, not here.
+	// dropped here. Empty (and inert) unless E1/dropped-import is enabled. Write
+	// deletions are derived later from the on-disk file, not here. E5 does NOT
+	// gate on this: it reads the whole pre-edit file itself (wholeFileText), so
+	// including duplicateEnabled() here would needlessly keep this fast-path
+	// guard from firing on an E5-only pure-deletion edit.
 	var removedText string
-	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
+	if danglingEnabled() || droppedImportEnabled() {
 		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
 	}
 	if filePath == "" || (text == "" && removedText == "") {
@@ -486,10 +489,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
 		// whole on-disk pre-edit file (wholeFileText), not oldText/removedText —
 		// see wholeFileText's doc comment for why the hunk-scoped variable above
-		// is not reusable here.
+		// is not reusable here. Skips the check entirely (rather than treating ""
+		// as "nothing defined") when wholeFileText can't give a definitive answer
+		// — see wholeFileText's doc comment for why that distinction matters.
 		if duplicateEnabled() {
-			if added := addedDefs(lang, wholeFileText(filePath), text); len(added) > 0 {
-				duplicates = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+			if wholeOld, definitive := wholeFileText(filePath); definitive {
+				if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
+					duplicates = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+				}
 			}
 		}
 	}

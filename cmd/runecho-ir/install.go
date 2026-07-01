@@ -65,10 +65,10 @@ func installHooks(root string, force bool) error {
 	}
 	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
 
-	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %q \"$@\"\n", guardBin)
-	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%q repo reindex . >/dev/null 2>&1 &\n", irBin)
+	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %s \"$@\"\n", shellQuote(guardBin))
+	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
 	// post-checkout: only reindex on branch switches ($3 == 1), not file checkouts.
-	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %q repo reindex . >/dev/null 2>&1 &\n", irBin)
+	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
 
 	hooks := map[string]string{
 		"pre-commit":    preCommit,
@@ -171,9 +171,26 @@ func xmlEscape(s string) string {
 	return buf.String()
 }
 
+// shellQuote wraps s in single quotes for safe embedding in a POSIX shell
+// command, escaping any embedded single quote as the standard '\” idiom. Unlike
+// Go's %q (a Go string literal), this neutralises $, `, and " that the shell
+// would otherwise expand — so an install path containing those characters yields
+// a hook that still exec's the intended binary.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// cronQuote shell-quotes s for a crontab command field and additionally escapes
+// `%`, which cron itself converts to a newline (splitting the command and feeding
+// the remainder as stdin) BEFORE any shell parsing — single-quoting alone cannot
+// prevent that, so the `%` must be backslash-escaped in the raw crontab line.
+func cronQuote(s string) string {
+	return strings.ReplaceAll(shellQuote(s), "%", `\%`)
+}
+
 // installCron adds an hourly crontab entry on Linux/other.
 func installCron(irBin string) error {
-	entry := fmt.Sprintf("0 * * * * %q repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", irBin)
+	entry := fmt.Sprintf("0 * * * * %s repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", cronQuote(irBin))
 	// Read existing crontab, strip any prior runecho entry, append new one.
 	existing, _ := exec.Command("crontab", "-l").Output()
 	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")

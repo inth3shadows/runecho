@@ -240,6 +240,26 @@ func equalFileStructure(a, b FileStructure) bool {
 		equalStringSlices(a.Exports, b.Exports)
 }
 
+// Regression: `export default abstract class Foo` — the fallback default-export
+// regex must capture the class NAME, not the `abstract` modifier.
+func TestExtractExports_DefaultAbstractClass(t *testing.T) {
+	got := extractExports("export default abstract class Foo {}\n")
+	has := func(name string) bool {
+		for _, e := range got {
+			if e == name {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("Foo") {
+		t.Errorf("want class name Foo in exports, got %v", got)
+	}
+	if has("abstract") {
+		t.Errorf("modifier 'abstract' must not be captured as an export: %v", got)
+	}
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

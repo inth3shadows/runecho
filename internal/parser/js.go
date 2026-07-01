@@ -65,10 +65,12 @@ var (
 	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function|type|interface|enum)\s+(\w+)`)
 	// Matches: export * as ns from './m' — the namespace re-export binds `ns`.
 	exportStarAsRegex = regexp.MustCompile(`export\s+\*\s+as\s+(\w+)`)
-	// Matches: export default function Foo / export default class Foo / export default ident.
-	// Three capture groups — first non-empty wins; keywords (function/class/async) in
-	// group 3 are discarded so anonymous defaults don't pollute Exports.
-	exportDefaultRegex = regexp.MustCompile(`export\s+default\s+(?:(?:async\s+)?function\s+(\w+)|class\s+(\w+)|(\w+))`)
+	// Matches: export default function Foo / export default [abstract] class Foo /
+	// export default ident. Three capture groups — first non-empty wins; keywords
+	// (function/class/async) in group 3 are discarded so anonymous defaults don't
+	// pollute Exports. The `abstract` modifier is consumed before `class` so the
+	// class NAME (not "abstract") is captured for `export default abstract class`.
+	exportDefaultRegex = regexp.MustCompile(`export\s+default\s+(?:(?:async\s+)?function\s+(\w+)|(?:abstract\s+)?class\s+(\w+)|(\w+))`)
 )
 
 // NewJSParser creates a new JavaScript/TypeScript parser.

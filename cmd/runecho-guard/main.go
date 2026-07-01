@@ -316,13 +316,19 @@ func refreshIRForFile(filePath string) (outcome string) {
 	var updated *ir.IR
 	var changed bool
 	bootstrapped := false
+	// Coverage counters written back via TouchRepo below. A single-file
+	// UpdateFile does not re-walk, so it preserves the repo's existing counters;
+	// a bootstrap Generate re-walks the whole tree and yields fresh, authoritative
+	// counts that must replace the stale ones (else coverage can exceed 100%).
+	parseErrors, supportedSeen := repo.ParseErrors, repo.SupportedSeen
 	if loadErr != nil || existing == nil || existing.Version != ir.IRVersion {
 		// No usable IR file yet — bootstrap with a full generate (one-time cost).
-		full, _, genErr := gen.Generate(srcRoot)
+		full, stats, genErr := gen.Generate(srcRoot)
 		if genErr != nil {
 			return "generate-fail"
 		}
 		updated, changed, bootstrapped = full, true, true
+		parseErrors, supportedSeen = stats.ParseErrors, stats.SupportedSeen
 	} else if updated, changed, err = gen.UpdateFile(existing, srcRoot, filePath); err != nil {
 		return "update-fail"
 	}
@@ -338,9 +344,10 @@ func refreshIRForFile(filePath string) (outcome string) {
 	if _, err := db.RollAutoSnapshot(repo.ID, "", srcRoot, updated); err != nil {
 		return "snapshot-roll-fail"
 	}
-	// Bump last_indexed so the staleness warning stays quiet; preserve the
-	// existing coverage counters (a single-file refresh doesn't re-walk).
-	_ = db.TouchRepo(repo.ID, time.Now(), repo.ParseErrors, repo.SupportedSeen)
+	// Bump last_indexed so the staleness warning stays quiet. The coverage
+	// counters are the pre-walk values for a single-file refresh, or the fresh
+	// full-walk values when this call bootstrapped (see above).
+	_ = db.TouchRepo(repo.ID, time.Now(), parseErrors, supportedSeen)
 	if bootstrapped {
 		return "bootstrapped"
 	}

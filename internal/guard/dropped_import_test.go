@@ -31,6 +31,17 @@ func TestDroppedImport_Python_ConstStillUsed(t *testing.T) {
 	}
 }
 
+// Negative: a dropped import rebound as the SECOND declarator of a comma-separated
+// const/let/var must not be flagged — the rebind is a legitimate local definition.
+// Previously only the first declarator was seen, so the later rebind looked dropped.
+func TestDroppedImport_JS_SecondDeclaratorRebound(t *testing.T) {
+	oldText := "import { ULID } from 'ulid';\nreturn ULID();\n"
+	newText := "const helper = doSomething(), ULID = () => Math.random();\nreturn ULID();\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("ULID rebound as 2nd declarator must not warn, got %v", droppedNames(got))
+	}
+}
+
 // Negative: the import is gone AND so is every use — a legitimate cleanup, stays
 // silent (the false-positive killer).
 func TestDroppedImport_Python_RemovedAndUnused(t *testing.T) {

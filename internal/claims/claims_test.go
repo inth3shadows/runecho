@@ -64,9 +64,9 @@ func TestExtractSymbolRefs_MethodDecl(t *testing.T) {
 		text string
 		want string
 	}{
-		{"func (r *Reader) Fetch() error", "Reader.Fetch"},   // pointer receiver + var
-		{"func (Reader) Close()", "Reader.Close"},            // value receiver, no var
-		{"func (s *Set[T]) Add(v T)", "Set.Add"},             // generic receiver
+		{"func (r *Reader) Fetch() error", "Reader.Fetch"}, // pointer receiver + var
+		{"func (Reader) Close()", "Reader.Close"},          // value receiver, no var
+		{"func (s *Set[T]) Add(v T)", "Set.Add"},           // generic receiver
 	}
 	for _, tc := range cases {
 		refs := ExtractSymbolRefs(tc.text)
@@ -119,17 +119,42 @@ func TestExtractSymbolRefs_DeclBlock_NestedAndKeys(t *testing.T) {
 	}
 }
 
+// Regression: a struct/interface nested inside a `type (...)` group uses braces,
+// not parens, so its FIELD lines also match blockMemberRe. They must NOT be
+// captured as block-level declarations — only the type name (at brace depth 0)
+// and members after the nested type closes are.
+func TestExtractSymbolRefs_StructFieldsInTypeBlockSkipped(t *testing.T) {
+	text := "type (\n" +
+		"\tFoo struct {\n" +
+		"\t\tBar string\n" +
+		"\t\tBaz int\n" +
+		"\t}\n" +
+		"\tQux int\n" + // a genuine block member after the struct closes
+		")\n"
+	refs := ExtractSymbolRefs(text)
+	for _, want := range []string{"Foo", "Qux"} {
+		if _, ok := refs[want]; !ok {
+			t.Errorf("expected block-level %q in refs: %v", want, refs)
+		}
+	}
+	for _, nope := range []string{"Bar", "Baz"} {
+		if _, ok := refs[nope]; ok {
+			t.Errorf("struct field %q must not be captured as a block member: %v", nope, refs)
+		}
+	}
+}
+
 // Regression (forage): Python/JS/TS declaration keywords had no decl-pattern
 // parity with Go — only backtick coverage. class/function/let/def now extract,
 // accepting camelCase (these languages don't mark export by case) while
 // IsCodeSymbol still filters pure snake_case/lowercase noise.
 func TestExtractSymbolRefs_LangParity(t *testing.T) {
 	want := map[string]string{
-		"class MyHandler:":         "MyHandler",   // python/js class
-		"function processData() {": "processData", // js func, camelCase
-		"export class Widget {":    "Widget",      // export modifier before keyword
-		"let RetryCount = 3":       "RetryCount",  // js let
-		"async def DoWork(self):":  "DoWork",      // python async, CamelCase
+		"class MyHandler:":             "MyHandler",   // python/js class
+		"function processData() {":     "processData", // js func, camelCase
+		"export class Widget {":        "Widget",      // export modifier before keyword
+		"let RetryCount = 3":           "RetryCount",  // js let
+		"async def DoWork(self):":      "DoWork",      // python async, CamelCase
 		"const processData = (x) => x": "processData", // js/ts const, camelCase
 	}
 	for text, sym := range want {

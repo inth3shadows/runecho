@@ -440,6 +440,47 @@ func TestSaveSnapshot_RefsToName(t *testing.T) {
 	}
 }
 
+// TestSaveSnapshot_DefsOfName verifies symbols answer "who defines X"
+// deterministically (the mirror of TestSaveSnapshot_RefsToName), that
+// import-kind rows (module references, not definitions) are excluded, and
+// that a name carried under two kinds in one file (the exported TS
+// interface/type/enum pattern — see internal/parser/js.go) collapses to a
+// single definer row rather than double-counting that file.
+func TestSaveSnapshot_DefsOfName(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
+
+	irData := &ir.IR{Version: ir.IRVersion, RootHash: "h", Files: map[string]ir.FileIR{
+		"a.go": {Hash: "h1", Symbols: []ir.Symbol{{Name: "DoThing", Kind: "function"}}},
+		"b.go": {Hash: "h2", Symbols: []ir.Symbol{{Name: "DoThing", Kind: "function"}}},
+		// Same name as an import specifier only — must NOT count as a definer.
+		"c.go": {Hash: "h3", Symbols: []ir.Symbol{{Name: "DoThing", Kind: "import"}}},
+		// Same name under two kinds in one file (TS interface+export pattern) —
+		// must collapse to one row, not two.
+		"d.go": {Hash: "h4", Symbols: []ir.Symbol{
+			{Name: "Config", Kind: "class"}, {Name: "Config", Kind: "export"},
+		}},
+	}}
+	snapID, err := db.SaveSnapshot(id, "s", "v1", "/tmp/r", irData)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	got, err := db.DefsOfName(snapID, "DoThing")
+	if err != nil {
+		t.Fatalf("DefsOfName: %v", err)
+	}
+	if len(got) != 2 || got[0] != "a.go" || got[1] != "b.go" {
+		t.Errorf("definers of DoThing = %v, want [a.go b.go] (c.go's import-kind row excluded)", got)
+	}
+	if got, _ := db.DefsOfName(snapID, "Config"); len(got) != 1 || got[0] != "d.go" {
+		t.Errorf("definers of Config = %v, want [d.go] deduplicated across kinds", got)
+	}
+	if got, _ := db.DefsOfName(snapID, "Nope"); len(got) != 0 {
+		t.Errorf("definers of Nope = %v, want empty", got)
+	}
+}
+
 // TestBackupTo asserts VACUUM INTO produces a usable copy with the same data.
 func TestBackupTo(t *testing.T) {
 	db, _ := openTemp(t)

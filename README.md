@@ -65,7 +65,9 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 
 ## Prerequisites
 
-- **Go 1.24+** to build (no other runtime; the binaries are self-contained).
+- **Nothing** to run a tagged release — the [prebuilt binaries](#quick-start) are
+  self-contained (no runtime, no API keys).
+- **Go 1.24+** only if you build from source (`bash install.sh`).
 - A POSIX or Windows shell. Storage lives under `~/.runecho/` by default.
 - No external services, no API keys.
 
@@ -76,7 +78,15 @@ full semantic analysis.
 
 ## Quick Start
 
-1. Build and install the binaries into `~/.local/bin`:
+1. Get the binaries. Either **download a prebuilt release** (no Go needed) — pick
+   your OS/arch from the [latest release](https://github.com/inth3shadows/runecho/releases/latest):
+   ```bash
+   # example: macOS arm64 — adjust the asset name for your platform
+   VER=v0.5.0
+   curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${VER}/runecho_${VER}_darwin_arm64.tar.gz" | tar -xz
+   install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
+   ```
+   …or **build from source** (needs Go 1.24+), which also installs the guard hooks:
    ```bash
    bash install.sh
    ```

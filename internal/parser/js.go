@@ -63,6 +63,14 @@ var (
 	// AST records them in Classes, this regex records the exported name (so a TS
 	// `export interface Shape {}` is enumerable as both a class and an export).
 	exportDeclRegex = regexp.MustCompile(`export\s+(?:const|let|var|function|class|async\s+function|type|interface|enum)\s+(\w+)`)
+	// Matches the binding list of a destructured object export:
+	// export const { foo, bar } = x. The trailing `=` distinguishes a
+	// destructuring assignment from an object type; exportDeclRegex only
+	// captures a single \w+ binding, so these were previously dropped.
+	exportObjDestructureRegex = regexp.MustCompile(`export\s+(?:const|let|var)\s*\{([^}]*)\}\s*=`)
+	// Matches the binding list of a destructured array export:
+	// export const [ a, b ] = y.
+	exportArrDestructureRegex = regexp.MustCompile(`export\s+(?:const|let|var)\s*\[([^\]]*)\]\s*=`)
 	// Matches: export * as ns from './m' — the namespace re-export binds `ns`.
 	exportStarAsRegex = regexp.MustCompile(`export\s+\*\s+as\s+(\w+)`)
 	// Matches: export default function Foo / export default class Foo / export default ident.
@@ -485,6 +493,17 @@ func extractExports(source string) []string {
 		}
 	}
 
+	// Destructured declaration exports: export const { foo, bar } = x and
+	// export const [ a, b ] = y bind multiple names at once.
+	for _, re := range []*regexp.Regexp{exportObjDestructureRegex, exportArrDestructureRegex} {
+		matches = re.FindAllStringSubmatch(source, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				exports = append(exports, destructuredNames(match[1])...)
+			}
+		}
+	}
+
 	// Namespace re-export: export * as ns from './m' binds ns.
 	matches = exportStarAsRegex.FindAllStringSubmatch(source, -1)
 	for _, match := range matches {
@@ -509,6 +528,36 @@ func extractExports(source string) []string {
 	}
 
 	return exports
+}
+
+// destructuredNames extracts the bound identifiers from the inner text of a
+// destructuring pattern (the part between { } or [ ]). For each comma-separated
+// element it strips a default value (`a = 1` → `a`) and, for a renamed object
+// binding (`a: renamedA` → `renamedA`), keeps the bound name — the identifier
+// that is actually referenceable, not the source key. A rest element
+// (`...rest` / `[first, ...others]`) binds the trailing name, so the leading
+// `...` is stripped and `rest`/`others` recorded rather than the literal token.
+func destructuredNames(inner string) []string {
+	var names []string
+	for _, part := range strings.Split(inner, ",") {
+		// Strip a default value first so a colon inside it (e.g. a ternary)
+		// can't be mistaken for a rename separator.
+		if idx := strings.Index(part, "="); idx >= 0 {
+			part = part[:idx]
+		}
+		// Renamed object binding `key: bound` — the bound name is what's usable.
+		if idx := strings.Index(part, ":"); idx >= 0 {
+			part = part[idx+1:]
+		}
+		part = strings.TrimSpace(part)
+		// Rest element: `...rest` binds `rest`. Strip the spread so the bound
+		// name is recorded, not the literal `...rest` (which is no symbol).
+		part = strings.TrimPrefix(part, "...")
+		if part = strings.TrimSpace(part); part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
 }
 
 // deduplicate removes duplicate entries from a sorted slice.

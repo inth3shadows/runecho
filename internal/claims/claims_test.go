@@ -64,9 +64,9 @@ func TestExtractSymbolRefs_MethodDecl(t *testing.T) {
 		text string
 		want string
 	}{
-		{"func (r *Reader) Fetch() error", "Reader.Fetch"},   // pointer receiver + var
-		{"func (Reader) Close()", "Reader.Close"},            // value receiver, no var
-		{"func (s *Set[T]) Add(v T)", "Set.Add"},             // generic receiver
+		{"func (r *Reader) Fetch() error", "Reader.Fetch"}, // pointer receiver + var
+		{"func (Reader) Close()", "Reader.Close"},          // value receiver, no var
+		{"func (s *Set[T]) Add(v T)", "Set.Add"},           // generic receiver
 	}
 	for _, tc := range cases {
 		refs := ExtractSymbolRefs(tc.text)

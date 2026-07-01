@@ -69,7 +69,8 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 - A POSIX or Windows shell. Storage lives under `~/.runecho/` by default.
 - No external services, no API keys.
 
-Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, and Python**.
+Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, Google Apps
+Script (`.gs`), and Python**.
 Extraction is intentionally shallow and deterministic: top-level structure, not
 full semantic analysis.
 

@@ -3,6 +3,7 @@ package guard
 import (
 	"bufio"
 	"os"
+	"path"
 	"strings"
 )
 
@@ -21,13 +22,25 @@ type Violation struct {
 // symbols is the set of known symbol names from the IR snapshot.
 // ignorePath is the optional path to a .runechoguardignore file (empty = none).
 func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Violation {
-	// Build the known set: IR symbols + ignore list
+	// Build the known set: IR symbols + ignore list. A line containing a glob
+	// metacharacter (*, ?, [) is matched against each unresolved reference in
+	// pass 2 instead of being added as a literal name — this lets a repo
+	// allowlist a whole family of bare global names (`track*` for injected
+	// analytics calls) in one line instead of every individual name. Note
+	// this only helps bare, unqualified references: a qualified call like
+	// `React.useState()` is already exempt regardless of the ignore file
+	// (ExtractRefs never emits it as a reference — see TECHNICAL.md).
 	known := make(map[string]struct{}, len(symbols))
 	for name := range symbols {
 		known[name] = struct{}{}
 	}
+	var ignoreGlobs []string
 	if ignorePath != "" {
 		for _, name := range loadIgnore(ignorePath) {
+			if strings.ContainsAny(name, "*?[") {
+				ignoreGlobs = append(ignoreGlobs, name)
+				continue
+			}
 			known[name] = struct{}{}
 		}
 	}
@@ -65,6 +78,9 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			if _, ok := known[ref.Name]; ok {
 				continue
 			}
+			if matchesIgnoreGlob(ref.Name, ignoreGlobs) {
+				continue
+			}
 			key := fd.Path + "\x00" + ref.Name
 			if _, dup := seen[key]; dup {
 				continue
@@ -81,6 +97,19 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 	return violations
+}
+
+// matchesIgnoreGlob reports whether name matches any of the guardignore glob
+// patterns. A malformed pattern (path.ErrBadPattern) never matches rather
+// than erroring the whole run — the same fail-open posture as the rest of
+// the guard's degraded-input handling.
+func matchesIgnoreGlob(name string, globs []string) bool {
+	for _, g := range globs {
+		if ok, err := path.Match(g, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 // loadIgnore reads a guardignore file and returns non-comment, non-blank lines.

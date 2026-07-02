@@ -119,6 +119,31 @@ func TestExtractSymbolRefs_DeclBlock_NestedAndKeys(t *testing.T) {
 	}
 }
 
+// Regression: a struct/interface nested inside a `type (...)` group uses braces,
+// not parens, so its FIELD lines also match blockMemberRe. They must NOT be
+// captured as block-level declarations — only the type name (at brace depth 0)
+// and members after the nested type closes are.
+func TestExtractSymbolRefs_StructFieldsInTypeBlockSkipped(t *testing.T) {
+	text := "type (\n" +
+		"\tFoo struct {\n" +
+		"\t\tBar string\n" +
+		"\t\tBaz int\n" +
+		"\t}\n" +
+		"\tQux int\n" + // a genuine block member after the struct closes
+		")\n"
+	refs := ExtractSymbolRefs(text)
+	for _, want := range []string{"Foo", "Qux"} {
+		if _, ok := refs[want]; !ok {
+			t.Errorf("expected block-level %q in refs: %v", want, refs)
+		}
+	}
+	for _, nope := range []string{"Bar", "Baz"} {
+		if _, ok := refs[nope]; ok {
+			t.Errorf("struct field %q must not be captured as a block member: %v", nope, refs)
+		}
+	}
+}
+
 // Regression (forage): Python/JS/TS declaration keywords had no decl-pattern
 // parity with Go — only backtick coverage. class/function/let/def now extract,
 // accepting camelCase (these languages don't mark export by case) while

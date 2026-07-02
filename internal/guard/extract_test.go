@@ -14,6 +14,28 @@ func lines(strs ...string) []AddedLine {
 	return ls
 }
 
+// TestExtractRefs_CallOnDefLineChecked pins the fix for the def-line skip: a call
+// that shares a line with a definition (a one-line Go body, a Python default-arg
+// factory) must still be validated, while the definition's OWN name is skipped as
+// a self-match. Previously the whole line was skipped, hiding hallucinated calls.
+func TestExtractRefs_CallOnDefLineChecked(t *testing.T) {
+	goRefs := ExtractRefs(LangGo, lines("func Helper() int { return ComputeSomething() }"))
+	if !containsAll(goRefs, "ComputeSomething") {
+		t.Errorf("one-line Go body: ComputeSomething not extracted: %v", refNames(goRefs))
+	}
+	if !containsNone(goRefs, "Helper") {
+		t.Errorf("Go def name Helper should self-skip: %v", refNames(goRefs))
+	}
+
+	pyRefs := ExtractRefs(LangPython, lines("def process(data, factory=NonExistentFactory()):"))
+	if !containsAll(pyRefs, "NonExistentFactory") {
+		t.Errorf("py default-arg factory not extracted: %v", refNames(pyRefs))
+	}
+	if !containsNone(pyRefs, "process") {
+		t.Errorf("py def name process should self-skip: %v", refNames(pyRefs))
+	}
+}
+
 func refNames(refs []Ref) []string {
 	names := make([]string, len(refs))
 	for i, r := range refs {

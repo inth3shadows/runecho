@@ -447,6 +447,11 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 		// stay correct. open threads multi-line string state across lines.
 		scan, newOpen := stripLiteralsStateful(lang, text, open)
 		open = newOpen
+		// Names this line DEFINES (func/def/class/const). A reference to the
+		// definition's own name is a self-match, not a call to validate — but any
+		// OTHER call sharing the line (a one-line function body, a Python default-
+		// arg factory) still is, so we skip per-name rather than the whole line.
+		defs := defNames(lang, text)
 		matches := reCallIdent.FindAllStringSubmatchIndex(scan, -1)
 		for _, idx := range matches {
 			fullStart := idx[0]
@@ -466,8 +471,8 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 			if lang == LangGo && (name[0] < 'A' || name[0] > 'Z') {
 				continue
 			}
-			// Skip definition lines (func/def/function keyword on same line before ident)
-			if isDefLine(lang, text) {
+			// Skip the definition's own name (self-reference on a def line).
+			if _, isDef := defs[name]; isDef {
 				continue
 			}
 			refs = append(refs, Ref{Name: name, LineNo: l.LineNo})
@@ -810,16 +815,30 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 	return false
 }
 
-func isDefLine(lang Lang, text string) bool {
+// defNames returns the identifier(s) a line DEFINES (the func/def/class/const
+// name), so a reference to a definition's own name can be skipped as a self-match
+// while genuine calls that share the line are still validated. Empty for a
+// non-definition line. Each def regex captures the declared name in group 1.
+func defNames(lang Lang, text string) map[string]struct{} {
+	names := make(map[string]struct{})
+	capture := func(re *regexp.Regexp) {
+		if m := re.FindStringSubmatch(text); m != nil {
+			names[m[1]] = struct{}{}
+		}
+	}
 	switch lang {
 	case LangGo:
-		return reGoDef.MatchString(text)
+		capture(reGoDef)
 	case LangPython:
-		return rePyDef.MatchString(text) || rePyClassDef.MatchString(text) || rePyConstDef.MatchString(text)
+		capture(rePyDef)
+		capture(rePyClassDef)
+		capture(rePyConstDef)
 	case LangJS:
-		return reJSFuncDef.MatchString(text) || reJSVarDef.MatchString(text) || reJSTypeDef.MatchString(text)
+		capture(reJSFuncDef)
+		capture(reJSVarDef)
+		capture(reJSTypeDef)
 	}
-	return false
+	return names
 }
 
 // isImportLine reports whether a line is an import/require statement. References

@@ -153,7 +153,7 @@ var (
 	reAsBind        = regexp.MustCompile(`\bas\s+([A-Za-z_]\w*)`) // with/except ... as x
 	reWalrus        = regexp.MustCompile(`([A-Za-z_]\w*)\s*:=`)
 	rePyDefParams   = regexp.MustCompile(`^\s*(?:async\s+)?def\s+\w+\s*\(([^)]*)\)`)
-	reJSDecl        = regexp.MustCompile(`\b(?:const|let|var)\s+([^=;]+?)\s*=`)
+	reJSDeclList    = regexp.MustCompile(`\b(?:const|let|var)\s+(.+)$`)
 	reJSFnParams    = regexp.MustCompile(`function\b[^(]*\(([^)]*)\)`)
 	reJSArrowParams = regexp.MustCompile(`\(([^)]*)\)\s*=>`)
 	reJSForDecl     = regexp.MustCompile(`\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)`)
@@ -191,8 +191,17 @@ func locallyBoundNames(lang Lang, text string) map[string]struct{} {
 				add(mm[1])
 			}
 		case LangJS:
-			if mm := reJSDecl.FindStringSubmatch(s); mm != nil {
-				add(mm[1])
+			// Capture EVERY declarator of a const/let/var statement, not just the
+			// first — `const a = f(), Ulid = () => …` rebinds Ulid as the second
+			// declarator, which a first-`=`-only match would miss (false positive).
+			if mm := reJSDeclList.FindStringSubmatch(s); mm != nil {
+				for _, decl := range splitTopLevelCommas(mm[1]) {
+					if lhs := assignLHS(decl); lhs != "" {
+						add(lhs)
+					} else {
+						add(decl) // declarator with no initializer (`let a, b;`)
+					}
+				}
 			}
 			if mm := reJSFnParams.FindStringSubmatch(s); mm != nil {
 				add(mm[1])
@@ -233,4 +242,29 @@ func assignLHS(s string) string {
 		return s[:i]
 	}
 	return ""
+}
+
+// splitTopLevelCommas splits s on commas that are not nested inside (), [], or
+// {}, so a multi-declarator statement (`a = f(x, y), b = g()`) splits into its
+// declarators without breaking on commas inside call args, arrays, or objects.
+// Operates on literal-stripped text, so no string/comment commas remain.
+func splitTopLevelCommas(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
 }

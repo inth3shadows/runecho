@@ -27,6 +27,7 @@ const (
 //	runecho-ir log [--n=10] [root]
 //	runecho-ir verify [--session=""] [root]
 //	runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]
+//	runecho-ir guard-stats [--days=30] [--top=10] [--json]
 //	runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]
 //	runecho-ir validate-claims --text=<file> [--ir=<path>]
 func main() {
@@ -68,6 +69,8 @@ func run() int {
 			return runVerify(os.Args[2:])
 		case "churn":
 			return runChurn(os.Args[2:])
+		case "guard-stats":
+			return runGuardStats(os.Args[2:])
 		case "repo":
 			return runRepo(os.Args[2:])
 		case "backup":
@@ -104,6 +107,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir guard-stats [--days=30] [--top=10] [--json]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic] [--force] [root]")

@@ -32,11 +32,23 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 
-	// Pass 1: collect all new definitions across the entire diff and add to known.
+	// Pass 1: collect all new definitions AND imported names across the entire
+	// diff and add to known. An imported name (`from pathlib import Path`,
+	// `import {Foo} from './m'`) is a real, bound symbol — a bare call to it is
+	// not a hallucination. The hook-mode known-set builder folds imports the same
+	// way; without this, the pre-commit path flagged bare calls to any imported
+	// symbol whose import line sat outside a hunk's def set (issues #76, #80).
+	// NOTE: this covers imports present IN the diff. An import that is pre-existing
+	// (outside the staged hunk) is only resolvable via the indexed IR, whose
+	// FileStructure.Imports currently stores module paths not bound names — a
+	// separate, deeper fix tracked on #76/#80.
 	for _, fd := range diffs {
 		lang := LangFor(fd.Path)
 		for _, def := range ExtractDefs(lang, fd.AddedLines) {
 			known[def] = struct{}{}
+		}
+		for _, imp := range ExtractImports(lang, fd.AddedLines) {
+			known[imp] = struct{}{}
 		}
 	}
 

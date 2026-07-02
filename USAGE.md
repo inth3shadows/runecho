@@ -183,7 +183,10 @@ a single "where is X" query without spending context on the full table:
 
 An unfiltered or broad query on a large repo is capped per call; the response
 carries `next_offset` when more matches remain — pass it back as `offset` to
-page through the rest, or narrow the query instead.
+page through the rest, or narrow the query instead. Each call re-reads the
+live repo (no cached snapshot between pages), so on a repo actively being
+edited mid-session, results across pages aren't pinned to one point in
+time — prefer narrowing the query over paging deep into a large, changing repo.
 
 To prime a session without dumping the map, `runecho-ir map --header` prints a
 <200-token summary (file/symbol counts, busiest directories, and a pointer to

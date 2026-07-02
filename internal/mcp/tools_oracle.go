@@ -64,7 +64,7 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "locate",
-		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped). Defaults to functions+classes.",
+		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped, paginate with `offset`). Defaults to functions+classes.",
 		InputSchema: locateSchema(),
 		Handler:     o.locate,
 	})
@@ -197,7 +197,7 @@ func locateSchema() map[string]any {
 			"repo":   map[string]any{"type": "string", "description": "name of an enrolled repo"},
 			"symbol": map[string]any{"type": "string", "description": "symbol to locate: matches by exact name, name prefix, or last dotted segment (e.g. \"fetch\" finds \"Reader.fetch\"). Omit to list all (capped)."},
 			"kind":   map[string]any{"type": "string", "description": "restrict to func|class|export|import (default: func+class)"},
-			"offset": map[string]any{"type": "integer", "description": "skip this many matches before returning a page (default 0). Page again with the response's next_offset until it's absent."},
+			"offset": map[string]any{"type": "integer", "minimum": 0, "description": "skip this many matches before returning a page (default 0). Page again with the response's next_offset until it's absent."},
 		},
 		"required": []string{"repo"},
 	}
@@ -539,12 +539,12 @@ func (o *Oracle) locate(args json.RawMessage) (string, error) {
 	// using total to know how far it has to go (or that a narrower query would
 	// avoid paging entirely).
 	total := len(matches)
-	page := matches
-	if a.Offset > len(page) {
-		page = nil
-	} else {
-		page = page[a.Offset:]
-	}
+	page := matches[min(a.Offset, total):]
+	// truncated now describes whether THIS page was clipped by locateMatchCap,
+	// not (as before offset existed) the whole result set — for an offset=0
+	// call, still every prior caller's meaning. A client paging through
+	// multiple pages should key off next_offset's presence, not this field,
+	// to know when it has reached the end.
 	truncated := false
 	if len(page) > locateMatchCap {
 		page = page[:locateMatchCap]

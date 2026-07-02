@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -278,6 +280,118 @@ func TestRepoReindex(t *testing.T) {
 	}
 	if !strings.Contains(out, "Reindexed") {
 		t.Errorf("stdout %q: expected \"Reindexed\"", out)
+	}
+}
+
+// poisonSymbolName loads the IR at irPath, renames the first symbol named
+// oldName in file's entry to newName, and saves it back. Used to inject a
+// distinguishable marker into an on-disk IR without touching the underlying
+// source file, so a subsequent incremental reindex can be proven to have
+// reused (not re-parsed) that file's entry.
+func poisonSymbolName(t *testing.T, irPath, file, oldName, newName string) {
+	t.Helper()
+	doc, err := ir.Load(irPath)
+	if err != nil {
+		t.Fatalf("load %s to poison: %v", irPath, err)
+	}
+	fileIR, ok := doc.Files[file]
+	if !ok {
+		t.Fatalf("%s has no entry for %q (have: %v)", irPath, file, doc.Files)
+	}
+	found := false
+	for i := range fileIR.Symbols {
+		if fileIR.Symbols[i].Name == oldName {
+			fileIR.Symbols[i].Name = newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no symbol named %q in %q to poison (symbols: %+v)", oldName, file, fileIR.Symbols)
+	}
+	doc.Files[file] = fileIR
+	if err := doc.Save(irPath); err != nil {
+		t.Fatalf("save poisoned %s: %v", irPath, err)
+	}
+}
+
+// hasSymbolName reports whether irPath's entry for file contains a symbol
+// with the given name.
+func hasSymbolName(t *testing.T, irPath, file, name string) bool {
+	t.Helper()
+	doc, err := ir.Load(irPath)
+	if err != nil {
+		t.Fatalf("load %s: %v", irPath, err)
+	}
+	fileIR, ok := doc.Files[file]
+	if !ok {
+		return false
+	}
+	for _, s := range fileIR.Symbols {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRepoReindex_Incremental proves doReindex/buildIR actually take the
+// incremental Update() path (issue #92) when a prior .ai/ir.json is present,
+// rather than always doing a full Generate(). Uses a "poison the cache"
+// pattern: hand-edit the on-disk IR for an unchanged file so its entry
+// carries a distinguishable marker, reindex without touching that file's
+// source, and assert the marker survived (proves reuse-by-hash-match, not a
+// fresh re-parse that would have recomputed the real symbol name). Then
+// change the file's actual content and reindex again, asserting the marker
+// is gone and the freshly parsed symbols are present (proves changed files
+// still get re-parsed, so the incremental path isn't silently stale).
+func TestRepoReindex_Incremental(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	// "repo add" auto-reindexes once, so a prior .ai/ir.json already exists
+	// on disk by the time we poison it.
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", dir})
+	if code != 0 {
+		t.Fatalf("repo add: %d", code)
+	}
+	name := strings.Fields(out)[1]
+
+	irPath := filepath.Join(dir, ".ai", "ir.json")
+	poisonSymbolName(t, irPath, "stub.go", "Hello", "HelloPoisoned")
+
+	// Reindex without touching stub.go: the incremental path must reuse the
+	// unchanged file's entry verbatim, so the poisoned marker should survive.
+	code, out, _ = runWith(t, home, []string{"runecho-ir", "repo", "reindex", name})
+	if code != 0 {
+		t.Fatalf("repo reindex (poisoned, unchanged source): got code %d, want 0", code)
+	}
+	if !strings.Contains(out, "Reindexed") {
+		t.Errorf("stdout %q: expected \"Reindexed\"", out)
+	}
+	if !hasSymbolName(t, irPath, "stub.go", "HelloPoisoned") {
+		t.Errorf("poisoned marker did not survive reindex: unchanged file was re-parsed instead of reused")
+	}
+
+	// Now actually change stub.go's content. A real edit must still be
+	// re-parsed: the poisoned marker must NOT survive once the hash changes.
+	newSrc := "package stub\n\nfunc Hello() {}\n\nfunc World() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "stub.go"), []byte(newSrc), 0o644); err != nil {
+		t.Fatalf("rewrite stub.go: %v", err)
+	}
+	code, out, _ = runWith(t, home, []string{"runecho-ir", "repo", "reindex", name})
+	if code != 0 {
+		t.Fatalf("repo reindex (changed source): got code %d, want 0", code)
+	}
+	if hasSymbolName(t, irPath, "stub.go", "HelloPoisoned") {
+		t.Errorf("poisoned marker survived after source changed: file was reused instead of re-parsed")
+	}
+	if !hasSymbolName(t, irPath, "stub.go", "Hello") {
+		t.Errorf("expected fresh parse of changed stub.go to recover symbol \"Hello\"")
+	}
+	if !hasSymbolName(t, irPath, "stub.go", "World") {
+		t.Errorf("expected fresh parse of changed stub.go to find new symbol \"World\"")
 	}
 }
 

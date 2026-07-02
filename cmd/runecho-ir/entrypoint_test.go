@@ -768,3 +768,70 @@ func TestWorktree_AutoEnrollUsesTopLevel(t *testing.T) {
 		t.Errorf("repo list does not contain git top-level %q\nlist:\n%s", dir, listOut)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// guard-stats
+// ---------------------------------------------------------------------------
+
+// TestGuardStats writes a decisions.jsonl fixture directly into a temp
+// RUNECHO_HOME and asserts the report surfaces the expected repo/symbol names.
+func TestGuardStats(t *testing.T) {
+	home := t.TempDir()
+	fixture := `{"v":1,"ts":"2026-06-01T10:00:00Z","mode":"hook","repo":"runecho","file":"a.go","lang":"go","decision":"ask","reason":"unresolved-symbol","symbols":["FooBar"]}
+{"v":1,"ts":"2026-06-01T10:05:00Z","mode":"hook","repo":"runecho","file":"b.go","lang":"go","decision":"defer","reason":"parse-fail"}
+{"v":1,"ts":"2026-06-01T10:10:00Z","mode":"hook","repo":"runecho","file":"a.go","lang":"go","decision":"outcome","reason":"approved"}
+`
+	if err := os.WriteFile(filepath.Join(home, "decisions.jsonl"), []byte(fixture), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "guard-stats", "--days=3650"})
+	if code != ExitOK {
+		t.Fatalf("guard-stats: got code %d, want %d (ExitOK)", code, ExitOK)
+	}
+	for _, want := range []string{"runecho", "FooBar", "parse-fail"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout %q: expected to contain %q", out, want)
+		}
+	}
+	if strings.Contains(out, "approved") {
+		t.Errorf("stdout %q: outcome record's reason should not appear in the report", out)
+	}
+}
+
+// TestGuardStats_NonPositiveDays verifies --days=0 and a negative --days are
+// rejected as a usage error rather than silently producing an empty (but
+// "successful") report — since(now) or since(future) would otherwise exclude
+// every decision without signaling that the flag value itself was the cause.
+func TestGuardStats_NonPositiveDays(t *testing.T) {
+	home := t.TempDir()
+	fixture := `{"v":1,"ts":"2026-06-01T10:00:00Z","mode":"hook","repo":"runecho","decision":"ask","reason":"unresolved-symbol","symbols":["FooBar"]}
+`
+	if err := os.WriteFile(filepath.Join(home, "decisions.jsonl"), []byte(fixture), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	for _, days := range []string{"0", "-1"} {
+		code, _, stderr := runWith(t, home, []string{"runecho-ir", "guard-stats", "--days=" + days})
+		if code != ExitError {
+			t.Errorf("guard-stats --days=%s: got code %d, want %d (ExitError)", days, code, ExitError)
+		}
+		if !strings.Contains(stderr, "must be positive") {
+			t.Errorf("guard-stats --days=%s: stderr %q, expected a usage error mentioning \"must be positive\"", days, stderr)
+		}
+	}
+}
+
+// TestGuardStats_NoLog verifies the friendly no-data message and ExitNoData
+// exit code when decisions.jsonl doesn't exist yet.
+func TestGuardStats_NoLog(t *testing.T) {
+	home := t.TempDir()
+
+	code, _, stderr := runWith(t, home, []string{"runecho-ir", "guard-stats"})
+	if code != ExitNoData {
+		t.Fatalf("guard-stats no log: got code %d, want %d (ExitNoData)", code, ExitNoData)
+	}
+	if !strings.Contains(stderr, "No decisions recorded yet.") {
+		t.Errorf("stderr %q: expected \"No decisions recorded yet.\"", stderr)
+	}
+}

@@ -100,6 +100,35 @@ func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 	}, nil
 }
 
+// ChurnPayload converts a ChurnReport into the canonical JSON-friendly map for
+// `runecho-ir churn --json`, mirroring DiffPayload's shape convention: snake_case
+// top-level keys, entries filtered to minChanges (matching FormatChurn's "hot"
+// threshold) so the JSON and text outputs agree on what counts as hot.
+func ChurnPayload(r ChurnReport, minChanges int) map[string]interface{} {
+	hotFiles := make([]FileChurn, 0, len(r.Files))
+	for _, f := range r.Files {
+		if f.Changes >= minChanges {
+			hotFiles = append(hotFiles, f)
+		}
+	}
+	hotSymbols := make([]SymbolChurn, 0, len(r.Symbols))
+	for _, s := range r.Symbols {
+		if s.Changes >= minChanges {
+			hotSymbols = append(hotSymbols, s)
+		}
+	}
+	return map[string]interface{}{
+		"summary":        FormatChurnCompact(r),
+		"snapshot_count": r.SnapshotCount,
+		"diff_count":     r.DiffCount,
+		"since":          r.Since,
+		"until":          r.Until,
+		"min_changes":    minChanges,
+		"hot_files":      hotFiles,
+		"hot_symbols":    hotSymbols,
+	}
+}
+
 // FormatChurn formats a full churn report, omitting entries below minChanges.
 func FormatChurn(r ChurnReport, minChanges int) string {
 	if r.SnapshotCount < 2 {

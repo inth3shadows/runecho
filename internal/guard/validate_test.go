@@ -18,6 +18,37 @@ func TestRun_CleanDiff(t *testing.T) {
 	}
 }
 
+// TestRun_ImportedNameNotFlagged pins the #76/#80 fix: a bare call to a name
+// bound by an import in the same diff (Python `from X import Y`, JS `import {Y}`)
+// must resolve, not read as a hallucination. A genuinely-unknown bare call on the
+// same line still flags — the import fold must not blanket-suppress.
+func TestRun_ImportedNameNotFlagged(t *testing.T) {
+	symbols := map[string]struct{}{} // empty IR — resolution rides on the diff's import
+	diffs := []FileDiff{
+		{
+			Path:       "scripts/render.py",
+			AddedLines: lines(`from pathlib import Path`, `p = Path(args.output)`),
+		},
+		{
+			Path:       "src/m.ts",
+			AddedLines: lines(`import { Widget } from './lib'`, `const w = Widget(cfg)`),
+		},
+	}
+	if v := Run(symbols, "", diffs); len(v) != 0 {
+		t.Fatalf("imported names must resolve, got violations: %+v", v)
+	}
+
+	// Negative: an unimported, undefined bare call still flags.
+	bad := []FileDiff{{
+		Path:       "scripts/render.py",
+		AddedLines: lines(`from pathlib import Path`, `q = NotImported(x)`),
+	}}
+	v := Run(symbols, "", bad)
+	if len(v) != 1 || v[0].Symbol != "NotImported" {
+		t.Fatalf("want 1 violation for NotImported, got %+v", v)
+	}
+}
+
 func TestRun_HallucinatedCall(t *testing.T) {
 	symbols := map[string]struct{}{"ProcessFoo": {}}
 	diffs := []FileDiff{{

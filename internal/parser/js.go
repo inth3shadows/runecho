@@ -12,14 +12,21 @@ import (
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-// JSParser parses .js, .ts, .jsx, .tsx, .gs files. Imports and exports are
-// extracted with deterministic regex (line-oriented constructs). Functions and
-// classes use a real tree-sitter AST via a pure-Go (CGO-free) runtime when the
-// matching grammar is embedded in the build, so they carry per-symbol start
-// lines and function body hashes (matching the Python parser's FileStructure
-// contract). When the grammar is absent (a build without the grammar_subset_*
-// tags), it degrades to the former regex extraction — names only, no spans —
-// so symbol coverage never regresses.
+// JSParser parses .js, .ts, .jsx, .tsx, .gs files. Functions, classes,
+// imports, and exports all use a real tree-sitter AST via a pure-Go
+// (CGO-free) runtime when the matching grammar is embedded in the build:
+// functions/classes carry per-symbol start lines and function body hashes
+// (matching the Python parser's FileStructure contract), while imports/
+// exports are resolved structurally off the grammar's own node/field shapes
+// (import_statement, export_statement, export_specifier, variable_declarator,
+// …) rather than pattern-matching source text, so alias-vs-local-name
+// confusion and TS `type`-only forms are no longer regex edge cases. CommonJS
+// require(...) calls have no dedicated grammar node and stay regex-matched
+// regardless of AST availability (see extractCJSRequires). When the grammar
+// is absent (a build without the grammar_subset_* tags), or the reduced
+// grammar's error recovery leaves a partial tree, this degrades to (or
+// supplements with) the former line-oriented regex extraction — so symbol
+// coverage never regresses.
 //
 // Altitude: like the Go parser, it captures top-level functions/classes plus
 // class methods (qualified as Class.method); it does not descend into function
@@ -135,18 +142,17 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 	// (parity with the Python parser).
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 
-	// Imports and exports stay regex (line-oriented; same split as python.go).
-	// Run them on comment-stripped source so commented-out statements are ignored.
+	// Run the regex fallbacks on comment-stripped source so commented-out
+	// statements are ignored; the AST paths below parse the raw `source`
+	// directly (tree-sitter handles comments itself).
 	noComments := removeComments(source)
-	imports := extractImports(noComments)
-	exports := extractExports(noComments)
-	wildcardReexports := extractWildcardReexports(noComments)
 
-	// Functions and classes: AST when the grammar is available, regex otherwise.
+	// Functions, classes, imports, exports: AST when the grammar is
+	// available, regex otherwise.
 	var (
-		functions, classes []string
-		hashes             map[string]string
-		lines              map[string]int
+		functions, classes, imports, exports, wildcardReexports []string
+		hashes                                                  map[string]string
+		lines                                                   map[string]int
 	)
 	if lang := jsLanguageFor(ext); lang != nil {
 		var hasError bool
@@ -164,11 +170,30 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 			functions = append(functions, extractFunctions(noComments)...)
 			classes = append(classes, extractClasses(noComments)...)
 		}
+
+		var ieHasError bool
+		imports, exports, wildcardReexports, ieHasError = jsImportsExportsFromAST(source, lang)
+		if ieHasError {
+			// Same posture as the functions/classes fallback above: supplement,
+			// don't replace, so a partially-recovered tree never loses a real
+			// import/export that plain regex matching would still have found.
+			imports = append(imports, extractImports(noComments)...)
+			exports = append(exports, extractExports(noComments)...)
+			wildcardReexports = append(wildcardReexports, extractWildcardReexports(noComments)...)
+		}
+		// require(...) calls have no dedicated grammar node (they're an
+		// ordinary call_expression that can appear anywhere, including inside
+		// function bodies the declaration-level AST walk doesn't descend
+		// into) — always union in the regex-matched requires.
+		imports = append(imports, extractCJSRequires(noComments)...)
 	} else {
-		// No grammar embedded in this build — degrade to names only, no spans
-		// (preserves the regex-era contract; better than dropping JS symbols).
+		// No grammar embedded in this build — degrade to the former
+		// line-oriented regex extraction entirely.
 		functions = extractFunctions(noComments)
 		classes = extractClasses(noComments)
+		imports = extractImports(noComments)
+		exports = extractExports(noComments)
+		wildcardReexports = extractWildcardReexports(noComments)
 	}
 
 	sort.Strings(imports)
@@ -289,25 +314,6 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 		classes = append(classes, full)
 		recordLine("class:"+full, int(node.StartPoint().Row)+1)
 	}
-	fieldText := func(n *ts.Node, field string) string {
-		if f := n.ChildByFieldName(field, lang); f != nil {
-			return f.Text(src)
-		}
-		return ""
-	}
-	// childOfType returns the first named child of n whose type is in types.
-	childOfType := func(n *ts.Node, types ...string) *ts.Node {
-		for i := 0; i < n.NamedChildCount(); i++ {
-			c := n.NamedChild(i)
-			for _, want := range types {
-				if c.Type(lang) == want {
-					return c
-				}
-			}
-		}
-		return nil
-	}
-
 	var walk func(n *ts.Node, prefix string, depth int)
 	walk = func(n *ts.Node, prefix string, depth int) {
 		// Bound recursion so a deeply-nested AST can't overflow the goroutine
@@ -330,7 +336,7 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				// (e.g. a named callback `setTimeout(function tick(){})`) are
 				// intentionally NOT a case here; only those bound to a variable (below)
 				// are captured.
-				name := fieldText(c, "name")
+				name := fieldText(c, "name", lang, src)
 				if name == "" {
 					continue
 				}
@@ -345,7 +351,7 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				// and descended with the qualified prefix so members become X.member —
 				// without this, namespace members would escape qualification and
 				// collide with identically-named top-level symbols.
-				name := fieldText(c, "name")
+				name := fieldText(c, "name", lang, src)
 				if name == "" {
 					continue
 				}
@@ -358,14 +364,14 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				// function to the bound variable name, spanning the function value
 				// so a body change flips the hash. Body is not recursed (top-level
 				// altitude — see the function case above).
-				name := fieldText(c, "name")
-				if fn := childOfType(c, "arrow_function", "function_expression"); fn != nil && name != "" {
+				name := fieldText(c, "name", lang, src)
+				if fn := childOfType(c, lang, "arrow_function", "function_expression"); fn != nil && name != "" {
 					recordFunc(qualify(prefix, name), fn)
 					continue
 				}
 				// `const X = class {...}` / `= class Named {...}`: record the class
 				// under the bound variable name and descend for its methods.
-				if cls := childOfType(c, "class", "class_expression"); cls != nil && name != "" {
+				if cls := childOfType(c, lang, "class", "class_expression"); cls != nil && name != "" {
 					full := qualify(prefix, name)
 					recordClass(full, cls)
 					walk(cls, full, depth+1)
@@ -390,6 +396,319 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 		lines = nil
 	}
 	return functions, classes, hashes, lines, hasError
+}
+
+// fieldText returns the text of n's named child in the given field, or ""
+// if the field is absent. A string-literal field (an import/export source,
+// or the rare string-form module export name in `export { "x" as y }`) is
+// unquoted — callers never see the surrounding quote characters. Package
+// level (not a jsSymbolsFromAST closure) so jsImportsExportsFromAST can
+// share it without duplicating the field-lookup logic.
+func fieldText(n *ts.Node, field string, lang *ts.Language, src []byte) string {
+	return nodeText(n.ChildByFieldName(field, lang), lang, src)
+}
+
+// childOfType returns the first named child of n whose type is in types, or
+// nil. Package level for the same reason as fieldText.
+func childOfType(n *ts.Node, lang *ts.Language, types ...string) *ts.Node {
+	for i := 0; i < n.NamedChildCount(); i++ {
+		c := n.NamedChild(i)
+		for _, want := range types {
+			if c.Type(lang) == want {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// nodeText returns n's source text, unquoting it if n is a string-literal
+// node (grammar type "string" — a single-quoted, double-quoted, or
+// backtick-delimited span). Returns "" for a nil node so callers can chain
+// it straight off ChildByFieldName/childOfType without a separate nil check.
+func nodeText(n *ts.Node, lang *ts.Language, src []byte) string {
+	if n == nil {
+		return ""
+	}
+	txt := n.Text(src)
+	if n.Type(lang) == "string" && len(txt) >= 2 {
+		first, last := txt[0], txt[len(txt)-1]
+		if (first == '\'' || first == '"' || first == '`') && first == last {
+			return txt[1 : len(txt)-1]
+		}
+	}
+	return txt
+}
+
+// jsImportsExportsFromAST walks the JS/TS AST and returns this file's import
+// specifiers (module paths — FileStructure.Imports is a list of paths, not
+// bound names), exported names, and bare wildcard re-export specifiers. It
+// mirrors jsSymbolsFromAST's structure (same panic/nest-depth guards, same
+// hasError contract) but walks import_statement/export_statement nodes
+// directly instead of extracting functions/classes, resolving alias vs.
+// local name and TS `type`-only forms off the grammar's own fields rather
+// than regex. require(...) calls have no dedicated grammar node — they stay
+// regex-matched via extractCJSRequires regardless of AST availability (see
+// p.parse), since a declaration-level walk doesn't descend into arbitrary
+// call expressions/function bodies where require() commonly appears.
+func jsImportsExportsFromAST(source string, lang *ts.Language) (imports, exports, wildcardReexports []string, hasError bool) {
+	// Same fail-safe posture as jsSymbolsFromAST: a panic degrades to no AST
+	// imports/exports rather than crashing the indexer/MCP server.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "runecho: JS/TS import/export parse panicked (%v); AST imports/exports for this file disabled\n", r)
+			imports, exports, wildcardReexports = nil, nil, nil
+		}
+	}()
+	src := []byte(source)
+	if exceedsNestDepth(src) {
+		fmt.Fprintf(os.Stderr, "runecho: JS/TS source exceeds max nesting depth (%d); AST imports/exports for this file disabled\n", maxParseNestDepth)
+		return nil, nil, nil, false
+	}
+	tree, err := ts.NewParser(lang).Parse(src)
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		return nil, nil, nil, false
+	}
+	// Same rationale as jsSymbolsFromAST: error-recovery on a partially
+	// unparseable file can drop sibling statements from the tree, so the
+	// caller supplements with the regex fallback rather than trusting a
+	// partial walk.
+	hasError = tree.RootNode().HasError()
+
+	var walk func(n *ts.Node, depth int)
+	walk = func(n *ts.Node, depth int) {
+		if depth > maxParseNestDepth {
+			return
+		}
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			switch c.Type(lang) {
+			case "import_statement":
+				collectImportSource(c, lang, src, &imports)
+			case "export_statement":
+				collectExportStatement(c, lang, src, &exports, &wildcardReexports)
+				// export_statement is also a container — e.g. `export
+				// namespace NS { export const X = 1; }` nests another
+				// export_statement inside its declaration's body — so keep
+				// descending into it like any other wrapper node.
+				walk(c, depth+1)
+			default:
+				// Recurse through every other wrapper (program, statement_block,
+				// class_body, internal_module, ERROR-recovery nodes, …) so
+				// import/export statements nested inside them are still found.
+				walk(c, depth+1)
+			}
+		}
+	}
+	walk(tree.RootNode(), 0)
+
+	return imports, exports, wildcardReexports, hasError
+}
+
+// collectImportSource extracts an import_statement's module specifier into
+// *imports. Covers `import ... from '...'`, the bare side-effect form
+// `import '...'`, and the TS `import x = require('...')` form (whose source
+// lives on the nested import_require_clause — a visible grammar rule, so its
+// own "source" field isn't promoted up to import_statement the way a hidden
+// rule's fields are).
+func collectImportSource(n *ts.Node, lang *ts.Language, src []byte, imports *[]string) {
+	if source := fieldText(n, "source", lang, src); source != "" {
+		*imports = append(*imports, source)
+		return
+	}
+	if req := childOfType(n, lang, "import_require_clause"); req != nil {
+		if source := fieldText(req, "source", lang, src); source != "" {
+			*imports = append(*imports, source)
+		}
+	}
+}
+
+// collectExportStatement extracts one export_statement node's contribution
+// to *exports/*wildcardReexports. An export_statement takes one of a handful
+// of shapes distinguished by which fields/children are present:
+//
+//   - "declaration" field: `export function|class|interface|enum|type|const|
+//     let|var ...` (with or without a leading `default`) — see
+//     collectExportedDeclNames.
+//   - "value" field: `export default <expression>` where the expression
+//     isn't itself a declaration (an identifier, or an anonymous/named
+//     function or class expression) — see collectExportDefaultValueName.
+//   - a namespace_export child: `export * as ns [from '...']` binds ns.
+//   - an export_clause child: `export {a, b as c} [from '...']` and the TS
+//     `export type {...}` form — both resolved via export_specifier's
+//     name/alias fields, covering local exports and named re-exports in one
+//     path.
+//   - neither of the above, but a "source" field directly on this node
+//     (promoted up from the hidden _from_clause rule): the bare wildcard
+//     re-export `export * from '...'` — its names aren't enumerable from
+//     this file's text alone (see extractWildcardReexports).
+//
+// TS `export = expr` and `export as namespace X` match none of these and are
+// intentionally left as a no-op (out of scope — not a named export/import).
+func collectExportStatement(n *ts.Node, lang *ts.Language, src []byte, exports, wildcardReexports *[]string) {
+	if decl := n.ChildByFieldName("declaration", lang); decl != nil {
+		collectExportedDeclNames(decl, lang, src, exports)
+		return
+	}
+	if val := n.ChildByFieldName("value", lang); val != nil {
+		collectExportDefaultValueName(val, lang, src, exports)
+		return
+	}
+	if ns := childOfType(n, lang, "namespace_export"); ns != nil {
+		// namespace_export's bound name isn't itself a Field() in the
+		// grammar (only the Seq around it is), so it's just the sole named
+		// child rather than reachable via ChildByFieldName.
+		if name := nodeText(childOfType(ns, lang, "identifier", "string"), lang, src); name != "" {
+			*exports = append(*exports, name)
+		}
+		return
+	}
+	if clause := childOfType(n, lang, "export_clause"); clause != nil {
+		for i := 0; i < clause.NamedChildCount(); i++ {
+			spec := clause.NamedChild(i)
+			if spec.Type(lang) != "export_specifier" {
+				continue
+			}
+			// The alias is what consumers actually import; only fall back to
+			// the local name when there's no `as` clause.
+			name := fieldText(spec, "alias", lang, src)
+			if name == "" {
+				name = fieldText(spec, "name", lang, src)
+			}
+			if name != "" {
+				*exports = append(*exports, name)
+			}
+		}
+		return
+	}
+	if source := fieldText(n, "source", lang, src); source != "" {
+		*wildcardReexports = append(*wildcardReexports, source)
+	}
+}
+
+// collectExportedDeclNames extracts the bound name(s) of an exported
+// declaration into *exports. Most declaration shapes (function, class,
+// interface, enum, type alias, TS namespace/module, …) carry a single "name"
+// field directly, matching jsSymbolsFromAST's class-like case. const/let/var
+// declarations are the exception — a single statement can bind more than one
+// name (`export const A = 1, B = 2`) or a destructuring pattern
+// (`export const {a, b} = x`), so those recurse through each
+// variable_declarator's real pattern structure via collectPatternNames
+// instead of a single name field.
+func collectExportedDeclNames(decl *ts.Node, lang *ts.Language, src []byte, exports *[]string) {
+	switch decl.Type(lang) {
+	case "lexical_declaration", "variable_declaration":
+		for i := 0; i < decl.NamedChildCount(); i++ {
+			d := decl.NamedChild(i)
+			if d.Type(lang) != "variable_declarator" {
+				continue
+			}
+			collectPatternNames(d.ChildByFieldName("name", lang), lang, src, exports)
+		}
+	default:
+		// function_declaration, generator_function_declaration,
+		// class_declaration, abstract_class_declaration,
+		// interface_declaration, enum_declaration, type_alias_declaration,
+		// function_signature, internal_module, module — all carry a plain
+		// "name" field. Anything else (e.g. TS import_alias/
+		// ambient_declaration, which don't) yields "" and is a safe no-op.
+		if name := fieldText(decl, "name", lang, src); name != "" {
+			*exports = append(*exports, name)
+		}
+	}
+}
+
+// collectExportDefaultValueName extracts a name from `export default
+// <expression>` when the expression isn't itself a declaration (those go
+// through collectExportedDeclNames instead — e.g. `export default class Foo
+// {}` parses as a class_declaration in the "declaration" field, not here).
+// An anonymous function/class expression, or any other expression form
+// (call, member, arrow, literal, parenthesized, …), has no exportable name
+// and is intentionally skipped — matching exportDefaultRegex's existing
+// treatment of anonymous defaults.
+func collectExportDefaultValueName(val *ts.Node, lang *ts.Language, src []byte, exports *[]string) {
+	switch val.Type(lang) {
+	case "identifier":
+		*exports = append(*exports, val.Text(src))
+	case "function_expression", "generator_function", "class", "class_expression":
+		if name := fieldText(val, "name", lang, src); name != "" {
+			*exports = append(*exports, name)
+		}
+	}
+}
+
+// collectPatternNames extracts the bound identifier(s) from a
+// variable_declarator's "name" node into *exports — either a plain
+// identifier, or an object/array destructuring pattern (nestable to
+// arbitrary depth). Mirrors destructuredNames' semantics for the regex
+// fallback (renamed binding keeps the bound name, a default value resolves
+// to its left-hand target, a rest element binds its trailing identifier) but
+// walks real pattern node boundaries instead of comma-splitting text, so an
+// initializer's own internal commas/braces can never be mistaken for another
+// binding.
+func collectPatternNames(n *ts.Node, lang *ts.Language, src []byte, exports *[]string) {
+	if n == nil {
+		return
+	}
+	switch n.Type(lang) {
+	case "identifier", "shorthand_property_identifier_pattern":
+		*exports = append(*exports, n.Text(src))
+
+	case "object_pattern":
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			switch c.Type(lang) {
+			case "shorthand_property_identifier_pattern", "identifier":
+				// `{ foo }` — no rename, no default.
+				*exports = append(*exports, c.Text(src))
+			case "pair_pattern":
+				// `{ key: value }` — the bound name is the value side, not
+				// the source key (matches destructuredNames' rename handling).
+				collectPatternNames(c.ChildByFieldName("value", lang), lang, src, exports)
+			case "object_assignment_pattern":
+				// `{ foo = default }` — a shorthand binding with a default;
+				// the bound name is the left side.
+				collectPatternNames(c.ChildByFieldName("left", lang), lang, src, exports)
+			case "rest_pattern":
+				// `{ ...rest }` binds the trailing identifier.
+				collectPatternNames(restPatternTarget(c), lang, src, exports)
+			}
+		}
+
+	case "array_pattern":
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			switch c.Type(lang) {
+			case "assignment_pattern":
+				// `[ a = default ]` — the bound name is the left side.
+				collectPatternNames(c.ChildByFieldName("left", lang), lang, src, exports)
+			case "rest_pattern":
+				// `[ ...rest ]` binds the trailing identifier.
+				collectPatternNames(restPatternTarget(c), lang, src, exports)
+			default:
+				// A plain element (identifier) or a nested destructuring
+				// pattern (`[[a, b], c]`) — recurse straight back through
+				// the same switch.
+				collectPatternNames(c, lang, src, exports)
+			}
+		}
+
+	case "assignment_pattern":
+		// Reached when a top-level variable_declarator name is itself an
+		// assignment_pattern (not expected from real source, but handled for
+		// robustness/symmetry with the nested cases above).
+		collectPatternNames(n.ChildByFieldName("left", lang), lang, src, exports)
+	}
+}
+
+// restPatternTarget returns a rest_pattern's bound identifier — its sole
+// named child (`...rest` / `...others`), since rest_pattern's grammar
+// production isn't Field()-wrapped.
+func restPatternTarget(n *ts.Node) *ts.Node {
+	if n.NamedChildCount() == 0 {
+		return nil
+	}
+	return n.NamedChild(n.NamedChildCount() - 1)
 }
 
 // Parse extracts top-level structure from JavaScript/TypeScript source.
@@ -459,6 +778,23 @@ func extractImports(source string) []string {
 		}
 	}
 
+	return imports
+}
+
+// extractCJSRequires finds require('path') call specifiers via regex. Unlike
+// ESM imports, a require() call has no dedicated tree-sitter node — it's an
+// ordinary call_expression that can appear anywhere in the file, including
+// inside function bodies the declaration-level jsImportsExportsFromAST walk
+// doesn't descend into — so this stays regex-driven and is unioned into
+// Imports regardless of AST availability (see p.parse).
+func extractCJSRequires(source string) []string {
+	var imports []string
+	matches := importCJSRegex.FindAllStringSubmatch(source, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			imports = append(imports, match[1])
+		}
+	}
 	return imports
 }
 

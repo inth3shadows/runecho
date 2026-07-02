@@ -258,7 +258,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 | Language | Extensions | Definitions captured | Methods | Altitude | Backend |
 |---|---|---|---|---|---|
 | **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures | `go/ast` (stdlib) |
-| **JS/TS/JSX/TSX** | `.js`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via regex | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
+| **JS/TS/JSX/TSX** | `.js`, `.mjs`, `.cjs`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via AST, regex fallback when the grammar is unavailable | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
 | **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are

@@ -10,7 +10,7 @@ type Lang string
 
 const (
 	LangGo      Lang = "go"
-	LangJS      Lang = "js" // covers .js, .ts, .jsx, .tsx, .gs (GAS)
+	LangJS      Lang = "js" // covers .js, .mjs, .cjs, .ts, .jsx, .tsx, .gs (GAS)
 	LangPython  Lang = "py"
 	LangUnknown Lang = ""
 )
@@ -20,7 +20,8 @@ func LangFor(path string) Lang {
 	switch {
 	case strings.HasSuffix(path, ".go"):
 		return LangGo
-	case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".ts"),
+	case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".mjs"),
+		strings.HasSuffix(path, ".cjs"), strings.HasSuffix(path, ".ts"),
 		strings.HasSuffix(path, ".jsx"), strings.HasSuffix(path, ".tsx"),
 		strings.HasSuffix(path, ".gs"):
 		return LangJS

@@ -12,7 +12,7 @@ import (
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-// JSParser parses .js, .ts, .jsx, .tsx, .gs files. Functions, classes,
+// JSParser parses .js, .mjs, .cjs, .ts, .jsx, .tsx, .gs files. Functions, classes,
 // imports, and exports all use a real tree-sitter AST via a pure-Go
 // (CGO-free) runtime when the matching grammar is embedded in the build:
 // functions/classes carry per-symbol start lines and function body hashes
@@ -113,10 +113,13 @@ func NewJSParser() *JSParser {
 	return &JSParser{}
 }
 
-// SupportsExtension returns true for .js, .ts, .jsx, .tsx, .gs files.
+// SupportsExtension returns true for .js, .mjs, .cjs, .ts, .jsx, .tsx, .gs
+// files. .mjs/.cjs are plain JS syntax (ESM/CJS module-system markers, not a
+// grammar difference) — they fall through ParseExt's default case to the same
+// JS grammar as .js.
 func (p *JSParser) SupportsExtension(ext string) bool {
 	switch ext {
-	case ".js", ".ts", ".jsx", ".tsx", ".gs":
+	case ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".gs":
 		return true
 	default:
 		return false
@@ -230,7 +233,7 @@ func jsLanguageFor(ext string) *ts.Language {
 		return cachedLang(&tsLangOnce, &tsLang, "typescript", grammars.TypescriptLanguage)
 	case ".tsx":
 		return cachedLang(&tsxLangOnce, &tsxLang, "tsx", grammars.TsxLanguage)
-	default: // .js, .jsx, .gs, "" — the JS grammar also parses JSX.
+	default: // .js, .mjs, .cjs, .jsx, .gs, "" — the JS grammar also parses JSX.
 		return cachedLang(&jsLangOnce, &jsLang, "javascript", grammars.JavascriptLanguage)
 	}
 }

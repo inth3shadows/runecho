@@ -417,6 +417,86 @@ func TestJSParser_SupportsExtension(t *testing.T) {
 	}
 }
 
+// TestJSParser_ImportsValue asserts on result.Imports directly — prior to the
+// AST-based import/export walk (issue #89), no test in this file checked
+// Imports' contents at all, only indirectly via the determinism/fuzz checks.
+// FileStructure.Imports is a list of module specifiers (paths), not bound
+// names, so an aliased/renamed import still just contributes its source path.
+func TestJSParser_ImportsValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		ext     string
+		wantImp []string
+	}{
+		{
+			name:    "default_import",
+			source:  "import React from 'react';",
+			wantImp: []string{"react"},
+		},
+		{
+			name:    "named_import",
+			source:  "import { useState } from 'react';",
+			wantImp: []string{"react"},
+		},
+		{
+			name:    "named_import_with_alias",
+			source:  "import { useEffect as fx } from 'react';",
+			wantImp: []string{"react"},
+		},
+		{
+			name:    "namespace_import",
+			source:  "import * as ns from './mod';",
+			wantImp: []string{"./mod"},
+		},
+		{
+			name:    "default_and_named_combined",
+			source:  "import Def, { a, b } from './mod';",
+			wantImp: []string{"./mod"},
+		},
+		{
+			name:    "bare_side_effect_import",
+			source:  "import './side-effect';",
+			wantImp: []string{"./side-effect"},
+		},
+		{
+			name:    "cjs_require",
+			source:  "const axios = require('axios');",
+			wantImp: []string{"axios"},
+		},
+		{
+			name:    "multiple_esm_and_cjs_together",
+			source:  "import React from 'react';\nconst axios = require('axios');",
+			wantImp: []string{"axios", "react"},
+		},
+		{
+			name:    "ts_import_type",
+			source:  "import type { Foo } from './types';",
+			ext:     ".ts",
+			wantImp: []string{"./types"},
+		},
+		{
+			name:    "ts_import_require_equals",
+			source:  "import x = require('mod');",
+			ext:     ".ts",
+			wantImp: []string{"mod"},
+		},
+	}
+
+	p := NewJSParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.ParseExt(tc.source, tc.ext)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !equalStringSlices(result.Imports, tc.wantImp) {
+				t.Errorf("Imports = %v, want %v", result.Imports, tc.wantImp)
+			}
+		})
+	}
+}
+
 // Helper functions
 
 func equalFileStructure(a, b FileStructure) bool {

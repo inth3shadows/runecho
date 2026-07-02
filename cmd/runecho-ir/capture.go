@@ -70,7 +70,38 @@ func runBackup(args []string) int {
 	return 0
 }
 
-// buildIR generates a fresh IR for root (full, not incremental).
+// generateIR builds absRoot's IR, reusing the prior .ai/ir.json (if one
+// exists and loads cleanly) via Generator.Update() instead of a full
+// Generator.Generate() — Update() re-parses only files whose hash changed
+// and reuses unchanged entries verbatim, and already falls back to Generate()
+// itself on a nil or version-mismatched prior IR (see Generator.UpdateCtx), so
+// that fallback isn't duplicated here. Shared by runIndex and buildIR so both
+// the legacy `runecho-ir [root]` command and the central-store `repo add` /
+// `repo reindex` path get the same incremental-reuse behavior (issue #92).
+func generateIR(generator *ir.Generator, absRoot string) (*ir.IR, ir.Stats, error) {
+	irPath := filepath.Join(absRoot, ".ai", "ir.json")
+	if _, err := os.Stat(irPath); err == nil {
+		existing, loadErr := ir.Load(irPath)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load existing IR, regenerating: %v\n", loadErr)
+			return generator.Generate(absRoot)
+		}
+		if existing.Version != ir.IRVersion {
+			// An old-format IR cannot be incrementally updated: Update reuses
+			// unchanged files verbatim, which would leave fields added by newer
+			// versions (e.g. v2 refs) empty forever. Update() would already fall
+			// back to Generate() here on its own, but the warning is worth
+			// keeping visible to the caller.
+			fmt.Fprintf(os.Stderr, "IR format v%d -> v%d: full regenerate\n", existing.Version, ir.IRVersion)
+		}
+		return generator.Update(existing, absRoot)
+	}
+	return generator.Generate(absRoot)
+}
+
+// buildIR builds root's IR, incrementally reusing the prior .ai/ir.json when
+// one is already on disk (see generateIR) rather than always doing a full
+// re-parse.
 // fileCap limits the number of files indexed (0 = unlimited).
 // Returns the IR, the walk's honest-coverage stats, and an exit code (0 = ok).
 func buildIR(root string, fileCap int) (*ir.IR, ir.Stats, int) {
@@ -78,11 +109,12 @@ func buildIR(root string, fileCap int) (*ir.IR, ir.Stats, int) {
 	if err != nil {
 		return nil, ir.Stats{}, printErr(err)
 	}
-	result, stats, err := ir.NewGenerator(ir.GeneratorConfig{
+	generator := ir.NewGenerator(ir.GeneratorConfig{
 		IgnoredPaths:    ir.DefaultIgnoredPaths,
 		FileCap:         fileCap,
 		GenerateTimeout: cliGenerateTimeout(),
-	}).Generate(abs)
+	})
+	result, stats, err := generateIR(generator, abs)
 	if err != nil {
 		return nil, ir.Stats{}, printErr(fmt.Errorf("generate IR for %q: %w", abs, err))
 	}
@@ -120,35 +152,7 @@ func runIndex(args []string) int {
 
 	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, GenerateTimeout: cliGenerateTimeout()})
 
-	var result *ir.IR
-	var stats ir.Stats
-	var genErr error
-
-	if _, err := os.Stat(irPath); err == nil {
-		existing, loadErr := ir.Load(irPath)
-		switch {
-		case loadErr != nil:
-			fmt.Fprintf(os.Stderr, "Warning: failed to load existing IR, regenerating: %v\n", loadErr)
-			result, stats, genErr = generator.Generate(absRoot)
-		case existing.Version != ir.IRVersion:
-			// An old-format IR cannot be incrementally updated: Update reuses
-			// unchanged files verbatim, which would leave fields added by newer
-			// versions (e.g. v2 refs) empty forever.
-			fmt.Fprintf(os.Stderr, "IR format v%d -> v%d: full regenerate\n", existing.Version, ir.IRVersion)
-			result, stats, genErr = generator.Generate(absRoot)
-		default:
-			result, stats, genErr = generator.Update(existing, absRoot)
-		}
-	} else {
-		if err := os.MkdirAll(filepath.Dir(irPath), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to create .ai directory: %v\n", err)
-			return ExitError
-		}
-		result, stats, genErr = generator.Generate(absRoot)
-	}
-
-	err = genErr
-
+	result, stats, err := generateIR(generator, absRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return ExitError

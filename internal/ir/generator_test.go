@@ -513,6 +513,46 @@ func TestGenerate_RefsExtraction(t *testing.T) {
 	}
 }
 
+// TestGenerate_ImportedNamesSymbol: a bare call to an imported symbol
+// (`Path(...)` after `from pathlib import Path`) must resolve against the
+// CLI pre-commit guard's known-symbol set, not just the PreToolUse hook's. The
+// guard's set is built from Symbols regardless of Kind, so the fix is a
+// dedicated "import_name" Symbol holding the bound name — distinct from the
+// "import" Symbol, which must keep holding the raw import path ("pathlib")
+// for the legacy .ai/ir.json "imports" contract. Regression test for #76/#80.
+func TestGenerate_ImportedNamesSymbol(t *testing.T) {
+	tmpDir := t.TempDir()
+	pySrc := "from pathlib import Path\n\ndef run():\n    return Path(\".\")\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.py"), []byte(pySrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	jsSrc := "import { readFileSync } from 'fs';\n\nfunction run() {\n  return readFileSync('x');\n}\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.js"), []byte(jsSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _, err := NewGenerator(GeneratorConfig{}).Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	pyFile := result.Files["a.py"]
+	if got, want := pyFile.namesOf("import"), []string{"pathlib"}; !slices.Equal(got, want) {
+		t.Errorf("a.py import (path) symbols = %v, want %v (legacy contract unchanged)", got, want)
+	}
+	if got, want := pyFile.namesOf("import_name"), []string{"Path"}; !slices.Equal(got, want) {
+		t.Errorf("a.py import_name symbols = %v, want %v (bound name for guard resolution)", got, want)
+	}
+
+	jsFile := result.Files["b.js"]
+	if got, want := jsFile.namesOf("import"), []string{"fs"}; !slices.Equal(got, want) {
+		t.Errorf("b.js import (path) symbols = %v, want %v (legacy contract unchanged)", got, want)
+	}
+	if got, want := jsFile.namesOf("import_name"), []string{"readFileSync"}; !slices.Equal(got, want) {
+		t.Errorf("b.js import_name symbols = %v, want %v (bound name for guard resolution)", got, want)
+	}
+}
+
 // TestUpdate_VersionMismatchRegenerates: Update must fall back to a full
 // Generate for an old-format IR — reusing v1 entries verbatim would leave
 // their Refs empty forever.

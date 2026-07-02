@@ -458,14 +458,22 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 
 	return FileIR{
 		Hash:    hash,
-		Symbols: symbolsFromStructure(structure),
+		Symbols: symbolsFromStructure(structure, path, src),
 		Refs:    extractRefs(path, src),
 	}, nil
 }
 
 // symbolsFromStructure folds the parser's parallel arrays and "kind:name"-keyed
-// hash/line maps into the canonical, sorted []Symbol.
-func symbolsFromStructure(s parser.FileStructure) []Symbol {
+// hash/line maps into the canonical, sorted []Symbol. path and src additionally
+// feed importedNames, which extracts the locally-bound names an import
+// introduces (e.g. `Path` from `from pathlib import Path`) as a distinct
+// "import_name" kind — the "import" kind above stays the parser's raw import
+// paths ("pathlib"), preserving the legacy .ai/ir.json "imports" contract.
+// SymbolsForLatestSnapshot reads symbol names regardless of kind, so adding
+// "import_name" closes the gap where a bare call to an imported symbol read as
+// unresolved because only its module path, never its bound name, was ever
+// added to the known set (issues #76, #80).
+func symbolsFromStructure(s parser.FileStructure, path, src string) []Symbol {
 	var syms []Symbol
 	add := func(names []string, kind string) {
 		for _, n := range names {
@@ -477,8 +485,18 @@ func symbolsFromStructure(s parser.FileStructure) []Symbol {
 	add(s.Classes, "class")
 	add(s.Exports, "export")
 	add(s.Imports, "import")
+	add(importedNames(path, src), "import_name")
 	sortSymbols(syms)
 	return syms
+}
+
+// importedNames returns the locally-bound names this file's import statements
+// introduce, reusing the same extractor the PreToolUse hook already trusts
+// (addInFileDefs in cmd/runecho-guard) so index-time and edit-time agree on
+// what counts as resolved.
+func importedNames(path, src string) []string {
+	lang := guard.LangFor(path)
+	return guard.ExtractImports(lang, guard.TextToAddedLines(src))
 }
 
 // extractRefs returns the sorted, deduplicated bare call targets in content,

@@ -184,6 +184,35 @@ func TestJSParser_AbstractMethod(t *testing.T) {
 	}
 }
 
+// TestJSParser_TypedArrowConst covers issue #84: the reduced TS grammar can't
+// parse an arrow function whose parameter list carries a type annotation —
+// with or without an explicit return type — and swallows the whole
+// declaration into an unrecoverable ERROR subtree. Confirmed by direct AST
+// inspection: `(x) => x` parses as a clean arrow_function, but `(x: string)
+// => x` and `(x: string): string => x` both produce a top-level ERROR node
+// with no variable_declarator/arrow_function left to walk. The regex
+// fallback (name-only, no span/hash) recovers the binding instead of
+// dropping it — a real hallucination-risk gap, since a missing symbol here
+// means ANY call to it elsewhere in the repo is flagged unresolved by the
+// guard.
+func TestJSParser_TypedArrowConst(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	src := `export const withParamType = (x: string) => x;
+export const withReturnType = (x: string): string => x;
+export const plain = (x) => x;
+`
+	fs, err := p.ParseExt(src, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"withParamType", "withReturnType", "plain"} {
+		if !containsStr(fs.Functions, name) {
+			t.Errorf("Functions = %v, want it to contain %q", fs.Functions, name)
+		}
+	}
+}
+
 func containsStr(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {

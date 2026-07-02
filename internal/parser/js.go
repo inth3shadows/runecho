@@ -46,7 +46,10 @@ var (
 	// Matches: const/let/var name = function(...) or name = async function(...)
 	funcExprRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\s*\(`)
 	// Matches: const/let/var name = (...) => or name = async (...) =>
-	arrowFuncRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*=>`)
+	// The optional `(?:\s*:\s*[^=]+)?` tolerates a TS return-type annotation
+	// between the parameter list and `=>` (`(x: T): R => ...`) — `[^=]` can
+	// never consume into the arrow's own `=`, so it can't overrun into `=>`.
+	arrowFuncRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*(?:\s*:\s*[^=]+)?\s*=>`)
 
 	// Class declarations
 	// Matches: class Name or export class Name or export default class Name
@@ -141,7 +144,21 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 		lines              map[string]int
 	)
 	if lang := jsLanguageFor(ext); lang != nil {
-		functions, classes, hashes, lines = jsSymbolsFromAST(source, lang)
+		var hasError bool
+		functions, classes, hashes, lines, hasError = jsSymbolsFromAST(source, lang)
+		if hasError {
+			// The reduced grammar failed to cleanly parse at least part of this
+			// file (e.g. a typed arrow parameter/return type) — error recovery
+			// can corrupt or drop sibling top-level declarations from the tree
+			// entirely, not just the offending statement. Supplement (union,
+			// not replace) with the regex fallback so a real top-level symbol
+			// is never silently missing from the known set — the accepted
+			// trade-off is picking up an occasional nested closure the AST
+			// path deliberately excludes, which only widens the known set
+			// rather than narrowing it.
+			functions = append(functions, extractFunctions(noComments)...)
+			classes = append(classes, extractClasses(noComments)...)
+		}
 	} else {
 		// No grammar embedded in this build — degrade to names only, no spans
 		// (preserves the regex-era contract; better than dropping JS symbols).
@@ -208,7 +225,7 @@ func cachedLang(once *sync.Once, dst **ts.Language, name string, load func() *ts
 // "function:<qualified name>" for modified-symbol diffing; classes, interfaces,
 // enums, and type aliases are located (start line) but not hashed (their changes
 // surface through their members).
-func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []string, hashes map[string]string, lines map[string]int) {
+func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []string, hashes map[string]string, lines map[string]int, hasError bool) {
 	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
 	// input; a panic here would otherwise propagate through parseFile→Generate
 	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
@@ -226,12 +243,20 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: JS/TS source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, false
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, false
 	}
+	// The reduced grammar can't parse some declarator shapes — notably a typed
+	// arrow parameter or return type (`const f = (x: T): R => ...`) — and error
+	// recovery can cascade far enough to corrupt or drop sibling top-level
+	// declarations entirely (confirmed by direct AST inspection: a single
+	// broken statement can erase a later, otherwise clean function from the
+	// tree). HasError() flags this so the caller can supplement with the
+	// regex fallback over the whole file rather than trusting a partial walk.
+	hasError = tree.RootNode().HasError()
 
 	hashes = make(map[string]string)
 	lines = make(map[string]int)
@@ -357,7 +382,7 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 	if len(lines) == 0 {
 		lines = nil
 	}
-	return functions, classes, hashes, lines
+	return functions, classes, hashes, lines, hasError
 }
 
 // Parse extracts top-level structure from JavaScript/TypeScript source.

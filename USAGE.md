@@ -207,6 +207,7 @@ new state instead of the old one.
 ```bash
 runecho-ir log
 runecho-ir churn
+runecho-ir churn --json           # machine shape (parity with diff --json)
 ```
 
 Use `log` to see recent snapshots. Use `churn` to see which files and symbols

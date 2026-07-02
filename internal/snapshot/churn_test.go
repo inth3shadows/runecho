@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,82 @@ func TestFormatChurn_Full(t *testing.T) {
 	// cold.go has changes=1 < minChanges=2, so should not appear in hot files
 	if strings.Contains(out, "cold.go") {
 		t.Error("cold file should be filtered out at minChanges=2")
+	}
+}
+
+// TestChurnPayloadShape locks the JSON shape consumed by `runecho-ir churn --json`.
+func TestChurnPayloadShape(t *testing.T) {
+	r := ChurnReport{
+		SnapshotCount: 3,
+		DiffCount:     2,
+		Since:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Until:         time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
+		Files: []FileChurn{
+			{Path: "hot.go", Changes: 3, DiffCount: 2},
+			{Path: "cold.go", Changes: 1, DiffCount: 2},
+		},
+		Symbols: []SymbolChurn{
+			{Name: "HotFunc", Kind: "function", FilePath: "hot.go", Changes: 2, DiffCount: 2},
+		},
+	}
+
+	raw, err := json.Marshal(ChurnPayload(r, 2))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	for _, key := range []string{"summary", "snapshot_count", "diff_count", "since", "until", "min_changes", "hot_files", "hot_symbols"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("missing top-level key %q in churn payload", key)
+		}
+	}
+	if got["snapshot_count"].(float64) != 3 || got["diff_count"].(float64) != 2 {
+		t.Errorf("counts wrong: %v / %v", got["snapshot_count"], got["diff_count"])
+	}
+
+	hotFiles, ok := got["hot_files"].([]any)
+	if !ok || len(hotFiles) != 1 {
+		t.Fatalf("hot_files shape wrong (want 1 entry at minChanges=2): %v", got["hot_files"])
+	}
+	f := hotFiles[0].(map[string]any)
+	if f["Path"] != "hot.go" {
+		t.Errorf("hot file wrong: %v", f)
+	}
+
+	hotSymbols, ok := got["hot_symbols"].([]any)
+	if !ok || len(hotSymbols) != 1 {
+		t.Fatalf("hot_symbols shape wrong: %v", got["hot_symbols"])
+	}
+	sym := hotSymbols[0].(map[string]any)
+	if sym["Name"] != "HotFunc" || sym["Kind"] != "function" {
+		t.Errorf("hot symbol wrong: %v", sym)
+	}
+}
+
+// TestChurnPayloadEmptyIsArray asserts a report with no hot entries marshals
+// "hot_files": [] / "hot_symbols": [] (not null) — the common baseline case
+// must stay a JSON array so a machine consumer never has to null-guard.
+func TestChurnPayloadEmptyIsArray(t *testing.T) {
+	raw, err := json.Marshal(ChurnPayload(ChurnReport{SnapshotCount: 2, DiffCount: 1}, 2))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"hot_files", "hot_symbols"} {
+		arr, ok := got[key].([]any)
+		if !ok {
+			t.Fatalf("%s should be a JSON array, got %T (%s)", key, got[key], raw)
+		}
+		if len(arr) != 0 {
+			t.Errorf("%s should be empty, got %d", key, len(arr))
+		}
 	}
 }
 

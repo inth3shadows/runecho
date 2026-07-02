@@ -329,6 +329,7 @@ func runChurn(args []string) int {
 	n := fs.Int("n", 20, "number of snapshots to analyze")
 	minChanges := fs.Int("min-changes", 2, "minimum diffs a file/symbol must appear in to be considered hot")
 	compact := fs.Bool("compact", false, "single-line compact output")
+	asJSON := fs.Bool("json", false, "machine-readable JSON (parity with diff --json)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
 	}
@@ -354,9 +355,17 @@ func runChurn(args []string) int {
 		return ExitError
 	}
 
-	if *compact {
+	switch {
+	case *asJSON:
+		out, err := json.MarshalIndent(snapshot.ChurnPayload(report, *minChanges), "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return ExitError
+		}
+		fmt.Println(string(out))
+	case *compact:
 		fmt.Println(snapshot.FormatChurnCompact(report))
-	} else {
+	default:
 		fmt.Print(snapshot.FormatChurn(report, *minChanges))
 	}
 	return 0

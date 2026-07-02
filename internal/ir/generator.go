@@ -486,6 +486,13 @@ func symbolsFromStructure(s parser.FileStructure, path, src string) []Symbol {
 	add(s.Exports, "export")
 	add(s.Imports, "import")
 	add(importedNames(path, src), "import_name")
+	// Module specifiers behind a bare `export * from './mod'` re-export
+	// (JS/TS). The names that re-export actually binds aren't enumerable from
+	// this file alone (see FileStructure.WildcardReexports) — recording the
+	// specifier under its own kind keeps the fact visible (`runecho-ir map`/
+	// `locate`) instead of the prior silent drop, without fabricating export
+	// names this file doesn't itself define.
+	add(s.WildcardReexports, "export_wildcard")
 	sortSymbols(syms)
 	return syms
 }

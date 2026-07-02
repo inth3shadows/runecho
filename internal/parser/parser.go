@@ -7,6 +7,16 @@ type FileStructure struct {
 	Classes   []string // Class names, nested qualified as Outer.Inner (sorted)
 	Exports   []string // Exported symbol names (sorted)
 
+	// WildcardReexports lists the raw module specifiers pulled in via a bare
+	// `export * from './mod'` re-export (JS/TS only; sorted). A single-file
+	// parser cannot enumerate the target module's own bindings, so these names
+	// are never added to Exports — recording the specifier here at least makes
+	// the gap visible to downstream consumers (the IR generator resolves it
+	// in-repo where possible) instead of silently dropping it. Nil for parsers
+	// without this construct (everything but JS/TS) or files with no bare
+	// wildcard re-export.
+	WildcardReexports []string
+
 	// SymbolHashes maps "kind:name" (e.g. "function:Reader.fetch") to a hash of
 	// that symbol's source body, for parsers that extract per-symbol spans (the
 	// AST-backed Python parser). It enables modified-symbol diffing: a symbol

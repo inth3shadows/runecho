@@ -197,6 +197,7 @@ func locateSchema() map[string]any {
 			"repo":   map[string]any{"type": "string", "description": "name of an enrolled repo"},
 			"symbol": map[string]any{"type": "string", "description": "symbol to locate: matches by exact name, name prefix, or last dotted segment (e.g. \"fetch\" finds \"Reader.fetch\"). Omit to list all (capped)."},
 			"kind":   map[string]any{"type": "string", "description": "restrict to func|class|export|import (default: func+class)"},
+			"offset": map[string]any{"type": "integer", "description": "skip this many matches before returning a page (default 0). Page again with the response's next_offset until it's absent."},
 		},
 		"required": []string{"repo"},
 	}
@@ -490,6 +491,7 @@ func (o *Oracle) locate(args json.RawMessage) (string, error) {
 		Repo   string `json:"repo"`
 		Symbol string `json:"symbol"`
 		Kind   string `json:"kind"`
+		Offset int    `json:"offset"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
@@ -497,6 +499,9 @@ func (o *Oracle) locate(args json.RawMessage) (string, error) {
 	kind, ok := normalizeLocateKind(a.Kind)
 	if !ok {
 		return "", fmt.Errorf("invalid kind %q (want func|class|export|import)", a.Kind)
+	}
+	if a.Offset < 0 {
+		return "", fmt.Errorf("offset must be >= 0, got %d", a.Offset)
 	}
 	repo, err := o.resolveRepo(a.Repo)
 	if err != nil {
@@ -529,23 +534,38 @@ func (o *Oracle) locate(args json.RawMessage) (string, error) {
 		matches = append(matches, s)
 	}
 
+	// total is the full filtered set, independent of offset/cap — a client
+	// pages by re-issuing with offset=next_offset until next_offset is absent,
+	// using total to know how far it has to go (or that a narrower query would
+	// avoid paging entirely).
 	total := len(matches)
+	page := matches
+	if a.Offset > len(page) {
+		page = nil
+	} else {
+		page = page[a.Offset:]
+	}
 	truncated := false
-	if len(matches) > locateMatchCap {
-		matches = matches[:locateMatchCap]
+	if len(page) > locateMatchCap {
+		page = page[:locateMatchCap]
 		truncated = true
 	}
-	if matches == nil {
-		matches = []ir.SymbolLoc{}
+	if page == nil {
+		page = []ir.SymbolLoc{}
 	}
-	return jsonText(map[string]any{
+	out := map[string]any{
 		"repo":      repo.Name,
 		"query":     a.Symbol,
-		"count":     len(matches),
+		"count":     len(page),
 		"total":     total,
+		"offset":    a.Offset,
 		"truncated": truncated,
-		"symbols":   matches,
-	})
+		"symbols":   page,
+	}
+	if next := a.Offset + len(page); next < total {
+		out["next_offset"] = next
+	}
+	return jsonText(out)
 }
 
 // symbolMatches reports whether a symbol name satisfies a locate query: exact

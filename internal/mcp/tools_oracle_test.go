@@ -234,6 +234,88 @@ func TestOracleLocate(t *testing.T) {
 	}
 }
 
+// TestOracleLocate_Offset covers pagination: offset skips already-seen
+// matches, next_offset chains pages until exhausted, and out-of-range/negative
+// offsets are handled without panicking or double-counting. Regression test
+// for #88 (locate had no way to page past locateMatchCap).
+func TestOracleLocate_Offset(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	repoDir := t.TempDir()
+	var src string
+	for i := 0; i < 5; i++ {
+		src += fmt.Sprintf("func Fn%d() {}\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "demo.go"), []byte("package demo\n\n"+src), 0644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if _, err := db.EnrollRepo("demo", repoDir, "", 0); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	o := NewOracle(db, dbPath)
+
+	// No offset: all 5, no next_offset (well under locateMatchCap).
+	all := call(t, o.locate, `{"repo":"demo"}`)
+	if all["total"].(float64) != 5 || all["count"].(float64) != 5 {
+		t.Fatalf("locate all = %+v, want total=5 count=5", all)
+	}
+	if _, ok := all["next_offset"]; ok {
+		t.Errorf("next_offset should be absent when everything fit in one page: %+v", all)
+	}
+
+	// Manually page 2 at a time and confirm the union matches the full set,
+	// with no duplicates and no gaps.
+	seen := map[string]bool{}
+	offset := 0
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("too many pages — pagination likely stuck")
+		}
+		page := call(t, o.locate, fmt.Sprintf(`{"repo":"demo","offset":%d}`, offset))
+		if page["offset"].(float64) != float64(offset) {
+			t.Errorf("page offset = %v, want %d", page["offset"], offset)
+		}
+		syms := page["symbols"].([]any)
+		for _, s := range syms {
+			name := s.(map[string]any)["name"].(string)
+			if seen[name] {
+				t.Errorf("symbol %q returned in more than one page", name)
+			}
+			seen[name] = true
+		}
+		next, hasNext := page["next_offset"]
+		if !hasNext {
+			break
+		}
+		offset = int(next.(float64))
+	}
+	if len(seen) != 5 {
+		t.Errorf("paged through %d distinct symbols, want 5: %v", len(seen), seen)
+	}
+
+	// Offset past the end: empty page, not an error, total still reports 5.
+	past := call(t, o.locate, `{"repo":"demo","offset":100}`)
+	if past["count"].(float64) != 0 {
+		t.Errorf("offset past end count = %v, want 0", past["count"])
+	}
+	if past["total"].(float64) != 5 {
+		t.Errorf("offset past end total = %v, want 5", past["total"])
+	}
+	if _, ok := past["next_offset"]; ok {
+		t.Errorf("next_offset should be absent past the end: %+v", past)
+	}
+
+	// Negative offset is rejected.
+	if _, err := o.locate([]byte(`{"repo":"demo","offset":-1}`)); err == nil {
+		t.Error("expected error for negative offset")
+	}
+}
+
 func TestSymbolMatches(t *testing.T) {
 	cases := []struct {
 		name, query string

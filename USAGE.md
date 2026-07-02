@@ -181,6 +181,10 @@ a single "where is X" query without spending context on the full table:
 // → matches Reader.fetch → src/reader.py:42 (exact, prefix, or last-segment match)
 ```
 
+An unfiltered or broad query on a large repo is capped per call; the response
+carries `next_offset` when more matches remain — pass it back as `offset` to
+page through the rest, or narrow the query instead.
+
 To prime a session without dumping the map, `runecho-ir map --header` prints a
 <200-token summary (file/symbol counts, busiest directories, and a pointer to
 `locate`) — suitable for a Claude Code SessionStart hook.

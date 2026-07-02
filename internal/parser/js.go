@@ -89,6 +89,10 @@ var (
 	exportArrDestructureRegex = regexp.MustCompile(`export\s+(?:const|let|var)\s*\[([^\]]*)\]\s*=`)
 	// Matches: export * as ns from './m' — the namespace re-export binds `ns`.
 	exportStarAsRegex = regexp.MustCompile(`export\s+\*\s+as\s+(\w+)`)
+	// Matches: export * from './m' — the bare form, with no `as` clause. Requires
+	// "from" to follow "*" with only whitespace between, so it never matches the
+	// namespace form above (which has "as ns" in between).
+	exportStarBareRegex = regexp.MustCompile(`export\s+\*\s+from\s+['"]([^'"]+)['"]`)
 	// Matches: export default function Foo / export default [abstract] class Foo /
 	// export default ident. Three capture groups — first non-empty wins; keywords
 	// (function/class/async) in group 3 are discarded so anonymous defaults don't
@@ -136,6 +140,7 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 	noComments := removeComments(source)
 	imports := extractImports(noComments)
 	exports := extractExports(noComments)
+	wildcardReexports := extractWildcardReexports(noComments)
 
 	// Functions and classes: AST when the grammar is available, regex otherwise.
 	var (
@@ -170,14 +175,16 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 	sort.Strings(functions)
 	sort.Strings(classes)
 	sort.Strings(exports)
+	sort.Strings(wildcardReexports)
 
 	return FileStructure{
-		Imports:      deduplicate(imports),
-		Functions:    deduplicate(functions),
-		Classes:      deduplicate(classes),
-		Exports:      deduplicate(exports),
-		SymbolHashes: hashes,
-		SymbolLines:  lines,
+		Imports:           deduplicate(imports),
+		Functions:         deduplicate(functions),
+		Classes:           deduplicate(classes),
+		Exports:           deduplicate(exports),
+		WildcardReexports: deduplicate(wildcardReexports),
+		SymbolHashes:      hashes,
+		SymbolLines:       lines,
 	}, nil
 }
 
@@ -577,6 +584,20 @@ func extractExports(source string) []string {
 	}
 
 	return exports
+}
+
+// extractWildcardReexports finds bare `export * from './mod'` module
+// specifiers — the names they re-export aren't enumerable from this file's
+// text alone. See exportStarBareRegex.
+func extractWildcardReexports(source string) []string {
+	var specifiers []string
+	matches := exportStarBareRegex.FindAllStringSubmatch(source, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			specifiers = append(specifiers, match[1])
+		}
+	}
+	return specifiers
 }
 
 // splitTopLevelDeclNames splits a `const`/`let`/`var` declarator list (the

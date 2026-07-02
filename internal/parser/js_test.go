@@ -284,6 +284,68 @@ func TestJSParser_ExportDestructure(t *testing.T) {
 	}
 }
 
+func TestJSParser_WildcardReexport(t *testing.T) {
+	cases := []struct {
+		name     string
+		source   string
+		wantExp  []string
+		wantWild []string
+	}{
+		{
+			name:     "bare star re-export recorded as wildcard, not export",
+			source:   "export * from './mod';",
+			wantExp:  nil,
+			wantWild: []string{"./mod"},
+		},
+		{
+			name:     "namespace star re-export still binds ns, no wildcard marker",
+			source:   "export * as ns from './m';",
+			wantExp:  []string{"ns"},
+			wantWild: nil,
+		},
+		{
+			name:     "multiple bare star re-exports from different modules",
+			source:   "export * from './a';\nexport * from './b';",
+			wantExp:  nil,
+			wantWild: []string{"./a", "./b"},
+		},
+		{
+			name:     "duplicate bare star re-export deduplicated",
+			source:   "export * from './a';\nexport * from './a';",
+			wantExp:  nil,
+			wantWild: []string{"./a"},
+		},
+		{
+			name:     "bare and namespace forms coexist independently",
+			source:   "export * from './a';\nexport * as ns from './b';",
+			wantExp:  []string{"ns"},
+			wantWild: []string{"./a"},
+		},
+		{
+			name:     "no star re-export at all",
+			source:   "export const Widget = 1;",
+			wantExp:  []string{"Widget"},
+			wantWild: nil,
+		},
+	}
+
+	p := NewJSParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.Parse(tc.source)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if !equalStringSlices(result.Exports, tc.wantExp) {
+				t.Errorf("Exports = %v, want %v", result.Exports, tc.wantExp)
+			}
+			if !equalStringSlices(result.WildcardReexports, tc.wantWild) {
+				t.Errorf("WildcardReexports = %v, want %v", result.WildcardReexports, tc.wantWild)
+			}
+		})
+	}
+}
+
 func TestJSParser_MultiNameDeclExport(t *testing.T) {
 	cases := []struct {
 		name    string

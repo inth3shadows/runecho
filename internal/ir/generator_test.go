@@ -553,6 +553,35 @@ func TestGenerate_ImportedNamesSymbol(t *testing.T) {
 	}
 }
 
+// TestGenerate_WildcardReexportSymbol: a bare `export * from './mod'`
+// re-export must not vanish from the IR — the names it binds aren't
+// enumerable from this file alone, but the specifier itself is recorded under
+// its own "export_wildcard" kind (distinct from "export") so `runecho`
+// structure/map surface the gap instead of silently showing nothing.
+// Regression test for #83.
+func TestGenerate_WildcardReexportSymbol(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := "export * from './mod';\nexport * as ns from './other';\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "index.ts"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _, err := NewGenerator(GeneratorConfig{}).Generate(tmpDir)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	file := result.Files["index.ts"]
+	if got, want := file.namesOf("export_wildcard"), []string{"./mod"}; !slices.Equal(got, want) {
+		t.Errorf("export_wildcard symbols = %v, want %v", got, want)
+	}
+	// The namespace form still binds `ns` as a real export — unaffected by the
+	// bare form's handling.
+	if got, want := file.namesOf("export"), []string{"ns"}; !slices.Equal(got, want) {
+		t.Errorf("export symbols = %v, want %v (namespace re-export unaffected)", got, want)
+	}
+}
+
 // TestUpdate_VersionMismatchRegenerates: Update must fall back to a full
 // Generate for an old-format IR — reusing v1 entries verbatim would leave
 // their Refs empty forever.

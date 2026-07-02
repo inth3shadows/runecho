@@ -28,9 +28,11 @@ type IR struct {
 	Files    map[string]FileIR `json:"-"` // Excluded from direct marshalling
 }
 
-// Symbol is one declared symbol. Kind is function | class | export | import.
-// Line is the 1-based start line (0 = unknown). Hash is the symbol's body hash,
-// empty unless the parser isolated a body (AST functions/methods carry it).
+// Symbol is one declared symbol. Kind is function | class | export | import |
+// import_name | export_wildcard (a JS/TS bare `export * from './mod'`
+// specifier — see FileStructure.WildcardReexports). Line is the 1-based start
+// line (0 = unknown). Hash is the symbol's body hash, empty unless the parser
+// isolated a body (AST functions/methods carry it).
 type Symbol struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`

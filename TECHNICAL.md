@@ -136,7 +136,8 @@ Validation is a two-pass static check: first collect every definition the change
 itself introduces (plus the on-disk file's own definitions and imports, so local
 helpers don't false-positive), then flag bare calls — `Foo(`, never `pkg.Foo(` —
 that appear in neither the IR, the new definitions, the per-language builtin
-sets, nor `.runechoguardignore` (one literal symbol per line, `#` comments, at
+sets, nor `.runechoguardignore` (one literal symbol or glob pattern per line —
+`track*` allowlists a whole family of bare global names — `#` comments, at
 the repo root).
 
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB

@@ -101,6 +101,33 @@ func TestRun_IgnoreFile_SuppressesViolation(t *testing.T) {
 	}
 }
 
+func TestRun_IgnoreFile_GlobSuppressesNamespace(t *testing.T) {
+	// Bare (unqualified) calls only — a qualified call like React.useState()
+	// is already exempt regardless of the ignore file (see
+	// TestRun_QualifiedCall_NotFlagged), so the glob path needs its own
+	// bare-call fixture to actually exercise matchesIgnoreGlob.
+	dir := t.TempDir()
+	ignorePath := filepath.Join(dir, ".runechoguardignore")
+	if err := os.WriteFile(ignorePath, []byte("# comment\ntrack*\nLiteralName\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	symbols := map[string]struct{}{}
+	diffs := []FileDiff{{
+		Path: "main.js",
+		AddedLines: lines(
+			`trackClick()`,
+			`trackView()`,
+			`LiteralName()`,
+			`NotIgnored()`,
+		),
+	}}
+	violations := Run(symbols, ignorePath, diffs)
+	if len(violations) != 1 || violations[0].Symbol != "NotIgnored" {
+		t.Errorf("want only NotIgnored flagged, got %v", violations)
+	}
+}
+
 func TestRun_BuiltinCall_NotFlagged(t *testing.T) {
 	symbols := map[string]struct{}{}
 	diffs := []FileDiff{{

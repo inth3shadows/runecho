@@ -401,6 +401,8 @@ func TestJSParser_SupportsExtension(t *testing.T) {
 		expected bool
 	}{
 		{".js", true},
+		{".mjs", true},
+		{".cjs", true},
 		{".ts", true},
 		{".gs", true},
 		{".py", false},

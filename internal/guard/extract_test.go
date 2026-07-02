@@ -659,6 +659,8 @@ func TestLangFor(t *testing.T) {
 		{"src/bar.ts", LangJS},
 		{"baz.jsx", LangJS},
 		{"qux.gs", LangJS},
+		{"esm.mjs", LangJS},
+		{"commonjs.cjs", LangJS},
 		{"script.py", LangPython},
 		{"data.json", LangUnknown},
 	}

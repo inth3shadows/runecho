@@ -273,8 +273,7 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 			recordLine("function:"+full, int(spanNode.StartPoint().Row)+1)
 		case "class_definition":
 			classes = append(classes, full)
-			// Classes are not hashed (changes surface through their members),
-			// but they still get a location for the map.
+			recordHash("class:"+full, src[spanNode.StartByte():spanNode.EndByte()])
 			recordLine("class:"+full, int(spanNode.StartPoint().Row)+1)
 		default:
 			return

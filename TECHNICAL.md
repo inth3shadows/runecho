@@ -262,8 +262,11 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 | **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
-consistent across parsers. Functions/methods are body-hashed; classes/types are
-located but not hashed (their changes surface through their members).
+consistent across parsers. Functions/methods are body-hashed over their full
+span; classes/types are also hashed over their full span (name through closing
+brace), so a field/member change flips the type's own hash — there is no
+separate field-level symbol, so diff/churn report "the type changed," not
+which member changed.
 
 **Known gaps:**
 

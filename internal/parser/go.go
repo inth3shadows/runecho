@@ -18,8 +18,10 @@ import (
 //   - Exported funcs and methods → Functions. Methods are qualified by receiver
 //     type ("Reader.Fetch"), matching the Python parser's scope-qualified names,
 //     so identical method names on different types never collide.
-//   - Exported types → Classes (struct, interface, alias, etc.); located but not
-//     hashed (parity with Python classes — changes surface through members).
+//   - Exported types → Classes (struct, interface, alias, etc.); located and
+//     hashed over the full type-spec span (name through closing brace), so a
+//     field/member change flips the type's hash without a separate field
+//     symbol kind (parity with Python/JS/TS class hashing).
 //   - Exported interface method signatures → Functions, qualified by the
 //     interface type ("Reader.Read"); located and hashed over the signature span
 //     so a contract change flips the hash (parity with the JS/TS parser, which
@@ -160,7 +162,9 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 				continue
 			}
 			*classes = append(*classes, s.Name.Name)
-			recordLine("class:"+s.Name.Name, fset.Position(s.Pos()).Line)
+			key := "class:" + s.Name.Name
+			recordHash(key, nodeSpan(fset, src, s))
+			recordLine(key, fset.Position(s.Pos()).Line)
 			// Descend into an interface body so its method signatures become
 			// referenceable as Type.Method (parity with JS/TS interface methods
 			// and Python class methods). Only methods carry Names + a FuncType;

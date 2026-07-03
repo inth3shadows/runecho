@@ -197,6 +197,41 @@ func TestPythonParser_Classes(t *testing.T) {
 	}
 }
 
+// TestPythonParser_ClassHashChangesOnFieldEdit covers issue #53's cheaper
+// alternative to per-field extraction: a class's own hash flips when an
+// instance attribute is added/renamed, without a dedicated field symbol.
+func TestPythonParser_ClassHashChangesOnFieldEdit(t *testing.T) {
+	p := NewPythonParser()
+	hashOf := func(src, key string) string {
+		t.Helper()
+		fs, err := p.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fs.SymbolHashes[key]
+		if h == "" {
+			t.Fatalf("no hash for %q in:\n%s", key, src)
+		}
+		return h
+	}
+
+	base := "class Config:\n    def __init__(self):\n        self.timeout = 1\n\nclass Other:\n    def __init__(self):\n        self.x = 1\n"
+	fieldAdded := "class Config:\n    def __init__(self):\n        self.timeout = 1\n        self.retries = 3\n\nclass Other:\n    def __init__(self):\n        self.x = 1\n"
+	fieldRenamed := "class Config:\n    def __init__(self):\n        self.deadline = 1\n\nclass Other:\n    def __init__(self):\n        self.x = 1\n"
+	siblingChange := "class Config:\n    def __init__(self):\n        self.timeout = 1\n\nclass Other:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n"
+
+	baseConfig := hashOf(base, "class:Config")
+	if hashOf(fieldAdded, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after adding a field — diff would miss the change")
+	}
+	if hashOf(fieldRenamed, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after renaming its only field")
+	}
+	if hashOf(siblingChange, "class:Config") != baseConfig {
+		t.Error("Config hash changed when only sibling Other changed — would over-report")
+	}
+}
+
 func TestPythonParser_AllExportsDoubleQuote(t *testing.T) {
 	src := `__all__ = ["process_data", "Animal", "helper"]` + "\n"
 	p := NewPythonParser()

@@ -1,9 +1,54 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+var fuzzLangs = []Lang{LangGo, LangJS, LangPython, LangUnknown}
+
+// FuzzStripLiteralsStateful asserts stripLiteralsStateful never panics and
+// preserves two invariants: output length equals input length, and valid
+// UTF-8 input never becomes invalid UTF-8 output. stripLiteralsStateful is on
+// ExtractRefs's hot path (36 callers) — the core symbol-reference extraction
+// used throughout the hallucination-detection guard — so a crash or a
+// corrupted-rune bug here would corrupt every downstream match. The harness
+// drives the same per-line loop as extract.go:435-450, threading `open`
+// across lines, since that's where the real risk (multi-line strings/
+// comments) lives — a single isolated call with open="" would never reach it.
+// Run: go test -run=x -fuzz=FuzzStripLiteralsStateful ./internal/guard
+func FuzzStripLiteralsStateful(f *testing.F) {
+	seeds := []string{
+		`q := "SELECT COUNT(*)" // trailing`,
+		`x = f('a\'b') # note`,
+		"const s = `tmpl ${x}` // c",
+		`x = f"{Build(y)}"`,
+		`x = f"{{esc}} {Call(z)}"`,
+		`x = rf"\d+ {Match(p)}"`,
+		"",
+		`x = """unterminated triple-quote`,
+		"/* unterminated block comment",
+		"line one\x00\nline two\x00",
+	}
+	for _, s := range seeds {
+		f.Add(uint8(0), s)
+	}
+	f.Fuzz(func(t *testing.T, langIdx uint8, text string) {
+		lang := fuzzLangs[int(langIdx)%len(fuzzLangs)]
+		open := ""
+		for _, line := range strings.Split(text, "\n") {
+			scan, newOpen := stripLiteralsStateful(lang, line, open)
+			open = newOpen
+			if len(scan) != len(line) {
+				t.Fatalf("stripLiteralsStateful(%q, %q, open=%q) changed length: %d != %d", lang, line, open, len(scan), len(line))
+			}
+			if utf8.ValidString(line) && !utf8.ValidString(scan) {
+				t.Fatalf("stripLiteralsStateful(%q, %q, open=%q) produced invalid UTF-8 from valid input: %q", lang, line, open, scan)
+			}
+		}
+	})
+}
 
 // FuzzGuardDiff asserts the unified-diff parser never panics on arbitrary input.
 // parseDiffOutput is on the guard's hot path — it runs on every staged commit

@@ -67,6 +67,37 @@ func TestDiffPayloadShape(t *testing.T) {
 	}
 }
 
+// TestComputeDiff_ClassHashModification covers the integration point that
+// issue #53's type-level hashing feeds: before that change, class-kind
+// symbols always carried Hash == "" on both sides, so this branch of
+// computeDiff was dead for structs/classes — a field edit was invisible to
+// diff. Now that parsers populate a real class hash, the existing
+// both-sides-non-empty check (diff.go) must catch it like any other symbol.
+func TestComputeDiff_ClassHashModification(t *testing.T) {
+	a := SnapshotMeta{RootHash: "aaa"}
+	b := SnapshotMeta{RootHash: "bbb"}
+	aFiles := map[string]string{"config.go": "filehash1"}
+	bFiles := map[string]string{"config.go": "filehash2"} // file content changed along with the field
+	aSymbols := map[string][]SymbolDelta{
+		"config.go": {{Name: "Config", Kind: "class", Hash: "hash-before"}},
+	}
+	bSymbols := map[string][]SymbolDelta{
+		"config.go": {{Name: "Config", Kind: "class", Hash: "hash-after"}},
+	}
+
+	result := computeDiff(a, b, aFiles, bFiles, aSymbols, bSymbols)
+
+	if result.TotalModified != 1 {
+		t.Fatalf("TotalModified = %d, want 1 (a struct field edit should surface as modified)", result.TotalModified)
+	}
+	if len(result.Files) != 1 || len(result.Files[0].Modified) != 1 {
+		t.Fatalf("Files = %+v, want one file with one modified symbol", result.Files)
+	}
+	if result.Files[0].Modified[0].Name != "Config" {
+		t.Errorf("modified symbol = %+v, want Config", result.Files[0].Modified[0])
+	}
+}
+
 // TestDiffPayloadEmptyFilesIsArray asserts a zero-drift diff marshals
 // "files": [] (not null) — the common baseline case must stay a JSON array so a
 // machine consumer never has to null-guard before iterating.

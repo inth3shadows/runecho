@@ -99,7 +99,8 @@ type Number interface {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The interfaces themselves remain in Classes (located, not hashed).
+	// The interfaces themselves remain in Classes (located and hashed over
+	// the full interface span).
 	wantClasses := []string{"Number", "ReadWriter", "Reader"}
 	if len(fs.Classes) != len(wantClasses) {
 		t.Fatalf("classes: got %v, want %v", fs.Classes, wantClasses)
@@ -286,15 +287,15 @@ func (w *Widget) Do() {}
 			t.Errorf("SymbolLines[%q] = %d, want %d", key, got, wantLine)
 		}
 	}
-	// Functions only (not classes) carry a body hash.
+	// Functions and classes both carry a body hash; exports/imports don't.
 	if fs.SymbolHashes["function:Top"] == "" {
 		t.Error("function:Top has no body hash")
 	}
 	if fs.SymbolHashes["function:Widget.Do"] == "" {
 		t.Error("function:Widget.Do has no body hash")
 	}
-	if _, ok := fs.SymbolHashes["class:Widget"]; ok {
-		t.Error("class:Widget should not be hashed (parity with Python classes)")
+	if fs.SymbolHashes["class:Widget"] == "" {
+		t.Error("class:Widget has no body hash")
 	}
 }
 
@@ -333,6 +334,41 @@ func TestGoParser_BodyHashChangesOnRewrite(t *testing.T) {
 	}
 	if hashOf(siblingChange, "function:G") == hashOf(base, "function:G") {
 		t.Error("G body hash unchanged after G was rewritten")
+	}
+}
+
+// TestGoParser_ClassHashChangesOnFieldEdit covers issue #53's cheaper
+// alternative to per-field extraction: a struct's own hash flips when a field
+// is added/renamed, without a dedicated field symbol.
+func TestGoParser_ClassHashChangesOnFieldEdit(t *testing.T) {
+	p := NewGoParser()
+	hashOf := func(src, key string) string {
+		t.Helper()
+		fs, err := p.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fs.SymbolHashes[key]
+		if h == "" {
+			t.Fatalf("no hash for %q in:\n%s", key, src)
+		}
+		return h
+	}
+
+	base := "package foo\n\ntype Config struct {\n\tTimeout int\n}\n\ntype Other struct {\n\tX int\n}\n"
+	fieldAdded := "package foo\n\ntype Config struct {\n\tTimeout int\n\tRetries int\n}\n\ntype Other struct {\n\tX int\n}\n"
+	fieldRenamed := "package foo\n\ntype Config struct {\n\tDeadline int\n}\n\ntype Other struct {\n\tX int\n}\n"
+	siblingChange := "package foo\n\ntype Config struct {\n\tTimeout int\n}\n\ntype Other struct {\n\tX int\n\tY int\n}\n"
+
+	baseConfig := hashOf(base, "class:Config")
+	if hashOf(fieldAdded, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after adding a field — diff would miss the change")
+	}
+	if hashOf(fieldRenamed, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after renaming its only field")
+	}
+	if hashOf(siblingChange, "class:Config") != baseConfig {
+		t.Error("Config hash changed when only sibling Other changed — would over-report")
 	}
 }
 

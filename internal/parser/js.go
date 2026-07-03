@@ -315,6 +315,7 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 	}
 	recordClass := func(full string, node *ts.Node) {
 		classes = append(classes, full)
+		recordHash("class:"+full, src[node.StartByte():node.EndByte()])
 		recordLine("class:"+full, int(node.StartPoint().Row)+1)
 	}
 	var walk func(n *ts.Node, prefix string, depth int)
@@ -350,10 +351,11 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				"internal_module", "module":
 				// Class-like containers: classes, interfaces, enums, type aliases, and
 				// TS namespaces/modules (`namespace X {}` parses as internal_module,
-				// `module X {}` as module). Recorded as a class (located, not hashed)
-				// and descended with the qualified prefix so members become X.member —
-				// without this, namespace members would escape qualification and
-				// collide with identically-named top-level symbols.
+				// `module X {}` as module). Recorded as a class, hashed over its full
+				// span (a member change flips the hash), and descended with the
+				// qualified prefix so members become X.member — without this,
+				// namespace members would escape qualification and collide with
+				// identically-named top-level symbols.
 				name := fieldText(c, "name", lang, src)
 				if name == "" {
 					continue

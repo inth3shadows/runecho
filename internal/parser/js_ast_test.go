@@ -43,14 +43,11 @@ export const arrow = () => 1;
 			t.Errorf("SymbolLines[%q] = %d, want %d", key, got, want)
 		}
 	}
-	// Functions/methods are hashed; classes are not (parity with Python/Go).
-	for _, key := range []string{"function:topLevel", "function:Widget.doThing", "function:arrow"} {
+	// Functions/methods and classes are all hashed over their full span.
+	for _, key := range []string{"function:topLevel", "function:Widget.doThing", "function:arrow", "class:Widget"} {
 		if fs.SymbolHashes[key] == "" {
 			t.Errorf("%s has no body hash", key)
 		}
-	}
-	if _, ok := fs.SymbolHashes["class:Widget"]; ok {
-		t.Error("class:Widget should not be hashed")
 	}
 	// The qualified method must appear in Functions, not a bare "doThing".
 	if !containsStr(fs.Functions, "Widget.doThing") {
@@ -92,6 +89,41 @@ func TestJSParser_BodyHashChangesOnRewrite(t *testing.T) {
 	}
 }
 
+// TestJSParser_ClassHashChangesOnFieldEdit covers issue #53's cheaper
+// alternative to per-field extraction: a class's own hash flips when a field
+// is added/renamed, without a dedicated field symbol.
+func TestJSParser_ClassHashChangesOnFieldEdit(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	hashOf := func(src, key string) string {
+		t.Helper()
+		fs, err := p.ParseExt(src, ".ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fs.SymbolHashes[key]
+		if h == "" {
+			t.Fatalf("no hash for %q in:\n%s", key, src)
+		}
+		return h
+	}
+	base := "class Config {\n  timeout: number;\n}\nclass Other {\n  x: number;\n}\n"
+	fieldAdded := "class Config {\n  timeout: number;\n  retries: number;\n}\nclass Other {\n  x: number;\n}\n"
+	fieldRenamed := "class Config {\n  deadline: number;\n}\nclass Other {\n  x: number;\n}\n"
+	siblingChange := "class Config {\n  timeout: number;\n}\nclass Other {\n  x: number;\n  y: number;\n}\n"
+
+	baseConfig := hashOf(base, "class:Config")
+	if hashOf(fieldAdded, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after adding a field — diff would miss the change")
+	}
+	if hashOf(fieldRenamed, "class:Config") == baseConfig {
+		t.Error("Config hash unchanged after renaming its only field")
+	}
+	if hashOf(siblingChange, "class:Config") != baseConfig {
+		t.Error("Config hash changed when only sibling Other changed — would over-report")
+	}
+}
+
 // TestJSParser_TypeScript covers TS-only constructs via the TS grammar
 // (selected by ParseExt): interfaces, type aliases, enums, generic functions,
 // and typed methods.
@@ -127,9 +159,12 @@ export function build<T>(x: T): T { return x; }
 			t.Errorf("Exports = %v, want it to contain %q", fs.Exports, name)
 		}
 	}
-	// The class itself is located, not hashed.
+	// The class itself is located and hashed over its full span.
 	if fs.SymbolLines["class:Server"] == 0 {
 		t.Error("class:Server has no line")
+	}
+	if fs.SymbolHashes["class:Server"] == "" {
+		t.Error("class:Server has no hash")
 	}
 }
 

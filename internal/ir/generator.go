@@ -371,15 +371,23 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 
 // normalizePath applies all path normalization rules:
 // 1. Convert to forward slashes (filepath.ToSlash)
-// 2. Strip leading "./" if present
+// 2. Strip repeated leading "./" segments if present
 // 3. Apply Unicode NFC normalization
-// This ensures cross-platform determinism (Windows/Linux/macOS).
+// This ensures cross-platform determinism (Windows/Linux/macOS). The function
+// must be idempotent — normalizePath(normalizePath(p)) == normalizePath(p) —
+// since its output is the IR's map key and may be re-normalized by a caller
+// that doesn't know it's already normalized.
 func normalizePath(relPath string) string {
 	// Convert to forward slashes
 	normalized := filepath.ToSlash(relPath)
 
-	// Strip leading "./" if present
-	normalized = strings.TrimPrefix(normalized, "./")
+	// Strip leading "./" if present — looped, not a single TrimPrefix, so a
+	// doubled prefix ("././foo") fully resolves in one call instead of one
+	// layer per call (which broke idempotence: FuzzNormalizePath found that
+	// normalizePath("././foo") != normalizePath(normalizePath("././foo"))).
+	for strings.HasPrefix(normalized, "./") {
+		normalized = strings.TrimPrefix(normalized, "./")
+	}
 
 	// Apply Unicode NFC normalization
 	// This ensures macOS NFD filenames and Linux NFC filenames produce identical output

@@ -10,9 +10,10 @@ import { homedir } from 'os';
 const projectArg = process.argv[2];
 if (!projectArg) { console.error('usage: parse-session.mjs <project-dir>'); process.exit(1); }
 
-// Claude Code escapes the (real) cwd by replacing every "/" with "-".
+// Claude Code escapes the (real) cwd by replacing every non-alphanumeric
+// character (/, _, ., etc.) with "-".
 const real = realpathSync(projectArg);
-const escaped = real.replace(/\//g, '-');
+const escaped = real.replace(/[^a-zA-Z0-9]/g, '-');
 const projDir = join(homedir(), '.claude', 'projects', escaped);
 if (!existsSync(projDir)) { console.error('no session logs at', projDir); process.exit(1); }
 

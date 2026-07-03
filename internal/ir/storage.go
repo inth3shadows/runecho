@@ -16,10 +16,12 @@ const DefaultIRPath = ".ai/ir.json"
 // unifies the per-symbol data into a single FileIR.Symbols slice — the on-disk
 // JSON still emits the legacy functions/classes/exports/imports arrays and the
 // symbol_hashes/symbol_lines maps for backward compatibility (e.g. kb-mcp reads
-// functions/classes), alongside a canonical `symbols` array. A loaded IR with an
-// older version must be fully regenerated, not incrementally updated — Update
-// reuses unchanged-file entries verbatim, which would leave new fields empty.
-const IRVersion = 5
+// functions/classes), alongside a canonical `symbols` array. v6 adds body hashes
+// for class/struct symbols (previously located but never hashed). A loaded IR
+// with an older version must be fully regenerated, not incrementally updated —
+// Update reuses unchanged-file entries verbatim, which would leave new fields
+// (or, as of v6, newly-populated existing fields) empty/stale forever.
+const IRVersion = 6
 
 // IR represents the complete intermediate representation of a codebase.
 type IR struct {

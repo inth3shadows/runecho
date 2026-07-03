@@ -64,7 +64,7 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "locate",
-		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped, paginate with `offset`). Defaults to functions+classes.",
+		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped, paginate with `offset`). Defaults to functions+classes. Use this to verify a symbol exists before claiming it does: a zero-match result is definitive (parsed from the live AST), unlike grep, which can miss real symbols (formatting/whitespace variance, multi-line signatures) or hit false positives (comments, strings).",
 		InputSchema: locateSchema(),
 		Handler:     o.locate,
 	})

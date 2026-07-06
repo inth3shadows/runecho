@@ -395,7 +395,19 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	if danglingEnabled() || droppedImportEnabled() {
 		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
 	}
-	if filePath == "" || (text == "" && removedText == "") {
+	// A full-file-deletion Write (empty content) has text=="" and — since Write
+	// carries no old_string — removedText=="" too, so it would trip the empty-input
+	// bail below. But for Write the DELETED text is the pre-edit on-disk file, read
+	// later for the E1/dropped-import checks; wiping a whole file is exactly when a
+	// dangling-ref check matters most. So don't drop a Write as "empty input" while
+	// those deletion-side checks are enabled — let the on-disk read downstream
+	// decide. (A Write that creates a genuinely empty file simply finds nothing to
+	// delete there and falls through to the normal no-violation defer.)
+	emptyInput := text == "" && removedText == ""
+	if payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
+		emptyInput = false
+	}
+	if filePath == "" || emptyInput {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "empty-input"})
 		return 0

@@ -234,6 +234,50 @@ func TestOracleLocate(t *testing.T) {
 	}
 }
 
+// TestOracleLocate_NamedQuerySearchesAllKinds pins the definitive-zero-match
+// fix: a named lookup must find a symbol that exists only under an internal kind
+// — here import_name, the bound name of `import { readFileSync } from 'fs'`,
+// which lives nowhere else in the IR. Before the fix the functions+classes browse
+// default gated named lookups too, so `locate readFileSync` returned a false
+// "definitive" zero. Browse mode (no symbol) must still stay scoped to
+// functions+classes so it does not dump every import binding.
+func TestOracleLocate_NamedQuerySearchesAllKinds(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	repoDir := t.TempDir()
+	src := "import { readFileSync } from 'fs';\n\nexport function useIt() {\n  return readFileSync('x');\n}\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "mod.js"), []byte(src), 0644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if _, err := db.EnrollRepo("jsdemo", repoDir, "", 0); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	o := NewOracle(db, dbPath)
+
+	// Named lookup of the bound import name must find it — a zero here would be a
+	// false "definitive not found".
+	got := call(t, o.locate, `{"repo":"jsdemo","symbol":"readFileSync"}`)
+	if got["count"].(float64) < 1 {
+		t.Fatalf("locate readFileSync count = %v, want >=1 (import_name must be reachable by name)", got["count"])
+	}
+	if first := got["symbols"].([]any)[0].(map[string]any); first["name"] != "readFileSync" {
+		t.Errorf("locate readFileSync first match = %v, want name=readFileSync", first)
+	}
+
+	// Browse mode (no symbol) must NOT dump import bindings — stays functions+classes.
+	all := call(t, o.locate, `{"repo":"jsdemo"}`)
+	for _, s := range all["symbols"].([]any) {
+		if k := s.(map[string]any)["kind"]; k == "import_name" || k == "import" {
+			t.Errorf("browse mode should not list %v symbols: %+v", k, s)
+		}
+	}
+}
+
 // TestOracleLocate_Offset covers the offset-slicing mechanics on a fixture
 // well under locateMatchCap: offset skips already-seen matches, next_offset
 // is absent once nothing remains, and out-of-range/negative offsets are

@@ -239,6 +239,41 @@ func TestExtractRefs_JS_ConsoleSkipped(t *testing.T) {
 	}
 }
 
+// TestExtractRefs_JS_DollarLedCalls pins the `\b`-boundary fix: a `$`-led call
+// like `$http(...)` (AngularJS) must resolve to `$http`, not the wrong bare name
+// `http`, and a bare `$(...)` (jQuery) must be captured, not missed entirely.
+// RE2's `\w` excludes `$`, so the old leading `\b` split these apart.
+func TestExtractRefs_JS_DollarLedCalls(t *testing.T) {
+	refs := ExtractRefs(LangJS, lines(`$http(config)`, `const el = $('#root')`))
+	if !containsAll(refs, "$http", "$") {
+		t.Errorf("expected $http and $ as call refs, got %v", refNames(refs))
+	}
+	if !containsNone(refs, "http") {
+		t.Errorf("$http must resolve to $http, not the truncated name http: %v", refNames(refs))
+	}
+}
+
+// TestAddedLinesWithGap_ResetsStringStateBetweenBlocks pins the MultiEdit fix:
+// an unterminated string/template opened in one edit block must not leak its
+// open-string state into the next block and blank real calls there. The gap
+// AddedLinesWithGap inserts forces the stateful scanner to reset per block.
+func TestAddedLinesWithGap_ResetsStringStateBetweenBlocks(t *testing.T) {
+	block1 := "const q = `SELECT * FROM" // unterminated template literal
+	block2 := "doThing(RealCall())"
+
+	gapped := ExtractRefs(LangJS, AddedLinesWithGap([]string{block1, block2}))
+	if !containsAll(gapped, "doThing", "RealCall") {
+		t.Errorf("gap must reset open-string state so block 2 calls are seen; got %v", refNames(gapped))
+	}
+
+	// Contrast: the old contiguous "\n"-join leaks the open template into block 2
+	// and blanks its calls — the bug this fix removes.
+	leaked := ExtractRefs(LangJS, TextToAddedLines(block1+"\n"+block2))
+	if !containsNone(leaked, "RealCall") {
+		t.Errorf("contiguous join was expected to leak string state and miss RealCall, got %v", refNames(leaked))
+	}
+}
+
 func TestExtractRefs_Unknown_ReturnsNil(t *testing.T) {
 	ls := lines(`whatever`)
 	refs := ExtractRefs(LangUnknown, ls)

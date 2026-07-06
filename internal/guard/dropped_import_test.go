@@ -21,6 +21,20 @@ func TestDroppedImport_Python_StillCalled(t *testing.T) {
 	}
 }
 
+// Python: a multi-line docstring containing example code that looks like a
+// binding (`ULID = ...`) must NOT suppress a genuine dropped import. The stateless
+// stripLiterals scanned the interior line in isolation, read `ULID = generate()`
+// as a real rebind, and silently dropped the detection (a false negative). The
+// stateful stripper blanks the docstring interior, so the real drop is flagged.
+func TestDroppedImport_Python_DocstringExampleNotABinding(t *testing.T) {
+	oldText := "from ulid import ULID\n\ndef make():\n    return ULID()\n"
+	newText := "def make():\n    \"\"\"\n    Example: ULID = generate()\n    \"\"\"\n    return ULID()\n"
+	got := DroppedImportRefs(LangPython, oldText, newText)
+	if !containsStr(droppedNames(got), "ULID") {
+		t.Errorf("expected ULID flagged despite docstring example, got %v", droppedNames(got))
+	}
+}
+
 // Python: dropped constant import still used as a subscript — obs-py-001 pattern.
 func TestDroppedImport_Python_ConstStillUsed(t *testing.T) {
 	oldText := "from ..models import TASTING_ROOM_KIND\nx = TASTING_ROOM_KIND[t]\n"

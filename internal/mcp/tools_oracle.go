@@ -64,7 +64,7 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "locate",
-		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping; omit it to list all (capped, paginate with `offset`). Defaults to functions+classes. Use this to verify a symbol exists before claiming it does: a zero-match result is definitive (parsed from the live AST), unlike grep, which can miss real symbols (formatting/whitespace variance, multi-line signatures) or hit false positives (comments, strings).",
+		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping (a named lookup searches every kind); omit it to list all (capped, paginate with `offset`) — the unfiltered list defaults to functions+classes. Use this to verify a symbol exists before claiming it does: a zero-match result is definitive (parsed from the live AST), unlike grep, which can miss real symbols (formatting/whitespace variance, multi-line signatures) or hit false positives (comments, strings).",
 		InputSchema: locateSchema(),
 		Handler:     o.locate,
 	})
@@ -515,6 +515,16 @@ func (o *Oracle) locate(args json.RawMessage) (string, error) {
 	keep := func(k string) bool {
 		if kind != "" {
 			return k == kind
+		}
+		// A named existence check ("does X exist?") must search EVERY kind, or the
+		// tool's "zero-match is definitive" promise breaks for names stored only
+		// under an internal kind — notably import_name (the bound name of an
+		// import, e.g. readFileSync), which lives nowhere else in the IR. The
+		// functions+classes default is a browse-mode convenience (don't dump every
+		// import/export on an unfiltered list-all); it has no place gating a
+		// specific-name lookup, where there is no dump to avoid.
+		if a.Symbol != "" {
+			return true
 		}
 		return k == "function" || k == "class"
 	}

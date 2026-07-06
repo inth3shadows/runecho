@@ -460,7 +460,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
-		AddedLines: guard.TextToAddedLines(text),
+		AddedLines: hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -610,6 +610,32 @@ func hookText(toolName, newString, content string, edits []editOp) string {
 		return strings.Join(parts, "\n")
 	default:
 		return ""
+	}
+}
+
+// hookAddedLines builds the AddedLine slice the additive hallucination check
+// scans. It mirrors hookText, but for MultiEdit it keeps each edit in its own
+// line-number block (separated by a gap via AddedLinesWithGap) instead of the
+// flat "\n"-joined string hookText returns. That gap makes the stateful literal
+// scanner reset open-string/comment state at every edit boundary, so an
+// unterminated string in one edit can't silently blank real calls in an
+// unrelated later edit (dropping genuine hallucination detections).
+func hookAddedLines(toolName, newString, content string, edits []editOp) []guard.AddedLine {
+	switch toolName {
+	case "MultiEdit":
+		var blocks []string
+		for _, e := range edits {
+			if e.NewString != "" {
+				blocks = append(blocks, e.NewString)
+			}
+		}
+		return guard.AddedLinesWithGap(blocks)
+	case "Edit":
+		return guard.TextToAddedLines(newString)
+	case "Write":
+		return guard.TextToAddedLines(content)
+	default:
+		return nil
 	}
 }
 

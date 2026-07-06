@@ -171,8 +171,20 @@ func locallyBoundNames(lang Lang, text string) map[string]struct{} {
 			m[id] = struct{}{}
 		}
 	}
-	for _, l := range TextToAddedLines(text) {
-		s := stripLiterals(lang, l.Text)
+	// Thread multi-line string state across lines (like firstUnqualifiedUseLines
+	// and ExtractRefs). The stateless stripLiterals scanned each line in isolation,
+	// so a `x = Foo()` example inside a multi-line docstring/template read as a real
+	// binding — spuriously adding names to the bound set and suppressing genuine
+	// dropped-import detections (a false negative). open resets on a line-number gap.
+	open := ""
+	prevNo := 0
+	for i, l := range TextToAddedLines(text) {
+		if i > 0 && l.LineNo != prevNo+1 {
+			open = ""
+		}
+		prevNo = l.LineNo
+		var s string
+		s, open = stripLiteralsStateful(lang, l.Text, open)
 		if lhs := assignLHS(s); lhs != "" {
 			add(lhs)
 		}

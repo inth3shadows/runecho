@@ -339,7 +339,13 @@ func parseJSBindingTarget(s string) []string {
 // callPattern matches an identifier immediately followed by '(' that is NOT
 // preceded by '.' (which would make it a method/package call on an external value).
 // The negative lookbehind is emulated by checking the character before the match.
-var reCallIdent = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*\(`)
+//
+// No leading `\b`: RE2's `\w` excludes `$`, so a `\b` anchor sits *between* `$`
+// and a following letter — making `$http(` capture `http` (wrong symbol) and
+// bare `$(` (jQuery) match nothing at all. Instead the left boundary is emulated
+// in the scan loop by rejecting a match whose preceding byte is an identifier
+// byte (see isWordByte), which correctly treats a leading `$` as part of the name.
+var reCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
 
 // reUpperSnakeRef matches a SCREAMING_SNAKE_CASE identifier (requires at least
 // one underscore-joined segment). These are module-constant references — a
@@ -459,9 +465,13 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 			nameStart, nameEnd := idx[2], idx[3]
 			name := scan[nameStart:nameEnd]
 
-			// Skip if preceded by '.' (qualified call)
-			if fullStart > 0 && scan[fullStart-1] == '.' {
-				continue
+			// Skip if preceded by '.' (qualified call), or by an identifier byte
+			// (the match is mid-identifier — this emulates the left `\b` the regex
+			// no longer carries, while still allowing a leading `$` in the name).
+			if fullStart > 0 {
+				if prev := scan[fullStart-1]; prev == '.' || isWordByte(prev) {
+					continue
+				}
 			}
 			// Skip builtins / keywords
 			if _, ok := builtins[name]; ok {

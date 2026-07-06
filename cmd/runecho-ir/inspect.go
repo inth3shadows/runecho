@@ -74,6 +74,18 @@ func runDiff(args []string) int {
 		return code
 	}
 
+	// Distinguish an explicit `--since=""` from the flag being absent. Snapshots
+	// may legitimately carry an empty label (only "auto" is reserved by
+	// SaveSnapshot), so keying the mode on `*since != ""` made an empty-label
+	// snapshot permanently unreachable — the empty-string flag fell through to the
+	// two-ID positional mode. fs.Visit reports only the flags actually set.
+	sinceProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "since" {
+			sinceProvided = true
+		}
+	})
+
 	db, code := mustOpenDB()
 	if code != 0 {
 		return code
@@ -82,7 +94,7 @@ func runDiff(args []string) int {
 
 	var result snapshot.DiffResult
 
-	if *since != "" {
+	if sinceProvided {
 		// --since mode: A = last snapshot by label, B = live ir.json. root is
 		// resolved here, not at the top: in two-ID mode the leading positional
 		// is a snapshot id, not a path, so resolving a root there is meaningless.

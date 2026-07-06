@@ -237,6 +237,33 @@ func TestDangling_WriteDropsReferencedDef_Asks(t *testing.T) {
 	}
 }
 
+// TestDangling_WriteWipesReferencedDef_Asks pins #7: a full-file-deletion Write
+// (empty content) removes every definition, but the empty-input guard used to
+// bail before the pre-edit on-disk file — the documented deletion source for
+// Write — was ever read, silently skipping the dangling-ref check. Wiping a file
+// is exactly when the check matters most.
+func TestDangling_WriteWipesReferencedDef_Asks(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_DANGLING", "1")
+
+	// Pre-edit on-disk file defines DoThing; the Write wipes it to empty content.
+	file := filepath.Join(top, "known.go")
+	if err := os.WriteFile(file, []byte("package p\nfunc DoThing() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Write", file, "", "", "", nil) // content "" = full wipe
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("Write wiping a referenced def should ask, got %q", d.Hook.PermissionDec)
+	}
+	if !strings.Contains(d.Hook.PermissionReason, "DoThing") {
+		t.Errorf("reason should name DoThing:\n%s", d.Hook.PermissionReason)
+	}
+}
+
 func TestDangling_MultiEditRemovesDef_Asks(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)

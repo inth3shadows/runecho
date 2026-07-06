@@ -57,6 +57,43 @@ func TestJSParse_NestGuard_NoHang(t *testing.T) {
 	}
 }
 
+// TestJSParse_NestGuard_RegexFallbackRecoversSymbols pins the fix for the give-up
+// paths returning hasError=false: when the AST is disabled (here by over-nesting),
+// the documented coverage-never-regresses regex fallback must still fire so real
+// top-level symbols are not silently dropped. Before the fix, the nest bail
+// returned hasError=false, the caller skipped the fallback, and TopLevelFn /
+// helperFn / the import were invisible.
+func TestJSParse_NestGuard_RegexFallbackRecoversSymbols(t *testing.T) {
+	depth := maxParseNestDepth + 5 // trips exceedsNestDepth → AST disabled
+	src := "const blob = " + strings.Repeat("[", depth) + strings.Repeat("]", depth) + ";\n" +
+		"import { readFileSync } from 'fs';\n" +
+		"function TopLevelFn() { return 1; }\n" +
+		"class TopLevelClass {}\n"
+	p := NewJSParser()
+	fs, err := p.ParseExt(src, ".js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(fs.Functions, "TopLevelFn") {
+		t.Errorf("regex fallback must recover TopLevelFn when AST is disabled; got funcs=%v", fs.Functions)
+	}
+	if !contains(fs.Classes, "TopLevelClass") {
+		t.Errorf("regex fallback must recover TopLevelClass when AST is disabled; got classes=%v", fs.Classes)
+	}
+	if !contains(fs.Imports, "fs") {
+		t.Errorf("regex fallback must recover the import when AST is disabled; got imports=%v", fs.Imports)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestJSParse_NormalStillParses guards against the depth check over-rejecting:
 // ordinary shallow code must still yield its symbols.
 func TestJSParse_NormalStillParses(t *testing.T) {

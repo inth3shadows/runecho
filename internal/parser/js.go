@@ -267,10 +267,17 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 	// (the same fail-safe path as a nil grammar) so one bad file can't take down
 	// the process. Named returns are reset so a panic mid-walk can't leak a
 	// partial, inconsistent symbol set.
+	// hasError=true tells the caller to supplement with the regex fallback. Every
+	// give-up path below sets it, because "we produced no AST symbols" is exactly
+	// when the coverage-never-regresses fallback must run — returning false here
+	// would leave a file that panicked, over-nested, or failed to parse with zero
+	// symbols AND no fallback (the silent-miss bug the fallback exists to prevent).
+	// The fallback is a linear regex scan, so it is safe even on the nested input
+	// the nest guard rejects, and it only ever unions symbols in.
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "runecho: JS/TS parse panicked (%v); AST symbols for this file disabled\n", r)
-			functions, classes, hashes, lines = nil, nil, nil, nil
+			functions, classes, hashes, lines, hasError = nil, nil, nil, nil, true
 		}
 	}()
 	src := []byte(source)
@@ -278,11 +285,11 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: JS/TS source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, true
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, true
 	}
 	// The reduced grammar can't parse some declarator shapes — notably a typed
 	// arrow parameter or return type (`const f = (x: T): R => ...`) — and error
@@ -459,20 +466,23 @@ func nodeText(n *ts.Node, lang *ts.Language, src []byte) string {
 func jsImportsExportsFromAST(source string, lang *ts.Language) (imports, exports, wildcardReexports []string, hasError bool) {
 	// Same fail-safe posture as jsSymbolsFromAST: a panic degrades to no AST
 	// imports/exports rather than crashing the indexer/MCP server.
+	// Same hasError contract as jsSymbolsFromAST: every give-up path sets it so the
+	// caller runs the regex fallback rather than silently dropping every import/
+	// export in a file that panicked, over-nested, or failed to parse.
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "runecho: JS/TS import/export parse panicked (%v); AST imports/exports for this file disabled\n", r)
-			imports, exports, wildcardReexports = nil, nil, nil
+			imports, exports, wildcardReexports, hasError = nil, nil, nil, true
 		}
 	}()
 	src := []byte(source)
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: JS/TS source exceeds max nesting depth (%d); AST imports/exports for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, false
+		return nil, nil, nil, true
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, false
+		return nil, nil, nil, true
 	}
 	// Same rationale as jsSymbolsFromAST: error-recovery on a partially
 	// unparseable file can drop sibling statements from the tree, so the

@@ -214,6 +214,34 @@ func TestDiffTwoID_HappyPath_Exits0(t *testing.T) {
 	}
 }
 
+// TestDiff_SinceEmptyLabel_Reachable pins the fix for `--since=""` being
+// indistinguishable from an absent flag. A snapshot may legitimately carry an
+// empty label (only "auto" is reserved by SaveSnapshot), so `diff --since=` must
+// reach it via the since-mode. Before the fix, keying the mode on `*since != ""`
+// routed the empty string to the two-ID positional mode, making the empty-label
+// snapshot permanently unreachable (usage error, ExitError).
+func TestDiff_SinceEmptyLabel_Reachable(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	// Store a snapshot under an explicitly empty label (snapshot auto-enrolls).
+	code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=", dir})
+	if code != 0 {
+		t.Fatalf("snapshot --label=: got code %d, stderr %q", code, stderr)
+	}
+
+	// diff --since= must reach the empty-label snapshot (live vs snapshot), not
+	// fall through to the two-ID positional usage error.
+	code, _, stderr = runWith(t, home, []string{"runecho-ir", "diff", "--since=", dir})
+	if code != ExitOK {
+		t.Fatalf("diff --since= (empty label): got code %d, want %d (ExitOK); stderr %q", code, ExitOK, stderr)
+	}
+	if strings.Contains(stderr, "Usage:") || strings.Contains(stderr, "No snapshot found") {
+		t.Errorf("empty-label snapshot should be reachable via --since=; stderr %q", stderr)
+	}
+}
+
 // parseAllSnapshotIDs returns every snapshot ID string from `runecho-ir log`
 // output, in the order they appear (newest first per the log table). It is
 // intentionally distinct from the existing parseFirstSnapshotID helper.

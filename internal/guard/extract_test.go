@@ -601,6 +601,21 @@ func TestExtractRefs_Python_TripleQuotedFString(t *testing.T) {
 	}
 }
 
+// A single-line f-string whose interpolation's own '(' runs past end of line
+// (valid Python 3.12+: a call spanning lines inside f"{...}") must propagate the
+// quote as the open multi-line-string delimiter so the continuation line's
+// closing quote correctly ends the string, instead of being misread as opening
+// a fresh one — which would blank the trailing `+ extra()` call on line 3.
+func TestExtractRefs_Python_FStringInterpolationSpansLines(t *testing.T) {
+	l1 := `msg = f"Total: {sum(`
+	l2 := `    1, 2, 3,`
+	l3 := `)}" + extra()`
+	refs := ExtractRefs(LangPython, lines(l1, l2, l3))
+	if !containsAll(refs, "extra") {
+		t.Errorf("call after the closing f-string on the continuation line should be extracted; got %v", refNames(refs))
+	}
+}
+
 func TestExtractImports_JS(t *testing.T) {
 	ls := lines(
 		`import fs from 'fs'`,

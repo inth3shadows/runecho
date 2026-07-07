@@ -169,6 +169,18 @@ func TestDroppedImport_JS_Rebound_Decl(t *testing.T) {
 	}
 }
 
+// Negative: a dropped import rebound as an unparenthesized single-arg arrow
+// param (`x => x*2`) must not be flagged. reJSArrowParams only matches the
+// parenthesized form `(x) => …`, so a bare single-identifier arrow used to slip
+// past locallyBoundNames entirely and false-positive.
+func TestDroppedImport_JS_Rebound_BareArrowParam(t *testing.T) {
+	oldText := "import { x } from './m';\nreturn arr.map(x => x * 2);\n"
+	newText := "return arr.map(x => x * 2);\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("bare arrow param x must not warn as dropped import, got %v", droppedNames(got))
+	}
+}
+
 func TestDroppedImport_JS_Rebound_CatchAndParam(t *testing.T) {
 	oldText := "import { err } from './m';\nlog(err);\n"
 	newText := "try { x(); } catch (err) { log(err); }\n"
@@ -196,6 +208,44 @@ func TestDroppedImport_JS_StillUsed(t *testing.T) {
 	got := DroppedImportRefs(LangJS, oldText, newText)
 	if !containsStr(droppedNames(got), "fetchUser") {
 		t.Errorf("expected fetchUser flagged, got %v", droppedNames(got))
+	}
+}
+
+// A physical line that packs an import clause and a real statement, separated
+// by ';' (`import re; x = SomeDroppedImport()`), must not have the trailing
+// statement's use of a dropped import swallowed as if the whole line were
+// import content. rePyImport/rePyFrom are anchored to end-of-line, so
+// isImportLine classifies the WHOLE line as an import — firstUnqualifiedUseLines
+// used to skip it outright, silently missing the use.
+func TestDroppedImport_Python_SemicolonPackedLineStillScanned(t *testing.T) {
+	oldText := "from utils import SomeDroppedImport\n\ndef run():\n    import re; x = SomeDroppedImport()\n    return x\n"
+	newText := "\ndef run():\n    import re; x = SomeDroppedImport()\n    return x\n"
+	got := DroppedImportRefs(LangPython, oldText, newText)
+	if !containsStr(droppedNames(got), "SomeDroppedImport") {
+		t.Errorf("expected SomeDroppedImport flagged despite semicolon-packed import line, got %v", droppedNames(got))
+	}
+}
+
+// DroppedImportRefsLinesWithBound lets a caller fold in whole-file binding
+// context a hunk-only scan can't see — a name rebound on an UNTOUCHED line
+// elsewhere in the file. This mirrors the guard hook's false-positive: an
+// Edit/MultiEdit's newLines only cover the touched hunk, so a name rebound
+// outside it looks dropped even though the file as a whole still provides it.
+func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T) {
+	oldLines := TextToAddedLines("import re\nx = re.compile(y)\n")
+	newLines := TextToAddedLines("x = re.compile(y)\n") // hunk only; the untouched `re = custom_regex_module()` line elsewhere is not in this scan
+
+	// Without whole-file context, the hunk-only scan (falsely) flags `re` as
+	// dropped — this pins that the test setup actually reproduces the bug.
+	if got := DroppedImportRefsLines(LangPython, oldLines, newLines); !containsStr(droppedNames(got), "re") {
+		t.Fatalf("expected hunk-only scan to flag re as dropped (invalid test setup), got %v", droppedNames(got))
+	}
+
+	// With whole-file context folded in as preBound (the untouched line rebinds
+	// `re`), the warning must be suppressed.
+	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"))
+	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBound); len(got) != 0 {
+		t.Errorf("whole-file rebind of re must suppress the dropped-import warning, got %v", droppedNames(got))
 	}
 }
 

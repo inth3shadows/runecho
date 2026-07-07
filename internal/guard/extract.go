@@ -757,6 +757,19 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 							}
 							i++
 						}
+						if depth > 0 && i >= n {
+							// The interpolation's own '(' / '[' runs past end of line
+							// unterminated (valid Python 3.12+: a call spanning lines
+							// inside f"{...}"). Falling through to the final `return
+							// string(out), open` would return the ORIGINAL open (""),
+							// so the continuation line's closing quote is misread as
+							// opening a fresh string instead of closing this one —
+							// mirror the triple-quote branch and propagate the quote
+							// itself as the open delimiter. Same KNOWN limitation as
+							// the triple-quote case: a call nested inside the
+							// continuation is not scanned, only the delimiter search.
+							return string(out), string(quote)
+						}
 					default:
 						out[i] = ' '
 						i++

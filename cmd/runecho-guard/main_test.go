@@ -196,6 +196,30 @@ func TestAddInFileDefs_MissingFileIsSilent(t *testing.T) {
 	}
 }
 
+// wholeFileBoundNames is the dropped-import check's whole-file counterpart to
+// addInFileDefs: it must see a plain assignment rebind (`re = ...`), which
+// ExtractDefs alone does not capture (it only sees def/class/const forms).
+func TestWholeFileBoundNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mod.py")
+	src := "import re\n\ndef run():\n    re = custom_regex_module()\n    return re\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bound := wholeFileBoundNames(path, guard.LangPython)
+	if _, ok := bound["re"]; !ok {
+		t.Errorf("expected re folded in as a whole-file rebind, got %v", bound)
+	}
+}
+
+func TestWholeFileBoundNames_MissingFileIsSilent(t *testing.T) {
+	bound := wholeFileBoundNames(filepath.Join(t.TempDir(), "does-not-exist.py"), guard.LangPython)
+	if bound != nil {
+		t.Errorf("missing file should yield nil, got %v", bound)
+	}
+}
+
 func TestSuggestionSuffix(t *testing.T) {
 	if got := suggestionSuffix(""); got != "" {
 		t.Errorf("empty suggestion should render nothing, got %q", got)

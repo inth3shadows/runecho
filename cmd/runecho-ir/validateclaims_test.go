@@ -50,3 +50,48 @@ func TestValidateClaims_DeterministicOrder(t *testing.T) {
 		t.Errorf("mismatch order = %v, want sorted %v", got, want)
 	}
 }
+
+// TestValidateClaims_ImportNameRecognized pins review finding #3: the known-symbol
+// set must span every indexed kind, not just function/class. A name bound only as
+// an import (kind=import_name) genuinely exists, so it must not be reported as a
+// hallucinated reference — parity with the MCP `locate` fix. A truly-absent name
+// must still be flagged, proving the check itself is intact.
+func TestValidateClaims_ImportNameRecognized(t *testing.T) {
+	dir := t.TempDir()
+	irPath := filepath.Join(dir, "ir.json")
+	irJSON := `{"files":{"mod.js":{"hash":"h","imports":["fs"],"functions":[],"classes":[],"exports":[],"refs":[],"symbols":[{"name":"readFileSync","kind":"import_name"}]}}}`
+	if err := os.WriteFile(irPath, []byte(irJSON), 0o644); err != nil {
+		t.Fatalf("write ir: %v", err)
+	}
+	txtPath := filepath.Join(dir, "msg.txt")
+	if err := os.WriteFile(txtPath, []byte("calls `readFileSync` and `totallyMadeUp`\n"), 0o644); err != nil {
+		t.Fatalf("write txt: %v", err)
+	}
+
+	var code int
+	var stdout string
+	withArgs([]string{"runecho-ir", "validate-claims", "--ir", irPath, "--text", txtPath}, func() {
+		stdout, _ = captureOutput(func() { code = run() })
+	})
+
+	var out struct {
+		Mismatches []struct {
+			Ref string `json:"ref"`
+		} `json:"mismatches"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("decode %q: %v", stdout, err)
+	}
+	// One genuine miss (totallyMadeUp) remains, so the check still reports it.
+	if code != ExitNoData {
+		t.Errorf("exit = %d, want ExitNoData (%d) for the one real miss; stdout=%s", code, ExitNoData, stdout)
+	}
+	for _, m := range out.Mismatches {
+		if m.Ref == "readFileSync" {
+			t.Errorf("import_name readFileSync wrongly flagged as a hallucination: %s", stdout)
+		}
+	}
+	if len(out.Mismatches) != 1 || out.Mismatches[0].Ref != "totallyMadeUp" {
+		t.Errorf("expected only totallyMadeUp flagged, got %v", out.Mismatches)
+	}
+}

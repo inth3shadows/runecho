@@ -413,12 +413,16 @@ func runValidateClaims(args []string) int {
 		fmt.Fprintf(os.Stderr, "Error: cannot load IR %q: %v\n", *irPath, err)
 		return ExitError
 	}
+	// A claim-existence check is a named lookup, so include EVERY indexed kind —
+	// not just function/class. Parity with the MCP `locate` tool: a name bound only
+	// under an internal kind (import_name, export, export_wildcard) genuinely exists
+	// in the code, so restricting to func+class would flag a real imported/exported
+	// name (e.g. `readFileSync`) as an invented reference. Widening the known set
+	// only ever suppresses false positives — the safe direction for this check.
 	knownSymbols := make(map[string]bool)
 	for _, fileEntry := range irData.Files {
 		for _, s := range fileEntry.Symbols {
-			if s.Kind == "function" || s.Kind == "class" {
-				knownSymbols[s.Name] = true
-			}
+			knownSymbols[s.Name] = true
 		}
 	}
 

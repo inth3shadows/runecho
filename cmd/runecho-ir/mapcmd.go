@@ -70,6 +70,18 @@ func runMap(args []string) int {
 		return code
 	}
 
+	// Distinguish an explicit `--since=""` from the flag being absent (parity with
+	// `diff`): a snapshot may legitimately carry an empty label (only "auto" is
+	// reserved), so keying since-mode on `*since != ""` made an empty-label baseline
+	// silently unreachable via `map --since=` (it fell back to the full unfiltered
+	// map). fs.Visit reports only the flags actually set.
+	sinceProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "since" {
+			sinceProvided = true
+		}
+	})
+
 	kind, ok := normalizeKind(*kindFlag)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "Invalid --kind %q (want func|class|export|import)\n", *kindFlag)
@@ -104,7 +116,7 @@ func runMap(args []string) int {
 
 	// --since: compute the changed-symbol set (added ∪ modified) from a diff.
 	var changed map[string]map[string]bool
-	if *since != "" {
+	if sinceProvided {
 		set, code := changedSymbols(db, root, *since, *sessionID, irData)
 		if code != 0 {
 			return code
@@ -115,7 +127,7 @@ func runMap(args []string) int {
 	syms := collectMapSymbols(irData, kind, *dirPrefix, changed)
 
 	if *asJSON {
-		return emitMapJSON(root, syms, *byFile, *since != "")
+		return emitMapJSON(root, syms, *byFile, sinceProvided)
 	}
 	if *byFile {
 		emitMapByFile(syms, *compact)

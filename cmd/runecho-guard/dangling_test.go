@@ -264,6 +264,30 @@ func TestDangling_WriteWipesReferencedDef_Asks(t *testing.T) {
 	}
 }
 
+// TestDangling_WriteCreatesEmptyFile_FastDefer pins review finding #4: a Write
+// that CREATES a new empty file (path absent, content="") has nothing to delete,
+// so it must take the cheap empty-input defer rather than paying DB open + file
+// reads for the deletion checks. The os.Stat guard keeps it on the fast path;
+// before that guard it fell through to the deletion machinery and defer-with-no-
+// finding instead (reason != "empty-input").
+func TestDangling_WriteCreatesEmptyFile_FastDefer(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_DANGLING", "1")
+
+	file := filepath.Join(top, "brand_new.go") // does not exist on disk
+	in := payloadOld(t, "Write", file, "", "", "", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("new empty-file Write should not ask, got: %s", d.Hook.PermissionReason)
+	}
+	if rec := readLastDecisionLog(t); rec["reason"] != "empty-input" {
+		t.Errorf("new empty-file Write should fast-defer with reason=empty-input, got %v", rec["reason"])
+	}
+}
+
 func TestDangling_MultiEditRemovesDef_Asks(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)

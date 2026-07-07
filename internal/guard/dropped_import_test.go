@@ -21,6 +21,28 @@ func TestDroppedImport_Python_StillCalled(t *testing.T) {
 	}
 }
 
+// MultiEdit: an unterminated string in one edit block must not leak into the next
+// and blank a real use of a dropped import. DroppedImportRefsLines with gap-
+// separated lines (AddedLinesWithGap, as the hook builds for MultiEdit) resets the
+// open-string state at the boundary; the old flat "\n"-join did not, silently
+// missing the drop. Pins review finding #1.
+func TestDroppedImport_MultiEditGap_NoStringLeak(t *testing.T) {
+	oldLines := TextToAddedLines("import { ULID } from 'ulid';")
+	b1 := "const q = `SELECT * FROM" // edit #1: unterminated template literal
+	b2 := "return doStuff(ULID());"  // edit #2: real use of the dropped import
+
+	gapped := AddedLinesWithGap([]string{b1, b2})
+	if got := DroppedImportRefsLines(LangJS, oldLines, gapped); !containsStr(droppedNames(got), "ULID") {
+		t.Errorf("gapped MultiEdit must see ULID() past the open template; got %v", droppedNames(got))
+	}
+	// Contrast: a flat contiguous join leaks the open template into b2 and misses it
+	// (this is exactly what the old MultiEdit flat-join did).
+	flat := TextToAddedLines(b1 + "\n" + b2)
+	if got := DroppedImportRefsLines(LangJS, oldLines, flat); containsStr(droppedNames(got), "ULID") {
+		t.Errorf("flat join was expected to leak string state and miss ULID (documents the bug)")
+	}
+}
+
 // Python: a multi-line docstring containing example code that looks like a
 // binding (`ULID = ...`) must NOT suppress a genuine dropped import. The stateless
 // stripLiterals scanned the interior line in isolation, read `ULID = generate()`

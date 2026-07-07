@@ -553,6 +553,29 @@ func stripLiterals(lang Lang, text string) string {
 	return s
 }
 
+// scanStripped calls fn for each line with its literal-stripped form (see
+// stripLiteralsStateful), threading multi-line string state across lines and
+// resetting it on a line-number gap — a non-contiguous AddedLine sequence, e.g.
+// unrelated MultiEdit blocks joined by AddedLinesWithGap, whose open-string state
+// must not leak across the boundary. This consolidates the identical
+// state-threading loop the non-comment-aware scanners (firstUnqualifiedUseLines,
+// locallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
+// their own loops because they inspect state (comment lines / inPyParen) before
+// stripping.
+func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {
+	open := ""
+	prevNo := 0
+	for i, l := range lines {
+		if i > 0 && l.LineNo != prevNo+1 {
+			open = ""
+		}
+		prevNo = l.LineNo
+		var scan string
+		scan, open = stripLiteralsStateful(lang, l.Text, open)
+		fn(scan, l)
+	}
+}
+
 // stripLiteralsStateful blanks string-literal and trailing-comment content on one
 // line, replacing interior characters with spaces so length (and therefore match
 // indices and LineNo) is preserved. This stops identifiers inside strings/comments

@@ -103,6 +103,59 @@ func TestDuplicate_NewFuncMatchesOtherFile_Asks(t *testing.T) {
 	}
 }
 
+// TestDuplicate_CrossPackageSameName_Defers pins the package-scoping fix: a name
+// shared across directories (different Go packages) is not a duplicate. Editing
+// cmd/a/main.go to add `main` while cmd/b/main.go also defines `main` must NOT
+// ask — the cross-package `main`/`Load` collisions were the non-test dogfood FPs.
+func TestDuplicate_CrossPackageSameName_Defers(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	files := map[string]ir.FileIR{
+		"cmd/a/main.go": {Hash: "h1", Symbols: funcsToSymbols([]string{"Placeholder"})},
+		"cmd/b/main.go": {Hash: "h2", Symbols: funcsToSymbols([]string{"main"})},
+	}
+	top := enrolledStoreWithFiles(t, repoRoot, files)
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+
+	file := filepath.Join(top, "cmd", "a", "main.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package main\nfunc Placeholder() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func Placeholder() {}", "func Placeholder() {}\nfunc main() {}", "", nil)
+	_, _, d := runHook(t, in)
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("cross-package same name should not ask; reason: %s", d.Hook.PermissionReason)
+	}
+}
+
+// TestDuplicate_TestFileEdit_Defers pins the test-file exclusion: a symbol added
+// to a _test.go file that also exists in another test file is a conventional name
+// collision, not a reimplementation — no ask. Both files are in the same dir, so
+// only the test-file skip (not package-scoping) can suppress this.
+func TestDuplicate_TestFileEdit_Defers(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	files := map[string]ir.FileIR{
+		"foo_test.go": {Hash: "h1", Symbols: funcsToSymbols([]string{"Placeholder"})},
+		"bar_test.go": {Hash: "h2", Symbols: funcsToSymbols([]string{"TestBar"})},
+	}
+	top := enrolledStoreWithFiles(t, repoRoot, files)
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+
+	file := filepath.Join(top, "foo_test.go")
+	if err := os.WriteFile(file, []byte("package p\nfunc Placeholder() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func Placeholder() {}", "func Placeholder() {}\nfunc TestBar() {}", "", nil)
+	_, _, d := runHook(t, in)
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("duplicate introduced in a test file should not ask; reason: %s", d.Hook.PermissionReason)
+	}
+}
+
 func TestDuplicate_MatchOnlyInSameFile_Defers(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)

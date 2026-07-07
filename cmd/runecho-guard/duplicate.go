@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"path"
 	"sort"
+	"strings"
 
 	"github.com/inth3shadows/runecho/internal/guard"
 )
@@ -90,6 +92,14 @@ func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning
 	if len(added) == 0 {
 		return nil
 	}
+	// Test files legitimately reuse symbol names across files (test functions,
+	// fixtures, table-driven helpers named after what they cover), so a symbol
+	// "introduced" in a test file that also exists in another test file is almost
+	// always a false positive, not a reimplementation. Skip the check for them —
+	// this was ~95% of the dogfood asks.
+	if isTestFile(filePath) {
+		return nil
+	}
 	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
 	if !ok {
 		return nil
@@ -102,7 +112,7 @@ func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning
 		if err != nil {
 			continue // skip this symbol, keep checking the rest
 		}
-		others := excludeSelf(paths, self)
+		others := duplicateCandidates(excludeSelf(paths, self), self)
 		if len(others) > 0 {
 			if len(others) > maxDuplicateLocations {
 				others = others[:maxDuplicateLocations]
@@ -111,4 +121,46 @@ func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning
 		}
 	}
 	return warns
+}
+
+// duplicateCandidates keeps only the other-file definitions that are a genuine
+// duplicate of a symbol added to the edited file: in the SAME directory (a proxy
+// for the same package/module) and not themselves a test file. A name shared
+// across directories is not a duplicate — it is an unrelated same-named symbol in
+// another package (every Go binary defines `main`; many packages define `Load` /
+// `New` / `String`), which for Go the compiler already keeps distinct and which
+// dominated the dogfood false positives. Within a single directory two files
+// sharing a top-level name is a real duplicate (a Go compile error the check
+// surfaces early; a genuine JS/Py reimplementation).
+func duplicateCandidates(others []string, self string) []string {
+	selfDir := path.Dir(self)
+	var out []string
+	for _, o := range others {
+		if path.Dir(o) == selfDir && !isTestFile(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// isTestFile reports whether a path is a test file for its language — the class
+// of file whose symbol names (Test*/spec/fixture helpers) recur across files by
+// convention rather than by reimplementation. Accepts absolute or repo-relative
+// paths (both use '/' on the supported platforms).
+func isTestFile(p string) bool {
+	base := path.Base(p)
+	switch {
+	case strings.HasSuffix(base, "_test.go"): // Go
+		return true
+	case strings.HasSuffix(base, "_test.py") || strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py"): // Python
+		return true
+	}
+	// JS/TS: *.test.* / *.spec.* (before the extension).
+	for _, infix := range []string{".test.", ".spec."} {
+		if strings.Contains(base, infix) {
+			return true
+		}
+	}
+	// A conventional tests/ directory anywhere in the path.
+	return strings.HasPrefix(p, "tests/") || strings.Contains(p, "/tests/")
 }

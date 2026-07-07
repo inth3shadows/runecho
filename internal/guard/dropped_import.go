@@ -29,15 +29,30 @@ type DroppedImport struct {
 // Go is excluded: Go imports are used package-qualified (pkg.Foo), so a dropped
 // Go import surfaces as a qualified reference, which the guard handles elsewhere
 // (and ExtractImports already excludes Go for the same reason).
+// DroppedImportRefs is the single-block convenience form (Edit/Write, where the
+// old and new text are each one contiguous region). For a MultiEdit — whose edits
+// are unrelated regions that must not share open multi-line-string state — call
+// DroppedImportRefsLines with AddedLinesWithGap so the scan resets at each edit
+// boundary; a flat "\n"-join here would leak an unterminated string from one edit
+// into the next and silently drop (or falsely raise) a detection.
 func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
+	return DroppedImportRefsLines(lang, TextToAddedLines(oldText), TextToAddedLines(newText))
+}
+
+// DroppedImportRefsLines is the structured form of DroppedImportRefs: it scans the
+// pre-built AddedLines directly, so a caller can pass gap-separated lines
+// (AddedLinesWithGap) for a MultiEdit to reset multi-line-string state at each
+// edit boundary. All of its scans (ExtractImports' inPyParen state,
+// firstUnqualifiedUseLines, locallyBoundNames) honor those gaps.
+func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []DroppedImport {
 	if lang != LangPython && lang != LangJS {
 		return nil
 	}
-	oldImps := nameSet(ExtractImports(lang, TextToAddedLines(oldText)))
+	oldImps := nameSet(ExtractImports(lang, oldLines))
 	if len(oldImps) == 0 {
 		return nil // nothing was imported in the removed text; no work
 	}
-	newImps := nameSet(ExtractImports(lang, TextToAddedLines(newText)))
+	newImps := nameSet(ExtractImports(lang, newLines))
 
 	// bound = every name the new text re-provides locally: top-level definitions
 	// PLUS any binding form (assignment LHS, for/comprehension target, with/except
@@ -47,8 +62,8 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 	// suppressed real drop is a recoverable miss (the additive check or the runtime
 	// still catches it), whereas a false alarm trains users to ignore the guard —
 	// the adoption-killer. Precision over recall.
-	bound := locallyBoundNames(lang, newText)
-	for _, d := range ExtractDefs(lang, TextToAddedLines(newText)) {
+	bound := locallyBoundNames(lang, newLines)
+	for _, d := range ExtractDefs(lang, newLines) {
 		bound[d] = struct{}{}
 	}
 
@@ -73,7 +88,7 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 	// Index every unqualified identifier use in one pass so each dropped name is an
 	// O(1) lookup below. Rescanning the whole new text per dropped import was
 	// O(distinct-imports × text-length) — quadratic on a crafted diff.
-	uses := firstUnqualifiedUseLines(lang, TextToAddedLines(newText))
+	uses := firstUnqualifiedUseLines(lang, newLines)
 	var out []DroppedImport
 	for _, name := range dropped {
 		if ln := uses[name]; ln > 0 {
@@ -106,17 +121,9 @@ func nameSet(names []string) map[string]struct{} {
 // `x.Name`) — semantics identical to the former containsUnqualifiedWord.
 func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 	uses := make(map[string]int)
-	open := ""
-	prevNo := 0
-	for i, l := range lines {
-		if i > 0 && l.LineNo != prevNo+1 {
-			open = ""
-		}
-		prevNo = l.LineNo
-		scan, newOpen := stripLiteralsStateful(lang, l.Text, open)
-		open = newOpen
+	scanStripped(lang, lines, func(scan string, l AddedLine) {
 		if isImportLine(lang, l.Text) {
-			continue
+			return
 		}
 		for j := 0; j < len(scan); {
 			if !isWordByte(scan[j]) {
@@ -134,7 +141,7 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 				uses[id] = l.LineNo
 			}
 		}
-	}
+	})
 	return uses
 }
 
@@ -164,27 +171,20 @@ var (
 // construct, so a dropped import that is actually rebound (replaced by a local
 // assignment, loop variable, with-as, parameter, destructure, …) does not
 // false-positive. Over-inclusive by design (see DroppedImportRefs).
-func locallyBoundNames(lang Lang, text string) map[string]struct{} {
+func locallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 	m := make(map[string]struct{})
 	add := func(s string) {
 		for _, id := range reIdentAll.FindAllString(s, -1) {
 			m[id] = struct{}{}
 		}
 	}
-	// Thread multi-line string state across lines (like firstUnqualifiedUseLines
-	// and ExtractRefs). The stateless stripLiterals scanned each line in isolation,
-	// so a `x = Foo()` example inside a multi-line docstring/template read as a real
-	// binding — spuriously adding names to the bound set and suppressing genuine
-	// dropped-import detections (a false negative). open resets on a line-number gap.
-	open := ""
-	prevNo := 0
-	for i, l := range TextToAddedLines(text) {
-		if i > 0 && l.LineNo != prevNo+1 {
-			open = ""
-		}
-		prevNo = l.LineNo
-		var s string
-		s, open = stripLiteralsStateful(lang, l.Text, open)
+	// scanStripped threads multi-line string state (so a `x = Foo()` example inside
+	// a multi-line docstring/template is not read as a real binding) AND resets it
+	// on a line-number gap (so an unterminated string in one MultiEdit block does
+	// not leak a spurious binding into the next). Both matter: the former is why
+	// stripping must be stateful, the latter is why gap-separated lines
+	// (AddedLinesWithGap) reset correctly.
+	scanStripped(lang, lines, func(s string, _ AddedLine) {
 		if lhs := assignLHS(s); lhs != "" {
 			add(lhs)
 		}
@@ -228,7 +228,7 @@ func locallyBoundNames(lang Lang, text string) map[string]struct{} {
 				m[mm[1]] = struct{}{}
 			}
 		}
-	}
+	})
 	return m
 }
 

@@ -399,13 +399,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// carries no old_string — removedText=="" too, so it would trip the empty-input
 	// bail below. But for Write the DELETED text is the pre-edit on-disk file, read
 	// later for the E1/dropped-import checks; wiping a whole file is exactly when a
-	// dangling-ref check matters most. So don't drop a Write as "empty input" while
-	// those deletion-side checks are enabled — let the on-disk read downstream
-	// decide. (A Write that creates a genuinely empty file simply finds nothing to
-	// delete there and falls through to the normal no-violation defer.)
+	// dangling-ref check matters most. So don't drop such a Write as "empty input"
+	// while those checks are enabled — provided the on-disk file actually has
+	// content to delete. A cheap os.Stat gates this so a Write that CREATES a new or
+	// already-empty file (nothing to delete) keeps the fast early-return instead of
+	// paying a DB open + two file reads on the ~12ms hook budget.
 	emptyInput := text == "" && removedText == ""
-	if payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
-		emptyInput = false
+	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
+		if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
+			emptyInput = false
+		}
 	}
 	if filePath == "" || emptyInput {
 		hookDefer()
@@ -470,9 +473,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 	}
 
+	// newLines is the added text as AddedLines — gap-separated per edit for a
+	// MultiEdit so stateful scanners reset open-string state at each boundary.
+	// Shared by the additive check and the dropped-import check below so both see
+	// the same (leak-free) view of a MultiEdit rather than a flat "\n"-join.
+	newLines := hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits)
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
-		AddedLines: hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits),
+		AddedLines: newLines,
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -502,7 +510,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
 		if droppedImportEnabled() {
-			droppedImps = guard.DroppedImportRefs(lang, oldText, text)
+			oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
+			droppedImps = guard.DroppedImportRefsLines(lang, oldLines, newLines)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
@@ -649,6 +658,25 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 	default:
 		return nil
 	}
+}
+
+// hookOldLines builds the AddedLines of the text being REMOVED, mirroring
+// hookAddedLines: for a MultiEdit each edit's old_string is its own gap-separated
+// block, so the dropped-import scan resets open multi-line-string state at each
+// edit boundary instead of leaking it across the flat join. For Edit/Write the
+// removed text is one contiguous region — singleBlock (the edit's old_string, or
+// the on-disk pre-edit file for Write) — so it is converted straight through.
+func hookOldLines(toolName, oldString string, edits []editOp, singleBlock string) []guard.AddedLine {
+	if toolName == "MultiEdit" {
+		var blocks []string
+		for _, e := range edits {
+			if e.OldString != "" {
+				blocks = append(blocks, e.OldString)
+			}
+		}
+		return guard.AddedLinesWithGap(blocks)
+	}
+	return guard.TextToAddedLines(singleBlock)
 }
 
 // suggestionSuffix renders the model-free "did you mean" hint, or "" if none.

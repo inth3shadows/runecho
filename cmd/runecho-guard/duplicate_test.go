@@ -103,6 +103,40 @@ func TestDuplicate_NewFuncMatchesOtherFile_Asks(t *testing.T) {
 	}
 }
 
+// TestDuplicate_SameSubdirSameName_Asks is the positive control for the
+// package-scoping fix: a genuine same-directory duplicate in a SUBDIRECTORY must
+// still ask. The other same-dir positive (NewFuncMatchesOtherFile_Asks) uses
+// repo-root files where path.Dir is "." for both, so it can't catch a
+// self-vs-DefsOfName path-format mismatch that would silently over-suppress every
+// subdirectory duplicate. This exercises a real subdir so that comparison is
+// proven, not assumed.
+func TestDuplicate_SameSubdirSameName_Asks(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	files := map[string]ir.FileIR{
+		"pkg/x.go": {Hash: "h1", Symbols: funcsToSymbols([]string{"Placeholder"})},
+		"pkg/y.go": {Hash: "h2", Symbols: funcsToSymbols([]string{"DoThing"})},
+	}
+	top := enrolledStoreWithFiles(t, repoRoot, files)
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+
+	file := filepath.Join(top, "pkg", "x.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package pkg\nfunc Placeholder() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func Placeholder() {}", "func Placeholder() {}\nfunc DoThing() {}", "", nil)
+	_, _, d := runHook(t, in)
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("same-subdir duplicate must ask (a path-format mismatch would silently over-suppress); got %q", d.Hook.PermissionDec)
+	}
+	if !strings.Contains(d.Hook.PermissionReason, "pkg/y.go") {
+		t.Errorf("reason should name pkg/y.go: %s", d.Hook.PermissionReason)
+	}
+}
+
 // TestDuplicate_CrossPackageSameName_Defers pins the package-scoping fix: a name
 // shared across directories (different Go packages) is not a duplicate. Editing
 // cmd/a/main.go to add `main` while cmd/b/main.go also defines `main` must NOT

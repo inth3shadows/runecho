@@ -197,8 +197,8 @@ func runArgs(args []string) int {
 		return 0
 	}
 
-	// Ignorefile at repo root.
-	ignorePath := filepath.Join(repoRoot, ".runechoguardignore")
+	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
+	ignorePath := ignorePathFor(cwd, repoRoot)
 
 	if *verbose {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
@@ -717,6 +717,29 @@ type lookupResult struct {
 	OK         bool
 }
 
+// ignorePathFor resolves the .runechoguardignore for the working tree containing
+// `dir`. The enrolled repoRoot can be a bare-repo CONTAINER: the claudew/codexw
+// layout enrols the container (e.g. ".../terse", holding .bare + linked worktrees),
+// not the worktree that actually holds the file (".../terse/main"). Joining repoRoot
+// with the filename then points at a path that does not exist, loadIgnore silently
+// returns nothing, and every false positive fires despite a correct ignore file. The
+// ignore file is a per-worktree config, so prefer the git worktree top of `dir`; fall
+// back to repoRoot when the worktree has no ignore file (or dir is not inside a tree,
+// e.g. TopLevel erroring on a bare root).
+func ignorePathFor(dir, repoRoot string) string {
+	if top, err := gitutil.TopLevel(dir); err == nil {
+		if p := filepath.Join(top, ".runechoguardignore"); fileExists(p) {
+			return p
+		}
+	}
+	return filepath.Join(repoRoot, ".runechoguardignore")
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
 func lookupSymbolsFor(dir string) lookupResult {
 	storeDir, err := runechoDir()
 	if err != nil {
@@ -755,7 +778,7 @@ func lookupSymbolsFor(dir string) lookupResult {
 
 	return lookupResult{
 		Symbols:    syms,
-		IgnorePath: filepath.Join(repoRoot, ".runechoguardignore"),
+		IgnorePath: ignorePathFor(dir, repoRoot),
 		Latest:     snaps[0].Timestamp,
 		RepoName:   repo.Name,
 		OK:         true,

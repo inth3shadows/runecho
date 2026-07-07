@@ -146,9 +146,9 @@ func computeDiff(
 				totalRemoved++
 			}
 		}
-		sort.Slice(fd.Added, func(i, j int) bool { return fd.Added[i].Name < fd.Added[j].Name })
-		sort.Slice(fd.Removed, func(i, j int) bool { return fd.Removed[i].Name < fd.Removed[j].Name })
-		sort.Slice(fd.Modified, func(i, j int) bool { return fd.Modified[i].Name < fd.Modified[j].Name })
+		sort.Slice(fd.Added, func(i, j int) bool { return lessSymbolDelta(fd.Added[i], fd.Added[j]) })
+		sort.Slice(fd.Removed, func(i, j int) bool { return lessSymbolDelta(fd.Removed[i], fd.Removed[j]) })
+		sort.Slice(fd.Modified, func(i, j int) bool { return lessSymbolDelta(fd.Modified[i], fd.Modified[j]) })
 
 		fileDiffs = append(fileDiffs, fd)
 	}
@@ -161,6 +161,19 @@ func computeDiff(
 		TotalRemoved:  totalRemoved,
 		TotalModified: totalModified,
 	}
+}
+
+// lessSymbolDelta is a total ordering over SymbolDelta for stable, deterministic
+// diff output. Name alone is NOT a total order: a single exported symbol can be
+// stored under two kinds (e.g. "export:foo" and "function:foo"), so two deltas
+// can share a Name. Sorting on Name only leaves those tied, and sort.Slice is not
+// stable, so their order — and the resulting `diff --json` bytes — varied per run
+// on identical input, breaking runecho's determinism guarantee. Tie-break on Kind.
+func lessSymbolDelta(a, b SymbolDelta) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	return a.Kind < b.Kind
 }
 
 // symbolSet converts a slice of SymbolDelta to a map keyed by "kind:name".

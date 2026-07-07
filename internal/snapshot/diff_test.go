@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -95,6 +96,61 @@ func TestComputeDiff_ClassHashModification(t *testing.T) {
 	}
 	if result.Files[0].Modified[0].Name != "Config" {
 		t.Errorf("modified symbol = %+v, want Config", result.Files[0].Modified[0])
+	}
+}
+
+// TestLessSymbolDelta_TotalOrderOnTiedNames pins the F118 fix: two deltas that
+// share a Name (a single exported symbol stored under both "export" and
+// "function" kinds) must have a strict, deterministic order. Name-only comparison
+// returned false in BOTH directions for such a pair, leaving them tied under the
+// non-stable sort.Slice and making diff output order random per run.
+func TestLessSymbolDelta_TotalOrderOnTiedNames(t *testing.T) {
+	exp := SymbolDelta{Name: "foo", Kind: "export"}
+	fn := SymbolDelta{Name: "foo", Kind: "function"}
+	if !lessSymbolDelta(exp, fn) {
+		t.Error("lessSymbolDelta(export:foo, function:foo) = false, want true (tie-break on Kind)")
+	}
+	if lessSymbolDelta(fn, exp) {
+		t.Error("lessSymbolDelta(function:foo, export:foo) = true, want false — order must be antisymmetric")
+	}
+}
+
+// TestComputeDiff_DualKindSameNameStableOrder pins F118 end-to-end: a newly added
+// file whose symbol appears under two kinds with the same Name must produce the
+// same Added ordering on every run, despite computeDiff ranging over a Go map
+// (randomized iteration order). Repeated to defeat a lucky single-run pass.
+func TestComputeDiff_DualKindSameNameStableOrder(t *testing.T) {
+	a := SnapshotMeta{RootHash: "aaa"}
+	b := SnapshotMeta{RootHash: "bbb"}
+	aFiles := map[string]string{} // file is newly added in b
+	bFiles := map[string]string{"x.ts": "filehash-new"}
+	aSymbols := map[string][]SymbolDelta{}
+	// `export function foo(){}` is stored under both "export" and "function".
+	bSymbols := map[string][]SymbolDelta{
+		"x.ts": {{Name: "foo", Kind: "function"}, {Name: "foo", Kind: "export"}},
+	}
+
+	var want []string
+	for i := 0; i < 32; i++ {
+		result := computeDiff(a, b, aFiles, bFiles, aSymbols, bSymbols)
+		if len(result.Files) != 1 {
+			t.Fatalf("run %d: want 1 file diff, got %d", i, len(result.Files))
+		}
+		var got []string
+		for _, s := range result.Files[0].Added {
+			got = append(got, s.Kind+":"+s.Name)
+		}
+		if i == 0 {
+			want = got
+			continue
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("run %d: Added order = %v, differs from first run %v — diff output is nondeterministic", i, got, want)
+		}
+	}
+	// And the deterministic order is the Kind-sorted one (export < function).
+	if strings.Join(want, ",") != "export:foo,function:foo" {
+		t.Errorf("Added order = %v, want [export:foo function:foo]", want)
 	}
 }
 

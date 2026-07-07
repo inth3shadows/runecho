@@ -539,7 +539,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 
 	var sb strings.Builder
+	// syms: every flagged name, for the ask record / guardstats observability.
+	// learnSyms: only the hallucination-origin (violations) names — the subset an
+	// approval may train the learned-allow store on. See LearnSymbols on
+	// decisionRecord for why the other categories must be excluded.
 	var syms []string
+	var learnSyms []string
 	if len(violations) > 0 {
 		fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
 		for _, v := range violations {
@@ -548,6 +553,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// relative to the edit hunk — not the file's absolute line number.
 			fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 			syms = append(syms, v.Symbol)
+			learnSyms = append(learnSyms, v.Symbol)
 		}
 	}
 	if len(dangling) > 0 {
@@ -573,7 +579,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0), Symbols: syms})
+	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0), Symbols: syms, LearnSymbols: learnSyms})
 	return 0
 }
 

@@ -179,6 +179,39 @@ func TestDangling_RemovedDefStillReferenced_Asks(t *testing.T) {
 	}
 }
 
+// TestDangling_AskIsNotLearnEligible pins F2: a dangling ask must record the
+// flagged symbol under `symbols` (observability) but NOT under `learn_symbols`.
+// Only hallucination-origin (violations) names are learn-eligible — if a dangling
+// approval trained the learned-allow store, it would later blind guard.Run's
+// hallucination check to a genuine hallucination of that same deleted name.
+func TestDangling_AskIsNotLearnEligible(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_DANGLING", "1")
+
+	file := filepath.Join(top, "known.go")
+	in := payloadOld(t, "Edit", file, "func DoThing() {}", "", "", nil)
+	_, _, d := runHook(t, in)
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("want ask, got %q", d.Hook.PermissionDec)
+	}
+
+	rec := readLastDecisionLog(t)
+	if rec["reason"] != "dangling" {
+		t.Fatalf("decision reason = %v, want dangling", rec["reason"])
+	}
+	syms, _ := rec["symbols"].([]any)
+	if len(syms) != 1 || syms[0] != "DoThing" {
+		t.Errorf("symbols = %v, want [DoThing] for observability", rec["symbols"])
+	}
+	if learn, ok := rec["learn_symbols"]; ok {
+		if ls, _ := learn.([]any); len(ls) != 0 {
+			t.Errorf("learn_symbols = %v, want empty — a dangling ask must not train learned-allow", learn)
+		}
+	}
+}
+
 func TestDangling_ReferencedOnlyBySelf_Defers(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)

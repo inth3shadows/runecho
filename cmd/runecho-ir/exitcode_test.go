@@ -214,6 +214,35 @@ func TestDiffTwoID_HappyPath_Exits0(t *testing.T) {
 	}
 }
 
+// TestMap_SinceEmptyLabel_Reachable pins review finding #2: `map --since=` must
+// reach an empty-label snapshot the same way `diff --since=` now does. Before the
+// fix, keying since-mode on `*since != ""` routed the empty string to the full
+// unfiltered map, silently ignoring the (legal) empty-label baseline.
+func TestMap_SinceEmptyLabel_Reachable(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir) // stub.go defines func Hello
+
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=", dir}); code != 0 {
+		t.Fatalf("snapshot --label=: stderr %q", stderr)
+	}
+
+	// map --since= is since-mode against the empty-label snapshot. The repo is
+	// unchanged vs that snapshot, so the scoped view lists no changed symbols — in
+	// particular NOT Hello. A full-map fallback (the bug) would list Hello.
+	code, out, stderr := runWith(t, home, []string{"runecho-ir", "map", "--since=", dir})
+	if code != ExitOK {
+		t.Fatalf("map --since=: got code %d, stderr %q", code, stderr)
+	}
+	if strings.Contains(out, "Hello") {
+		t.Errorf("map --since= (empty label) should be since-scoped (no changes), but listed the full map:\n%s", out)
+	}
+	// Sanity: the unscoped map does list Hello, so the assertion above is meaningful.
+	if _, full, _ := runWith(t, home, []string{"runecho-ir", "map", dir}); !strings.Contains(full, "Hello") {
+		t.Errorf("plain map should list Hello, got:\n%s", full)
+	}
+}
+
 // TestDiff_SinceEmptyLabel_Reachable pins the fix for `--since=""` being
 // indistinguishable from an absent flag. A snapshot may legitimately carry an
 // empty label (only "auto" is reserved by SaveSnapshot), so `diff --since=` must

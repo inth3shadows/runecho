@@ -186,7 +186,8 @@ func TestLogOutcomeForFile_EnrichesAndRecords(t *testing.T) {
 	file := "/some/repo/main.go"
 	logDecision(decisionRecord{
 		Mode: "hook", Repo: "r", File: file, Lang: "go",
-		Decision: "ask", Reason: "violations", Symbols: []string{"Ghost"},
+		Decision: "ask", Reason: "violations",
+		Symbols: []string{"Ghost"}, LearnSymbols: []string{"Ghost"},
 	})
 
 	logOutcomeForFile(file)
@@ -203,6 +204,35 @@ func TestLogOutcomeForFile_EnrichesAndRecords(t *testing.T) {
 	// And the approval is folded into the learned-allow store.
 	if loadLearnedAllow(home).Repos["r"]["Ghost"].Count != 1 {
 		t.Error("logOutcomeForFile should record the approval in the learned-allow store")
+	}
+}
+
+// TestLogOutcomeForFile_OnlyLearnsHallucinationOrigin pins the consumer half of
+// F2: when an ask mixes a hallucination violation (learn-eligible) with a
+// dangling/dropped/duplicate name (not learn-eligible), approving it must train
+// the learned-allow store ONLY on the hallucination-origin name carried in
+// LearnSymbols — never on the other categories carried in Symbols.
+func TestLogOutcomeForFile_OnlyLearnsHallucinationOrigin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	file := "/some/repo/main.go"
+	logDecision(decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go",
+		Decision: "ask", Reason: "violations+dangling",
+		Symbols:      []string{"Ghost", "Dangled"}, // both surfaced in the ask
+		LearnSymbols: []string{"Ghost"},            // only the hallucination is learn-eligible
+	})
+
+	logOutcomeForFile(file)
+
+	store := loadLearnedAllow(home)
+	if store.Repos["r"]["Ghost"].Count != 1 {
+		t.Errorf("Ghost (hallucination-origin) should be learned, got %+v", store.Repos["r"]["Ghost"])
+	}
+	if _, ok := store.Repos["r"]["Dangled"]; ok {
+		t.Error("Dangled (dangling-origin) must NOT enter the learned-allow store — it would blind the hallucination check")
 	}
 }
 

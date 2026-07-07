@@ -14,17 +14,27 @@ import (
 // ("precommit"). decision is "ask" or "defer" in both modes — pre-commit blocks
 // instead of asking, but keeping the same two-value enum lets log consumers
 // correlate ask-rate across surfaces without schema forks.
-// symbols is only populated on ask (the violating symbol names).
+// symbols is only populated on ask (the flagged symbol names, across all ask
+// categories: hallucination violations, dangling, dropped-import, duplicate).
+//
+// learnSymbols is the HALLUCINATION-ORIGIN subset of symbols — the only names an
+// approval may fold into the learned-allow store (recordApprovals). It exists
+// because the learned-allow set feeds guard.Run's hallucination known-set: a name
+// approved from a dangling/dropped/duplicate ask does NOT mean "this reference
+// legitimately resolves," so training the hallucination check on it would blind
+// the guard to a later genuine hallucination of that same name. Only violations
+// carry that "name resolves" meaning, so only they populate this field.
 type decisionRecord struct {
-	V        int      `json:"v"`
-	TS       string   `json:"ts"`
-	Mode     string   `json:"mode"`
-	Repo     string   `json:"repo,omitempty"`
-	File     string   `json:"file,omitempty"`
-	Lang     string   `json:"lang,omitempty"`
-	Decision string   `json:"decision"`
-	Reason   string   `json:"reason"`
-	Symbols  []string `json:"symbols,omitempty"`
+	V            int      `json:"v"`
+	TS           string   `json:"ts"`
+	Mode         string   `json:"mode"`
+	Repo         string   `json:"repo,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Lang         string   `json:"lang,omitempty"`
+	Decision     string   `json:"decision"`
+	Reason       string   `json:"reason"`
+	Symbols      []string `json:"symbols,omitempty"`
+	LearnSymbols []string `json:"learn_symbols,omitempty"`
 }
 
 // logDecision appends one JSONL line to <storeDir>/decisions.jsonl.
@@ -107,15 +117,21 @@ func logOutcomeForFile(file string) {
 		return
 	}
 	logDecision(decisionRecord{
-		Mode:     "hook",
-		Repo:     ask.Repo,
-		File:     file,
-		Lang:     ask.Lang,
-		Decision: "outcome",
-		Reason:   "approved",
-		Symbols:  ask.Symbols,
+		Mode:         "hook",
+		Repo:         ask.Repo,
+		File:         file,
+		Lang:         ask.Lang,
+		Decision:     "outcome",
+		Reason:       "approved",
+		Symbols:      ask.Symbols,
+		LearnSymbols: ask.LearnSymbols,
 	})
-	recordApprovals(dir, ask.Repo, ask.Symbols, time.Now())
+	// Train learned-allow only on the hallucination-origin subset — see the
+	// LearnSymbols doc on decisionRecord for why dangling/dropped/duplicate
+	// approvals must not populate the hallucination known-set. Records written
+	// before this field existed have a nil LearnSymbols, so they simply train
+	// nothing (fail-safe: under-trains rather than mis-trains).
+	recordApprovals(dir, ask.Repo, ask.LearnSymbols, time.Now())
 }
 
 // recentAsk returns the MOST RECENT "ask" record for file in decisions.jsonl

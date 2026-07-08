@@ -154,6 +154,56 @@ func TestResolveRepo_WorktreeTier(t *testing.T) {
 	}
 }
 
+// TestResolveRepo_BareRootResolvesEnrolledWorktree (F13): when dir is a BARE repo
+// root, gitutil.TopLevel fails ("must be run in a work tree"). If tier 1 also
+// misses (common_dir not yet backfilled — a pre-V4 enrollment), tier 2's error
+// must NOT short-circuit the whole resolver: `git worktree list` still works from
+// a bare root, so tier 3 can map the bare root to its enrolled linked worktree.
+// Before the fix, the tier-2 early-return skipped tier 3 (and tier 3 was keyed on
+// the failed top-level anyway) → a genuinely-enrolled repo resolved as "not
+// enrolled". Near-unreachable in normal use (you operate from a worktree, and any
+// prior worktree-based resolve backfills common_dir) but a real correctness gap
+// in the core resolver.
+func TestResolveRepo_BareRootResolvesEnrolledWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Seed a normal repo with a commit, then make a bare clone that supports
+	// `worktree add` (a bare repo with refs).
+	seed := t.TempDir()
+	resolveGitInit(t, seed)
+	resolveGitCommit(t, seed)
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	if out, err := exec.Command("git", "clone", "--bare", seed, bare).CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %v: %s", err, out)
+	}
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", bare, "worktree", "add", wt, "-b", "wt-branch").CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+
+	// Sanity: confirm the bare root has no top-level (the condition F13 hinges on).
+	if _, err := gitutil.TopLevel(bare); err == nil {
+		t.Skip("this git treats the bare root as having a top-level; F13 precondition absent")
+	}
+
+	db, _ := openTemp(t)
+	// Enroll the WORKTREE path, with NO common_dir (pre-V4 / unbackfilled) so tier
+	// 1 misses for a bare-root lookup and the resolver must fall to tier 3.
+	id, err := db.EnrollRepo("r", wt, wt, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+
+	repo, _, ok := db.ResolveRepo(bare)
+	if !ok {
+		t.Fatal("F13: ResolveRepo(bareRoot) returned not-enrolled, but the worktree IS enrolled and `git worktree list` reaches it")
+	}
+	if repo.ID != id {
+		t.Errorf("repo.ID = %d, want %d", repo.ID, id)
+	}
+}
+
 // TestResolveRepo_Unenrolled: no enrolled repo in dir → returns ok=false.
 func TestResolveRepo_Unenrolled(t *testing.T) {
 	root := t.TempDir()

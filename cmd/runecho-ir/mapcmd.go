@@ -101,7 +101,7 @@ func runMap(args []string) int {
 
 	// Always build a fresh IR: the map reflects current code, never a stale
 	// ir.json. fileCap honors the enrolled repo's cap (0 if not enrolled).
-	irData, _, irCode := buildIR(root, repoFileCap(db, root))
+	irData, stats, irCode := buildIR(root, repoFileCap(db, root))
 	if irCode != 0 {
 		return irCode
 	}
@@ -110,7 +110,7 @@ func runMap(args []string) int {
 	// the per-symbol rendering entirely — the point is to NOT spend context on the
 	// full map up front, just to tell the agent the map exists and how to query it.
 	if *header {
-		emitMapHeader(irData)
+		emitMapHeader(irData, stats)
 		return 0
 	}
 
@@ -218,8 +218,11 @@ func collectMapSymbols(irData *ir.IR, kind, dirPrefix string, changed map[string
 // emitMapHeader prints a compact, deterministic repo summary (file/symbol counts,
 // the busiest top-level directories, and a pointer to the lookup tools). Designed
 // to fit a Claude Code SessionStart hook in under ~200 tokens — it tells an agent
-// the map exists and how to query it, without dumping the map itself.
-func emitMapHeader(irData *ir.IR) {
+// the map exists and how to query it, without dumping the map itself. stats carry
+// the walk's coverage so a PARTIAL index (parse errors or file-cap truncation) is
+// disclosed rather than presented as a complete map — otherwise an agent treating
+// runecho as code-truth reads a symbol's absence as definitive when it isn't.
+func emitMapHeader(irData *ir.IR, stats ir.Stats) {
 	funcs, classes := 0, 0
 	dirFiles := make(map[string]int)
 	for path, f := range irData.Files {
@@ -258,7 +261,13 @@ func emitMapHeader(irData *ir.IR) {
 		top = append(top, dirs[i].dir)
 	}
 
-	fmt.Printf("runecho map: %d files, %d functions, %d classes.\n", len(irData.Files), funcs, classes)
+	fmt.Printf("runecho map: %d files, %d functions, %d classes.%s\n", len(irData.Files), funcs, classes, coverageSuffix(stats))
+	if missed := stats.SupportedSeen - stats.Indexed; missed > 0 {
+		// Partial coverage: `missed` supported-language files failed to parse or
+		// were truncated by the file cap and are NOT in the map. Only printed on a
+		// shortfall, so the full-coverage common case stays terse and within budget.
+		fmt.Printf("Coverage is PARTIAL — %d supported file(s) not indexed; a symbol missing from the map may still exist (reindex or read the file).\n", missed)
+	}
 	if len(top) > 0 {
 		fmt.Printf("Busiest: %s\n", strings.Join(top, " "))
 	}

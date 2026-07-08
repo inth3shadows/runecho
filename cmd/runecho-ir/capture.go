@@ -104,10 +104,43 @@ func generateIR(generator *ir.Generator, absRoot string) (*ir.IR, ir.Stats, erro
 // re-parse.
 // fileCap limits the number of files indexed (0 = unlimited).
 // Returns the IR, the walk's honest-coverage stats, and an exit code (0 = ok).
+// requireExistingDir verifies absRoot is an existing directory — the shared
+// precondition for building a fresh IR. Both fresh-IR entry points (runIndex,
+// buildIR) need a live directory: a bare argument is a root-path by contract, so
+// a mistyped subcommand or bad path reaches them as a nonexistent path, where
+// generateIR would only warn-and-continue (its per-entry walk tolerance is
+// deliberate — a partially-readable tree must still index its reachable files)
+// and yield an EMPTY IR at exit 0 — a typo masquerading as success (and, in
+// runIndex, a stray <arg>/.ai/ir.json). Fail fast instead. A missing/non-dir
+// ROOT is a hard error, distinct from an unreadable entry encountered mid-walk.
+// Enrollment-gated callers (snapshot/diff/verify/reindex) always pass a real
+// enrolled dir, so this is a no-op for them; it closes the gap for the ungated
+// `map` path. Returns 0 if ok, else ExitError (message already printed).
+// displayPath is the user's original (possibly relative) arg, for a readable
+// error.
+func requireExistingDir(absRoot, displayPath string) int {
+	info, err := os.Stat(absRoot)
+	switch {
+	case os.IsNotExist(err):
+		fmt.Fprintf(os.Stderr, "Error: path does not exist: %q (expected a root directory or a subcommand — see --help)\n", displayPath)
+		return ExitError
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "Error: cannot access %q: %v\n", displayPath, err)
+		return ExitError
+	case !info.IsDir():
+		fmt.Fprintf(os.Stderr, "Error: not a directory: %q\n", displayPath)
+		return ExitError
+	}
+	return 0
+}
+
 func buildIR(root string, fileCap int) (*ir.IR, ir.Stats, int) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, ir.Stats{}, printErr(err)
+	}
+	if code := requireExistingDir(abs, root); code != 0 {
+		return nil, ir.Stats{}, code
 	}
 	generator := ir.NewGenerator(ir.GeneratorConfig{
 		IgnoredPaths:    ir.DefaultIgnoredPaths,
@@ -146,6 +179,14 @@ func runIndex(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve path %q: %v\n", rootPath, err)
 		return ExitError
+	}
+
+	// A bare argument is a root-path by contract (`runecho-ir [root-path]`), so a
+	// mistyped subcommand (`runecho-ir snpashot`) lands here as a nonexistent
+	// path; reject it before indexing (see requireExistingDir) rather than let
+	// Save litter a stray <arg>/.ai/ir.json and exit 0.
+	if code := requireExistingDir(absRoot, rootPath); code != 0 {
+		return code
 	}
 
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")

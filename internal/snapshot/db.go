@@ -13,9 +13,21 @@ type DB struct {
 	conn *sql.DB
 }
 
+// storeDSN builds the sqlite DSN for the store. _txlock=immediate makes every
+// transaction begin with BEGIN IMMEDIATE (acquire the write lock up front)
+// instead of database/sql's default deferred BEGIN. This serializes concurrent
+// writers/migrators at BEGIN so — combined with migrate()'s re-read of
+// user_version under the lock — two runecho processes opening the same store at
+// once can't both run the same schema step and hit a hard "duplicate column"
+// error (issue #107 F12). Every one of the store's transactions is a write, so
+// eager locking costs no read concurrency. modernc splits the DSN on the first
+// '?', passing the path literally (store paths never contain '?'), so no
+// URI-encoding is needed even for paths with spaces.
+func storeDSN(path string) string { return path + "?_txlock=immediate" }
+
 // Open opens (or creates) the snapshot DB at path, sets pragmas, and migrates schema.
 func Open(path string) (*DB, error) {
-	conn, err := sql.Open("sqlite", path)
+	conn, err := sql.Open("sqlite", storeDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
@@ -47,7 +59,7 @@ func Open(path string) (*DB, error) {
 // corruption simply yields a query error, and the guard degrades to defer. Pragmas
 // and migration (both cheap when the schema is current) are still applied.
 func OpenFast(path string) (*DB, error) {
-	conn, err := sql.Open("sqlite", path)
+	conn, err := sql.Open("sqlite", storeDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
@@ -89,14 +101,20 @@ func (db *DB) BackupTo(path string) error {
 
 func (db *DB) setPragmas() error {
 	for _, p := range []string{
+		// busy_timeout MUST come first: switching journal_mode to WAL (and WAL
+		// recovery) can itself hit a transient lock when another process opens the
+		// same store concurrently. Without busy_timeout already in effect, that
+		// `PRAGMA journal_mode=WAL` fails immediately with "database is locked"
+		// (SQLITE_BUSY_RECOVERY). Setting the timeout first lets every subsequent
+		// PRAGMA — and the BEGIN IMMEDIATE that _txlock=immediate makes each
+		// transaction use (see storeDSN + migrate()) — wait up to 5s instead of
+		// erroring. MaxOpenConns(1) only serializes in-process; a second runecho
+		// process (CLI write vs. MCP first-run migrate, or two guard hooks) still
+		// contends for the write lock.
+		"PRAGMA busy_timeout=5000",
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=NORMAL",
-		// Wait up to 5s for a competing writer instead of failing immediately
-		// with "database is locked" — MaxOpenConns(1) only serializes in-process,
-		// so a second runecho process (CLI write vs. MCP first-run migrate) can
-		// still contend for the write lock.
-		"PRAGMA busy_timeout=5000",
 	} {
 		if _, err := db.conn.Exec(p); err != nil {
 			return fmt.Errorf("pragma %q: %w", p, err)
@@ -112,9 +130,17 @@ func (db *DB) setPragmas() error {
 // rebuilt, and it never resolves on its own.
 var ErrSchemaNewer = errors.New("store schema is newer than this binary")
 
+// newerSchemaErr reports a store migrated by a newer binary than this one. Built
+// in one place so the pre-lock read and the under-lock re-read in migrate() stay
+// identical.
+func newerSchemaErr(version int) error {
+	return fmt.Errorf("db schema version %d is newer than this binary supports (%d); upgrade runecho: %w", version, len(migrations), ErrSchemaNewer)
+}
+
 // migration brings the schema from version N to N+1, where N is its index in the
-// migrations slice. Each runs in its own transaction; user_version is bumped only
-// on commit, so a partial upgrade can never leave a torn schema.
+// migrations slice. Each runs inside a single write-locked transaction that also
+// bumps user_version, so a partial upgrade can never leave a torn schema and a
+// concurrent opener can never re-run an already-applied step.
 type migration func(*sql.Tx) error
 
 var migrations = []migration{
@@ -137,25 +163,57 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 	if current > len(migrations) {
-		return fmt.Errorf("db schema version %d is newer than this binary supports (%d); upgrade runecho: %w", current, len(migrations), ErrSchemaNewer)
+		return newerSchemaErr(current)
 	}
-	for v := current; v < len(migrations); v++ {
+
+	for current < len(migrations) {
+		// Begin() emits BEGIN IMMEDIATE (the store DSN sets _txlock=immediate), so
+		// the write lock is taken up front — waiting up to busy_timeout for a peer —
+		// rather than lazily on first write. Two processes both at vN would
+		// otherwise both read the stale version, both run the vN→vN+1 step, and
+		// whichever lost the write-lock race would re-run e.g. `ALTER TABLE … ADD
+		// COLUMN` on a schema that already has it: a hard "duplicate column" error
+		// that fails Open (issue #107 F12).
 		tx, err := db.conn.Begin()
 		if err != nil {
-			return fmt.Errorf("begin migration %d: %w", v+1, err)
+			return fmt.Errorf("begin migration %d: %w", current+1, err)
 		}
-		if err := migrations[v](tx); err != nil {
+		// Re-read the version under the write lock: a peer may have applied this
+		// step while we waited for the lock. Resync to the current version and
+		// re-evaluate (skipping already-applied steps) rather than blindly running
+		// migrations[current]. Because we hold the write lock, `locked` is stable
+		// for this iteration, so `current` only ever advances — the loop terminates.
+		// (A `locked < current` downgrade can only come from corruption or a manual
+		// PRAGMA edit; the ALTERs have no IF NOT EXISTS, so it fails Open loudly
+		// rather than silently mis-migrating — an acceptable failure for a tampered
+		// store.)
+		var locked int
+		if err := tx.QueryRow("PRAGMA user_version").Scan(&locked); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("migrate to v%d: %w", v+1, err)
+			return fmt.Errorf("read user_version under lock: %w", err)
 		}
-		// PRAGMA user_version cannot be parameterized; v+1 is a trusted loop index.
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+		if locked > len(migrations) {
 			tx.Rollback()
-			return fmt.Errorf("set user_version %d: %w", v+1, err)
+			return newerSchemaErr(locked)
+		}
+		if locked != current {
+			tx.Rollback()
+			current = locked
+			continue
+		}
+		if err := migrations[current](tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migrate to v%d: %w", current+1, err)
+		}
+		// PRAGMA user_version cannot be parameterized; current+1 is a trusted index.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", current+1)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version %d: %w", current+1, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d: %w", v+1, err)
+			return fmt.Errorf("commit migration %d: %w", current+1, err)
 		}
+		current++
 	}
 	return nil
 }

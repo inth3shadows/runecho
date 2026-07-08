@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -608,6 +609,100 @@ func TestEnrollRepo_SourceRoot(t *testing.T) {
 	}
 	if r2.EffectiveSourceRoot() != "/repos/bare" {
 		t.Errorf("EffectiveSourceRoot = %q, want /repos/bare", r2.EffectiveSourceRoot())
+	}
+}
+
+// buildStoreAtVersion creates a store migrated to exactly `target` (0 <= target
+// <= len(migrations)), leaving it one-or-more steps behind latest so a subsequent
+// Open() must migrate. Mirrors the raw-open + per-migration pattern the other
+// migration tests use.
+func buildStoreAtVersion(t *testing.T, dbPath string, target int) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	defer conn.Close()
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := conn.Exec(p); err != nil {
+			t.Fatalf("pragma: %v", err)
+		}
+	}
+	for v := 0; v < target; v++ {
+		tx, _ := conn.Begin()
+		if err := migrations[v](tx); err != nil {
+			t.Fatalf("migration v%d: %v", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
+			t.Fatalf("set user_version: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit v%d: %v", v+1, err)
+		}
+	}
+}
+
+// TestMigrate_ConcurrentOpenNoDuplicateColumn (F12): several runecho processes
+// can open the same store at once (CLI write vs. MCP first-run migrate, or two
+// guard hooks). Each Open() runs migrate(). Before the fix, all readers saw the
+// same stale user_version and each ran the final ALTER; whichever lost the write
+// lock re-ran `ALTER TABLE symbols ADD COLUMN sig_hash` on a schema that already
+// had it → a hard "duplicate column name" error, failing Open (and, for the
+// guard, disabling validation). MaxOpenConns(1) only serializes IN-process, so
+// N independent Open() calls model N processes. The store is built one version
+// behind latest so every opener races on the same final migration.
+func TestMigrate_ConcurrentOpenNoDuplicateColumn(t *testing.T) {
+	if len(migrations) == 0 {
+		t.Skip("no migrations")
+	}
+	// A single race is probabilistic: on a slow/serializing runner the openers can
+	// line up so no two ever hold the stale version at once, letting even buggy
+	// code pass. Repeat over fresh stores so the race window is hit reliably; the
+	// pre-fix code fails within the first few iterations.
+	const iters = 40
+	const N = 8
+	for iter := 0; iter < iters; iter++ {
+		dbPath := filepath.Join(t.TempDir(), fmt.Sprintf("prev-%d.db", iter))
+		buildStoreAtVersion(t, dbPath, len(migrations)-1)
+
+		var wg sync.WaitGroup
+		errs := make([]error, N)
+		start := make(chan struct{})
+		for i := 0; i < N; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start // release all openers together to maximize the race window
+				db, err := Open(dbPath)
+				if err == nil {
+					_ = db.Close()
+				}
+				errs[i] = err // each goroutine writes its own index — no data race
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("iter %d: concurrent Open %d failed (F12 migration race): %v", iter, i, err)
+			}
+		}
+		// The store must have reached the latest version.
+		db, err := Open(dbPath)
+		if err != nil {
+			t.Fatalf("iter %d: final Open: %v", iter, err)
+		}
+		v := userVersion(t, db)
+		db.Close()
+		if v != SchemaVersion {
+			t.Fatalf("iter %d: user_version = %d, want %d", iter, v, SchemaVersion)
+		}
 	}
 }
 

@@ -138,20 +138,46 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 	uses := make(map[string]int)
 	scanStripped(lang, lines, func(scan string, l AddedLine) {
 		if isImportLine(lang, l.Text) {
-			// A single physical line can pack an import clause and a real
-			// statement, separated by ';' (`import re; x = Foo()`) — isImportLine
-			// classifies the WHOLE line as import (its regexes are anchored to
-			// end-of-line, so the trailing statement gets swallowed into the
-			// "import list" match). Skipping the whole line here would silently
+			// A single physical line can pack one or more import clauses and then
+			// a real statement, ';'-separated (`import re; x = Foo()`) —
+			// isImportLine classifies the WHOLE line as import (its regexes are
+			// anchored to end-of-line, so a trailing statement gets swallowed into
+			// the "import list" match). Skipping the whole line here would silently
 			// miss a genuine use in that trailing statement (e.g. a dropped
-			// import's only remaining call). Only blank the leading clause up to
-			// and including the first top-level ';'; a plain import line (no
-			// ';') still skips entirely, as before.
-			idx := strings.IndexByte(l.Text, ';')
-			if idx < 0 {
+			// import's only remaining call). So peel each LEADING ';'-segment that
+			// is itself an import clause — blanking it — and scan only the
+			// remainder (from the first genuine non-import segment onward) as code.
+			// A reimport in a trailing segment (`import a; import {Dropped} from
+			// './b'`) stays blanked, so its imported name is not misread as a use.
+			// Segment on the stripped `scan` (not raw text) so a ';' inside a
+			// string literal is not a boundary; scan and l.Text share indices
+			// (stripLiteralsStateful preserves length). A plain import line (no
+			// ';') blanks entirely and skips, as before.
+			pos := 0
+			scanned := false
+			for pos < len(scan) {
+				rel := strings.IndexByte(scan[pos:], ';')
+				segEnd := len(scan)
+				if rel >= 0 {
+					segEnd = pos + rel
+				}
+				if !isImportLine(lang, l.Text[pos:segEnd]) {
+					scanned = true
+					break
+				}
+				blankTo := segEnd
+				if rel >= 0 {
+					blankTo = segEnd + 1 // include the ';' delimiter
+				}
+				scan = scan[:pos] + strings.Repeat(" ", blankTo-pos) + scan[blankTo:]
+				if rel < 0 {
+					break
+				}
+				pos = blankTo
+			}
+			if !scanned {
 				return
 			}
-			scan = strings.Repeat(" ", idx+1) + scan[idx+1:]
 		}
 		for j := 0; j < len(scan); {
 			if !isWordByte(scan[j]) {
@@ -257,10 +283,17 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			}
 			if mm := reJSArrowParams.FindStringSubmatch(s); mm != nil {
 				add(mm[1])
-			} else if mm := reJSArrowParamsBare.FindStringSubmatch(s); mm != nil {
-				// Bare single-arg arrow (`x => …`), checked only when the
-				// parenthesized form above didn't already match — avoids
-				// double-adding when the same line uses the parenthesized form.
+			}
+			// Bare single-arg arrow (`x => …`) — an INDEPENDENT check, not an
+			// `else if` off the parenthesized form. A single line can carry both
+			// (`(a, b) => …; arr.map(Dropped => …)`); gating the bare check on the
+			// parenthesized one not matching would miss the bare arrow's binding
+			// there and false-positive `Dropped` as a dropped import. add() is a
+			// set insert, so double-adding a name the parenthesized form already
+			// caught is harmless. (reJSArrowParamsBare's `\b … \s*=>` can't fire
+			// inside a parenthesized arrow: the ident there is followed by `)`,
+			// not `=>`.)
+			if mm := reJSArrowParamsBare.FindStringSubmatch(s); mm != nil {
 				add(mm[1])
 			}
 			if mm := reJSForDecl.FindStringSubmatch(s); mm != nil {

@@ -249,6 +249,36 @@ func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T)
 	}
 }
 
+// Round-2 regression pin (F8): a physical line that packs MULTIPLE import
+// clauses (`import re; from x import Dropped`) must have EVERY leading import
+// segment blanked, not just the clause before the first ';'. The pre-round-2
+// fix blanked only up to the first ';', then scanned the trailing
+// `from x import Dropped` as code — recording `Dropped` as a bogus "use", which
+// (when Dropped's import is not recognized by ExtractImports) false-positives it
+// as a dropped import. firstUnqualifiedUseLines is the exact site, so pin it
+// directly: the trailing import's bound name must NOT appear as a use.
+func TestFirstUnqualifiedUseLines_TrailingImportSegmentBlanked(t *testing.T) {
+	lines := TextToAddedLines("import re; from x import Dropped\n")
+	uses := firstUnqualifiedUseLines(LangPython, lines)
+	if ln := uses["Dropped"]; ln != 0 {
+		t.Errorf("Dropped is bound by the trailing import segment, must not be recorded as a use (got line %d)", ln)
+	}
+}
+
+// Round-2 regression pin (F6): a dropped import rebound as a BARE arrow param on
+// a line that ALSO carries a parenthesized arrow (`(a, b) => …; arr.map(Dropped
+// => …)`) must be suppressed. The pre-round-2 fix gated the bare-arrow check
+// behind `else if` off the parenthesized form, so the parenthesized match on the
+// same line shadowed the bare arrow — `Dropped` never entered the bound set and
+// false-positived as dropped despite being a local param.
+func TestDroppedImport_JS_BareArrowParam_SameLineAsParenArrow(t *testing.T) {
+	oldText := "import { Dropped } from './m';\n(a, b) => f(a, b);\narr.map(Dropped => Dropped * 2);\n"
+	newText := "(a, b) => f(a, b); arr.map(Dropped => Dropped * 2);\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("bare arrow param Dropped alongside a paren arrow must not warn as dropped, got %v", droppedNames(got))
+	}
+}
+
 // Go is excluded by design (imports are package-qualified).
 func TestDroppedImport_Go_Excluded(t *testing.T) {
 	oldText := "import \"x\"\nx.Foo()\n"

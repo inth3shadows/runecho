@@ -768,6 +768,16 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 							// itself as the open delimiter. Same KNOWN limitation as
 							// the triple-quote case: a call nested inside the
 							// continuation is not scanned, only the delimiter search.
+							// FURTHER KNOWN LIMITATION: because `open` carries only the
+							// quote byte (not the interpolation depth), on the
+							// continuation line a *same-quote* character inside the
+							// still-open interpolation is read as the string's close,
+							// so trailing code after it on that line can be dropped
+							// from scanning. This is net-positive over the prior
+							// baseline (which returned "" here and misread the whole
+							// continuation), and rare; a full fix would need open-state
+							// to carry an interpolation-depth counter, not just the
+							// quote byte — deferred.
 							return string(out), string(quote)
 						}
 					default:

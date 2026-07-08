@@ -392,19 +392,26 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 			return repos[0], repos[0].Path, true
 		}
 	}
-	// Tier 2: git top-level → exact path lookup.
-	topLevel, err := gitutil.TopLevel(dir)
-	if err != nil {
-		return nil, "", false
+	// Tier 2: git top-level → exact path lookup. A TopLevel error (dir is a bare
+	// repo root or a .git dir — no work tree) must NOT short-circuit the resolver:
+	// tier 3 can still recover such a dir via `git worktree list`. So skip tier 2
+	// on error and fall through, rather than returning not-enrolled here.
+	topLevel, tlErr := gitutil.TopLevel(dir)
+	if tlErr == nil {
+		if r, err := db.GetRepoByPath(topLevel); err != nil {
+			warnResolve("top-level", err)
+		} else if r != nil {
+			db.backfillCommonDir(r.ID, commonDir, cdErr)
+			return r, topLevel, true
+		}
 	}
-	if r, err := db.GetRepoByPath(topLevel); err != nil {
-		warnResolve("top-level", err)
-	} else if r != nil {
-		db.backfillCommonDir(r.ID, commonDir, cdErr)
-		return r, topLevel, true
-	}
-	// Tier 3: worktree shim — check all registered worktree paths.
-	for _, wt := range gitutil.WorktreePaths(topLevel) {
+	// Tier 3: worktree shim — check all registered worktree paths. Keyed on `dir`,
+	// NOT topLevel: `git worktree list` works from a bare root / .git dir (where
+	// TopLevel just failed), so a bare-root lookup whose enrollment sits at a
+	// linked worktree still resolves. topLevel is "" when tier 2 errored, so the
+	// self-skip below is a no-op in that case (nothing to skip) and only elides
+	// the already-checked path in the normal case.
+	for _, wt := range gitutil.WorktreePaths(dir) {
 		if wt == topLevel {
 			continue
 		}

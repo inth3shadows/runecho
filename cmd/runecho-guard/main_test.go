@@ -21,6 +21,38 @@ func gitInit(t *testing.T, dir string) {
 	}
 }
 
+func TestIgnorePathFor_PrefersWorktreeOverEnrolledContainer(t *testing.T) {
+	// The bare-worktree bug: repoRoot is enrolled as the CONTAINER (".../terse",
+	// which holds .bare + linked worktrees and NO ignore file) while the real ignore
+	// file lives in the linked worktree (".../terse/main"). The guard must read the
+	// worktree's file, not the non-existent container path — else every ignore entry
+	// is silently dropped and all false positives fire.
+	wt := t.TempDir()
+	gitInit(t, wt)
+	if err := os.WriteFile(filepath.Join(wt, ".runechoguardignore"),
+		[]byte("Path\nCounter\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	container := t.TempDir() // stands in for ".../terse": no ignore file here
+
+	got := ignorePathFor(wt, container)
+	if !fileExists(got) {
+		t.Fatalf("returned non-existent path %q — fell back to the container (the bug)", got)
+	}
+	if b, _ := os.ReadFile(got); string(b) != "Path\nCounter\n" {
+		t.Fatalf("read the wrong ignore file %q: %q", got, b)
+	}
+}
+
+func TestIgnorePathFor_FallsBackToRepoRootWhenWorktreeHasNone(t *testing.T) {
+	wt := t.TempDir()
+	gitInit(t, wt) // no ignore file in the worktree
+	container := t.TempDir()
+	if got := ignorePathFor(wt, container); got != filepath.Join(container, ".runechoguardignore") {
+		t.Fatalf("expected fallback to repoRoot %q, got %q", container, got)
+	}
+}
+
 func openTempDB(t *testing.T) *snapshot.DB {
 	t.Helper()
 	db, err := snapshot.Open(filepath.Join(t.TempDir(), "history.db"))

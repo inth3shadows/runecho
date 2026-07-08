@@ -172,7 +172,7 @@ func TestDroppedImport_JS_Rebound_Decl(t *testing.T) {
 // Negative: a dropped import rebound as an unparenthesized single-arg arrow
 // param (`x => x*2`) must not be flagged. reJSArrowParams only matches the
 // parenthesized form `(x) => …`, so a bare single-identifier arrow used to slip
-// past locallyBoundNames entirely and false-positive.
+// past LocallyBoundNames entirely and false-positive.
 func TestDroppedImport_JS_Rebound_BareArrowParam(t *testing.T) {
 	oldText := "import { x } from './m';\nreturn arr.map(x => x * 2);\n"
 	newText := "return arr.map(x => x * 2);\n"
@@ -276,6 +276,38 @@ func TestDroppedImport_JS_BareArrowParam_SameLineAsParenArrow(t *testing.T) {
 	newText := "(a, b) => f(a, b); arr.map(Dropped => Dropped * 2);\n"
 	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
 		t.Errorf("bare arrow param Dropped alongside a paren arrow must not warn as dropped, got %v", droppedNames(got))
+	}
+}
+
+// Round-2b regression pin (C#1/A#1): an import clause packed AFTER a non-import
+// statement on one line (`import a; x = 1; from n import Dropped`) must still be
+// blanked. The leading-run-only version broke out of the peel loop at the
+// non-import `x = 1` and scanned the trailing import as code, recording Dropped
+// as a use — and ExtractImports' first-clause-only parse never put Dropped in
+// newImps to offset it, so Dropped false-positived as a dropped import even
+// though it is literally imported on the line. Blanking EVERY import segment
+// (not just the leading run) fixes it.
+func TestFirstUnqualifiedUseLines_NonLeadingImportSegmentBlanked(t *testing.T) {
+	lines := TextToAddedLines("import a; x = 1; from n import Dropped\n")
+	uses := firstUnqualifiedUseLines(LangPython, lines)
+	if ln := uses["Dropped"]; ln != 0 {
+		t.Errorf("Dropped is bound by a trailing import segment, must not be recorded as a use (got line %d)", ln)
+	}
+	if uses["x"] == 0 {
+		t.Errorf("the genuine non-import segment `x = 1` must still be scanned (x missing from uses)")
+	}
+}
+
+// Round-2b regression pin (A#2): a dropped import rebound as a bare arrow param
+// that is NOT the first bare arrow on the line (`arr.map(x => x).forEach(Dropped
+// => log(Dropped))`) must be suppressed. FindStringSubmatch captured only the
+// first bare arrow (`x`), leaving Dropped unbound and false-positived; FindAll
+// binds every bare arrow.
+func TestDroppedImport_JS_SecondBareArrowParam(t *testing.T) {
+	oldText := "import { Dropped } from './m';\narr.map(x => x).forEach(Dropped => log(Dropped));\n"
+	newText := "arr.map(x => x).forEach(Dropped => log(Dropped));\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("a later bare arrow param Dropped must not warn as dropped, got %v", droppedNames(got))
 	}
 }
 

@@ -138,46 +138,42 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 	uses := make(map[string]int)
 	scanStripped(lang, lines, func(scan string, l AddedLine) {
 		if isImportLine(lang, l.Text) {
-			// A single physical line can pack one or more import clauses and then
-			// a real statement, ';'-separated (`import re; x = Foo()`) —
-			// isImportLine classifies the WHOLE line as import (its regexes are
-			// anchored to end-of-line, so a trailing statement gets swallowed into
-			// the "import list" match). Skipping the whole line here would silently
-			// miss a genuine use in that trailing statement (e.g. a dropped
-			// import's only remaining call). So peel each LEADING ';'-segment that
-			// is itself an import clause — blanking it — and scan only the
-			// remainder (from the first genuine non-import segment onward) as code.
-			// A reimport in a trailing segment (`import a; import {Dropped} from
-			// './b'`) stays blanked, so its imported name is not misread as a use.
-			// Segment on the stripped `scan` (not raw text) so a ';' inside a
-			// string literal is not a boundary; scan and l.Text share indices
-			// (stripLiteralsStateful preserves length). A plain import line (no
-			// ';') blanks entirely and skips, as before.
+			// A single physical line can pack import clauses and real statements,
+			// ';'-separated (`import re; x = Foo()`), and isImportLine classifies
+			// the WHOLE line as import (its regexes are end-anchored/prefix-based,
+			// so a trailing statement is swallowed into the "import list" match).
+			// Skipping the whole line here would silently miss a genuine use in a
+			// non-import segment (e.g. a dropped import's only remaining call). So
+			// blank EVERY ';'-segment that is itself an import clause — wherever it
+			// sits on the line — and scan only the genuine non-import segments.
+			// Blanking import clauses in ANY position (not just a leading run)
+			// matters: a reimport packed after a statement
+			// (`import a; x=1; import {Dropped} from './b'`) must stay blanked, else
+			// its name is scanned as a use — and ExtractImports' first-clause-only
+			// parse won't have put it in newImps to offset that, so it would
+			// false-positive as dropped. Segment on the stripped `scan` (not raw
+			// text) so a ';' inside a string literal is not a boundary; scan and
+			// l.Text share indices (stripLiteralsStateful preserves length). A
+			// plain import line (no ';') blanks entirely, as the old skip did.
+			buf := []byte(scan)
 			pos := 0
-			scanned := false
 			for pos < len(scan) {
 				rel := strings.IndexByte(scan[pos:], ';')
 				segEnd := len(scan)
 				if rel >= 0 {
 					segEnd = pos + rel
 				}
-				if !isImportLine(lang, l.Text[pos:segEnd]) {
-					scanned = true
-					break
+				if isImportLine(lang, l.Text[pos:segEnd]) {
+					for k := pos; k < segEnd; k++ {
+						buf[k] = ' '
+					}
 				}
-				blankTo := segEnd
-				if rel >= 0 {
-					blankTo = segEnd + 1 // include the ';' delimiter
-				}
-				scan = scan[:pos] + strings.Repeat(" ", blankTo-pos) + scan[blankTo:]
 				if rel < 0 {
 					break
 				}
-				pos = blankTo
+				pos = segEnd + 1
 			}
-			if !scanned {
-				return
-			}
+			scan = string(buf)
 		}
 		for j := 0; j < len(scan); {
 			if !isWordByte(scan[j]) {
@@ -204,7 +200,7 @@ func isWordByte(b byte) bool {
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
-// Binding-form patterns for locallyBoundNames. Each captures the binding TARGET
+// Binding-form patterns for LocallyBoundNames. Each captures the binding TARGET
 // region; identifiers within are extracted with reIdentAll. Definition-position
 // only — none match call-argument parens, so a dropped import passed as an
 // argument is still flagged, not suppressed.
@@ -284,16 +280,16 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			if mm := reJSArrowParams.FindStringSubmatch(s); mm != nil {
 				add(mm[1])
 			}
-			// Bare single-arg arrow (`x => …`) — an INDEPENDENT check, not an
-			// `else if` off the parenthesized form. A single line can carry both
-			// (`(a, b) => …; arr.map(Dropped => …)`); gating the bare check on the
-			// parenthesized one not matching would miss the bare arrow's binding
-			// there and false-positive `Dropped` as a dropped import. add() is a
-			// set insert, so double-adding a name the parenthesized form already
-			// caught is harmless. (reJSArrowParamsBare's `\b … \s*=>` can't fire
-			// inside a parenthesized arrow: the ident there is followed by `)`,
-			// not `=>`.)
-			if mm := reJSArrowParamsBare.FindStringSubmatch(s); mm != nil {
+			// Bare single-arg arrow(s) (`x => …`) — an INDEPENDENT check (not an
+			// `else if` off the parenthesized form) over ALL matches, not just the
+			// first. A single line can carry a parenthesized arrow alongside one or
+			// more bare arrows (`(a, b) => …; arr.map(Dropped => …)`) or chain them
+			// (`a => Dropped => …`); binding only the first bare param would miss a
+			// later one and false-positive that name as a dropped import. add() is
+			// a set insert, so overlap with the parenthesized form is harmless.
+			// (reJSArrowParamsBare's `\b … \s*=>` can't fire inside a parenthesized
+			// arrow: the ident there is followed by `)`, not `=>`.)
+			for _, mm := range reJSArrowParamsBare.FindAllStringSubmatch(s, -1) {
 				add(mm[1])
 			}
 			if mm := reJSForDecl.FindStringSubmatch(s); mm != nil {

@@ -559,7 +559,7 @@ func stripLiterals(lang Lang, text string) string {
 // unrelated MultiEdit blocks joined by AddedLinesWithGap, whose open-string state
 // must not leak across the boundary. This consolidates the identical
 // state-threading loop the non-comment-aware scanners (firstUnqualifiedUseLines,
-// locallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
+// LocallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
 // their own loops because they inspect state (comment lines / inPyParen) before
 // stripping.
 func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {

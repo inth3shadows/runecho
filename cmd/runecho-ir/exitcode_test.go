@@ -84,6 +84,24 @@ func TestMapHeader_FullCoverage_NoPartial(t *testing.T) {
 	}
 }
 
+// F4 generalization: the fresh-IR builders (runIndex AND buildIR) share the
+// nonexistent-root footgun. `map <typo>` is the one ungated buildIR path, so a
+// typo'd root must error, not print an empty "0 files" header at exit 0.
+func TestMap_NonexistentRoot_Errors(t *testing.T) {
+	home := t.TempDir()
+	typo := filepath.Join(t.TempDir(), "snpashot") // does not exist
+	code, out, stderr := runWith(t, home, []string{"runecho-ir", "map", typo})
+	if code != ExitError {
+		t.Fatalf("map on nonexistent root: got code %d, want %d (ExitError)", code, ExitError)
+	}
+	if strings.Contains(out, "runecho map:") {
+		t.Errorf("must not emit a map for a nonexistent root; stdout=%q", out)
+	}
+	if !strings.Contains(stderr, "does not exist") {
+		t.Errorf("stderr %q should explain the path does not exist", stderr)
+	}
+}
+
 // ─── runTruthTrail ───────────────────────────────────────────────────────────
 
 // TestTruthTrail_NotEnrolled_Exits1 exercises the first early-return in

@@ -148,6 +148,28 @@ func runIndex(args []string) int {
 		return ExitError
 	}
 
+	// Validate the root exists and is a directory BEFORE indexing. A bare
+	// argument is a root-path by contract (`runecho-ir [root-path]`), so a
+	// mistyped subcommand (`runecho-ir snpashot`) lands here as a nonexistent
+	// path. Without this guard, generateIR only warns-and-continues (its
+	// per-entry walk tolerance is deliberate — a partially-readable tree must
+	// still index its reachable files) and Save then CREATES a stray
+	// <arg>/.ai/ir.json, exiting 0: a typo masquerading as success, with litter.
+	// A missing/non-dir ROOT is a hard error, distinct from an unreadable entry
+	// encountered mid-walk.
+	info, err := os.Stat(absRoot)
+	switch {
+	case os.IsNotExist(err):
+		fmt.Fprintf(os.Stderr, "Error: path does not exist: %q (expected a root directory or a subcommand — see --help)\n", rootPath)
+		return ExitError
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "Error: cannot access %q: %v\n", rootPath, err)
+		return ExitError
+	case !info.IsDir():
+		fmt.Fprintf(os.Stderr, "Error: not a directory: %q\n", rootPath)
+		return ExitError
+	}
+
 	irPath := filepath.Join(absRoot, ".ai", "ir.json")
 
 	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, GenerateTimeout: cliGenerateTimeout()})

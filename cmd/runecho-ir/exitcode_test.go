@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // ─── runMap ──────────────────────────────────────────────────────────────────
@@ -37,6 +39,48 @@ func TestMap_HappyPath_Exits0(t *testing.T) {
 	code, _, _ := runWith(t, home, []string{"runecho-ir", "map", dir})
 	if code != ExitOK {
 		t.Fatalf("map happy path: got code %d, want %d (ExitOK)", code, ExitOK)
+	}
+}
+
+// F5: `map --header` is injected at session start as a repo summary. It must
+// disclose a coverage shortfall — otherwise an agent treating runecho as
+// code-truth reads a symbol's absence from an incomplete map as definitive. This
+// pins the rendering directly (deterministic, no enrollment/cap-resolution
+// fragility): given stats with Indexed < SupportedSeen, the header both shows the
+// figure and flags PARTIAL. The wire-through — that runMap actually PASSES stats
+// rather than discarding them (the F5 root cause) — is pinned by the coverage=1/1
+// assertion in TestMapHeader_FullCoverage_NoPartial, which the discarded-stats
+// version could not print.
+func TestMapHeader_PartialCoverage_Discloses(t *testing.T) {
+	out, _ := captureOutput(func() {
+		emitMapHeader(&ir.IR{}, ir.Stats{SupportedSeen: 5, Indexed: 3})
+	})
+	if !strings.Contains(out, "coverage=3/5") {
+		t.Errorf("header must show the coverage figure 3/5; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Coverage is PARTIAL") {
+		t.Errorf("header must disclose partial coverage when Indexed < SupportedSeen; got:\n%s", out)
+	}
+	if !strings.Contains(out, "2 supported file(s) not indexed") {
+		t.Errorf("header should name the shortfall count (2); got:\n%s", out)
+	}
+}
+
+// F5 companion: a fully-covered index must NOT cry "PARTIAL", but must still show
+// the coverage figure (so the header is honest in both directions).
+func TestMapHeader_FullCoverage_NoPartial(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir) // one file, not enrolled → no cap → full coverage
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "map", "--header", dir})
+	if code != ExitOK {
+		t.Fatalf("map --header: got code %d, want %d", code, ExitOK)
+	}
+	if strings.Contains(out, "PARTIAL") {
+		t.Errorf("full coverage must not be reported as partial; got:\n%s", out)
+	}
+	if !strings.Contains(out, "coverage=1/1") {
+		t.Errorf("header should still show coverage=1/1; got:\n%s", out)
 	}
 }
 

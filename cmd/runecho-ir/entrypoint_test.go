@@ -136,6 +136,50 @@ func TestUnknownFlag(t *testing.T) {
 	}
 }
 
+// F4: a bare argument is a root-path by contract (`runecho-ir [root-path]`), so a
+// mistyped subcommand (`runecho-ir snpashot`) lands in runIndex as a nonexistent
+// path. It must fail fast (ExitError, no output written) — NOT warn-and-exit-0
+// while creating a stray <arg>/.ai/ir.json, which is a typo masquerading as
+// success. The fix validates root existence up front, without breaking the real
+// `runecho-ir <dir>` contract (covered by TestBareRootPath_RealDirIndexes).
+func TestBareRootPath_NonexistentErrors(t *testing.T) {
+	home := t.TempDir()
+	work := t.TempDir()
+	typo := filepath.Join(work, "snpashot") // does not exist
+
+	code, out, stderr := runWith(t, home, []string{"runecho-ir", typo})
+	if code != ExitError {
+		t.Fatalf("nonexistent root: got code %d, want %d (ExitError)", code, ExitError)
+	}
+	if strings.Contains(out, "Indexed") {
+		t.Errorf("must not report a successful index for a nonexistent root; stdout=%q", out)
+	}
+	if !strings.Contains(stderr, "does not exist") {
+		t.Errorf("stderr %q should explain the path does not exist", stderr)
+	}
+	// The stray-directory side effect must be gone: no <typo>/.ai created.
+	if _, err := os.Stat(filepath.Join(typo, ".ai")); !os.IsNotExist(err) {
+		t.Errorf("a nonexistent root must not create a stray %s/.ai directory", typo)
+	}
+}
+
+// F4 contract preservation: a REAL directory argument must still index (exit 0),
+// so the root-existence guard does not regress `runecho-ir <dir>`.
+func TestBareRootPath_RealDirIndexes(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := runWith(t, home, []string{"runecho-ir", dir})
+	if code != 0 {
+		t.Fatalf("real dir index: got code %d, want 0", code)
+	}
+	if !strings.Contains(out, "Indexed") {
+		t.Errorf("stdout %q: expected an \"Indexed\" line for a real directory", out)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // repo add
 // ---------------------------------------------------------------------------

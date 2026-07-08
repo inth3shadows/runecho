@@ -559,7 +559,7 @@ func stripLiterals(lang Lang, text string) string {
 // unrelated MultiEdit blocks joined by AddedLinesWithGap, whose open-string state
 // must not leak across the boundary. This consolidates the identical
 // state-threading loop the non-comment-aware scanners (firstUnqualifiedUseLines,
-// locallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
+// LocallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
 // their own loops because they inspect state (comment lines / inPyParen) before
 // stripping.
 func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {
@@ -756,6 +756,29 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 								}
 							}
 							i++
+						}
+						if depth > 0 && i >= n {
+							// The interpolation's own '(' / '[' runs past end of line
+							// unterminated (valid Python 3.12+: a call spanning lines
+							// inside f"{...}"). Falling through to the final `return
+							// string(out), open` would return the ORIGINAL open (""),
+							// so the continuation line's closing quote is misread as
+							// opening a fresh string instead of closing this one —
+							// mirror the triple-quote branch and propagate the quote
+							// itself as the open delimiter. Same KNOWN limitation as
+							// the triple-quote case: a call nested inside the
+							// continuation is not scanned, only the delimiter search.
+							// FURTHER KNOWN LIMITATION: because `open` carries only the
+							// quote byte (not the interpolation depth), on the
+							// continuation line a *same-quote* character inside the
+							// still-open interpolation is read as the string's close,
+							// so trailing code after it on that line can be dropped
+							// from scanning. This is net-positive over the prior
+							// baseline (which returned "" here and misread the whole
+							// continuation), and rare; a full fix would need open-state
+							// to carry an interpolation-depth counter, not just the
+							// quote byte — deferred.
+							return string(out), string(quote)
 						}
 					default:
 						out[i] = ' '

@@ -3,6 +3,7 @@ package guard
 import (
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // DroppedImport names an imported symbol whose import binding an edit removes
@@ -43,8 +44,19 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 // pre-built AddedLines directly, so a caller can pass gap-separated lines
 // (AddedLinesWithGap) for a MultiEdit to reset multi-line-string state at each
 // edit boundary. All of its scans (ExtractImports' inPyParen state,
-// firstUnqualifiedUseLines, locallyBoundNames) honor those gaps.
+// firstUnqualifiedUseLines, LocallyBoundNames) honor those gaps.
 func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []DroppedImport {
+	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil)
+}
+
+// DroppedImportRefsLinesWithBound is DroppedImportRefsLines with an extra
+// preBound set of names unioned into the new-text binding set before dropped
+// imports are computed. This lets a caller fold in binding context that isn't
+// visible in newLines at all — e.g. a hunk-only Edit/MultiEdit can't see a
+// name rebound on an untouched line elsewhere in the file, which would
+// otherwise false-positive as a dropped import. Pass nil for no extra context
+// (identical to DroppedImportRefsLines).
+func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound map[string]struct{}) []DroppedImport {
 	if lang != LangPython && lang != LangJS {
 		return nil
 	}
@@ -62,9 +74,12 @@ func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []Dropped
 	// suppressed real drop is a recoverable miss (the additive check or the runtime
 	// still catches it), whereas a false alarm trains users to ignore the guard —
 	// the adoption-killer. Precision over recall.
-	bound := locallyBoundNames(lang, newLines)
+	bound := LocallyBoundNames(lang, newLines)
 	for _, d := range ExtractDefs(lang, newLines) {
 		bound[d] = struct{}{}
+	}
+	for name := range preBound {
+		bound[name] = struct{}{}
 	}
 
 	// Collect the imports that were actually dropped (removed and not rebound)
@@ -123,7 +138,42 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 	uses := make(map[string]int)
 	scanStripped(lang, lines, func(scan string, l AddedLine) {
 		if isImportLine(lang, l.Text) {
-			return
+			// A single physical line can pack import clauses and real statements,
+			// ';'-separated (`import re; x = Foo()`), and isImportLine classifies
+			// the WHOLE line as import (its regexes are end-anchored/prefix-based,
+			// so a trailing statement is swallowed into the "import list" match).
+			// Skipping the whole line here would silently miss a genuine use in a
+			// non-import segment (e.g. a dropped import's only remaining call). So
+			// blank EVERY ';'-segment that is itself an import clause — wherever it
+			// sits on the line — and scan only the genuine non-import segments.
+			// Blanking import clauses in ANY position (not just a leading run)
+			// matters: a reimport packed after a statement
+			// (`import a; x=1; import {Dropped} from './b'`) must stay blanked, else
+			// its name is scanned as a use — and ExtractImports' first-clause-only
+			// parse won't have put it in newImps to offset that, so it would
+			// false-positive as dropped. Segment on the stripped `scan` (not raw
+			// text) so a ';' inside a string literal is not a boundary; scan and
+			// l.Text share indices (stripLiteralsStateful preserves length). A
+			// plain import line (no ';') blanks entirely, as the old skip did.
+			buf := []byte(scan)
+			pos := 0
+			for pos < len(scan) {
+				rel := strings.IndexByte(scan[pos:], ';')
+				segEnd := len(scan)
+				if rel >= 0 {
+					segEnd = pos + rel
+				}
+				if isImportLine(lang, l.Text[pos:segEnd]) {
+					for k := pos; k < segEnd; k++ {
+						buf[k] = ' '
+					}
+				}
+				if rel < 0 {
+					break
+				}
+				pos = segEnd + 1
+			}
+			scan = string(buf)
 		}
 		for j := 0; j < len(scan); {
 			if !isWordByte(scan[j]) {
@@ -150,7 +200,7 @@ func isWordByte(b byte) bool {
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
-// Binding-form patterns for locallyBoundNames. Each captures the binding TARGET
+// Binding-form patterns for LocallyBoundNames. Each captures the binding TARGET
 // region; identifiers within are extracted with reIdentAll. Definition-position
 // only — none match call-argument parens, so a dropped import passed as an
 // argument is still flagged, not suppressed.
@@ -163,15 +213,24 @@ var (
 	reJSDeclList    = regexp.MustCompile(`\b(?:const|let|var)\s+(.+)$`)
 	reJSFnParams    = regexp.MustCompile(`function\b[^(]*\(([^)]*)\)`)
 	reJSArrowParams = regexp.MustCompile(`\(([^)]*)\)\s*=>`)
-	reJSForDecl     = regexp.MustCompile(`\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)`)
-	reJSCatch       = regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)`)
+	// reJSArrowParamsBare catches the unparenthesized single-arg arrow form
+	// (`x => x*2`), which reJSArrowParams — parenthesized-only — never matches.
+	// The `\b` left boundary plus requiring `=>` immediately (only whitespace
+	// between) after the identifier keeps this from firing inside an already-
+	// parenthesized form like `(a, b) => …` (the identifier there is followed
+	// by `)`, not `=>`, so it never matches).
+	reJSArrowParamsBare = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=>`)
+	reJSForDecl         = regexp.MustCompile(`\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)`)
+	reJSCatch           = regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)`)
 )
 
-// locallyBoundNames collects names the new text binds locally by any common
+// LocallyBoundNames collects names the given lines bind locally by any common
 // construct, so a dropped import that is actually rebound (replaced by a local
 // assignment, loop variable, with-as, parameter, destructure, …) does not
-// false-positive. Over-inclusive by design (see DroppedImportRefs).
-func locallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
+// false-positive. Over-inclusive by design (see DroppedImportRefs). Exported so
+// a caller (e.g. the guard hook) can compute the same binding set over whole-
+// file context and fold it into DroppedImportRefsLinesWithBound's preBound.
+func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 	m := make(map[string]struct{})
 	add := func(s string) {
 		for _, id := range reIdentAll.FindAllString(s, -1) {
@@ -219,6 +278,18 @@ func locallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 				add(mm[1])
 			}
 			if mm := reJSArrowParams.FindStringSubmatch(s); mm != nil {
+				add(mm[1])
+			}
+			// Bare single-arg arrow(s) (`x => …`) — an INDEPENDENT check (not an
+			// `else if` off the parenthesized form) over ALL matches, not just the
+			// first. A single line can carry a parenthesized arrow alongside one or
+			// more bare arrows (`(a, b) => …; arr.map(Dropped => …)`) or chain them
+			// (`a => Dropped => …`); binding only the first bare param would miss a
+			// later one and false-positive that name as a dropped import. add() is
+			// a set insert, so overlap with the parenthesized form is harmless.
+			// (reJSArrowParamsBare's `\b … \s*=>` can't fire inside a parenthesized
+			// arrow: the ident there is followed by `)`, not `=>`.)
+			for _, mm := range reJSArrowParamsBare.FindAllStringSubmatch(s, -1) {
 				add(mm[1])
 			}
 			if mm := reJSForDecl.FindStringSubmatch(s); mm != nil {

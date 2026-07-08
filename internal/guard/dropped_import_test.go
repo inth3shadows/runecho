@@ -169,6 +169,18 @@ func TestDroppedImport_JS_Rebound_Decl(t *testing.T) {
 	}
 }
 
+// Negative: a dropped import rebound as an unparenthesized single-arg arrow
+// param (`x => x*2`) must not be flagged. reJSArrowParams only matches the
+// parenthesized form `(x) => …`, so a bare single-identifier arrow used to slip
+// past LocallyBoundNames entirely and false-positive.
+func TestDroppedImport_JS_Rebound_BareArrowParam(t *testing.T) {
+	oldText := "import { x } from './m';\nreturn arr.map(x => x * 2);\n"
+	newText := "return arr.map(x => x * 2);\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("bare arrow param x must not warn as dropped import, got %v", droppedNames(got))
+	}
+}
+
 func TestDroppedImport_JS_Rebound_CatchAndParam(t *testing.T) {
 	oldText := "import { err } from './m';\nlog(err);\n"
 	newText := "try { x(); } catch (err) { log(err); }\n"
@@ -196,6 +208,106 @@ func TestDroppedImport_JS_StillUsed(t *testing.T) {
 	got := DroppedImportRefs(LangJS, oldText, newText)
 	if !containsStr(droppedNames(got), "fetchUser") {
 		t.Errorf("expected fetchUser flagged, got %v", droppedNames(got))
+	}
+}
+
+// A physical line that packs an import clause and a real statement, separated
+// by ';' (`import re; x = SomeDroppedImport()`), must not have the trailing
+// statement's use of a dropped import swallowed as if the whole line were
+// import content. rePyImport/rePyFrom are anchored to end-of-line, so
+// isImportLine classifies the WHOLE line as an import — firstUnqualifiedUseLines
+// used to skip it outright, silently missing the use.
+func TestDroppedImport_Python_SemicolonPackedLineStillScanned(t *testing.T) {
+	oldText := "from utils import SomeDroppedImport\n\ndef run():\n    import re; x = SomeDroppedImport()\n    return x\n"
+	newText := "\ndef run():\n    import re; x = SomeDroppedImport()\n    return x\n"
+	got := DroppedImportRefs(LangPython, oldText, newText)
+	if !containsStr(droppedNames(got), "SomeDroppedImport") {
+		t.Errorf("expected SomeDroppedImport flagged despite semicolon-packed import line, got %v", droppedNames(got))
+	}
+}
+
+// DroppedImportRefsLinesWithBound lets a caller fold in whole-file binding
+// context a hunk-only scan can't see — a name rebound on an UNTOUCHED line
+// elsewhere in the file. This mirrors the guard hook's false-positive: an
+// Edit/MultiEdit's newLines only cover the touched hunk, so a name rebound
+// outside it looks dropped even though the file as a whole still provides it.
+func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T) {
+	oldLines := TextToAddedLines("import re\nx = re.compile(y)\n")
+	newLines := TextToAddedLines("x = re.compile(y)\n") // hunk only; the untouched `re = custom_regex_module()` line elsewhere is not in this scan
+
+	// Without whole-file context, the hunk-only scan (falsely) flags `re` as
+	// dropped — this pins that the test setup actually reproduces the bug.
+	if got := DroppedImportRefsLines(LangPython, oldLines, newLines); !containsStr(droppedNames(got), "re") {
+		t.Fatalf("expected hunk-only scan to flag re as dropped (invalid test setup), got %v", droppedNames(got))
+	}
+
+	// With whole-file context folded in as preBound (the untouched line rebinds
+	// `re`), the warning must be suppressed.
+	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"))
+	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBound); len(got) != 0 {
+		t.Errorf("whole-file rebind of re must suppress the dropped-import warning, got %v", droppedNames(got))
+	}
+}
+
+// Round-2 regression pin (F8): a physical line that packs MULTIPLE import
+// clauses (`import re; from x import Dropped`) must have EVERY leading import
+// segment blanked, not just the clause before the first ';'. The pre-round-2
+// fix blanked only up to the first ';', then scanned the trailing
+// `from x import Dropped` as code — recording `Dropped` as a bogus "use", which
+// (when Dropped's import is not recognized by ExtractImports) false-positives it
+// as a dropped import. firstUnqualifiedUseLines is the exact site, so pin it
+// directly: the trailing import's bound name must NOT appear as a use.
+func TestFirstUnqualifiedUseLines_TrailingImportSegmentBlanked(t *testing.T) {
+	lines := TextToAddedLines("import re; from x import Dropped\n")
+	uses := firstUnqualifiedUseLines(LangPython, lines)
+	if ln := uses["Dropped"]; ln != 0 {
+		t.Errorf("Dropped is bound by the trailing import segment, must not be recorded as a use (got line %d)", ln)
+	}
+}
+
+// Round-2 regression pin (F6): a dropped import rebound as a BARE arrow param on
+// a line that ALSO carries a parenthesized arrow (`(a, b) => …; arr.map(Dropped
+// => …)`) must be suppressed. The pre-round-2 fix gated the bare-arrow check
+// behind `else if` off the parenthesized form, so the parenthesized match on the
+// same line shadowed the bare arrow — `Dropped` never entered the bound set and
+// false-positived as dropped despite being a local param.
+func TestDroppedImport_JS_BareArrowParam_SameLineAsParenArrow(t *testing.T) {
+	oldText := "import { Dropped } from './m';\n(a, b) => f(a, b);\narr.map(Dropped => Dropped * 2);\n"
+	newText := "(a, b) => f(a, b); arr.map(Dropped => Dropped * 2);\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("bare arrow param Dropped alongside a paren arrow must not warn as dropped, got %v", droppedNames(got))
+	}
+}
+
+// Round-2b regression pin (C#1/A#1): an import clause packed AFTER a non-import
+// statement on one line (`import a; x = 1; from n import Dropped`) must still be
+// blanked. The leading-run-only version broke out of the peel loop at the
+// non-import `x = 1` and scanned the trailing import as code, recording Dropped
+// as a use — and ExtractImports' first-clause-only parse never put Dropped in
+// newImps to offset it, so Dropped false-positived as a dropped import even
+// though it is literally imported on the line. Blanking EVERY import segment
+// (not just the leading run) fixes it.
+func TestFirstUnqualifiedUseLines_NonLeadingImportSegmentBlanked(t *testing.T) {
+	lines := TextToAddedLines("import a; x = 1; from n import Dropped\n")
+	uses := firstUnqualifiedUseLines(LangPython, lines)
+	if ln := uses["Dropped"]; ln != 0 {
+		t.Errorf("Dropped is bound by a trailing import segment, must not be recorded as a use (got line %d)", ln)
+	}
+	if uses["x"] == 0 {
+		t.Errorf("the genuine non-import segment `x = 1` must still be scanned (x missing from uses)")
+	}
+}
+
+// Round-2b regression pin (A#2): a dropped import rebound as a bare arrow param
+// that is NOT the first bare arrow on the line (`arr.map(x => x).forEach(Dropped
+// => log(Dropped))`) must be suppressed. FindStringSubmatch captured only the
+// first bare arrow (`x`), leaving Dropped unbound and false-positived; FindAll
+// binds every bare arrow.
+func TestDroppedImport_JS_SecondBareArrowParam(t *testing.T) {
+	oldText := "import { Dropped } from './m';\narr.map(x => x).forEach(Dropped => log(Dropped));\n"
+	newText := "arr.map(x => x).forEach(Dropped => log(Dropped));\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("a later bare arrow param Dropped must not warn as dropped, got %v", droppedNames(got))
 	}
 }
 

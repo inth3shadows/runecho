@@ -511,7 +511,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// still sees the old import on disk and so stays silent.
 		if droppedImportEnabled() {
 			oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
-			droppedImps = guard.DroppedImportRefsLines(lang, oldLines, newLines)
+			// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
+			// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
+			// addInFileDefs folds whole-file defs into the additive check's known
+			// set above). Fold the on-disk file's whole-file binding context in as
+			// preBound so such a rebind still suppresses the false positive. Not
+			// needed for Write: its newLines already IS the whole file.
+			var preBound map[string]struct{}
+			if payload.ToolName != "Write" {
+				preBound = wholeFileBoundNames(filePath, lang)
+			}
+			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
@@ -609,6 +619,35 @@ func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang
 	for _, imp := range guard.ExtractImports(lang, fileLines) {
 		symbols[imp] = struct{}{}
 	}
+}
+
+// wholeFileBoundNames reads the current on-disk file and returns the union of
+// its locally-bound names (LocallyBoundNames) and definitions (ExtractDefs) —
+// the same whole-file fold-in addInFileDefs does for the additive check,
+// mirrored here for the dropped-import check's bound set. Fail-open: any read
+// error or a file over maxInFileBytes yields nil (no extra context), same as
+// addInFileDefs's own degrade path.
+//
+// Known limitation (accepted, not a bug): the file is read PRE-edit, so for a
+// MultiEdit whose own sibling hunk removes a rebind, that rebind still appears
+// bound here and can suppress a real dropped-import warning (a false negative).
+// This is deliberately on the precision-over-recall side the whole check is
+// tuned to (see DroppedImportRefs): a suppressed real drop is recoverable (the
+// additive check or the runtime still catches it), whereas a false alarm from
+// masking sibling-hunk state imperfectly would train users to ignore the guard.
+// Masking each edit's OldString region before the read was considered and
+// rejected as complexity that buys recall the design does not prioritize.
+func wholeFileBoundNames(filePath string, lang guard.Lang) map[string]struct{} {
+	data, err := os.ReadFile(filePath)
+	if err != nil || len(data) > maxInFileBytes {
+		return nil
+	}
+	fileLines := guard.TextToAddedLines(string(data))
+	bound := guard.LocallyBoundNames(lang, fileLines)
+	for _, def := range guard.ExtractDefs(lang, fileLines) {
+		bound[def] = struct{}{}
+	}
+	return bound
 }
 
 // editOp is one MultiEdit edit. OldString is captured for the E1 dangling-refs

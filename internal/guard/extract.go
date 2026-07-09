@@ -143,6 +143,12 @@ var (
 	// reJSTypeDef captures TS type-level definitions (interface/type/enum/class) so
 	// that a local type used in an annotation resolves instead of false-positiving.
 	reJSTypeDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:interface|type|enum|class)\s+([A-Za-z_$][\w$]*)`)
+	// reGoInterfaceOpen matches a Go `interface {` token. It matches the anonymous
+	// empty `interface{}` too (`\s*` allows zero spaces), so the caller must reject
+	// an opener whose brace closes on the same line — an empty interface in a type
+	// position or a `map[string]interface{}{...}` composite literal is not a
+	// method-bearing body.
+	reGoInterfaceOpen = regexp.MustCompile(`\binterface\s*\{`)
 )
 
 // ExtractDefs extracts the names being *defined* on the given lines (functions,
@@ -438,10 +444,21 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 	// and string continuity can't be assumed across a gap.
 	open := ""
 	prevNo := 0
+	// inIface reports whether we are inside a Go `interface { ... }` body. Its lines
+	// are method *signatures* (Name(params) returns) and embedded interface names —
+	// declarations, never calls — but reCallIdent reads `Name(` as a call and
+	// defNames only recognizes `func`-prefixed defs, so without this an added
+	// interface flags every method as an unresolved call. Interface bodies hold no
+	// nested braces in practice (methods have no body; type sets use `|`/`~`), so a
+	// boolean entered on a genuine body opener and cleared on the first `}` is both
+	// sufficient and safe. Reset on a diff-hunk gap alongside `open`, since brace
+	// continuity can't be assumed across a gap.
+	inIface := false
 	for i, l := range lines {
 		text := l.Text
 		if i > 0 && l.LineNo != prevNo+1 {
 			open = ""
+			inIface = false
 		}
 		prevNo = l.LineNo
 		// Skip whole-line comments (only meaningful when not mid-string).
@@ -454,6 +471,34 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 		// stay correct. open threads multi-line string state across lines.
 		scan, newOpen := stripLiteralsStateful(lang, text, open)
 		open = newOpen
+		// Go interface bodies hold method signatures, not calls (see inIface). Braces
+		// are counted on the stripped scan (literals blanked, so braces in strings
+		// don't count).
+		if lang == LangGo {
+			if inIface {
+				// A line containing `}` closes the body: exit and scan it as code, so
+				// a real call sharing the close line (e.g. `}](m T) { Foo()` from a
+				// multi-line generic type set) is still checked — FP-over-FN. Method
+				// signatures effectively never share the closing line. An interior
+				// signature line has no `}` and is suppressed.
+				if strings.ContainsRune(scan, '}') {
+					inIface = false
+				} else {
+					continue
+				}
+			} else if loc := reGoInterfaceOpen.FindStringIndex(scan); loc != nil {
+				// Enter only a genuine method-bearing body: the brace must not close
+				// on the same line. `interface{}` in a type position and the
+				// `map[string]interface{}{...}` / `[]interface{}{...}` composite
+				// literal both close immediately and must not enter. A fully inline
+				// `interface { Method() }` also closes on its line and stays a known
+				// FP (rare; favors this simple tracker over per-position matching).
+				if after := scan[loc[1]:]; !strings.ContainsRune(after, '}') {
+					inIface = true
+				}
+			}
+		}
+
 		// Names this line DEFINES (func/def/class/const). A reference to the
 		// definition's own name is a self-match, not a call to validate — but any
 		// OTHER call sharing the line (a one-line function body, a Python default-

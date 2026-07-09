@@ -196,6 +196,81 @@ func TestExtractRefs_Go_ExportedStillChecked(t *testing.T) {
 	}
 }
 
+// TestExtractRefs_Go_InterfaceMethodNotACall pins the interface-method FP: an
+// exported method signature inside a Go `interface { ... }` body is a
+// declaration, not a call. reCallIdent matches `ExecContext(` and defNames only
+// recognizes `func`-prefixed lines, so before the fix these method signatures
+// were extracted as unresolved calls — flagging any diff that adds an interface.
+func TestExtractRefs_Go_InterfaceMethodNotACall(t *testing.T) {
+	ls := lines(
+		`type migExecer interface {`,
+		`	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)`,
+		`	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row`,
+		`}`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "ExecContext", "QueryRowContext") {
+		t.Errorf("interface method signatures must not be extracted as calls, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_CallAfterInterfaceStillChecked guards against over-suppression:
+// once the interface body closes, a genuine call on a later line must still be
+// caught (the suppression is scoped to the interface braces, not the whole hunk).
+func TestExtractRefs_Go_CallAfterInterfaceStillChecked(t *testing.T) {
+	ls := lines(
+		`type Store interface {`,
+		`	Save(x int) error`,
+		`}`,
+		`result := ProcessFoo(ctx)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "ProcessFoo") {
+		t.Errorf("call after interface body should still be extracted, got %v", refNames(refs))
+	}
+	if !containsNone(refs, "Save") {
+		t.Errorf("interface method Save must not be extracted, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_InterfaceLiteralNotSuppressed guards the regression the
+// first cut introduced: `interface{}` also appears in the ubiquitous
+// `map[string]interface{}{...}` / `[]interface{}{...}` composite literals. A
+// brace tracker that treated that as an interface body suppressed real calls
+// inside the literal — a false NEGATIVE (a hidden hallucinated call, the worst
+// class). Calls inside such a literal must still be extracted.
+func TestExtractRefs_Go_InterfaceLiteralNotSuppressed(t *testing.T) {
+	ls := lines(
+		`handlers := map[string]interface{}{`,
+		`	"run": BuildHandler(),`,
+		`}`,
+		`items := []interface{}{MakeThing()}`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "BuildHandler", "MakeThing") {
+		t.Errorf("calls inside interface{} composite literals must be extracted, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_GenericConstraintExit guards the net-zero close-line
+// regression: a multi-line generic type set `[K interface { ... }]` closes on a
+// line like `}](m map[K]V) {` that also opens the function body. A depth counter
+// netted to zero and stayed "in interface", suppressing the body's calls. The
+// call after the constraint must be extracted.
+func TestExtractRefs_Go_GenericConstraintExit(t *testing.T) {
+	ls := lines(
+		`func Keys[K interface {`,
+		`	comparable`,
+		`}](m map[K]int) {`,
+		`	DoThing()`,
+		`}`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "DoThing") {
+		t.Errorf("call after a multi-line generic constraint must be extracted, got %v", refNames(refs))
+	}
+}
+
 func TestExtractRefs_Go_DefLineSkipped(t *testing.T) {
 	ls := lines(`func HandleRequest(w http.ResponseWriter, r *http.Request) {`)
 	refs := ExtractRefs(LangGo, ls)

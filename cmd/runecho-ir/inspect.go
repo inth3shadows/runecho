@@ -417,14 +417,18 @@ func runValidateClaims(args []string) int {
 	// not just function/class. Parity with the MCP `locate` tool: a name bound only
 	// under an internal kind (import_name, export, export_wildcard) genuinely exists
 	// in the code, so restricting to func+class would flag a real imported/exported
-	// name (e.g. `readFileSync`) as an invented reference. Widening the known set
-	// only ever suppresses false positives — the safe direction for this check.
-	knownSymbols := make(map[string]bool)
+	// name (e.g. `readFileSync`) as an invented reference. claims.KnownSet completes
+	// that parity on the other axis — it also accepts a qualified symbol by its bare
+	// last segment, so a method claimed by its natural name (`fetchData`) resolves
+	// against `Reader.fetchData`. Widening the known set only ever suppresses false
+	// positives — the safe direction for this check.
+	var names []string
 	for _, fileEntry := range irData.Files {
 		for _, s := range fileEntry.Symbols {
-			knownSymbols[s.Name] = true
+			names = append(names, s.Name)
 		}
 	}
+	knownSymbols := claims.KnownSet(names)
 
 	// Extract symbol references from text.
 	refs := claims.ExtractSymbolRefs(text)

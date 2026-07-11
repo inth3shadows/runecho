@@ -126,6 +126,31 @@ func ExtractSymbolRefs(text string) map[string]string {
 	return refs
 }
 
+// KnownSet builds the lookup set for a claim-existence check from the declared
+// symbol names in an IR. Each name is added under its full form AND, when
+// qualified (dotted, e.g. a method `Reader.fetchData`), under its last segment
+// (`fetchData`). This lets a claim that references a method by its natural bare
+// name resolve against the qualified symbol — matching the locate oracle's
+// last-dotted-segment rule (internal/mcp symbolMatches). Without it, every
+// class-method / nested-function claim written the natural way is a false
+// positive: flagged as an invented or stale reference to a symbol that exists.
+//
+// Deliberately NOT a prefix match (unlike locate, which prefix-matches for
+// discovery): an existence check must stay tight, so `Foo` must not resolve
+// against `FooBar`. Exact + last-segment only. Bare-leaf acceptance can at most
+// mask an invented name that collides with a real method's leaf — the declared
+// safe direction for this check (suppress false positives over false negatives).
+func KnownSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+		if i := strings.LastIndexByte(n, '.'); i >= 0 {
+			set[n[i+1:]] = true
+		}
+	}
+	return set
+}
+
 // IsCodeSymbol returns true if the name looks like a CamelCase code identifier.
 // Requires both upper and lower letters to avoid ALL_CAPS constants, snake_case
 // helpers, and Python dunders (__init__). Unicode letters count: Go, JS, and

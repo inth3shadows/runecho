@@ -92,18 +92,20 @@ func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, churnN i
 	return result, nil
 }
 
-// liveSymbolSet returns the set of all declared symbol names in liveIR.
+// liveSymbolSet returns the claim-existence lookup set for liveIR: every
+// declared symbol name plus, for qualified names, its bare last segment (so a
+// claim naming a method `fetchData` resolves against `Reader.fetchData`). See
+// claims.KnownSet. All kinds (functions, classes, exports, imports) are declared
+// symbols — imports too, else a claim referencing an imported name is wrongly
+// flagged stale.
 func liveSymbolSet(liveIR *ir.IR) map[string]bool {
-	set := make(map[string]bool)
+	var names []string
 	for _, file := range liveIR.Files {
-		// All kinds (functions, classes, exports, imports) are declared symbols.
-		// Imports must be included too, else a claim referencing an imported name
-		// is wrongly flagged stale.
 		for _, s := range file.Symbols {
-			set[s.Name] = true
+			names = append(names, s.Name)
 		}
 	}
-	return set
+	return claims.KnownSet(names)
 }
 
 // FormatTrail formats a TrailResult as a human-readable change receipt.

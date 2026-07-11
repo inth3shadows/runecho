@@ -31,6 +31,29 @@ func TestIsCodeSymbol(t *testing.T) {
 	}
 }
 
+func TestKnownSet(t *testing.T) {
+	set := KnownSet([]string{"Reader.FetchData", "TopLevel", "pkg.util.Helper"})
+
+	// Qualified names resolve by full form AND bare last segment.
+	for _, name := range []string{"Reader.FetchData", "FetchData", "pkg.util.Helper", "Helper", "TopLevel"} {
+		if !set[name] {
+			t.Errorf("KnownSet should contain %q", name)
+		}
+	}
+	// A non-leaf intermediate segment is NOT a match (only the last segment).
+	if set["Reader"] {
+		t.Errorf("KnownSet should not add intermediate segment %q", "Reader")
+	}
+	// Not a prefix match — an existence check stays tight.
+	if set["Fetch"] {
+		t.Error("KnownSet must not prefix-match (Fetch should not resolve FetchData)")
+	}
+	// An invented name with no leaf collision is absent.
+	if set["Nonexistent"] {
+		t.Error("KnownSet should not contain an unrelated invented name")
+	}
+}
+
 func TestExtractSymbolRefs_Backtick(t *testing.T) {
 	text := "Call `ParseData` to load then `FileIR` to wrap."
 	refs := ExtractSymbolRefs(text)

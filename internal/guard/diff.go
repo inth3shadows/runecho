@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/inth3shadows/runecho/internal/gitutil"
 )
 
 // FileDiff holds the added lines from one file in the staged diff.
@@ -31,7 +32,7 @@ type AddedLine struct {
 // also bounds this last unbounded git call — the same cap (gitutil.Timeout) used
 // for every other git subprocess in the hook path.
 func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, partial bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "diff", "--cached", "--unified=0")
+	cmd := gitutil.Command(ctx, repoRoot, "diff", "--cached", "--unified=0")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false, fmt.Errorf("git diff --cached: %w", err)

@@ -4,9 +4,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	_ "modernc.org/sqlite"
 )
+
+// tightenStorePerms best-effort restricts the store DB (and its WAL/SHM
+// sidecars) to owner-only 0600 and the store dir to 0700. The dir's MkdirAll at
+// the creation sites won't tighten a pre-existing loose dir, and modernc creates
+// the DB file at the umask default (often 0644). The store aggregates repo paths
+// and symbol structure across ALL enrolled repos, so on a shared host it must
+// not be world-readable. Best-effort: a chmod failure (odd filesystem) must not
+// fail an otherwise-valid open.
+func tightenStorePerms(path string) {
+	_ = os.Chmod(filepath.Dir(path), 0700)
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		_ = os.Chmod(p, 0600)
+	}
+}
 
 // DB wraps a SQLite connection for snapshot storage.
 type DB struct {
@@ -48,6 +64,7 @@ func Open(path string) (*DB, error) {
 		conn.Close()
 		return nil, err
 	}
+	tightenStorePerms(path)
 	return db, nil
 }
 
@@ -74,6 +91,7 @@ func OpenFast(path string) (*DB, error) {
 		conn.Close()
 		return nil, err
 	}
+	tightenStorePerms(path)
 	return db, nil
 }
 

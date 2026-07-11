@@ -9,6 +9,7 @@ package gitutil
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,24 @@ import (
 // PreToolUse hook.
 const Timeout = 2 * time.Second
 
+// Command builds a hardened `git -C dir <args...>` bound to ctx, shared so every
+// git invocation (gitutil here + the guard's staged-diff parser) gets the same
+// config-injection defenses when run inside a possibly-untrusted repo:
+//   - `-c core.fsmonitor=false` neutralizes a repo-local `core.fsmonitor = <prog>`
+//     (a known RCE vector git runs on many commands); a command-line -c overrides
+//     repo/global config.
+//   - GIT_CONFIG_NOSYSTEM=1 ignores /etc/gitconfig.
+//   - GIT_TERMINAL_PROMPT=0 prevents an interactive-credential hang.
+//
+// The commands runecho runs today (rev-parse, worktree list, diff --cached) don't
+// invoke config-defined programs, so this is a standing guard rather than a fix
+// for a live vector.
+func Command(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
 // runGit runs `git -C dir <args...>` under Timeout and returns its stdout.
 // stderr is captured separately (not via CombinedOutput) so a warning git
 // prints on success can't corrupt the stdout we parse, while error returns
@@ -27,7 +46,7 @@ func runGit(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
 	var stderr strings.Builder
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd := Command(ctx, dir, args...)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {

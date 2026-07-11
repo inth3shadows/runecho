@@ -1,11 +1,35 @@
 package gitutil
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestCommand_Hardened pins L-cmd1: every git invocation carries the
+// config-injection defenses (-c core.fsmonitor=false, GIT_CONFIG_NOSYSTEM=1,
+// GIT_TERMINAL_PROMPT=0) so a malicious repo-local git config can't turn a git
+// call inside an untrusted repo into code execution.
+func TestCommand_Hardened(t *testing.T) {
+	cmd := Command(context.Background(), "/some/repo", "rev-parse", "HEAD")
+
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "-c core.fsmonitor=false") {
+		t.Errorf("missing -c core.fsmonitor=false in args: %v", cmd.Args)
+	}
+	if !strings.Contains(args, "-C /some/repo rev-parse HEAD") {
+		t.Errorf("args not preserved after hardening flags: %v", cmd.Args)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("missing %s in cmd.Env", want)
+		}
+	}
+}
 
 func gitInit(t *testing.T, dir string) {
 	t.Helper()

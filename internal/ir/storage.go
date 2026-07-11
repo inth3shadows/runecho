@@ -3,6 +3,7 @@ package ir
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -215,7 +216,10 @@ func (ir *IR) Save(path string) error {
 	// Ensure the parent dir exists — the DefaultIRPath default (.ai/ir.json)
 	// must work standalone, not only when the caller pre-created .ai/.
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// 0700 dir / 0600 file (below): the IR holds symbol and import names
+		// derived from the source; keep it owner-only rather than world-readable
+		// on a shared host, consistent with the central store's perms.
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("failed to create IR dir: %w", err)
 		}
 	}
@@ -229,7 +233,7 @@ func (ir *IR) Save(path string) error {
 	// ir.json that fails to unmarshal. Write a sibling temp file, then rename
 	// (atomic on the same filesystem on Linux/macOS).
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("failed to write IR file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -240,11 +244,34 @@ func (ir *IR) Save(path string) error {
 	return nil
 }
 
+// maxIRBytes caps the size of an .ai/ir.json Load will read into memory. The IR
+// holds only symbol names, hashes, and line numbers, so even a large monorepo
+// stays far below this. The cap stops a crafted or corrupt file — e.g. one
+// planted in an untrusted repo, which the PostToolUse guard auto-reads on every
+// edit (refreshIRForFile) — from OOMing the process. An oversized file returns
+// an error; the auto-refresh hook already degrades to a full regenerate when
+// Load errors, so it self-heals rather than trusting the giant file.
+const maxIRBytes = 100 << 20 // 100 MiB
+
 // Load reads IR from a file.
-func Load(path string) (*IR, error) {
-	data, err := os.ReadFile(path)
+func Load(path string) (*IR, error) { return loadCapped(path, maxIRBytes) }
+
+// loadCapped is Load with an explicit size limit (seam for tests). It reads at
+// most max+1 bytes so a giant file never fully buffers, then rejects if the file
+// exceeds max.
+func loadCapped(path string, max int64) (*IR, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read IR file: %w", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read IR file: %w", err)
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("IR file %q exceeds size cap of %d bytes", path, max)
 	}
 
 	var ir IR

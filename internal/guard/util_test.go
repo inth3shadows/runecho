@@ -1,9 +1,29 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestTextToAddedLines_CapsLongLine pins F3: a single pathologically long line
+// (no newlines) is truncated to maxLineBytes before scanning, so the per-line
+// regex work can't allocate proportionally to a ~16 MiB line and stall the hook.
+func TestTextToAddedLines_CapsLongLine(t *testing.T) {
+	long := strings.Repeat("a(", maxLineBytes) // ~2x maxLineBytes, one line
+	ls := TextToAddedLines(long)
+	if len(ls) != 1 {
+		t.Fatalf("len = %d, want 1", len(ls))
+	}
+	if len(ls[0].Text) != maxLineBytes {
+		t.Errorf("long line not capped: len = %d, want %d", len(ls[0].Text), maxLineBytes)
+	}
+	// A normal line is untouched.
+	norm := TextToAddedLines("short line")
+	if norm[0].Text != "short line" {
+		t.Errorf("normal line altered: %q", norm[0].Text)
+	}
+}
 
 func TestTextToAddedLines(t *testing.T) {
 	ls := TextToAddedLines("foo\nbar\nbaz")

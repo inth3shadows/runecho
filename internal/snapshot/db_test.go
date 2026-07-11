@@ -3,6 +3,7 @@ package snapshot
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,6 +13,38 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/ir"
 )
+
+// TestOpen_TightensStorePerms pins B5: Open restricts the store DB to 0600 and
+// its dir to 0700 even when the dir pre-exists with a loose mode (which MkdirAll
+// would not tighten). The store aggregates repo paths + symbols across all
+// enrolled repos, so it must not be world-readable on a shared host.
+func TestOpen_TightensStorePerms(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil { // simulate a pre-existing loose dir
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "history.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("history.db perm = %o, want 0600", perm)
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := di.Mode().Perm(); perm != 0700 {
+		t.Errorf("store dir perm = %o, want 0700 (Open must tighten a pre-existing loose dir)", perm)
+	}
+}
 
 // fnsToSymbols converts a list of function names into a sorted []ir.Symbol of
 // kind "function" — the new canonical shape replacing the old Functions array.

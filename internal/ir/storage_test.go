@@ -105,6 +105,54 @@ func TestIR_MarshalJSON_FilesAreSorted(t *testing.T) {
 	}
 }
 
+// TestLoadCapped_RejectsOversized pins F1: Load caps the file size so a crafted
+// or corrupt .ai/ir.json (which the PostToolUse guard auto-reads on every edit)
+// can't OOM the process. Tested via loadCapped with a small explicit limit so it
+// doesn't need a 100 MiB fixture.
+func TestLoadCapped_RejectsOversized(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ir.json")
+	// 4 KiB of content, cap at 1 KiB → must be rejected without unmarshalling.
+	if err := os.WriteFile(path, []byte("["+string(make([]byte, 4096))+"]"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCapped(path, 1024); err == nil {
+		t.Fatal("expected loadCapped to reject a file over the size cap")
+	}
+	// A small valid IR under the cap still loads.
+	small := &IR{Version: IRVersion, Files: map[string]FileIR{}}
+	if err := small.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCapped(path, 1<<20); err != nil {
+		t.Fatalf("loadCapped should accept a file under the cap: %v", err)
+	}
+}
+
+// TestIR_Save_OwnerOnlyPerms pins B4: the IR file is 0600 and its dir 0700 (it
+// holds symbol/import names), not world-readable.
+func TestIR_Save_OwnerOnlyPerms(t *testing.T) {
+	dir := t.TempDir()
+	irPath := filepath.Join(dir, ".ai", "ir.json")
+	if err := (&IR{Version: IRVersion, Files: map[string]FileIR{}}).Save(irPath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	fi, err := os.Stat(irPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("ir.json perm = %o, want 0600", perm)
+	}
+	di, err := os.Stat(filepath.Dir(irPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := di.Mode().Perm(); perm != 0700 {
+		t.Errorf(".ai dir perm = %o, want 0700", perm)
+	}
+}
+
 func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	irPath := filepath.Join(tmpDir, "ir.json")

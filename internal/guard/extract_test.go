@@ -142,6 +142,38 @@ func TestExtractDefs_JS(t *testing.T) {
 
 // --- ExtractRefs ---
 
+// TestExtractRefs_Go_GenericInstantiatedCall pins the generic-call FN: a Go call
+// written with explicit type arguments (`Foo[int](x)`) puts `[int]` between the
+// name and `(`, so the bare `name(` scanner never matched it and a hallucinated
+// generic call was silently never checked — a false negative, the worst class
+// for the truth-oracle guard.
+func TestExtractRefs_Go_GenericInstantiatedCall(t *testing.T) {
+	ls := lines(
+		`x := DoesNotExist[int](5)`,
+		`y := Transform[string, int](items)`,
+		`z := Wrap[T](v)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "DoesNotExist", "Transform", "Wrap") {
+		t.Errorf("generic-instantiated calls must be extracted, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_IndexCallNoFalsePositive guards the FP direction: indexing a
+// local (unexported) slice/map of funcs and calling the result — `arr[i](x)` —
+// must NOT be flagged. Go's unexported-name skip already covers the common case;
+// this pins that the generic-call support doesn't introduce a regression.
+func TestExtractRefs_Go_IndexCallNoFalsePositive(t *testing.T) {
+	ls := lines(
+		`arr[i](x)`,
+		`handlers[key](ctx)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "arr", "handlers") {
+		t.Errorf("unexported index-then-call must not be flagged, got %v", refNames(refs))
+	}
+}
+
 func TestExtractRefs_Go_BareCall(t *testing.T) {
 	ls := lines(`result := ProcessFoo(ctx, bar)`)
 	refs := ExtractRefs(LangGo, ls)

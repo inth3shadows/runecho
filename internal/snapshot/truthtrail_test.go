@@ -109,6 +109,32 @@ func TestTruthTrail_StaleClaims(t *testing.T) {
 	}
 }
 
+// TestTruthTrail_BareMethodClaimNotStale pins the qualified-symbol FP: a method
+// is indexed by its qualified name (`Reader.FetchData`), but a claim naturally
+// references it bare (`FetchData`). Before the fix the known-set was keyed on the
+// qualified name only, so the real method was wrongly reported as a stale claim —
+// a false positive that the sibling `locate` tool (last-dotted-segment match)
+// never had. A genuinely invented name must still be flagged.
+func TestTruthTrail_BareMethodClaimNotStale(t *testing.T) {
+	db, _ := openTemp(t)
+	repoID, _ := db.EnrollRepo("r", "/tmp/r", "", 0)
+	irData := makeIR("h1", "Reader.FetchData")
+	snapID, _ := db.SaveSnapshot(repoID, "", "session-start", "/tmp/r", irData)
+	meta, _ := db.GetByID(snapID)
+
+	text := "The `FetchData` method now retries, but `PhantomHelper` was removed."
+	trail, err := TruthTrail(db, repoID, *meta, irData, 0, text)
+	if err != nil {
+		t.Fatalf("TruthTrail: %v", err)
+	}
+	if len(trail.StaleClaims) != 1 {
+		t.Fatalf("expected only PhantomHelper stale, got %d: %v", len(trail.StaleClaims), trail.StaleClaims)
+	}
+	if trail.StaleClaims[0].Symbol != "PhantomHelper" {
+		t.Errorf("stale claim = %q, want PhantomHelper (FetchData must resolve via its Reader.FetchData leaf)", trail.StaleClaims[0].Symbol)
+	}
+}
+
 func TestTruthTrail_NoCallers(t *testing.T) {
 	db, _ := openTemp(t)
 	repoID, _ := db.EnrollRepo("r", "/tmp/r", "", 0)

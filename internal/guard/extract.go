@@ -353,6 +353,23 @@ func parseJSBindingTarget(s string) []string {
 // byte (see isWordByte), which correctly treats a leading `$` as part of the name.
 var reCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
 
+// reGoCallIdent is reCallIdent with an optional Go generic type-argument list
+// (`Foo[int](x)`, `Transform[K, V](x)`) between the name and `(`. Without it a
+// generic-instantiated call is silently missed (the name isn't immediately
+// followed by `(`), so a hallucinated `DoesNotExist[int](5)` is never checked —
+// a false negative. Go-only: `<...>`-style generic calls (TS) are left to
+// reCallIdent to avoid the `a < b > (c)` comparison ambiguity.
+//
+// An index-then-call `Container[i](x)` also matches (the callee is really
+// `Container[i]`, not `Container`), but the realistic FP surface is nearly empty:
+// an unexported container is dropped by the exported-name filter; an exported
+// package-level one resolves as a known Export; an exported-cased local (rare —
+// Go locals are lowercase) is bound by LocallyBoundNames when its assignment is
+// in the hunk. Any residual flag is FP-over-FN-consistent. The bracket body is
+// non-nesting (`[^\[\]]*`), so a deeply-nested type arg (`Foo[map[K]V](x)`) is
+// still missed — a narrower slice of the same FN.
+var reGoCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]]*\])?\s*\(`)
+
 // reUpperSnakeRef matches a SCREAMING_SNAKE_CASE identifier (requires at least
 // one underscore-joined segment). These are module-constant references — a
 // high-signal, low-false-positive class: a hallucinated constant (often a dropped
@@ -504,7 +521,11 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 		// OTHER call sharing the line (a one-line function body, a Python default-
 		// arg factory) still is, so we skip per-name rather than the whole line.
 		defs := defNames(lang, text)
-		matches := reCallIdent.FindAllStringSubmatchIndex(scan, -1)
+		callRe := reCallIdent
+		if lang == LangGo {
+			callRe = reGoCallIdent
+		}
+		matches := callRe.FindAllStringSubmatchIndex(scan, -1)
 		for _, idx := range matches {
 			fullStart := idx[0]
 			nameStart, nameEnd := idx[2], idx[3]

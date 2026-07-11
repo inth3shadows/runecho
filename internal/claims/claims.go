@@ -63,7 +63,7 @@ func ExtractSymbolRefs(text string) map[string]string {
 	add := func(line, sym string) {
 		if IsCodeSymbol(sym) {
 			if _, seen := refs[sym]; !seen {
-				refs[sym] = truncate(line, 80)
+				refs[sym] = redactSecrets(truncate(line, 80))
 			}
 		}
 	}
@@ -149,6 +149,26 @@ func KnownSet(names []string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// reSecretAssign matches a credential assignment (`api_key = ...`, `token: ...`)
+// and captures the key prefix so only the value is redacted. reLongToken matches
+// a contiguous 32+ char high-entropy run (a bare API key / hash / base64 secret);
+// `/` and `.` are excluded from the class so ordinary paths and dotted names
+// split into short segments and are not mistaken for one long token.
+var (
+	reSecretAssign = regexp.MustCompile(`(?i)((?:api[_-]?key|secret|token|password|passwd|bearer|auth(?:orization)?)\s*[:=]\s*)\S+`)
+	reLongToken    = regexp.MustCompile(`[A-Za-z0-9+_=-]{32,}`)
+)
+
+// redactSecrets blanks credential-looking content in a claim excerpt before it
+// is shown in a truth-trail/validate-claims receipt (which a user may paste into
+// a PR or commit). Conservative by design: the excerpt exists to give context on
+// a stale claim, so only high-signal secret shapes are redacted, not prose.
+func redactSecrets(s string) string {
+	s = reSecretAssign.ReplaceAllString(s, `${1}[REDACTED]`)
+	s = reLongToken.ReplaceAllString(s, "[REDACTED]")
+	return s
 }
 
 // IsCodeSymbol returns true if the name looks like a CamelCase code identifier.

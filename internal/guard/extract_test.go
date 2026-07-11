@@ -227,6 +227,31 @@ func TestExtractRefs_JS_GenericFuncDefSelfSkipped(t *testing.T) {
 	}
 }
 
+// TestExtractRefs_DedupsByName pins F4: the same call repeated across many lines
+// yields exactly one Ref (first line wins), so a pathological input can't hold
+// millions of Ref structs. Both consumers already collapse by name downstream,
+// so this is behavior-preserving.
+func TestExtractRefs_DedupsByName(t *testing.T) {
+	ls := lines(
+		`result := ProcessFoo(a)`,
+		`other := ProcessFoo(b)`,
+		`third := ProcessFoo(c)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	n := 0
+	for _, r := range refs {
+		if r.Name == "ProcessFoo" {
+			n++
+			if r.LineNo != 1 {
+				t.Errorf("deduped ref should keep the first line (1), got %d", r.LineNo)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("ProcessFoo should appear once after dedup, got %d: %v", n, refNames(refs))
+	}
+}
+
 func TestExtractRefs_Go_BareCall(t *testing.T) {
 	ls := lines(`result := ProcessFoo(ctx, bar)`)
 	refs := ExtractRefs(LangGo, ls)

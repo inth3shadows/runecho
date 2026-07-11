@@ -4,12 +4,19 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 )
+
+// maxDiffBytes caps the total staged-diff output read into memory. A huge staged
+// blob would otherwise fully buffer via cmd.Output(); past the cap the diff is
+// truncated and reported partial (the same incomplete-scan contract the per-line
+// scanner cap uses), bounding memory on the pre-commit path.
+const maxDiffBytes = 64 << 20 // 64 MiB
 
 // FileDiff holds the added lines from one file in the staged diff.
 type FileDiff struct {
@@ -32,12 +39,50 @@ type AddedLine struct {
 // also bounds this last unbounded git call — the same cap (gitutil.Timeout) used
 // for every other git subprocess in the hook path.
 func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, partial bool, err error) {
+	// Own cancel so we can stop git early once the byte cap is hit.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	cmd := gitutil.Command(ctx, repoRoot, "diff", "--cached", "--unified=0")
-	out, err := cmd.Output()
+	// Capture stderr so a git failure carries its diagnostic (parity with the old
+	// cmd.Output() path and with gitutil.runGit), not a bare "exit status 128".
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, false, fmt.Errorf("git diff --cached: %w", err)
 	}
-	return parseDiffOutput(string(out))
+	if err := cmd.Start(); err != nil {
+		return nil, false, fmt.Errorf("git diff --cached: %w", err)
+	}
+
+	// Read one byte past the cap to detect overflow without buffering the rest.
+	out, readErr := io.ReadAll(io.LimitReader(stdout, maxDiffBytes+1))
+	truncated := int64(len(out)) > maxDiffBytes
+	if truncated {
+		out = out[:maxDiffBytes]
+		cancel() // we have enough; stop git
+	}
+	// Drain any remainder so Wait doesn't block on a full pipe, then reap.
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+
+	// When not truncated, a read or non-zero-exit error is a real failure. When
+	// truncated we intentionally killed git, so its Wait error is expected.
+	if !truncated {
+		if readErr != nil {
+			return nil, false, fmt.Errorf("git diff --cached: %w", readErr)
+		}
+		if waitErr != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return nil, false, fmt.Errorf("git diff --cached: %w: %s", waitErr, msg)
+			}
+			return nil, false, fmt.Errorf("git diff --cached: %w", waitErr)
+		}
+	}
+
+	diffs, scanPartial, perr := parseDiffOutput(string(out))
+	return diffs, truncated || scanPartial, perr
 }
 
 // parseDiffOutput parses the raw unified-diff text into FileDiff entries.

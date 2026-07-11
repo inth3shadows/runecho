@@ -174,6 +174,59 @@ func TestExtractRefs_Go_IndexCallNoFalsePositive(t *testing.T) {
 	}
 }
 
+// TestExtractRefs_JS_GenericInstantiatedCall pins the TS twin of the Go
+// generic-call FN: a call with explicit type arguments (`Foo<T>(x)`) puts `<T>`
+// between the name and `(`, so the bare `name(` scanner missed it and a
+// hallucinated `DoesNotExist<T>(5)` was never checked (FN).
+func TestExtractRefs_JS_GenericInstantiatedCall(t *testing.T) {
+	ls := lines(
+		`const x = DoesNotExist<T>(5)`,
+		`const y = Transform<string, number>(items)`,
+		`const z = Make<Map<string, number>>(a)`,
+		`const r = Parse<Foo[]>(raw)`,
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsAll(refs, "DoesNotExist", "Transform", "Make", "Parse") {
+		t.Errorf("TS generic calls must be extracted, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_JS_ComparisonNotGenericCall guards the FP direction that makes
+// `<...>` hard: a conventionally-spaced comparison / shift / compound-boolean /
+// JSX expression must NOT have its identifiers read as a generic call. The `<`
+// being flush against the name (generic) vs spaced (comparison) is the
+// discriminator. (An unspaced `a<b>(c)` comparison — convention-violating and
+// nonsensical — is a known, accepted FP and is deliberately not asserted here.)
+func TestExtractRefs_JS_ComparisonNotGenericCall(t *testing.T) {
+	ls := lines(
+		`if (a < b > (c)) {}`,
+		`const t = a << b >> (c)`,
+		`if (count < max && idx > (lo)) {}`,
+		`return width < height > (pad)`,
+		`const e = <Foo>(bar)`,
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsNone(refs, "a", "b", "count", "max", "idx", "width", "height") {
+		t.Errorf("spaced comparisons/shift/JSX must not be read as generic calls, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_JS_GenericFuncDefSelfSkipped guards the def/call regex sync: a
+// generic function *declaration* must be recognized as a definition so the
+// call-side regex (which now bridges `<...>`) doesn't read the function's own
+// name as an unresolved call. Non-generic defs were already self-skipped; adding
+// a type param must not flip that into a false positive.
+func TestExtractRefs_JS_GenericFuncDefSelfSkipped(t *testing.T) {
+	ls := lines(
+		`function transform<T>(items) {`,
+		`export async function load<A, B>(url) {`,
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsNone(refs, "transform", "load") {
+		t.Errorf("generic function decls must self-skip, not flag their own name, got %v", refNames(refs))
+	}
+}
+
 func TestExtractRefs_Go_BareCall(t *testing.T) {
 	ls := lines(`result := ProcessFoo(ctx, bar)`)
 	refs := ExtractRefs(LangGo, ls)

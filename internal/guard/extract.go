@@ -131,9 +131,14 @@ func setOf(ss ...string) map[string]struct{} {
 // --- definition extraction ---
 
 var (
-	reGoDef     = regexp.MustCompile(`^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)\s*[(\[]`)
-	rePyDef     = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
-	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(`)
+	reGoDef = regexp.MustCompile(`^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)\s*[(\[]`)
+	rePyDef = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
+	// The optional `<...>` mirrors reJSCallIdent: a generic function decl
+	// `function transform<T>(x) {` must be captured as a definition, else the
+	// call-side regex (which now bridges the type-arg list) reads the function's
+	// own name as an unresolved call — a self-referential false positive on
+	// ordinary generic TS. Kept in sync with reJSCallIdent's type-arg body.
+	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*(?:<[\w$,.\[\]<>\s]+>)?\s*\(`)
 	reJSVarDef  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
 	// rePyClassDef / rePyConstDef capture Python class and SCREAMING_SNAKE module
 	// constant definitions so that references to them elsewhere in the file are
@@ -357,8 +362,8 @@ var reCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
 // (`Foo[int](x)`, `Transform[K, V](x)`) between the name and `(`. Without it a
 // generic-instantiated call is silently missed (the name isn't immediately
 // followed by `(`), so a hallucinated `DoesNotExist[int](5)` is never checked —
-// a false negative. Go-only: `<...>`-style generic calls (TS) are left to
-// reCallIdent to avoid the `a < b > (c)` comparison ambiguity.
+// a false negative. Go uses `[...]`; the TS `<...>` twin is handled separately
+// by reJSCallIdent.
 //
 // An index-then-call `Container[i](x)` also matches (the callee is really
 // `Container[i]`, not `Container`), but the realistic FP surface is nearly empty:
@@ -369,6 +374,24 @@ var reCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
 // non-nesting (`[^\[\]]*`), so a deeply-nested type arg (`Foo[map[K]V](x)`) is
 // still missed — a narrower slice of the same FN.
 var reGoCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]]*\])?\s*\(`)
+
+// reJSCallIdent is reCallIdent with an optional TS generic type-argument list
+// (`Foo<T>(x)`, `Transform<K, V>(x)`) between the name and `(`, so a hallucinated
+// generic call `DoesNotExist<T>(5)` is checked instead of silently missed (FN).
+//
+// `<...>` is genuinely ambiguous with comparison/shift, so this is deliberately
+// tight to keep the FP surface near-zero rather than maximize recall:
+//   - The `<` must be flush against the name (no space). Generic calls are written
+//     `Foo<T>(` unspaced; comparisons are conventionally spaced (`a < b`), so a
+//     real `a < b > (c)` never matches. Only an unspaced `a<b>(c)` comparison —
+//     convention-violating and vanishingly rare — would, an acceptable FP.
+//   - The type-arg body is restricted to type-expression bytes
+//     (`[\w$,.\[\]<>\s]`): no operators, quotes, or parens. A compound boolean
+//     like `a<b && c>(d)` fails on `&`, and string-literal / union / intersection
+//     type args (`Foo<'a'>`, `Foo<A|B>`) simply aren't matched — a residual FN,
+//     the safe direction. Go/Python keep reCallIdent (`<` is only ever an operator
+//     there).
+var reJSCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)(?:<[\w$,.\[\]<>\s]+>)?\s*\(`)
 
 // reUpperSnakeRef matches a SCREAMING_SNAKE_CASE identifier (requires at least
 // one underscore-joined segment). These are module-constant references — a
@@ -522,8 +545,11 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 		// arg factory) still is, so we skip per-name rather than the whole line.
 		defs := defNames(lang, text)
 		callRe := reCallIdent
-		if lang == LangGo {
+		switch lang {
+		case LangGo:
 			callRe = reGoCallIdent
+		case LangJS:
+			callRe = reJSCallIdent
 		}
 		matches := callRe.FindAllStringSubmatchIndex(scan, -1)
 		for _, idx := range matches {

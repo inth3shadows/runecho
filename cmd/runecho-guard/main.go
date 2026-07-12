@@ -465,7 +465,10 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// `_helper` the IR may not index) elsewhere in the file would falsely read as
 	// hallucinated. Fold the current on-disk file's definitions into the known set
 	// to suppress that. Best-effort: a missing/oversized file simply adds nothing.
-	addInFileDefs(symbols, filePath, lang)
+	// Read once here and reuse the parsed lines for the dropped-import check's
+	// whole-file bound set below — same snapshot, one read/scan per hook.
+	fileLines := readFileLines(filePath)
+	addInFileDefs(symbols, fileLines, lang)
 
 	// C3 learned-allow: fold in symbols this repo has approved often enough to
 	// trust (count>=N, within TTL) so the guard stops re-asking about them.
@@ -524,7 +527,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// needed for Write: its newLines already IS the whole file.
 			var preBound map[string]struct{}
 			if payload.ToolName != "Write" {
-				preBound = wholeFileBoundNames(filePath, lang)
+				preBound = wholeFileBoundNames(fileLines, lang)
 			}
 			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
 		}
@@ -598,24 +601,32 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	return 0
 }
 
-// maxInFileBytes caps the on-disk file read in addInFileDefs. Files larger than
+// maxInFileBytes caps the on-disk file read in readFileLines. Files larger than
 // this are skipped — the definition-context gain is not worth the read/scan cost,
 // and the SQLite symbol set already covers the file's top-level declarations.
 const maxInFileBytes = 2 << 20 // 2 MiB
 
-// addInFileDefs reads the current on-disk file and folds every definition the
-// def-extractor finds (top-level AND indented/nested defs and local arrow
-// consts, since the def regexes are `^\s*`-anchored) into the known symbol set.
-// This is the P2 residual-killer: it makes a hunk-scoped Edit aware of the rest
-// of its own file without re-implementing a scope-tracking parser. It mutates
-// symbols in place (a fresh per-call map). Degrades silently on any read error
-// (e.g. a brand-new file being created), adding nothing.
-func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang) {
+// readFileLines reads the current on-disk file and returns it as AddedLines, or
+// nil if the file can't be read or exceeds maxInFileBytes. Both whole-file folds
+// (addInFileDefs for the additive check, wholeFileBoundNames for the
+// dropped-import check) consume this so a single hook invocation reads and parses
+// the file once instead of once per check, and both see the same snapshot.
+func readFileLines(filePath string) []guard.AddedLine {
 	data, err := os.ReadFile(filePath)
 	if err != nil || len(data) > maxInFileBytes {
-		return
+		return nil
 	}
-	fileLines := guard.TextToAddedLines(string(data))
+	return guard.TextToAddedLines(string(data))
+}
+
+// addInFileDefs folds every definition the def-extractor finds in fileLines
+// (top-level AND indented/nested defs and local arrow consts, since the def
+// regexes are `^\s*`-anchored) into the known symbol set. This is the P2
+// residual-killer: it makes a hunk-scoped Edit aware of the rest of its own file
+// without re-implementing a scope-tracking parser. It mutates symbols in place (a
+// fresh per-call map). fileLines is nil for a missing/oversized file (see
+// readFileLines), in which case this adds nothing.
+func addInFileDefs(symbols map[string]struct{}, fileLines []guard.AddedLine, lang guard.Lang) {
 	for _, def := range guard.ExtractDefs(lang, fileLines) {
 		symbols[def] = struct{}{}
 	}
@@ -626,14 +637,14 @@ func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang
 	}
 }
 
-// wholeFileBoundNames reads the current on-disk file and returns the union of
-// its locally-bound names (LocallyBoundNames) and definitions (ExtractDefs) —
-// the same whole-file fold-in addInFileDefs does for the additive check,
-// mirrored here for the dropped-import check's bound set. Fail-open: any read
-// error or a file over maxInFileBytes yields nil (no extra context), same as
-// addInFileDefs's own degrade path.
+// wholeFileBoundNames returns the union of the file's locally-bound names
+// (LocallyBoundNames) and definitions (ExtractDefs) from fileLines — the same
+// whole-file fold-in addInFileDefs does for the additive check, mirrored here for
+// the dropped-import check's bound set. Fail-open: nil fileLines (a missing or
+// over-maxInFileBytes file, per readFileLines) yields nil (no extra context),
+// same as addInFileDefs's own degrade path.
 //
-// Known limitation (accepted, not a bug): the file is read PRE-edit, so for a
+// Known limitation (accepted, not a bug): fileLines is read PRE-edit, so for a
 // MultiEdit whose own sibling hunk removes a rebind, that rebind still appears
 // bound here and can suppress a real dropped-import warning (a false negative).
 // This is deliberately on the precision-over-recall side the whole check is
@@ -642,12 +653,10 @@ func addInFileDefs(symbols map[string]struct{}, filePath string, lang guard.Lang
 // masking sibling-hunk state imperfectly would train users to ignore the guard.
 // Masking each edit's OldString region before the read was considered and
 // rejected as complexity that buys recall the design does not prioritize.
-func wholeFileBoundNames(filePath string, lang guard.Lang) map[string]struct{} {
-	data, err := os.ReadFile(filePath)
-	if err != nil || len(data) > maxInFileBytes {
+func wholeFileBoundNames(fileLines []guard.AddedLine, lang guard.Lang) map[string]struct{} {
+	if fileLines == nil {
 		return nil
 	}
-	fileLines := guard.TextToAddedLines(string(data))
 	bound := guard.LocallyBoundNames(lang, fileLines)
 	for _, def := range guard.ExtractDefs(lang, fileLines) {
 		bound[def] = struct{}{}

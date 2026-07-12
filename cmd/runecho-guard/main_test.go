@@ -175,7 +175,7 @@ func TestAddInFileDefs(t *testing.T) {
 	}
 
 	symbols := map[string]struct{}{}
-	addInFileDefs(symbols, path, guard.LangPython)
+	addInFileDefs(symbols, readFileLines(path), guard.LangPython)
 
 	// Top-level AND indented defs are folded in (the def regex is ^\s*-anchored),
 	// so a hunk-scoped Edit calling either won't false-positive.
@@ -188,9 +188,9 @@ func TestAddInFileDefs(t *testing.T) {
 
 func TestAddInFileDefs_MissingFileIsSilent(t *testing.T) {
 	symbols := map[string]struct{}{}
-	// A brand-new file (Write/Edit creating it) does not exist yet — must add
-	// nothing and not panic.
-	addInFileDefs(symbols, filepath.Join(t.TempDir(), "does-not-exist.go"), guard.LangGo)
+	// A brand-new file (Write/Edit creating it) does not exist yet — readFileLines
+	// yields nil, so the fold must add nothing and not panic.
+	addInFileDefs(symbols, readFileLines(filepath.Join(t.TempDir(), "does-not-exist.go")), guard.LangGo)
 	if len(symbols) != 0 {
 		t.Errorf("missing file should add nothing, got %v", symbols)
 	}
@@ -207,14 +207,14 @@ func TestWholeFileBoundNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bound := wholeFileBoundNames(path, guard.LangPython)
+	bound := wholeFileBoundNames(readFileLines(path), guard.LangPython)
 	if _, ok := bound["re"]; !ok {
 		t.Errorf("expected re folded in as a whole-file rebind, got %v", bound)
 	}
 }
 
 func TestWholeFileBoundNames_MissingFileIsSilent(t *testing.T) {
-	bound := wholeFileBoundNames(filepath.Join(t.TempDir(), "does-not-exist.py"), guard.LangPython)
+	bound := wholeFileBoundNames(readFileLines(filepath.Join(t.TempDir(), "does-not-exist.py")), guard.LangPython)
 	if bound != nil {
 		t.Errorf("missing file should yield nil, got %v", bound)
 	}

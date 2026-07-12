@@ -194,6 +194,31 @@ func TestDroppedImport_JS_Rebound_BareArrowParam(t *testing.T) {
 	}
 }
 
+// A `$`-prefixed import rebound as a bare arrow param (`$x => …`) must not be
+// flagged. A `\b` left anchor on the bare-arrow pattern sits after the leading
+// `$` (a non-word byte) and captures `x` — the wrong name — leaving `$x`
+// unbound and false-positiving it as dropped. The anchor-free pattern captures
+// `$x` whole. Guards the jQuery/lodash `$`-name idiom.
+func TestDroppedImport_JS_Rebound_DollarBareArrowParam(t *testing.T) {
+	oldText := "import { $x } from './m';\narr.map($x => $x * 2);\n"
+	newText := "arr.map($x => $x * 2);\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("$-prefixed bare arrow param $x must not warn as dropped, got %v", droppedNames(got))
+	}
+}
+
+// No-space chained bare arrows (`a=>b=>c`) must bind every param. A left anchor
+// that consumes the boundary byte before each identifier would eat the byte the
+// next match needs (the `=>` before `b`), missing `b` and false-positiving it if
+// it were a dropped import. The anchor-free pattern binds a, b, and c.
+func TestDroppedImport_JS_Rebound_NoSpaceChainedBareArrows(t *testing.T) {
+	oldText := "import { b } from './m';\nconst f = a=>b=>c=>b;\n"
+	newText := "const f = a=>b=>c=>b;\n"
+	if got := DroppedImportRefs(LangJS, oldText, newText); len(got) != 0 {
+		t.Errorf("chained no-space bare arrow param b must not warn as dropped, got %v", droppedNames(got))
+	}
+}
+
 func TestDroppedImport_JS_Rebound_CatchAndParam(t *testing.T) {
 	oldText := "import { err } from './m';\nlog(err);\n"
 	newText := "try { x(); } catch (err) { log(err); }\n"

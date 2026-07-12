@@ -219,11 +219,17 @@ var (
 	reJSArrowParams = regexp.MustCompile(`\(([^)]*)\)\s*=>`)
 	// reJSArrowParamsBare catches the unparenthesized single-arg arrow form
 	// (`x => x*2`), which reJSArrowParams — parenthesized-only — never matches.
-	// The `\b` left boundary plus requiring `=>` immediately (only whitespace
-	// between) after the identifier keeps this from firing inside an already-
-	// parenthesized form like `(a, b) => …` (the identifier there is followed
-	// by `)`, not `=>`, so it never matches).
-	reJSArrowParamsBare = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=>`)
+	// No left anchor by design: a `\b` sits AFTER a leading `$` (a non-word byte),
+	// so `$x =>` would capture `x` — the wrong name — and leave the real binding
+	// `$x` unbound, false-positiving a rebound `$`-prefixed import as dropped.
+	// Leftmost matching already starts the identifier at its true start (a `.`- or
+	// space-preceded token can't match a suffix, since an earlier start position is
+	// tried first), and a leading anchor that consumes a boundary byte would break
+	// no-space chains (`x=>y=>z` — the byte before `y` was eaten by the `x` match).
+	// Requiring `=>` immediately (only whitespace between) after the identifier
+	// still keeps this from firing inside an already-parenthesized form like
+	// `(a, b) => …` (the identifier there is followed by `)`, not `=>`).
+	reJSArrowParamsBare = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*=>`)
 	reJSForDecl         = regexp.MustCompile(`\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)`)
 	reJSCatch           = regexp.MustCompile(`\bcatch\s*\(\s*([A-Za-z_$][\w$]*)`)
 )
@@ -320,7 +326,7 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			// (`a => Dropped => …`); binding only the first bare param would miss a
 			// later one and false-positive that name as a dropped import. add() is
 			// a set insert, so overlap with the parenthesized form is harmless.
-			// (reJSArrowParamsBare's `\b … \s*=>` can't fire inside a parenthesized
+			// (reJSArrowParamsBare's `… \s*=>` can't fire inside a parenthesized
 			// arrow: the ident there is followed by `)`, not `=>`.)
 			for _, mm := range reJSArrowParamsBare.FindAllStringSubmatch(s, -1) {
 				add(mm[1])

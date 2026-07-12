@@ -205,11 +205,15 @@ func isWordByte(b byte) bool {
 // only — none match call-argument parens, so a dropped import passed as an
 // argument is still flagged, not suppressed.
 var (
-	reIdentAll      = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
-	rePyForTarget   = regexp.MustCompile(`^\s*for\s+(.+?)\s+in\b`)
-	reAsBind        = regexp.MustCompile(`\bas\s+([A-Za-z_]\w*)`) // with/except ... as x
-	reWalrus        = regexp.MustCompile(`([A-Za-z_]\w*)\s*:=`)
-	rePyDefParams   = regexp.MustCompile(`^\s*(?:async\s+)?def\s+\w+\s*\(([^)]*)\)`)
+	reIdentAll    = regexp.MustCompile(`[A-Za-z_$][\w$]*`)
+	rePyForTarget = regexp.MustCompile(`^\s*for\s+(.+?)\s+in\b`)
+	reAsBind      = regexp.MustCompile(`\bas\s+([A-Za-z_]\w*)`) // with/except ... as x
+	reWalrus      = regexp.MustCompile(`([A-Za-z_]\w*)\s*:=`)
+	// rePyDefOpen matches a def header through its opening `(`. The parameter
+	// region is then accumulated across lines by paren depth (pyConsumeParens),
+	// so a PEP8-wrapped signature `def foo(\n  config,\n):` binds its params too —
+	// the old single-line-only `\(([^)]*)\)` false-positived every wrapped param.
+	rePyDefOpen     = regexp.MustCompile(`^\s*(?:async\s+)?def\s+\w+\s*\(`)
 	reJSDeclList    = regexp.MustCompile(`\b(?:const|let|var)\s+(.+)$`)
 	reJSFnParams    = regexp.MustCompile(`function\b[^(]*\(([^)]*)\)`)
 	reJSArrowParams = regexp.MustCompile(`\(([^)]*)\)\s*=>`)
@@ -237,13 +241,18 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			m[id] = struct{}{}
 		}
 	}
+	// State for accumulating a Python def signature's parameter region across
+	// lines (see rePyDefOpen). depth>0 means we are inside an unclosed signature.
+	pyDefDepth := 0
+	var pyDefParams strings.Builder
+	pyDefPrevNo := 0
 	// scanStripped threads multi-line string state (so a `x = Foo()` example inside
 	// a multi-line docstring/template is not read as a real binding) AND resets it
 	// on a line-number gap (so an unterminated string in one MultiEdit block does
 	// not leak a spurious binding into the next). Both matter: the former is why
 	// stripping must be stateful, the latter is why gap-separated lines
 	// (AddedLinesWithGap) reset correctly.
-	scanStripped(lang, lines, func(s string, _ AddedLine) {
+	scanStripped(lang, lines, func(s string, l AddedLine) {
 		if lhs := assignLHS(s); lhs != "" {
 			add(lhs)
 		}
@@ -258,9 +267,33 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			for _, mm := range reWalrus.FindAllStringSubmatch(s, -1) {
 				m[mm[1]] = struct{}{}
 			}
-			if mm := rePyDefParams.FindStringSubmatch(s); mm != nil {
-				add(mm[1])
+			// Bind def parameters, single- or multi-line. Accumulate the param
+			// region by paren depth from the header's `(` until it balances, then
+			// add() every identifier in it (same as the old single-line form).
+			// Reset on a diff-hunk line gap so a partial signature never spans
+			// non-contiguous added lines.
+			if pyDefDepth > 0 && l.LineNo != pyDefPrevNo+1 {
+				pyDefDepth = 0
+				pyDefParams.Reset()
 			}
+			if pyDefDepth > 0 {
+				part, closed := pyConsumeParens(s, &pyDefDepth)
+				pyDefParams.WriteString(part + " ")
+				if closed {
+					add(pyDefParams.String())
+					pyDefParams.Reset()
+				}
+			} else if loc := rePyDefOpen.FindStringIndex(s); loc != nil {
+				pyDefDepth = 1
+				part, closed := pyConsumeParens(s[loc[1]:], &pyDefDepth)
+				pyDefParams.Reset()
+				pyDefParams.WriteString(part + " ")
+				if closed {
+					add(pyDefParams.String())
+					pyDefParams.Reset()
+				}
+			}
+			pyDefPrevNo = l.LineNo
 		case LangJS:
 			// Capture EVERY declarator of a const/let/var statement, not just the
 			// first — `const a = f(), Ulid = () => …` rebinds Ulid as the second
@@ -301,6 +334,26 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 		}
 	})
 	return m
+}
+
+// pyConsumeParens scans s tracking paren nesting from *depth (>0 = inside an open
+// def signature), returning the param text before the balancing ')' and whether
+// the signature closed on this line. Nested parens (default-value calls like
+// `x=g()`) are balanced, so the signature closes only at its real end. Operates
+// on the literal-stripped scan, so parens inside strings don't count.
+func pyConsumeParens(s string, depth *int) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			*depth++
+		case ')':
+			*depth--
+			if *depth == 0 {
+				return s[:i], true
+			}
+		}
+	}
+	return s, false
 }
 
 // assignLHS returns the substring left of the first plain assignment '=' on a

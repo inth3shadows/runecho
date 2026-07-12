@@ -159,6 +159,22 @@ func TestExtractRefs_Go_GenericInstantiatedCall(t *testing.T) {
 	}
 }
 
+// TestExtractRefs_Go_NestedGenericCall pins the residual FN from #124: a generic
+// call whose type argument itself contains brackets (`Foo[map[K]V](x)`,
+// `Foo[[]byte](x)`) was missed because the type-arg body was non-nesting. One
+// level of bracket nesting is now allowed.
+func TestExtractRefs_Go_NestedGenericCall(t *testing.T) {
+	ls := lines(
+		`x := DoesNotExist[map[K]V](5)`,
+		`y := Wrap[[]byte](b)`,
+		`z := Conv[map[string]int](m)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsAll(refs, "DoesNotExist", "Wrap", "Conv") {
+		t.Errorf("nested-generic calls must be extracted, got %v", refNames(refs))
+	}
+}
+
 // TestExtractRefs_Go_IndexCallNoFalsePositive guards the FP direction: indexing a
 // local (unexported) slice/map of funcs and calling the result — `arr[i](x)` —
 // must NOT be flagged. Go's unexported-name skip already covers the common case;

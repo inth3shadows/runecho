@@ -69,6 +69,45 @@ const process = items => items.filter(y => y > 0);
 			note:      "",
 		},
 		{
+			name: "generator_function_expression_bound_to_const",
+			source: `
+const gen = function* () { yield 1; };
+`,
+			// BUG A (fixed): a generator function expression bound to a const was
+			// dropped — childOfType checked only arrow_function/function_expression,
+			// not generator_function (which the export-default path already knew).
+			wantFuncs: []string{"gen"},
+			wantClass: []string{},
+			wantExp:   []string{},
+			note:      "",
+		},
+		{
+			name: "destructuring_bound_to_function_value_not_a_symbol",
+			source: `
+const { a, b } = function () { return {}; };
+`,
+			// BUG B (fixed): the declarator's name field is an object_pattern
+			// (`{ a, b }`), not an identifier, so its text is not a symbol. Before
+			// the identifier guard, this recorded a garbage `{ a, b }` function.
+			wantFuncs: []string{},
+			wantClass: []string{},
+			wantExp:   []string{},
+			note:      "",
+		},
+		{
+			name: "destructuring_bound_to_class_value_not_a_symbol",
+			source: `
+const [First] = class {};
+`,
+			// BUG B twin: an array_pattern name with a class value must also not
+			// record a garbage `[First]` class (the isIdent guard covers both the
+			// function and class value paths).
+			wantFuncs: []string{},
+			wantClass: []string{},
+			wantExp:   []string{},
+			note:      "",
+		},
+		{
 			name: "nested_function_inside_conditional",
 			source: `
 function main() {

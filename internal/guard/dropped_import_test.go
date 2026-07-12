@@ -21,6 +21,19 @@ func TestDroppedImport_Python_StillCalled(t *testing.T) {
 	}
 }
 
+// Python: a PEP8-wrapped def signature binds its parameters across lines. The
+// old single-line rePyDefParams never matched `def foo(\n config,\n):`, so the
+// param `config` was not recognized as a local binding and a dropped import of
+// the same name false-positived. Pins the multi-line param accumulation.
+func TestDroppedImport_Python_MultiLineDefParamBound(t *testing.T) {
+	oldText := "from lib import config\n"
+	newText := "def foo(\n    config,\n):\n    return config\n"
+	got := DroppedImportRefs(LangPython, oldText, newText)
+	if containsStr(droppedNames(got), "config") {
+		t.Errorf("multi-line def param `config` is locally bound; must not flag as dropped import, got %v", droppedNames(got))
+	}
+}
+
 // MultiEdit: an unterminated string in one edit block must not leak into the next
 // and blank a real use of a dropped import. DroppedImportRefsLines with gap-
 // separated lines (AddedLinesWithGap, as the hook builds for MultiEdit) resets the

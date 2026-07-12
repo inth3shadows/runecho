@@ -370,10 +370,12 @@ var reCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
 // an unexported container is dropped by the exported-name filter; an exported
 // package-level one resolves as a known Export; an exported-cased local (rare —
 // Go locals are lowercase) is bound by LocallyBoundNames when its assignment is
-// in the hunk. Any residual flag is FP-over-FN-consistent. The bracket body is
-// non-nesting (`[^\[\]]*`), so a deeply-nested type arg (`Foo[map[K]V](x)`) is
-// still missed — a narrower slice of the same FN.
-var reGoCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]]*\])?\s*\(`)
+// in the hunk. Any residual flag is FP-over-FN-consistent. The bracket body
+// allows ONE level of nesting (`\[(?:[^\[\]]|\[[^\[\]]*\])*\]`), so a type arg
+// like `Foo[map[K]V](x)` or `Foo[[]byte](x)` matches; a two-level nested arg
+// (`Foo[map[[]K]V](x)`) is still missed — a much narrower slice of the same FN.
+// The alternation is RE2 (linear, no backtracking), so nesting adds no ReDoS risk.
+var reGoCallIdent = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?\s*\(`)
 
 // reJSCallIdent is reCallIdent with an optional TS generic type-argument list
 // (`Foo<T>(x)`, `Transform<K, V>(x)`) between the name and `(`, so a hallucinated

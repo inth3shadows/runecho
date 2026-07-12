@@ -372,22 +372,30 @@ func jsSymbolsFromAST(source string, lang *ts.Language) (functions, classes []st
 				walk(c, full, depth+1) // descend into the body so methods become Class.method
 
 			case "variable_declarator":
-				// `const name = () => ...` / `= function(){}`: attribute the
-				// function to the bound variable name, spanning the function value
-				// so a body change flips the hash. Body is not recursed (top-level
-				// altitude — see the function case above).
-				name := fieldText(c, "name", lang, src)
-				if fn := childOfType(c, lang, "arrow_function", "function_expression"); fn != nil && name != "" {
-					recordFunc(qualify(prefix, name), fn)
-					continue
-				}
-				// `const X = class {...}` / `= class Named {...}`: record the class
-				// under the bound variable name and descend for its methods.
-				if cls := childOfType(c, lang, "class", "class_expression"); cls != nil && name != "" {
-					full := qualify(prefix, name)
-					recordClass(full, cls)
-					walk(cls, full, depth+1)
-					continue
+				// `const name = () => ...` / `= function(){}` / `= function*(){}`:
+				// attribute the function to the bound variable name, spanning the
+				// function value so a body change flips the hash. Body is not
+				// recursed (top-level altitude — see the function case above).
+				//
+				// Only a plain identifier binds a value to a name. A destructuring
+				// pattern (`const {a} = f()`, `const [x] = g()`) has an
+				// object_pattern/array_pattern in the name field; its text (`{ a }`)
+				// is not a symbol, so it must not be recorded — recurse instead.
+				nameNode := c.ChildByFieldName("name", lang)
+				if nameNode != nil && nameNode.Type(lang) == "identifier" {
+					name := nodeText(nameNode, lang, src)
+					if fn := childOfType(c, lang, "arrow_function", "function_expression", "generator_function"); fn != nil {
+						recordFunc(qualify(prefix, name), fn)
+						continue
+					}
+					// `const X = class {...}` / `= class Named {...}`: record the
+					// class under the bound name and descend for its methods.
+					if cls := childOfType(c, lang, "class", "class_expression"); cls != nil {
+						full := qualify(prefix, name)
+						recordClass(full, cls)
+						walk(cls, full, depth+1)
+						continue
+					}
 				}
 				walk(c, prefix, depth+1)
 

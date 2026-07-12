@@ -54,6 +54,39 @@ func TestKnownSet(t *testing.T) {
 	}
 }
 
+// TestRedactSecrets pins B3: credential-looking content in a claim excerpt is
+// blanked (the receipt may be pasted into a PR), while ordinary prose context is
+// preserved.
+func TestRedactSecrets(t *testing.T) {
+	// Fixtures use placeholder values and a runtime-built long token — no real
+	// provider prefixes — so secret scanners (GitGuardian in CI) don't flag the
+	// test itself while it still exercises both redaction paths.
+	longToken := strings.Repeat("a", 40) // 40 chars → matches the 32+ token rule
+	redacted := []struct{ in, absent string }{
+		{`api_key = EXAMPLE_PLACEHOLDER_VALUE`, "EXAMPLE_PLACEHOLDER_VALUE"}, // assignment path
+		{`token: sample_placeholder_token`, "sample_placeholder_token"},      // assignment path
+		{`digest ` + longToken, longToken},                                   // long-token path
+	}
+	for _, tc := range redacted {
+		got := redactSecrets(tc.in)
+		if strings.Contains(got, tc.absent) {
+			t.Errorf("redactSecrets(%q) = %q, still contains the value %q", tc.in, got, tc.absent)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("redactSecrets(%q) = %q, expected a [REDACTED] marker", tc.in, got)
+		}
+	}
+	// Ordinary prose / short identifiers are untouched.
+	for _, ok := range []string{
+		"Updated `FetchData` to retry on failure",
+		"calls internal/guard/extract with a Config",
+	} {
+		if got := redactSecrets(ok); got != ok {
+			t.Errorf("redactSecrets over-redacted prose: %q -> %q", ok, got)
+		}
+	}
+}
+
 func TestExtractSymbolRefs_Backtick(t *testing.T) {
 	text := "Call `ParseData` to load then `FileIR` to wrap."
 	refs := ExtractSymbolRefs(text)

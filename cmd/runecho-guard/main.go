@@ -257,6 +257,11 @@ func runOutcomeMode(in io.Reader) int {
 	if payload.ToolInput.FilePath == "" {
 		return 0
 	}
+	// Reject null-byte-tainted or absurdly long paths before touching the
+	// filesystem (filepath.Dir/os.Stat/git), mirroring the PreToolUse guard.
+	if strings.ContainsRune(payload.ToolInput.FilePath, 0) || len(payload.ToolInput.FilePath) > 4096 {
+		return 0
+	}
 	logOutcomeForFile(payload.ToolInput.FilePath)
 	// E6 auto-fresh IR: reindex the edited file so the NEXT PreToolUse check sees
 	// symbols this edit added — closes the stale-IR false-positive class. Fail-open.

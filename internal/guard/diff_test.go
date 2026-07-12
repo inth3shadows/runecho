@@ -1,9 +1,56 @@
 package guard
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestParseStagedDiff_RealRepo exercises the StdoutPipe/cap rewrite (F2) against
+// a real git repo: a normal staged diff must still parse correctly and not be
+// flagged partial. The 64 MiB truncation boundary is not exercised (a fixture
+// that large is disproportionate); this pins the happy path the rewrite risked.
+func TestParseStagedDiff_RealRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init")
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc F() { Ghost() }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "a.go")
+
+	diffs, partial, err := ParseStagedDiff(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ParseStagedDiff: %v", err)
+	}
+	if partial {
+		t.Error("a small staged diff must not be reported partial")
+	}
+	found := false
+	for _, d := range diffs {
+		if strings.HasSuffix(d.Path, "a.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a.go in the staged diff, got %+v", diffs)
+	}
+}
 
 func TestParseDiffOutput_SingleFile(t *testing.T) {
 	raw := `diff --git a/foo.go b/foo.go

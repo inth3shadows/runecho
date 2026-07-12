@@ -420,7 +420,7 @@ var tsTypeBuiltins = setOf(
 // appendConstRefs adds SCREAMING_SNAKE constant references found in the (already
 // literal-stripped) scan to refs. Skips qualified attrs (`x.MAX`), definition
 // targets (`MAX =` / `MAX:`), and builtins.
-func appendConstRefs(refs []Ref, scan string, lineNo int, builtins map[string]struct{}) []Ref {
+func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}) []Ref {
 	for _, idx := range reUpperSnakeRef.FindAllStringSubmatchIndex(scan, -1) {
 		s, e := idx[2], idx[3]
 		name := scan[s:e]
@@ -434,6 +434,10 @@ func appendConstRefs(refs []Ref, scan string, lineNo int, builtins map[string]st
 		if _, ok := builtins[name]; ok {
 			continue
 		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
 		refs = append(refs, Ref{Name: name, LineNo: lineNo})
 	}
 	return refs
@@ -442,7 +446,7 @@ func appendConstRefs(refs []Ref, scan string, lineNo int, builtins map[string]st
 // appendTypeRefs adds PascalCase type-annotation references (`param: TypeName`)
 // found in the scan to refs. Skips qualified types, single-char generic params
 // (T/K/V), TS primitive/utility types, and JS builtins.
-func appendTypeRefs(refs []Ref, scan string, lineNo int) []Ref {
+func appendTypeRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int) []Ref {
 	for _, idx := range reTSParamType.FindAllStringSubmatchIndex(scan, -1) {
 		s, e := idx[2], idx[3]
 		name := scan[s:e]
@@ -458,6 +462,10 @@ func appendTypeRefs(refs []Ref, scan string, lineNo int) []Ref {
 		if _, ok := jsBuiltins[name]; ok {
 			continue
 		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
 		refs = append(refs, Ref{Name: name, LineNo: lineNo})
 	}
 	return refs
@@ -478,6 +486,13 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 	builtins := builtinsFor(lang)
 
 	var refs []Ref
+	// seen dedups refs by name (first occurrence wins). Both consumers already
+	// collapse by name downstream — the generator into a name set, validate.go via
+	// its per-(path,name) seen map keyed on the first line — so this changes no
+	// output, but it bounds the returned slice to the distinct-identifier count.
+	// Without it a pathological input (a file of millions of `a()` lines) would
+	// hold millions of Ref structs before the caller dedups.
+	seen := make(map[string]struct{})
 	// open tracks an unterminated multi-line string delimiter carried across
 	// lines (Python triple-quote `"""`/`'''`, JS/Go backtick). It resets on a
 	// non-consecutive line, since a diff hunk's added lines may not be contiguous
@@ -578,6 +593,10 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 			if _, isDef := defs[name]; isDef {
 				continue
 			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
 			refs = append(refs, Ref{Name: name, LineNo: l.LineNo})
 		}
 
@@ -590,9 +609,9 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 		if !isImportLine(lang, text) {
 			switch lang {
 			case LangPython:
-				refs = appendConstRefs(refs, scan, l.LineNo, builtins)
+				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins)
 			case LangJS:
-				refs = appendTypeRefs(refs, scan, l.LineNo)
+				refs = appendTypeRefs(refs, seen, scan, l.LineNo)
 			}
 		}
 	}

@@ -128,6 +128,28 @@ func TestRunOutcomeMode_NoOpOnMalformedInput(t *testing.T) {
 	}
 }
 
+// TestRunOutcomeMode_NoOpOnBadPath covers L-cmd2: a null-byte-tainted or absurdly
+// long file_path is rejected before any filesystem/git call, mirroring the
+// PreToolUse guard. This is a smoke test, not a revert-confirm — the fix is
+// defense-in-depth (don't hand tainted input to os.Stat/filepath.Dir/git), and
+// today those calls fail harmlessly on such a path anyway, so there is no
+// observable behavior change beyond "no decision entry, no crash".
+func TestRunOutcomeMode_NoOpOnBadPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	for _, bad := range []string{"foo\x00bar.go", strings.Repeat("a", 5000) + ".go"} {
+		before := countDecisionLogLines(t)
+		p, _ := json.Marshal(map[string]any{"tool_name": "Edit", "tool_input": map[string]string{"file_path": bad}})
+		if code := runOutcomeMode(strings.NewReader(string(p))); code != 0 {
+			t.Errorf("exit code = %d, want 0", code)
+		}
+		if after := countDecisionLogLines(t); after != before {
+			t.Errorf("bad path %q: expected no entry (before=%d after=%d)", bad, before, after)
+		}
+	}
+}
+
 func TestRunOutcomeMode_NoOpOnEmptyFilePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)

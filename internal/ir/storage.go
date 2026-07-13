@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // DefaultIRPath is the default location for IR storage.
@@ -231,9 +232,33 @@ func (ir *IR) Save(path string) error {
 
 	// Write atomically: a crash mid-write must never leave a half-written
 	// ir.json that fails to unmarshal. Write a sibling temp file, then rename
-	// (atomic on the same filesystem on Linux/macOS).
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	// (atomic on the same filesystem on Linux/macOS). The temp name must be
+	// unique per call: with a fixed name, two concurrent Saves interleave their
+	// writes into the same file and the loser renames a torn mix into place
+	// (concurrent PostToolUse hooks hit exactly this).
+	//
+	// Unique names never self-overwrite, so first reap temp files orphaned by a
+	// prior crash/kill between CreateTemp and Rename. Age-gated so a live
+	// concurrent Save's in-flight temp is never removed; best-effort throughout.
+	if stale, _ := filepath.Glob(path + ".tmp-*"); len(stale) > 0 {
+		for _, s := range stale {
+			if fi, err := os.Stat(s); err == nil && time.Since(fi.ModTime()) > time.Hour {
+				_ = os.Remove(s)
+			}
+		}
+	}
+	tmpF, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create IR temp file: %w", err)
+	}
+	tmp := tmpF.Name()
+	if _, err := tmpF.Write(data); err != nil {
+		tmpF.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("failed to write IR file: %w", err)
+	}
+	if err := tmpF.Close(); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("failed to write IR file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

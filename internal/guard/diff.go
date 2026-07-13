@@ -93,15 +93,28 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 	var result []FileDiff
 	var cur *FileDiff
 	newLineNo := 0 // running new-file line counter within the current hunk
+	// inHunk distinguishes real header lines from hunk content that merely looks
+	// like one: an added line whose CONTENT starts "++ " renders as "+++ ...",
+	// and treating it as a file boundary clears cur — silently dropping every
+	// added line for the rest of that file. A real "+++ " header only appears
+	// between a "diff --git" line and that file's first "@@" hunk, never inside
+	// one. (Hunk lines start with '+', '-', ' ', '\' or '@@', so a bare "@@ "
+	// inside a hunk is always a genuine next-hunk header.)
+	inHunk := false
 
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 0, 128*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// Next file section: header lines may follow again.
+		if strings.HasPrefix(line, "diff --git ") {
+			inHunk = false
+			continue
+		}
 		// New file boundary: "+++ b/<path>" (or git's C-quoted form when
 		// core.quotePath escapes spaces / non-ASCII bytes).
-		if strings.HasPrefix(line, "+++ ") {
+		if !inHunk && strings.HasPrefix(line, "+++ ") {
 			if path, ok := parseDiffNewPath(line); ok {
 				result = append(result, FileDiff{Path: path})
 				cur = &result[len(result)-1]
@@ -113,11 +126,27 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 			}
 			continue
 		}
-		// Skip "--- a/..." and "diff --git ..." header lines
-		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "diff --git ") ||
+		// Skip "--- a/..." and other header lines. Inside a hunk, "--- x" can
+		// only be a removed line with "-- x" content — skipping it there is
+		// equivalent to the removed-line fall-through (neither advances the
+		// new-file counter), so this branch stays unconditional.
+		if strings.HasPrefix(line, "--- ") ||
 			strings.HasPrefix(line, "index ") || strings.HasPrefix(line, "new file") ||
 			strings.HasPrefix(line, "deleted file") || strings.HasPrefix(line, "similarity") ||
 			strings.HasPrefix(line, "rename") || strings.HasPrefix(line, "Binary") {
+			continue
+		}
+
+		// Hunk header: @@ -old +new[,count] @@ — checked BEFORE the cur==nil
+		// skip so inHunk is set even for a file whose +++ header didn't parse:
+		// otherwise a crafted "+++ "-looking added line inside that skipped
+		// file's hunk would still read as a file boundary and attach a phantom
+		// FileDiff.
+		if strings.HasPrefix(line, "@@ ") {
+			inHunk = true
+			if cur != nil {
+				newLineNo = parseHunkStart(line)
+			}
 			continue
 		}
 
@@ -125,14 +154,9 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 			continue
 		}
 
-		// Hunk header: @@ -old +new[,count] @@
-		if strings.HasPrefix(line, "@@ ") {
-			newLineNo = parseHunkStart(line)
-			continue
-		}
-
-		// Added line
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+		// Added line. Inside a hunk a "+++"-prefixed line is content (the header
+		// branch above only consumes it between files), so don't exclude it here.
+		if strings.HasPrefix(line, "+") && (inHunk || !strings.HasPrefix(line, "+++")) {
 			cur.AddedLines = append(cur.AddedLines, AddedLine{
 				LineNo: newLineNo,
 				Text:   line[1:], // strip the leading '+'

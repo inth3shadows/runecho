@@ -204,7 +204,7 @@ Every guard decision (both modes) appends one JSON line to
 ```
 
 `decision` is `ask` or `defer`; `reason` classifies why (`clean`, `violations`,
-`stale-ir`, `no-repo`, `store-degraded`, `schema-newer`, `unknown-lang`,
+`stale-ir`, `no-repo`, `store-degraded`, `check-degraded`, `schema-newer`, `unknown-lang`,
 `bad-path`, `empty-input`, `parse-fail`). The write happens after the decision
 is emitted and all logging errors are discarded — the log can never alter a
 decision or slow the hook. It exists to measure the guard's real-world

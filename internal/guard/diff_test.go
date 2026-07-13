@@ -235,3 +235,37 @@ func TestParseDiffOutput_RemovedLinesOnly(t *testing.T) {
 		t.Errorf("expected 0 added lines for remove-only diff, got %d", len(diffs[0].AddedLines))
 	}
 }
+
+// TestParseDiffOutput_PlusPlusContentLineNotAHeader pins the F110 fix: an added
+// line whose CONTENT starts with "++ " renders in the diff as "+++ ...", which
+// the header check used to swallow — clearing cur and silently dropping every
+// added line for the rest of that file (a guard false-negative vector, e.g. a
+// markdown file quoting a diff, or C-style "++ i;" text). Inside a hunk, "+++ "
+// must parse as an added line, not a file boundary.
+func TestParseDiffOutput_PlusPlusContentLineNotAHeader(t *testing.T) {
+	raw := `diff --git a/notes.md b/notes.md
+index abc..def 100644
+--- a/notes.md
++++ b/notes.md
+@@ -0,0 +1,3 @@
++before
++++ quoted diff header
++CallAfter()
+`
+	diffs, _, err := parseDiffOutput(raw)
+	if err != nil {
+		t.Fatalf("parseDiffOutput: %v", err)
+	}
+	if len(diffs) != 1 {
+		t.Fatalf("expected 1 FileDiff, got %d: %+v", len(diffs), diffs)
+	}
+	if got := len(diffs[0].AddedLines); got != 3 {
+		t.Fatalf("expected 3 added lines, got %d: %+v", got, diffs[0].AddedLines)
+	}
+	if diffs[0].AddedLines[1].Text != "++ quoted diff header" {
+		t.Errorf("middle line text = %q, want the ++-content preserved", diffs[0].AddedLines[1].Text)
+	}
+	if diffs[0].AddedLines[2].Text != "CallAfter()" || diffs[0].AddedLines[2].LineNo != 3 {
+		t.Errorf("line after ++-content = %+v, want CallAfter() at line 3", diffs[0].AddedLines[2])
+	}
+}

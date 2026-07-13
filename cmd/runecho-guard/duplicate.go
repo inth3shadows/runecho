@@ -87,10 +87,12 @@ func addedDefs(lang guard.Lang, oldText, newText string) []string {
 // checkDuplicateDefs returns one warning per added def that is already defined
 // by a file OTHER than the one being edited, per the latest snapshot's symbol
 // index. Shares openLatestSnapshot with checkDanglingRefs — only the query
-// (DefsOfName vs RefsToName) and the warning shape differ.
-func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning {
+// (DefsOfName vs RefsToName) and the warning shape differ. queryErrs mirrors
+// checkDanglingRefs: per-symbol store queries that failed and were skipped, so
+// zero warnings + queryErrs > 0 must not read as a definitive clean pass.
+func checkDuplicateDefs(dir, filePath string, added []string) (warns []duplicateWarning, queryErrs int) {
 	if len(added) == 0 {
-		return nil
+		return nil, 0
 	}
 	// Test files legitimately reuse symbol names across files (test functions,
 	// fixtures, table-driven helpers named after what they cover), so a symbol
@@ -98,19 +100,19 @@ func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning
 	// always a false positive, not a reimplementation. Skip the check for them —
 	// this was ~95% of the dogfood asks.
 	if isTestFile(filePath) {
-		return nil
+		return nil, 0
 	}
 	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
 	if !ok {
-		return nil
+		return nil, 0
 	}
 	defer db.Close()
 
-	var warns []duplicateWarning
 	for _, a := range added {
 		paths, err := db.DefsOfName(snapID, a)
 		if err != nil {
-			continue // skip this symbol, keep checking the rest
+			queryErrs++
+			continue // fail-open for this symbol, keep checking the rest
 		}
 		others := duplicateCandidates(excludeSelf(paths, self), self)
 		if len(others) > 0 {
@@ -120,7 +122,7 @@ func checkDuplicateDefs(dir, filePath string, added []string) []duplicateWarning
 			warns = append(warns, duplicateWarning{Symbol: a, Locations: others})
 		}
 	}
-	return warns
+	return warns, queryErrs
 }
 
 // duplicateCandidates keeps only the other-file definitions that are a genuine

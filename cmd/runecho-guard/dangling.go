@@ -143,23 +143,27 @@ func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, se
 // cross-file referrer is the real "you'll break callers" signal.
 //
 // Fail-open everywhere: a missing store, unenrolled repo, no snapshot, or any
-// query error yields nil (no warning), never a false block. An empty deleted
-// set short-circuits before opening the store.
-func checkDanglingRefs(dir, filePath string, deleted []string) []danglingWarning {
+// query error yields no warning, never a false block. An empty deleted set
+// short-circuits before opening the store. queryErrs counts per-symbol store
+// queries that failed: those symbols were skipped without being checked, so a
+// caller must not read a zero-warning result as a definitive clean pass when
+// queryErrs > 0 (the hook surfaces that under strict mode as an advisory
+// instead of staying silent — a transient store error must not look clean).
+func checkDanglingRefs(dir, filePath string, deleted []string) (warns []danglingWarning, queryErrs int) {
 	if len(deleted) == 0 {
-		return nil
+		return nil, 0
 	}
 	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
 	if !ok {
-		return nil
+		return nil, 0
 	}
 	defer db.Close()
 
-	var warns []danglingWarning
 	for _, d := range deleted {
 		paths, err := db.RefsToName(snapID, d)
 		if err != nil {
-			continue // skip this symbol, keep checking the rest
+			queryErrs++
+			continue // fail-open for this symbol, keep checking the rest
 		}
 		others := excludeSelf(paths, self)
 		if len(others) > 0 {
@@ -169,7 +173,7 @@ func checkDanglingRefs(dir, filePath string, deleted []string) []danglingWarning
 			warns = append(warns, danglingWarning{Symbol: d, Referrers: others})
 		}
 	}
-	return warns
+	return warns, queryErrs
 }
 
 // repoRelPath renders filePath in the same form the refs index stores file paths

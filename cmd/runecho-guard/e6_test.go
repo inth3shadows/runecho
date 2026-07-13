@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -339,5 +341,74 @@ func TestRefreshIRForFile_CrossWorktree(t *testing.T) {
 	}
 	if !e6Has(syms, "Existing") {
 		t.Error("cross-worktree refresh dropped Existing")
+	}
+}
+
+// TestRefreshIRForFile_ConcurrentEditsKeepBothFiles pins the F61/F62 fix: two
+// PostToolUse hooks firing concurrently for different files must not lose either
+// file's refresh. Without the ir.json flock, both goroutines Load the same base
+// IR, each UpdateFile adds only its own file, and the last Save wins — silently
+// dropping the other file's symbols (last-writer-wins lost update, reproduced
+// ~98% of the time by the original hunt). Several rounds are run because the
+// pre-fix race is probabilistic per round; the fix must make every round hold.
+func TestRefreshIRForFile_ConcurrentEditsKeepBothFiles(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	e6Write(t, filepath.Join(repo, "a.go"), "package x\n\nfunc Existing() {}\n")
+
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	db, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	top, err := gitutil.TopLevel(repo)
+	if err != nil {
+		t.Fatalf("toplevel: %v", err)
+	}
+	id, err := db.EnrollRepo("r", top, top, 0)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if cd, err := gitutil.CommonDir(top); err == nil {
+		_ = db.SetRepoCommonDir(id, cd)
+	}
+	gen := ir.NewGenerator(ir.GeneratorConfig{})
+	base, _, err := gen.Generate(top)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	irPath := filepath.Join(top, ".ai", "ir.json")
+	if err := base.Save(irPath); err != nil {
+		t.Fatalf("save ir: %v", err)
+	}
+	if _, err := db.SaveSnapshot(id, "sess", "test", top, base); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	db.Close()
+
+	const rounds = 8
+	for i := 0; i < rounds; i++ {
+		fileA := filepath.Join(repo, fmt.Sprintf("conc_a_%d.go", i))
+		fileB := filepath.Join(repo, fmt.Sprintf("conc_b_%d.go", i))
+		e6Write(t, fileA, fmt.Sprintf("package x\n\nfunc ConcA%d() {}\n", i))
+		e6Write(t, fileB, fmt.Sprintf("package x\n\nfunc ConcB%d() {}\n", i))
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); refreshIRForFile(fileA) }()
+		go func() { defer wg.Done(); refreshIRForFile(fileB) }()
+		wg.Wait()
+
+		got, err := ir.Load(irPath)
+		if err != nil {
+			t.Fatalf("round %d: ir.json unreadable after concurrent refresh: %v", i, err)
+		}
+		if _, ok := got.Files[filepath.Base(fileA)]; !ok {
+			t.Fatalf("round %d: concurrent refresh lost %s from ir.json", i, filepath.Base(fileA))
+		}
+		if _, ok := got.Files[filepath.Base(fileB)]; !ok {
+			t.Fatalf("round %d: concurrent refresh lost %s from ir.json", i, filepath.Base(fileB))
+		}
 	}
 }

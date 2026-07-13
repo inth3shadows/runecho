@@ -88,7 +88,7 @@ is fully finished.
 | `internal/snapshot/diff.go` | `Diff`, `DiffLive`, formatters | — |
 | `internal/snapshot/churn.go` | `Churn` over the last N snapshots | — |
 | `internal/mcp/server.go` | Minimal stdio JSON-RPC 2.0 MCP server | — |
-| `internal/mcp/tools_oracle.go` | The five oracle tools, wired to `ir` + `snapshot` | `ir`, `snapshot` |
+| `internal/mcp/tools_oracle.go` | The six oracle tools, wired to `ir` + `snapshot` | `ir`, `snapshot` |
 | `internal/guard/diff.go` | Parse `git diff --cached --unified=0` into added lines | — |
 | `internal/guard/extract.go` | Per-language definition/reference/import extraction + builtin sets | — |
 | `internal/guard/validate.go` | Two-pass validation: collect new defs, then flag unresolved refs | — |
@@ -112,6 +112,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
 | `health` | — | Schema version, live integrity check, repo count, db path |
+| `locate` | `repo`, optional `symbol` + `kind` + `offset` | Symbol → `file:line` (+ short body hash). A named lookup matches by exact name, prefix, or last dotted segment and searches every kind, so zero matches is definitive; omitting `symbol` lists all (functions+classes by default, capped — page with `offset`/`next_offset`) |
 
 A `diff` with explicit `a`/`b` rejects snapshot ids that belong to a different
 repo — diffs never cross repo boundaries.
@@ -134,11 +135,18 @@ hallucinated API. Two modes share the same validation core:
 
 Validation is a two-pass static check: first collect every definition the change
 itself introduces (plus the on-disk file's own definitions and imports, so local
-helpers don't false-positive), then flag bare calls — `Foo(`, never `pkg.Foo(` —
-that appear in neither the IR, the new definitions, the per-language builtin
-sets, nor `.runechoguardignore` (one literal symbol or glob pattern per line —
-`track*` allowlists a whole family of bare global names — `#` comments, at
-the repo root).
+helpers don't false-positive), then flag unresolved references that appear in
+neither the IR, the new definitions, the per-language builtin sets, nor
+`.runechoguardignore` (one literal symbol or glob pattern per line — `track*`
+allowlists a whole family of bare global names — `#` comments, at the repo
+root). Three reference shapes are checked, all unqualified — `Foo(`, never
+`pkg.Foo(`:
+
+- **bare calls** — `Foo(x)`, including generic instantiations (`Foo[int](x)` in
+  Go, `Foo<T>(x)` in TS/JS)
+- **type annotations** (JS/TS) — the `param: TypeName` shape
+- **SCREAMING_SNAKE constant references** (Python) — uses of module-level
+  `UPPER_CASE` names
 
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
 error, or a hung git subprocess (3s cap) all degrade to silence — the guard

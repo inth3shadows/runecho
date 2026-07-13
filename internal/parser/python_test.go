@@ -462,3 +462,19 @@ func TestPyFallbackExports_TupleConstants(t *testing.T) {
 		}
 	}
 }
+
+// TestPythonParser_AllComparisonDoesNotSuppressFallback pins the F115 fix:
+// `__all__ == [...]` is a comparison, not an assignment, but pyAllPresentRegex
+// matched its first `=` and set hasAll — silently dropping the entire
+// no-underscore export fallback for the module.
+func TestPythonParser_AllComparisonDoesNotSuppressFallback(t *testing.T) {
+	src := "__all__ == [\"x\"]  # bare comparison statement\n\ndef public_fn():\n    pass\n"
+	p := NewPythonParser()
+	fs, err := p.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Contains(fs.Exports, "public_fn") {
+		t.Errorf("fallback exports suppressed by an __all__ comparison: %v", fs.Exports)
+	}
+}

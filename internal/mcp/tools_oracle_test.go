@@ -556,3 +556,25 @@ func TestOracleDiffSinceMissingLabel(t *testing.T) {
 		t.Error("unknown since label should return error")
 	}
 }
+
+// TestMatchGlob_GlobstarFinalComponent pins the F67 fix: `**/a/**` never
+// matched a path whose literal segment is the FINAL component (a trailing
+// `**` matches zero components), so structure/path filters silently missed
+// those files.
+func TestMatchGlob_GlobstarFinalComponent(t *testing.T) {
+	cases := []struct {
+		pattern, p string
+		want       bool
+	}{
+		{"**/a/**", "x/a", true},       // literal is the last component
+		{"**/a/**", "a", true},         // literal is the whole path
+		{"**/a/**", "x/a/y", true},     // unchanged: literal mid-path
+		{"**/a/**", "x/ab", false},     // no boundary: not the segment "a"
+		{"**/a/**/b/**", "x/a", false}, // later non-empty segment must still fail
+	}
+	for _, c := range cases {
+		if got := matchGlob(c.pattern, c.p); got != c.want {
+			t.Errorf("matchGlob(%q,%q)=%v want %v", c.pattern, c.p, got, c.want)
+		}
+	}
+}

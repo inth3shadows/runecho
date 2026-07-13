@@ -42,10 +42,12 @@ var (
 	// and an annotated `__all__: list[str] = [...]`. Presence makes __all__
 	// authoritative and suppresses the no-underscore fallback below. Requiring the
 	// `=` avoids a docstring that merely *mentions* __all__ falsely suppressing the
-	// fallback; allowing leading indentation keeps presence-detection consistent
+	// fallback (and the trailing [^=]|$ rejects an `__all__ ==` comparison, which
+	// is not an assignment and must not disable the fallback either); allowing
+	// leading indentation keeps presence-detection consistent
 	// with pyAllRegex's unanchored name extraction, so a conditionally-declared
 	// `__all__` (e.g. inside `if TYPE_CHECKING:`) is not extracted-then-discarded.
-	pyAllPresentRegex = regexp.MustCompile(`(?m)^\s*__all__\s*(?::[^=\n]*)?\+?=`)
+	pyAllPresentRegex = regexp.MustCompile(`(?m)^\s*__all__\s*(?::[^=\n]*)?\+?=(?:[^=]|$)`)
 
 	// module-level UPPER_CASE constant assignment, used only for the __all__-absent
 	// fallback. Anchored at column 0 (no indent = module scope); captures NAME in

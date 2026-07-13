@@ -162,6 +162,12 @@ func matchGlobstar(segs []string, p string) bool {
 		default:
 			if idx := strings.Index(p, "/"+m+"/"); idx >= 0 {
 				p = p[idx+len(m)+1:]
+			} else if p == m || strings.HasSuffix(p, "/"+m) {
+				// The literal is the FINAL path component ("**/a/**" vs "x/a"):
+				// a trailing "**" matches zero components, so consuming the rest
+				// of the path here is correct — any later non-empty segment then
+				// rightly fails against the now-empty remainder.
+				p = ""
 			} else {
 				return false
 			}

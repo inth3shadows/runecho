@@ -376,7 +376,7 @@ func runChurn(args []string) int {
 		}
 		fmt.Println(string(out))
 	case *compact:
-		fmt.Println(snapshot.FormatChurnCompact(report))
+		fmt.Println(snapshot.FormatChurnCompact(report, *minChanges))
 	default:
 		fmt.Print(snapshot.FormatChurn(report, *minChanges))
 	}

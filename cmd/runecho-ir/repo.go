@@ -49,6 +49,16 @@ func runRepoAdd(args []string) int {
 	if code != 0 {
 		return code
 	}
+	// A relative --source-root would be stored verbatim and re-resolved against
+	// whatever CWD a later reindex runs from — silently walking the wrong tree.
+	// Pin it to an absolute path at enroll time (F41/F98).
+	if *sourceRoot != "" {
+		abs, absErr := filepath.Abs(*sourceRoot)
+		if absErr != nil {
+			return printErr(fmt.Errorf("resolve --source-root: %w", absErr))
+		}
+		*sourceRoot = abs
+	}
 	db, code := mustOpenDB()
 	if code != 0 {
 		return code
@@ -87,21 +97,27 @@ func runRepoAdd(args []string) int {
 	}
 	fmt.Printf("Enrolled %s (id=%d cap=%d) -> %s%s\n", n, id, *cap, root, suffix)
 
-	// Auto-reindex immediately so the IR is ready without a separate step.
+	// Auto-reindex immediately so the IR is ready without a separate step. A
+	// failed initial index must surface in the exit code — "Enrolled" + exit 0
+	// with no snapshot behind it is exactly the silent state scripts need to
+	// catch (F42). The error itself is already printed by doReindex.
+	reindexCode := 0
 	enrolled, err2 := db.GetRepoByName(n)
 	if err2 == nil && enrolled != nil {
 		fmt.Printf("Indexing %s...\n", n)
-		doReindex(db, enrolled)
+		reindexCode = doReindex(db, enrolled)
 	}
 
 	// Auto-install all git hooks unless suppressed.
 	if !*noHooks {
-		if err := installHooks(root, false); err != nil {
+		if installed, err := installHooks(root, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
 			fmt.Fprintf(os.Stderr, "  Run manually: runecho-ir install\n")
+		} else if installed == 0 {
+			fmt.Fprintf(os.Stderr, "Warning: no hooks installed (existing non-runecho hooks). Overwrite with: runecho-ir install --force\n")
 		}
 	}
-	return 0
+	return reindexCode
 }
 
 // runRepoList prints all enrolled repos and their indexing state.

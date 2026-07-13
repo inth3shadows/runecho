@@ -1,6 +1,14 @@
 # RunEcho
 
 [![CI](https://github.com/inth3shadows/runecho/actions/workflows/ci.yml/badge.svg)](https://github.com/inth3shadows/runecho/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/inth3shadows/runecho)](https://github.com/inth3shadows/runecho/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
+[![No LLM](https://img.shields.io/badge/No%20LLM-100%25%20local-brightgreen.svg)](#prerequisites)
+
+[![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#quick-start)
+[![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#quick-start)
+[![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#quick-start)
 
 RunEcho is a deterministic **code-truth oracle for AI coding agents**. It gives an
 assistant (Claude Code, Codex, or any MCP client) a ground-truth view of what

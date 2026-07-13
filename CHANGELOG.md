@@ -16,6 +16,76 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-12
+
+44 commits since 0.6.0: parser fidelity, guard hardening, and CLI/IR features.
+
+### Added
+- `runecho-ir guard-stats` subcommand for guard decision-log summaries (#100).
+- `runecho-ir churn --json` output, matching the existing `diff --json` shape (#95).
+- Glob-pattern support in `.runechoguardignore` (e.g. `track*`) (#94).
+- Offset-based pagination for the MCP `locate` tool on large repos (#97).
+- JS/TS parser: AST-based import/export extraction replacing the regex pass, plus
+  a regex fallback when the grammar gives up (#98, #109).
+- Generic-instantiated call detection for the guard: `Foo<T>(x)` in TS/JS and
+  `Foo[int](x)` in Go (#124, #126).
+- `codegraph_render.py` + `make graph` — scoped call-graph SVG rendering tool (#78).
+
+### Changed
+- `repo reindex` is now incremental — unchanged files are skipped instead of
+  re-parsed on every run (#99).
+- Struct/class bodies are now hashed over their full span, so field/member
+  changes surface in `diff` (closes #53) (#103).
+- Guard reads `.runechoguardignore` from the actual git worktree root instead of
+  the bare-repo enrolled container, fixing false positives in claudew/codexw-style
+  worktree layouts (#119).
+- `runecho-ir diff --since=""` and `map --since=""` are now distinguished from an
+  omitted flag rather than silently treated the same (#110, #114).
+- `locate` named lookups now search all symbol kinds, so a zero-match result is
+  definitive rather than kind-scoped (#111).
+
+### Fixed
+- Six defects from a combined codegraph/runecho bug hunt, plus follow-on fixes for
+  bare calls to imported names in the guard's pre-commit path (#79, #81, #82).
+- Three silent false-negatives in the hallucination-detection path, and a batch of
+  further guard fidelity fixes (multi-line defs, JS declarators, nested Go
+  generics, `$`-prefixed bare-arrow false positives, Go interface method
+  signatures misread as calls) (#108, #117, #123, #129, #130).
+- E5 duplicate-symbol check: package-scoping and test-file exclusion (#115, #116).
+- `normalizePath` idempotence bug (#104); `.mjs`/`.cjs` now recognized as JS files
+  (#101); dropped bare `export *` re-exports now captured (#96).
+- Concurrency-safe schema migration and `ResolveRepo` bare-root recovery
+  (#121, #122).
+
+### Security
+- Red-team remediation sweep: parser DoS hardening, store permission fixes, guard
+  input-handling hardening, and a follow-up hardening pass (#71, #127, #128).
+
+## [0.6.0] — 2026-07-01
+
+### Added
+- Guard: non-call reference extraction — SCREAMING_SNAKE constant references and
+  type annotations, widening the guard beyond bare calls (closes #56) (#58).
+- Guard: dropped-import check flagging a removed import whose name is still
+  referenced in-file (#59), with false-positive suppression for locally-rebound
+  names (#60).
+- Guard: E5 duplicate-symbol check, detecting same-named symbols redeclared in a
+  file (#66), with package-scoping and fast-path fixes (#68).
+- `SECURITY.md` — threat model and vulnerability-reporting process (#67).
+- Pre-push tag-monotonicity hook, installable via `install.sh --hook-pre-push`
+  (#63).
+- Synthetic hallucination-reduction benchmark harness for the guard (#55).
+- goreleaser-based release workflow — tagged pushes now publish prebuilt binaries
+  for macOS/Linux/Windows plus checksums (#69).
+
+### Fixed
+- Multi-worktree `common_dir` resolution disambiguated, fixing cross-worktree
+  repo lookup (closes #61) (#62).
+- `internal/claims` symbol-ref extraction gained `const` for JS/TS parity with the
+  guard's own extraction (#64).
+- CI gofmt gate, `.gs` (Google Apps Script) doc coverage, and pre-push hook
+  automation corrected (#65).
+
 ## [0.5.0] — 2026-06-28
 
 First changelog-tracked release; establishes monotonic versioning and a build

@@ -31,11 +31,17 @@ func runInstall(args []string) int {
 		if code != 0 {
 			return code
 		}
-		if err := installHooks(root, *force); err != nil {
+		installed, err := installHooks(root, *force)
+		if err != nil {
 			if !*periodic {
 				return printErr(err)
 			}
 			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
+		} else if installed == 0 && !*periodic {
+			// Every hook was skipped (existing non-runecho hooks): an explicit
+			// `install` that changed nothing must not exit 0 claiming success —
+			// scripts read the code, and the guard is NOT active (F30/F33/F34).
+			return ExitNoData
 		}
 	}
 
@@ -49,19 +55,19 @@ func runInstall(args []string) int {
 
 // installHooks installs pre-commit (guard) and post-commit/post-merge/post-checkout
 // (background reindex) hooks into the git repo containing root.
-func installHooks(root string, force bool) error {
+func installHooks(root string, force bool) (installed int, err error) {
 	gitDir, err := gitutil.AbsGitDir(root)
 	if err != nil {
-		return fmt.Errorf("find git dir: %w", err)
+		return 0, fmt.Errorf("find git dir: %w", err)
 	}
 	hooksDir := filepath.Join(gitDir, "hooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		return fmt.Errorf("create hooks dir: %w", err)
+		return 0, fmt.Errorf("create hooks dir: %w", err)
 	}
 
 	irBin, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolve binary path: %w", err)
+		return 0, fmt.Errorf("resolve binary path: %w", err)
 	}
 	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
 
@@ -77,29 +83,40 @@ func installHooks(root string, force bool) error {
 		"post-checkout": postCheckout,
 	}
 	for name, content := range hooks {
-		if err := installHookFile(hooksDir, name, content, force); err != nil {
-			return err
+		ok, hErr := installHookFile(hooksDir, name, content, force)
+		if hErr != nil {
+			return installed, hErr
+		}
+		if ok {
+			installed++
 		}
 	}
-	fmt.Printf("Hooks installed in %s\n", hooksDir)
-	return nil
+	// Honest summary: "Hooks installed" used to print unconditionally, even
+	// when every hook was skipped — reading as success while the guard is
+	// not actually active.
+	if installed == 0 {
+		fmt.Printf("No hooks installed in %s (all %d skipped; use --force to overwrite existing hooks)\n", hooksDir, len(hooks))
+	} else {
+		fmt.Printf("Hooks installed in %s (%d/%d)\n", hooksDir, installed, len(hooks))
+	}
+	return installed, nil
 }
 
 // installHookFile writes a single hook script. Skips if an existing hook is not
 // a runecho hook (unless force). Overwrites existing runecho hooks always.
-func installHookFile(hooksDir, name, content string, force bool) error {
+func installHookFile(hooksDir, name, content string, force bool) (installed bool, err error) {
 	path := filepath.Join(hooksDir, name)
 	if existing, err := os.ReadFile(path); err == nil {
 		if !strings.Contains(string(existing), "runecho") && !force {
 			fmt.Fprintf(os.Stderr, "  Skipping %s: existing hook (use --force to overwrite)\n", name)
-			return nil
+			return false, nil
 		}
 	}
 	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-		return fmt.Errorf("write %s hook: %w", name, err)
+		return false, fmt.Errorf("write %s hook: %w", name, err)
 	}
 	fmt.Printf("  Installed %s\n", name)
-	return nil
+	return true, nil
 }
 
 // installPeriodic installs an hourly reindex job via launchd (macOS) or cron (Linux).

@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/ir"
+
+	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
 // ---------------------------------------------------------------------------
@@ -877,5 +879,92 @@ func TestGuardStats_NoLog(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "No decisions recorded yet.") {
 		t.Errorf("stderr %q: expected \"No decisions recorded yet.\"", stderr)
+	}
+}
+
+// TestRepoAdd_RelativeSourceRootStoredAbsolute pins the F41/F98 fix: a relative
+// --source-root was stored verbatim, so a later reindex resolved it against its
+// own CWD and silently walked the wrong tree. Enroll must pin it absolute.
+func TestRepoAdd_RelativeSourceRootStoredAbsolute(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	sub := filepath.Join(dir, "src")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run with CWD = dir so the relative path is meaningful at enroll time.
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWD)
+
+	code, _, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", "--name", "relsrc", "--source-root", "src", dir})
+	if code != 0 {
+		t.Fatalf("repo add: got code %d, want 0", code)
+	}
+
+	withHome(home, func() {
+		db, err := snapshot.Open(filepath.Join(home, "history.db"))
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		defer db.Close()
+		repo, err := db.GetRepoByName("relsrc")
+		if err != nil || repo == nil {
+			t.Fatalf("get repo: %v %v", repo, err)
+		}
+		if !filepath.IsAbs(repo.SourceRoot) {
+			t.Errorf("stored source_root = %q, want absolute", repo.SourceRoot)
+		}
+	})
+}
+
+// TestRepoAdd_FailedInitialIndexExitsNonzero pins the F42 fix: repo add
+// discarded doReindex's exit code, so an enroll whose initial index failed
+// still exited 0 — scripts had no way to notice there is no snapshot behind
+// the "Enrolled" line.
+func TestRepoAdd_FailedInitialIndexExitsNonzero(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	missing := filepath.Join(dir, "does-not-exist")
+
+	code, _, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", "--name", "badsrc", "--no-hooks", "--source-root", missing, dir})
+	if code == 0 {
+		t.Fatalf("repo add with a failing initial index exited 0; want nonzero")
+	}
+}
+
+// TestInstall_AllHooksSkippedExitsNonzeroAndSaysSo pins the F30/F33/F34 fix:
+// when every hook is skipped (existing non-runecho hooks, no --force), install
+// printed "Hooks installed" and exited 0 — success theater while the guard is
+// not actually active. It must say no hooks were installed and exit soft-fail.
+func TestInstall_AllHooksSkippedExitsNonzeroAndSaysSo(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"pre-commit", "post-commit", "post-merge", "post-checkout"} {
+		if err := os.WriteFile(filepath.Join(hooksDir, h), []byte("#!/bin/sh\n# husky, not ours\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "install", dir})
+	if code == 0 {
+		t.Fatalf("install with all hooks skipped exited 0; want nonzero (soft)")
+	}
+	if strings.Contains(out, "Hooks installed in") {
+		t.Errorf("output still claims success: %q", out)
+	}
+	if !strings.Contains(out, "No hooks installed") {
+		t.Errorf("output should state no hooks were installed: %q", out)
 	}
 }

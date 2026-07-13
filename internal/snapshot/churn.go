@@ -118,7 +118,7 @@ func ChurnPayload(r ChurnReport, minChanges int) map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"summary":        FormatChurnCompact(r),
+		"summary":        FormatChurnCompact(r, minChanges),
 		"snapshot_count": r.SnapshotCount,
 		"diff_count":     r.DiffCount,
 		"since":          r.Since,
@@ -184,8 +184,11 @@ func FormatChurn(r ChurnReport, minChanges int) string {
 	return sb.String()
 }
 
-// FormatChurnCompact returns a single-line churn summary.
-func FormatChurnCompact(r ChurnReport) string {
+// FormatChurnCompact returns a single-line churn summary. minChanges is the
+// same hotness threshold the detailed formats use — previously hardcoded to 2
+// here, which made the JSON "summary" line contradict its own hot_files list
+// at any non-default --min-changes.
+func FormatChurnCompact(r ChurnReport, minChanges int) string {
 	if r.SnapshotCount < 2 {
 		return fmt.Sprintf("CHURN: insufficient snapshots (need ≥ 2, have %d)", r.SnapshotCount)
 	}
@@ -193,15 +196,14 @@ func FormatChurnCompact(r ChurnReport) string {
 	since := r.Since.Format("2006-01-02")
 	until := r.Until.Format("2006-01-02")
 
-	// Count hot files/symbols at default threshold of 2.
 	hotFiles, hotSymbols := 0, 0
 	for _, f := range r.Files {
-		if f.Changes >= 2 {
+		if f.Changes >= minChanges {
 			hotFiles++
 		}
 	}
 	for _, s := range r.Symbols {
-		if s.Changes >= 2 {
+		if s.Changes >= minChanges {
 			hotSymbols++
 		}
 	}

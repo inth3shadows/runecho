@@ -912,3 +912,29 @@ func TestMigrateV4BackwardCompat(t *testing.T) {
 		t.Fatalf("after backfill GetRepoByCommonDir: %v %v", got, err)
 	}
 }
+
+// TestOpen_NegativeUserVersionErrors pins the F85 fix: a negative user_version
+// (tampered/corrupt store) indexed migrations[-1] and panicked every opener —
+// guard hook, MCP server, and CLI alike. It must fail with an error instead.
+func TestOpen_NegativeUserVersionErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	if _, err := db.conn.Exec("PRAGMA user_version = -1"); err != nil {
+		db.Close()
+		t.Fatalf("set user_version: %v", err)
+	}
+	db.Close()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Open panicked on negative user_version: %v", r)
+		}
+	}()
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open succeeded on a negative user_version; want error")
+	}
+}

@@ -183,6 +183,12 @@ func (db *DB) migrate() error {
 	if current > len(migrations) {
 		return newerSchemaErr(current)
 	}
+	// A negative user_version can only come from a tampered or corrupt store;
+	// without this guard it would index migrations[-1] below and panic every
+	// opener (guard hook, MCP server, CLI) instead of failing with a message.
+	if current < 0 {
+		return fmt.Errorf("invalid schema version %d (corrupt or tampered store)", current)
+	}
 
 	for current < len(migrations) {
 		// Begin() emits BEGIN IMMEDIATE (the store DSN sets _txlock=immediate), so

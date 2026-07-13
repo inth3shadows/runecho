@@ -236,12 +236,31 @@ func TestFormatChurnCompact(t *testing.T) {
 			{Name: "Foo", Kind: "function", Changes: 2, DiffCount: 4},
 		},
 	}
-	out := FormatChurnCompact(r)
+	out := FormatChurnCompact(r, 2)
 	// Should be a single line containing counts
 	if strings.Contains(out, "\n") {
 		t.Errorf("compact output should be one line, got: %s", out)
 	}
 	if !strings.Contains(out, "CHURN") {
 		t.Errorf("compact output should start with CHURN, got: %s", out)
+	}
+}
+
+// TestFormatChurnCompact_HonorsMinChanges pins the F81/F82 fix: the compact
+// summary hardcoded threshold 2, so `churn --compact --min-changes=1` (and the
+// JSON payload's "summary" line) contradicted the hot_files list it sat next to.
+func TestFormatChurnCompact_HonorsMinChanges(t *testing.T) {
+	r := ChurnReport{
+		SnapshotCount: 3,
+		DiffCount:     2,
+		Since:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Until:         time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		Files:         []FileChurn{{Path: "a.go", Changes: 1}},
+	}
+	if out := FormatChurnCompact(r, 1); !strings.Contains(out, "1 hot file") {
+		t.Errorf("minChanges=1 should count the single-change file: %s", out)
+	}
+	if out := FormatChurnCompact(r, 2); !strings.Contains(out, "0 hot files") {
+		t.Errorf("minChanges=2 should exclude the single-change file: %s", out)
 	}
 }

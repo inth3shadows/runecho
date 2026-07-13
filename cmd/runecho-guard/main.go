@@ -321,47 +321,63 @@ func refreshIRForFile(filePath string) (outcome string) {
 	irPath := filepath.Join(srcRoot, ".ai", "ir.json")
 
 	gen := ir.NewGenerator(ir.GeneratorConfig{})
-	existing, loadErr := ir.Load(irPath)
+	// Serialize the whole load→update→save (and the store roll that mirrors it)
+	// under a cross-process advisory lock: concurrent PostToolUse hooks otherwise
+	// interleave load-modify-save on ir.json and the last writer silently drops
+	// the other file's refresh (last-writer-wins lost update). Same fail-open
+	// flock the learned-allow store uses. The lock file lives beside ir.json;
+	// Save would create .ai/ anyway, so pre-creating it here changes nothing.
+	_ = os.MkdirAll(filepath.Dir(irPath), 0700)
+	withFileLock(irPath+".lock", func() {
+		existing, loadErr := ir.Load(irPath)
 
-	var updated *ir.IR
-	var changed bool
-	bootstrapped := false
-	// Coverage counters written back via TouchRepo below. A single-file
-	// UpdateFile does not re-walk, so it preserves the repo's existing counters;
-	// a bootstrap Generate re-walks the whole tree and yields fresh, authoritative
-	// counts that must replace the stale ones (else coverage can exceed 100%).
-	parseErrors, supportedSeen := repo.ParseErrors, repo.SupportedSeen
-	if loadErr != nil || existing == nil || existing.Version != ir.IRVersion {
-		// No usable IR file yet — bootstrap with a full generate (one-time cost).
-		full, stats, genErr := gen.Generate(srcRoot)
-		if genErr != nil {
-			return "generate-fail"
+		var updated *ir.IR
+		var changed bool
+		bootstrapped := false
+		// Coverage counters written back via TouchRepo below. A single-file
+		// UpdateFile does not re-walk, so it preserves the repo's existing counters;
+		// a bootstrap Generate re-walks the whole tree and yields fresh, authoritative
+		// counts that must replace the stale ones (else coverage can exceed 100%).
+		parseErrors, supportedSeen := repo.ParseErrors, repo.SupportedSeen
+		if loadErr != nil || existing == nil || existing.Version != ir.IRVersion {
+			// No usable IR file yet — bootstrap with a full generate (one-time cost).
+			full, stats, genErr := gen.Generate(srcRoot)
+			if genErr != nil {
+				outcome = "generate-fail"
+				return
+			}
+			updated, changed, bootstrapped = full, true, true
+			parseErrors, supportedSeen = stats.ParseErrors, stats.SupportedSeen
+		} else if updated, changed, err = gen.UpdateFile(existing, srcRoot, filePath); err != nil {
+			outcome = "update-fail"
+			return
 		}
-		updated, changed, bootstrapped = full, true, true
-		parseErrors, supportedSeen = stats.ParseErrors, stats.SupportedSeen
-	} else if updated, changed, err = gen.UpdateFile(existing, srcRoot, filePath); err != nil {
-		return "update-fail"
-	}
-	if !changed {
-		return "unchanged" // nothing structural changed; leave the store and ir.json alone
-	}
+		if !changed {
+			outcome = "unchanged" // nothing structural changed; leave the store and ir.json alone
+			return
+		}
 
-	if err := updated.Save(irPath); err != nil {
-		return "save-fail"
-	}
-	// Roll the single "auto" snapshot: delete the prior one and write the fresh
-	// one in ONE transaction, so concurrent PostToolUse hooks can't leave two.
-	if _, err := db.RollAutoSnapshot(repo.ID, "", srcRoot, updated); err != nil {
-		return "snapshot-roll-fail"
-	}
-	// Bump last_indexed so the staleness warning stays quiet. The coverage
-	// counters are the pre-walk values for a single-file refresh, or the fresh
-	// full-walk values when this call bootstrapped (see above).
-	_ = db.TouchRepo(repo.ID, time.Now(), parseErrors, supportedSeen)
-	if bootstrapped {
-		return "bootstrapped"
-	}
-	return "refreshed"
+		if err := updated.Save(irPath); err != nil {
+			outcome = "save-fail"
+			return
+		}
+		// Roll the single "auto" snapshot: delete the prior one and write the fresh
+		// one in ONE transaction, so concurrent PostToolUse hooks can't leave two.
+		if _, err := db.RollAutoSnapshot(repo.ID, "", srcRoot, updated); err != nil {
+			outcome = "snapshot-roll-fail"
+			return
+		}
+		// Bump last_indexed so the staleness warning stays quiet. The coverage
+		// counters are the pre-walk values for a single-file refresh, or the fresh
+		// full-walk values when this call bootstrapped (see above).
+		_ = db.TouchRepo(repo.ID, time.Now(), parseErrors, supportedSeen)
+		if bootstrapped {
+			outcome = "bootstrapped"
+			return
+		}
+		outcome = "refreshed"
+	})
+	return outcome
 }
 
 // runHookMode handles --hook-mode (Claude Code PreToolUse). It reads the tool
@@ -497,39 +513,55 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
 	// Write, which replaces wholesale so the old file is the only record of what it
 	// removes (best-effort read; the hook is PreToolUse, so the file is still old).
-	// Both feed the single ask. Fail-open: any error yields no warning.
+	// Both feed the single ask. Fail-open: any error yields no warning — but a
+	// check that could NOT give a definitive answer is counted in degraded, so a
+	// transient store error or an unreadable/oversized pre-edit file never
+	// masquerades as a clean pass (silent by default; an advisory under strict).
 	var dangling []danglingWarning
 	var droppedImps []guard.DroppedImport
 	var duplicates []duplicateWarning
+	degraded := 0
 	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
 		oldText := removedText
+		oldTextDefinitive := true
 		if payload.ToolName == "Write" {
-			if data, err := os.ReadFile(filePath); err == nil && len(data) <= maxInFileBytes {
-				oldText = string(data)
-			}
+			// Same read + same missing-vs-unreadable distinction E5 relies on: a
+			// missing file (new-file Write) means "" IS the pre-edit truth; an
+			// existing file that is unreadable or over the cap means the deletion
+			// side is unknown — E1/dropped-import would run against a fabricated
+			// empty old text and silently find nothing, so skip and count instead.
+			oldText, oldTextDefinitive = wholeFileText(filePath)
 		}
 		// E1: does this edit remove a definition that *other* files still reference?
 		if danglingEnabled() {
-			if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
-				dangling = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+			if !oldTextDefinitive {
+				degraded++
+			} else if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+				var qErrs int
+				dangling, qErrs = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+				degraded += qErrs
 			}
 		}
 		// Dropped-import: does this edit remove an import whose name the new text
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
 		if droppedImportEnabled() {
-			oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
-			// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
-			// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
-			// addInFileDefs folds whole-file defs into the additive check's known
-			// set above). Fold the on-disk file's whole-file binding context in as
-			// preBound so such a rebind still suppresses the false positive. Not
-			// needed for Write: its newLines already IS the whole file.
-			var preBound map[string]struct{}
-			if payload.ToolName != "Write" {
-				preBound = wholeFileBoundNames(fileLines, lang)
+			if !oldTextDefinitive {
+				degraded++
+			} else {
+				oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
+				// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
+				// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
+				// addInFileDefs folds whole-file defs into the additive check's known
+				// set above). Fold the on-disk file's whole-file binding context in as
+				// preBound so such a rebind still suppresses the false positive. Not
+				// needed for Write: its newLines already IS the whole file.
+				var preBound map[string]struct{}
+				if payload.ToolName != "Write" {
+					preBound = wholeFileBoundNames(fileLines, lang)
+				}
+				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
 			}
-			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
@@ -541,16 +573,28 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		if duplicateEnabled() {
 			if wholeOld, definitive := wholeFileText(filePath); definitive {
 				if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
-					duplicates = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+					var qErrs int
+					duplicates, qErrs = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+					degraded += qErrs
 				}
+			} else {
+				degraded++
 			}
 		}
 	}
 
 	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 {
-		// Nothing flagged. Defer to the normal permission flow, but if the IR is
-		// stale the check may be incomplete — say so via additionalContext (which
-		// informs Claude without forcing an allow/deny).
+		// Nothing flagged. A degraded deletion-side check means "found nothing"
+		// is not the same as "checked everything" — under strict, say so via
+		// additionalContext (the same posture strict already applies to other
+		// degraded states); by default stay silent per the fail-open contract.
+		if degraded > 0 && strictMode() {
+			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d deletion-side check(s) could not run to completion (pre-edit file unreadable/oversized or store query failed) — E1/dropped-import/duplicate coverage was incomplete for this edit.", degraded))
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
+			return 0
+		}
+		// If the IR is stale the check may be incomplete — say so via
+		// additionalContext (which informs Claude without forcing an allow/deny).
 		staleReason := hookDeferStale(out, latest)
 		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason})
 		return 0

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -373,5 +374,82 @@ func TestDangling_CombinedWithHallucination_SingleAsk(t *testing.T) {
 	}
 	if rec := readLastDecisionLog(t); rec["reason"] != "violations+dangling" {
 		t.Errorf("decision reason = %v, want violations+dangling", rec["reason"])
+	}
+}
+
+// TestDangling_WriteOversizedOldFile_StrictAdvisory pins the F22 fix: a Write
+// replacing an existing file the guard cannot read definitively (here: over the
+// maxInFileBytes cap) used to fabricate oldText="" — deletedDefs then saw
+// "nothing deleted" and the E1/dropped-import checks silently passed, exactly
+// the false "clean" E5 already avoids via wholeFileText's definitive flag.
+// Under strict mode that degradation must surface as an advisory (reason
+// store-degraded), not a silent defer.
+func TestDangling_WriteOversizedOldFile_StrictAdvisory(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_DANGLING", "1")
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	// Pre-edit on-disk file defines DoThing but exceeds the in-file read cap.
+	big := "package p\nfunc DoThing() {}\n//" + strings.Repeat("x", maxInFileBytes)
+	file := filepath.Join(top, "known.go")
+	if err := os.WriteFile(file, []byte(big), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Write", file, "", "", "package p\n", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("degraded deletion-side check must not ask, got: %s", d.Hook.PermissionReason)
+	}
+	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
+		t.Errorf("strict mode should surface a degraded-coverage advisory, got context %q", d.Hook.AdditionalContext)
+	}
+	if rec := readLastDecisionLog(t); rec["reason"] != "store-degraded" {
+		t.Errorf("decision log reason = %v, want store-degraded", rec["reason"])
+	}
+}
+
+// TestDangling_RefsQueryError_StrictAdvisory pins the F21 fix: a per-symbol
+// RefsToName failure inside checkDanglingRefs was silently swallowed
+// (`continue`), so a broken/partial store read as a clean pass on the exact
+// signal E1 exists for. The failure must be counted and, under strict mode,
+// surfaced as the same degraded-coverage advisory.
+func TestDangling_RefsQueryError_StrictAdvisory(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_DANGLING", "1")
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	// Break the refs index out from under E1 (the snapshot row itself stays
+	// valid, so openLatestSnapshot succeeds and only the per-symbol query fails).
+	dbPath := filepath.Join(os.Getenv("RUNECHO_HOME"), "history.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw store: %v", err)
+	}
+	if _, err := raw.Exec("DROP TABLE refs"); err != nil {
+		raw.Close()
+		t.Fatalf("drop refs: %v", err)
+	}
+	raw.Close()
+
+	file := filepath.Join(top, "known.go")
+	if err := os.WriteFile(file, []byte("package p\nfunc DoThing() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func DoThing() {}", "", "", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("query-error path must not ask, got: %s", d.Hook.PermissionReason)
+	}
+	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
+		t.Errorf("strict mode should surface the swallowed query error as an advisory, got context %q", d.Hook.AdditionalContext)
+	}
+	if rec := readLastDecisionLog(t); rec["reason"] != "store-degraded" {
+		t.Errorf("decision log reason = %v, want store-degraded", rec["reason"])
 	}
 }

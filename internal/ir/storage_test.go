@@ -366,3 +366,34 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+// TestIR_Save_UniqueTempName pins the F61 fix: Save must not use a fixed
+// "<path>.tmp" scratch name. With a fixed name, two concurrent Saves interleave
+// writes into the same temp file and the loser renames a torn mix into place
+// (the E6 auto-refresh hook hits exactly this). A unique per-call temp name
+// makes each rename atomic with its own complete content. Pinned observably:
+// a pre-existing sibling file named exactly "<path>.tmp" must survive Save
+// untouched.
+func TestIR_Save_UniqueTempName(t *testing.T) {
+	dir := t.TempDir()
+	irPath := filepath.Join(dir, "ir.json")
+	sentinel := irPath + ".tmp"
+	if err := os.WriteFile(sentinel, []byte("other writer's data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (&IR{Version: IRVersion, Files: map[string]FileIR{}}).Save(irPath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel %s gone after Save: %v", sentinel, err)
+	}
+	if string(got) != "other writer's data" {
+		t.Errorf("Save clobbered the fixed-name temp file: %q", got)
+	}
+	if _, err := Load(irPath); err != nil {
+		t.Errorf("saved IR does not load back: %v", err)
+	}
+}

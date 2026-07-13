@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // DefaultIRPath is the default location for IR storage.
@@ -235,6 +236,17 @@ func (ir *IR) Save(path string) error {
 	// unique per call: with a fixed name, two concurrent Saves interleave their
 	// writes into the same file and the loser renames a torn mix into place
 	// (concurrent PostToolUse hooks hit exactly this).
+	//
+	// Unique names never self-overwrite, so first reap temp files orphaned by a
+	// prior crash/kill between CreateTemp and Rename. Age-gated so a live
+	// concurrent Save's in-flight temp is never removed; best-effort throughout.
+	if stale, _ := filepath.Glob(path + ".tmp-*"); len(stale) > 0 {
+		for _, s := range stale {
+			if fi, err := os.Stat(s); err == nil && time.Since(fi.ModTime()) > time.Hour {
+				_ = os.Remove(s)
+			}
+		}
+	}
 	tmpF, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create IR temp file: %w", err)

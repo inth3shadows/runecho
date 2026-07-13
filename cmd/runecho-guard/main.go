@@ -325,10 +325,20 @@ func refreshIRForFile(filePath string) (outcome string) {
 	// under a cross-process advisory lock: concurrent PostToolUse hooks otherwise
 	// interleave load-modify-save on ir.json and the last writer silently drops
 	// the other file's refresh (last-writer-wins lost update). Same fail-open
-	// flock the learned-allow store uses. The lock file lives beside ir.json;
-	// Save would create .ai/ anyway, so pre-creating it here changes nothing.
-	_ = os.MkdirAll(filepath.Dir(irPath), 0700)
-	withFileLock(irPath+".lock", func() {
+	// flock the learned-allow store uses. The lock file lives in the runecho
+	// store dir (keyed by repo ID), NOT beside ir.json — an in-worktree lock
+	// file would litter git status on every hook fire, including the
+	// unchanged/fail outcomes where nothing is ever saved. Holding the lock
+	// across a bootstrap Generate is deliberate: a waiter then takes the cheap
+	// UpdateFile path against the fresh IR instead of repeating the full walk.
+	withFileLock(filepath.Join(storeDir, fmt.Sprintf("e6-refresh-%d.lock", repo.ID)), func() {
+		// Re-read the repo row now that the lock is held: a concurrent hook may
+		// have bootstrapped while we waited, and TouchRepo below must not
+		// clobber its fresh full-walk coverage counters with the stale values
+		// this call resolved before blocking.
+		if r2, rErr := db.GetRepoByName(repo.Name); rErr == nil && r2 != nil {
+			repo = r2
+		}
 		existing, loadErr := ir.Load(irPath)
 
 		var updated *ir.IR
@@ -522,21 +532,30 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	var duplicates []duplicateWarning
 	degraded := 0
 	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
+		// ONE definitive read of the pre-edit on-disk file, shared by every check
+		// that needs it: E1/dropped-import's oldText for Write (the old file is
+		// the only record of what a wholesale Write removes) and E5's whole-file
+		// prior-definition set (any tool). The missing-vs-unreadable distinction
+		// is wholeFileText's: a missing file means "" IS the pre-edit truth; an
+		// existing file that is unreadable or over the cap means the pre-edit
+		// state is unknown — the checks would run against a fabricated empty old
+		// text and silently find nothing, so they are skipped and the single
+		// cause counted once in degraded.
+		wholeOld, wholeDefinitive := "", true
+		if payload.ToolName == "Write" || duplicateEnabled() {
+			wholeOld, wholeDefinitive = wholeFileText(filePath)
+		}
+		if !wholeDefinitive {
+			degraded++
+		}
 		oldText := removedText
 		oldTextDefinitive := true
 		if payload.ToolName == "Write" {
-			// Same read + same missing-vs-unreadable distinction E5 relies on: a
-			// missing file (new-file Write) means "" IS the pre-edit truth; an
-			// existing file that is unreadable or over the cap means the deletion
-			// side is unknown — E1/dropped-import would run against a fabricated
-			// empty old text and silently find nothing, so skip and count instead.
-			oldText, oldTextDefinitive = wholeFileText(filePath)
+			oldText, oldTextDefinitive = wholeOld, wholeDefinitive
 		}
 		// E1: does this edit remove a definition that *other* files still reference?
-		if danglingEnabled() {
-			if !oldTextDefinitive {
-				degraded++
-			} else if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+		if danglingEnabled() && oldTextDefinitive {
+			if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
 				var qErrs int
 				dangling, qErrs = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
 				degraded += qErrs
@@ -545,40 +564,30 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// Dropped-import: does this edit remove an import whose name the new text
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
-		if droppedImportEnabled() {
-			if !oldTextDefinitive {
-				degraded++
-			} else {
-				oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
-				// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
-				// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
-				// addInFileDefs folds whole-file defs into the additive check's known
-				// set above). Fold the on-disk file's whole-file binding context in as
-				// preBound so such a rebind still suppresses the false positive. Not
-				// needed for Write: its newLines already IS the whole file.
-				var preBound map[string]struct{}
-				if payload.ToolName != "Write" {
-					preBound = wholeFileBoundNames(fileLines, lang)
-				}
-				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
+		if droppedImportEnabled() && oldTextDefinitive {
+			oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
+			// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
+			// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
+			// addInFileDefs folds whole-file defs into the additive check's known
+			// set above). Fold the on-disk file's whole-file binding context in as
+			// preBound so such a rebind still suppresses the false positive. Not
+			// needed for Write: its newLines already IS the whole file.
+			var preBound map[string]struct{}
+			if payload.ToolName != "Write" {
+				preBound = wholeFileBoundNames(fileLines, lang)
 			}
+			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
-		// whole on-disk pre-edit file (wholeFileText), not oldText/removedText —
-		// see wholeFileText's doc comment for why the hunk-scoped variable above
-		// is not reusable here. Skips the check entirely (rather than treating ""
-		// as "nothing defined") when wholeFileText can't give a definitive answer
-		// — see wholeFileText's doc comment for why that distinction matters.
-		if duplicateEnabled() {
-			if wholeOld, definitive := wholeFileText(filePath); definitive {
-				if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
-					var qErrs int
-					duplicates, qErrs = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
-					degraded += qErrs
-				}
-			} else {
-				degraded++
+		// whole pre-edit file (wholeOld), not oldText/removedText — see
+		// wholeFileText's doc comment for why the hunk-scoped variable above is
+		// not reusable here.
+		if duplicateEnabled() && wholeDefinitive {
+			if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
+				var qErrs int
+				duplicates, qErrs = checkDuplicateDefs(filepath.Dir(filePath), filePath, added)
+				degraded += qErrs
 			}
 		}
 	}
@@ -588,9 +597,15 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// is not the same as "checked everything" — under strict, say so via
 		// additionalContext (the same posture strict already applies to other
 		// degraded states); by default stay silent per the fail-open contract.
+		// Reason is check-degraded, NOT store-degraded: the store may be fine
+		// (an oversized pre-edit file degrades too), and dogfood stats grep
+		// decisions.jsonl by reason — conflating the two would skew the store-
+		// health signal the un-gating decisions rest on. This intentionally
+		// supersedes the stale-IR advisory for this edit (one advisory slot);
+		// degraded coverage is the more actionable of the two.
 		if degraded > 0 && strictMode() {
-			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d deletion-side check(s) could not run to completion (pre-edit file unreadable/oversized or store query failed) — E1/dropped-import/duplicate coverage was incomplete for this edit.", degraded))
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
+			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d deletion-side/duplicate check(s) could not run to completion (pre-edit file unreadable/oversized, or a store query failed) — coverage was incomplete for this edit.", degraded))
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded"})
 			return 0
 		}
 		// If the IR is stale the check may be incomplete — say so via

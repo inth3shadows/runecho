@@ -137,14 +137,20 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 			continue
 		}
 
-		if cur == nil {
+		// Hunk header: @@ -old +new[,count] @@ — checked BEFORE the cur==nil
+		// skip so inHunk is set even for a file whose +++ header didn't parse:
+		// otherwise a crafted "+++ "-looking added line inside that skipped
+		// file's hunk would still read as a file boundary and attach a phantom
+		// FileDiff.
+		if strings.HasPrefix(line, "@@ ") {
+			inHunk = true
+			if cur != nil {
+				newLineNo = parseHunkStart(line)
+			}
 			continue
 		}
 
-		// Hunk header: @@ -old +new[,count] @@
-		if strings.HasPrefix(line, "@@ ") {
-			inHunk = true
-			newLineNo = parseHunkStart(line)
+		if cur == nil {
 			continue
 		}
 

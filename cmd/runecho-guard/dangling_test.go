@@ -406,8 +406,8 @@ func TestDangling_WriteOversizedOldFile_StrictAdvisory(t *testing.T) {
 	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
 		t.Errorf("strict mode should surface a degraded-coverage advisory, got context %q", d.Hook.AdditionalContext)
 	}
-	if rec := readLastDecisionLog(t); rec["reason"] != "store-degraded" {
-		t.Errorf("decision log reason = %v, want store-degraded", rec["reason"])
+	if rec := readLastDecisionLog(t); rec["reason"] != "check-degraded" {
+		t.Errorf("decision log reason = %v, want check-degraded", rec["reason"])
 	}
 }
 
@@ -449,7 +449,7 @@ func TestDangling_RefsQueryError_StrictAdvisory(t *testing.T) {
 	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
 		t.Errorf("strict mode should surface the swallowed query error as an advisory, got context %q", d.Hook.AdditionalContext)
 	}
-	if rec := readLastDecisionLog(t); rec["reason"] != "store-degraded" {
-		t.Errorf("decision log reason = %v, want store-degraded", rec["reason"])
+	if rec := readLastDecisionLog(t); rec["reason"] != "check-degraded" {
+		t.Errorf("decision log reason = %v, want check-degraded", rec["reason"])
 	}
 }

@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+// TestFormatCompact_AddedRemovedLabeledChanged pins #141: FormatCompact counts
+// added, removed, and modified files into one file total, so labeling it "modified"
+// over-counted modifications. A diff of purely added/removed files must read
+// "N files changed", never "modified".
+func TestFormatCompact_AddedRemovedLabeledChanged(t *testing.T) {
+	result := DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		TotalAdded:   1,
+		TotalRemoved: 1,
+		Files: []FileDiff{
+			{Path: "new.go", Status: "added", Added: []SymbolDelta{{Name: "NewFunc", Kind: "function"}}},
+			{Path: "gone.go", Status: "removed", Removed: []SymbolDelta{{Name: "OldFunc", Kind: "function"}}},
+		},
+	}
+	got := FormatCompact(result)
+	if !strings.Contains(got, "2 files changed") {
+		t.Errorf("want \"2 files changed\", got %q", got)
+	}
+	if strings.Contains(got, "modified") {
+		t.Errorf("no file was modified (TotalModified=0); summary must not say \"modified\": %q", got)
+	}
+}
+
 // TestDiffPayloadShape locks the canonical JSON shape consumed by both the
 // `runecho-ir diff --json` CLI flag and the MCP `diff` oracle tool. If this
 // shape changes, the harness gate's parser must change with it — so the test

@@ -197,11 +197,12 @@ func isPyPublicTopLevel(qualified string) bool {
 // pySymbolsFromAST walks the Python AST and returns every function and class
 // definition. Methods and nested defs/classes are qualified by their enclosing
 // scope (e.g. "Reader.fetch", "outer.inner") so identical leaf names in different
-// scopes never collide. hashes carries a per-function body hash keyed
-// "function:<qualified name>" for modified-symbol diffing; classes are not hashed
-// (their changes surface through their members, avoiding double-reporting). lines
-// carries each symbol's 1-based start line, keyed "kind:<qualified name>", for the
-// repo map.
+// scopes never collide. hashes carries a per-symbol body hash keyed
+// "<kind>:<qualified name>" (kind is "function" or "class") for modified-symbol
+// diffing — issue #53 added class-level hashing so a class-body change that its
+// members don't otherwise surface (e.g. an edited class-level field) is still
+// detected as a modification. lines carries each symbol's 1-based start line, keyed
+// "kind:<qualified name>", for the repo map.
 func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int) {
 	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
 	// input; a panic here would otherwise propagate through parseFile→Generate

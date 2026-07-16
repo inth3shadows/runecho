@@ -223,6 +223,13 @@ func ExtractImports(lang Lang, lines []AddedLine) []string {
 		text := l.Text
 		switch lang {
 		case LangPython:
+			// Strip a trailing inline `# ...` comment before parsing. A Python
+			// import statement contains no string literals, so the first `#` on an
+			// import line always begins a comment. Without this, strings.Trim(list,
+			// "()") leaves the comment attached to the last name and every name after
+			// the first is dropped (`from m import (A, B)  # c` binds only A), and a
+			// `)` inside a comment can prematurely close a multi-line group (#144).
+			text = stripPyLineComment(text)
 			if inPyParen {
 				seg := text
 				if idx := strings.IndexByte(seg, ')'); idx >= 0 {
@@ -250,6 +257,16 @@ func ExtractImports(lang Lang, lines []AddedLine) []string {
 		}
 	}
 	return names
+}
+
+// stripPyLineComment truncates a Python import line at its inline `# ...` comment.
+// Import statements have no string literals, so the first `#` always begins a
+// comment — no string-literal masking is needed here (issue #144).
+func stripPyLineComment(s string) string {
+	if i := strings.IndexByte(s, '#'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // parsePyNames parses a comma-separated import name segment (`a, b as B`),

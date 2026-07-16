@@ -49,6 +49,44 @@ func TestRun_ImportedNameNotFlagged(t *testing.T) {
 	}
 }
 
+// TestRun_HunkInsideDocstringNotFlagged pins #145: a hunk that adds prose INSIDE a
+// pre-existing module docstring (the opening `"""` is on an unchanged line above the
+// hunk, so absent from the added lines) must be masked, not scanned as code. With
+// AbsPath set, ExtractRefs seeds the string-open state from the file above the hunk,
+// so prose like `headers (lowercase)` no longer reads as an unresolved `headers(` call.
+func TestRun_HunkInsideDocstringNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	// Docstring opens on line 1 and stays open through the added prose (lines 3-4).
+	content := "\"\"\"Shared HTTP-proxy plumbing.\n" +
+		"\n" +
+		"The redactor sees the (projected) response body string.\n" +
+		"Names exact response headers (lowercase) to surface upstream.\n" +
+		"\"\"\"\n" +
+		"import os\n"
+	path := filepath.Join(dir, "runner.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diffs := []FileDiff{{
+		Path:    "runner.py",
+		AbsPath: path,
+		AddedLines: []AddedLine{
+			{LineNo: 3, Text: "The redactor sees the (projected) response body string."},
+			{LineNo: 4, Text: "Names exact response headers (lowercase) to surface upstream."},
+		},
+	}}
+	if v := Run(map[string]struct{}{}, "", diffs); len(v) != 0 {
+		t.Fatalf("docstring prose must be masked via the AbsPath seed, got violations: %+v", v)
+	}
+
+	// Control: without the seed the same hunk starts in the outside-string state, so
+	// the prose IS scanned as code and flags — the exact false-positive #145 fixes.
+	diffs[0].AbsPath = ""
+	if v := Run(map[string]struct{}{}, "", diffs); len(v) == 0 {
+		t.Fatal("expected the unseeded hunk to still flag docstring prose (seed control)")
+	}
+}
+
 func TestRun_HallucinatedCall(t *testing.T) {
 	symbols := map[string]struct{}{"ProcessFoo": {}}
 	diffs := []FileDiff{{

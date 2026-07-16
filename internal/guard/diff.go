@@ -22,6 +22,13 @@ const maxDiffBytes = 64 << 20 // 64 MiB
 type FileDiff struct {
 	Path       string
 	AddedLines []AddedLine
+	// AbsPath is the absolute on-disk path of the file, used only to seed
+	// pre-hunk multi-line string state so a hunk that begins inside a
+	// pre-existing docstring is masked rather than scanned as code (issue #145).
+	// Empty disables seeding: it is set by the pre-commit path (where AddedLines
+	// carry real new-file line numbers) and left empty by the hook and full-file
+	// callers, whose line numbers are synthetic and can't index into the file.
+	AbsPath string
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

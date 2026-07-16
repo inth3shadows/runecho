@@ -349,8 +349,13 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 			return existing, false, nil // already absent
 		}
 		delete(files, norm) // file was deleted
-	case info.IsDir() || !g.supportsExtension(filepath.Ext(absFile)):
-		// Not an indexed source file. If it used to be one (extension changed),
+	case info.IsDir() || !g.supportsExtension(filepath.Ext(absFile)) || pathCrossesSymlink(absRoot, absFile):
+		// Not an indexed source file. A symlink — the edited target itself or any
+		// directory component within the repo — mirrors walkSourceFiles, which skips
+		// symlinked files and dirs: without this the per-edit refresh would os.Stat
+		// through the link and pull an out-of-repo target's content into the IR under
+		// an in-repo key, while a full walk skipped it (#143). If a real file at this
+		// key used to be indexed (extension changed, or a file replaced by a symlink),
 		// drop the stale entry; otherwise no-op.
 		if _, ok := files[norm]; !ok {
 			return existing, false, nil
@@ -367,6 +372,37 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	updated := &IR{Version: IRVersion, Files: files}
 	updated.RootHash = ComputeRootHash(files)
 	return updated, updated.RootHash != existing.RootHash, nil
+}
+
+// pathCrossesSymlink reports whether absFile, or any directory component strictly
+// between absRoot and absFile, is a symlink. It mirrors walkSourceFiles, which skips
+// symlinked files (return nil) and symlinked directories (SkipDir), so the per-edit
+// UpdateFile refresh skips exactly the paths a full walk would — an in-repo symlink
+// pointing OUTSIDE the repo can then never pull an external target into the IR (#143).
+//
+// absRoot's own ancestry is intentionally not inspected: filepath.Rel already placed
+// absFile lexically under absRoot, and the walk likewise never examines its start
+// dir's parents, so a repo legitimately checked out under a symlinked prefix still
+// indexes normally. A missing/unreadable component (broken link, race) returns false
+// and defers to the caller's os.Stat handling (deletion / no-op), never a false skip.
+func pathCrossesSymlink(absRoot, absFile string) bool {
+	for p := absFile; p != absRoot; {
+		li, err := os.Lstat(p)
+		if err != nil {
+			return false
+		}
+		if li.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			// Reached the filesystem root without matching absRoot (should not
+			// happen once Rel has confirmed containment) — stop rather than loop.
+			break
+		}
+		p = parent
+	}
+	return false
 }
 
 // normalizePath applies all path normalization rules:

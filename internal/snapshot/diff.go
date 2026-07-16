@@ -193,22 +193,26 @@ func FormatCompact(d DiffResult) string {
 	aShort := shortHash(d.SnapshotA.RootHash)
 	bShort := shortHash(d.SnapshotB.RootHash)
 
-	modifiedCount := 0
+	// Count every changed file — added, removed, and modified. The label is
+	// "changed", not "modified": an added or removed file is a change but not a
+	// modification, so labeling this total "modified" over-counted modifications
+	// (#141). The per-modification symbol total stays "~%d".
+	changedCount := 0
 	for _, f := range d.Files {
 		if f.Status == "modified" || f.Status == "added" || f.Status == "removed" {
-			modifiedCount++
+			changedCount++
 		}
 	}
 
 	addStr := plural(d.TotalAdded, "symbol")
 	remStr := plural(d.TotalRemoved, "symbol")
-	fileStr := plural(modifiedCount, "file")
+	fileStr := plural(changedCount, "file")
 
 	if d.TotalModified > 0 {
-		return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, ~%d, %s modified",
+		return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, ~%d, %s changed",
 			aShort, bShort, addStr, remStr, d.TotalModified, fileStr)
 	}
-	return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, %s modified",
+	return fmt.Sprintf("IR DIFF [%s→%s]: +%s, -%s, %s changed",
 		aShort, bShort, addStr, remStr, fileStr)
 }
 

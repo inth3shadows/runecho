@@ -768,6 +768,32 @@ func TestExtractImports_Python(t *testing.T) {
 	}
 }
 
+// TestExtractImports_PythonInlineComment pins #144: an inline `# ...` comment on a
+// Python import must not drop names. Before the fix, strings.Trim(list, "()") left
+// the comment attached to the last name so it failed reIdent and was dropped —
+// a later bare call to it then read as a hallucination (guard false positive).
+func TestExtractImports_PythonInlineComment(t *testing.T) {
+	ls := lines(
+		`from mod import (Foo, Bar)  # see notes`, // single-line paren + comment
+		`from other import Baz  # a note`,         // single name + comment
+		`import os  # stdlib`,                     // plain import + comment
+		`from pkg import (  # opens the group`,    // multi-line opener, ) only in comment
+		`    Alpha,`,
+		`    Beta as B,  # aliased`,
+		`)  # close`,
+	)
+	got := ExtractImports(LangPython, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	for _, want := range []string{"Foo", "Bar", "Baz", "os", "Alpha", "B"} {
+		if !gotSet[want] {
+			t.Errorf("expected import %q bound despite inline comment, got %v", want, got)
+		}
+	}
+}
+
 // A `from m import (` opens multi-line paren state; a non-contiguous line (a
 // LineNo jump, i.e. a separate diff hunk) must reset it so the continuation is
 // not misread as imported names. Mirrors the ExtractRefs multi-line-state reset.

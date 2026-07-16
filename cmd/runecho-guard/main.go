@@ -197,6 +197,15 @@ func runArgs(args []string) int {
 		return 0
 	}
 
+	// Seed each diff with its on-disk path so the hallucination check can mask a
+	// hunk that begins inside a pre-existing docstring — the opening delimiter sits
+	// in unchanged context above the hunk, invisible to the added lines alone
+	// (issue #145). Diff paths are repoRoot-relative; a file that can't be read
+	// disables seeding for that entry (fail-open, handled in openSeedFor).
+	for i := range diffs {
+		diffs[i].AbsPath = filepath.Join(repoRoot, filepath.FromSlash(diffs[i].Path))
+	}
+
 	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
 	ignorePath := ignorePathFor(cwd, repoRoot)
 

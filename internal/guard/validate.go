@@ -74,7 +74,14 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		if lang == LangUnknown {
 			continue
 		}
-		for _, ref := range ExtractRefs(lang, fd.AddedLines) {
+		// When the file is on disk (pre-commit path), seed the per-hunk string
+		// state from the lines above each hunk so a hunk that begins inside a
+		// pre-existing docstring is masked, not scanned as code (#145).
+		var openSeed func(int) string
+		if fd.AbsPath != "" {
+			openSeed = openSeedFor(lang, fd.AbsPath)
+		}
+		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed) {
 			if _, ok := known[ref.Name]; ok {
 				continue
 			}
@@ -97,6 +104,48 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 	return violations
+}
+
+// maxSeedFileBytes caps the file read for pre-hunk string-state seeding. Past it,
+// seeding is skipped (fall back to hunk-only scanning) rather than reading an
+// unbounded blob into memory on the pre-commit path.
+const maxSeedFileBytes = 8 << 20 // 8 MiB
+
+// openSeedFor reads absPath and returns a function mapping a 1-based new-file line
+// number to the unterminated multi-line string delimiter in effect at the START of
+// that line — the seed ExtractRefs uses to mask a hunk that begins inside a
+// pre-existing string/docstring (issue #145). Returns nil (no seeding, hunk-only
+// scanning) when the file can't be read or exceeds maxSeedFileBytes — fail-open,
+// matching the guard's degraded-input posture. The working-tree file is read; for
+// the unchanged context above a hunk it matches the staged content the diff came
+// from (an unstaged edit to that context is a rare corner and stays fail-open).
+func openSeedFor(lang Lang, absPath string) func(int) string {
+	data, err := os.ReadFile(absPath)
+	if err != nil || len(data) > maxSeedFileBytes {
+		return nil
+	}
+	fileLines := strings.Split(string(data), "\n")
+	// prefix[k] is the string-open state at the START of 1-based line k+1: prefix[0]
+	// is "" (before line 1), and each step threads one line through the same masking
+	// ExtractRefs uses, so prefix[k] is exactly the state ExtractRefs would reach had
+	// it scanned the file from the top.
+	prefix := make([]string, len(fileLines)+1)
+	open := ""
+	for i, ln := range fileLines {
+		prefix[i] = open
+		_, open = stripLiteralsStateful(lang, ln, open)
+	}
+	prefix[len(fileLines)] = open
+	return func(lineNo int) string {
+		idx := lineNo - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(prefix) {
+			idx = len(prefix) - 1
+		}
+		return prefix[idx]
+	}
 }
 
 // matchesIgnoreGlob reports whether name matches any of the guardignore glob

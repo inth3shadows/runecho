@@ -482,6 +482,17 @@ type Ref struct {
 // ExtractRefs extracts bare function call targets from the added lines for the
 // given language. Qualified calls (pkg.Foo / obj.Method) are skipped.
 func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
+	return extractRefs(lang, lines, nil)
+}
+
+// extractRefs is ExtractRefs with an optional openSeed. openSeed(lineNo) returns
+// the unterminated multi-line string delimiter in effect at the START of new-file
+// line lineNo, letting a diff hunk that begins inside a pre-existing string or
+// docstring be scanned in the right (masked) state — the hunk's added lines alone
+// can't reveal it, since the opening delimiter sits in unchanged context above the
+// hunk (issue #145). A nil seed preserves the full-file / hook behavior: every
+// contiguous run starts outside any string.
+func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string) []Ref {
 	if lang == LangUnknown {
 		return nil
 	}
@@ -513,8 +524,17 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 	inIface := false
 	for i, l := range lines {
 		text := l.Text
-		if i > 0 && l.LineNo != prevNo+1 {
-			open = ""
+		if i == 0 || l.LineNo != prevNo+1 {
+			// Start of a contiguous run (the first line, or after a hunk gap):
+			// reset carried state. Seed the string state from the file context
+			// above the run when a seed is available, so a run that opens inside a
+			// pre-existing docstring is masked instead of scanned as code (#145);
+			// without a seed the run starts outside any string, as before.
+			if openSeed != nil {
+				open = openSeed(l.LineNo)
+			} else {
+				open = ""
+			}
 			inIface = false
 		}
 		prevNo = l.LineNo

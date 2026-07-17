@@ -95,3 +95,25 @@ func TestShellParser_HeredocBodySkipped(t *testing.T) {
 		t.Errorf("Functions = %v, want %v (heredoc bodies must be skipped, herestring must not)", fs.Functions, want)
 	}
 }
+
+// TestShellParser_HeredocTerminatorExact pins that the heredoc delimiter is matched
+// EXACTLY (bash semantics): a body line `EOF ` (delimiter + trailing space) is NOT a
+// terminator, so it stays part of the body and a function-shaped line after it is
+// still skipped. A trimmed compare would end the heredoc early and leak that line.
+func TestShellParser_HeredocTerminatorExact(t *testing.T) {
+	src := "real() {\n" +
+		"  cat <<EOF\n" +
+		"EOF \n" + // trailing space: NOT the delimiter, still body
+		"leaked() {\n" + // would be extracted if `EOF ` wrongly terminated
+		"EOF\n" + // the real delimiter, exact
+		"}\n" +
+		"after() { echo x; }\n"
+	fs, err := NewShellParser().Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"after", "real"}
+	if !reflect.DeepEqual(fs.Functions, want) {
+		t.Errorf("Functions = %v, want %v (a trailing-space delimiter line must NOT terminate the heredoc)", fs.Functions, want)
+	}
+}

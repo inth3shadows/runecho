@@ -80,7 +80,7 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 - No external services, no API keys.
 
 Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, Google Apps
-Script (`.gs`), and Python**.
+Script (`.gs`), Python, and shell (`.sh`/`.bash`)**.
 Extraction is intentionally shallow and deterministic: top-level structure, not
 full semantic analysis.
 

@@ -322,7 +322,8 @@ behavior.
   Code run `claude mcp list` and look for `runecho` marked Connected. Re-register
   with the command the installer printed if it's missing.
 - **A repo shows unexpected file counts** — RunEcho only understands Go,
-  JavaScript/TypeScript/JSX/TSX, and Python; files in other languages are not counted.
+  JavaScript/TypeScript/JSX/TSX, Python, and shell (`.sh`/`.bash`); files in other
+  languages are not counted.
 - **You want to start a repo's history over** — `runecho-ir repo rm <name>`
   removes it and its history, then `repo add` + `repo reindex` gives a clean start.
 - **A commit is blocked and you disagree with the guard** — ignore-list the

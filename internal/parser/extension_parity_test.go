@@ -34,6 +34,7 @@ var registeredParsers = []parser.Parser{
 	parser.NewGoParser(),
 	parser.NewJSParser(),
 	parser.NewPythonParser(),
+	parser.NewShellParser(),
 }
 
 // TestExtensionParity asserts that for every extension guard.LangFor considers

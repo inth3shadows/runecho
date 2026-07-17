@@ -288,6 +288,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 | **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures | `go/ast` (stdlib) |
 | **JS/TS/JSX/TSX** | `.js`, `.mjs`, `.cjs`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via AST, regex fallback when the grammar is unavailable | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
 | **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
+| **Shell** | `.sh`, `.bash` | Top-level function definitions only (`name() { … }` and `function name { … }`) → Functions; no imports (`source` binds no named symbols), no classes/exports, no body hashes (diff degrades to add/remove) | None (shell has no methods) | Top-level function defs; heredoc bodies and comments skipped | regex (line scan) |
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
 consistent across parsers. Functions/methods are body-hashed over their full
@@ -317,9 +318,12 @@ which member changed.
 
 ## Known Limitations
 
-- **Languages:** Go, JS/TS/JSX/TSX/GAS (`.gs`), and Python only. Parsers are AST-based but
-  scoped to definitions (functions, classes, methods) — not full semantic
-  resolution (no type inference, call-graph, or cross-file binding).
+- **Languages:** Go, JS/TS/JSX/TSX/GAS (`.gs`), Python, and shell (`.sh`/`.bash`) only.
+  Parsers are AST-based (regex line-scan for shell) but scoped to definitions
+  (functions, classes, methods) — not full semantic resolution (no type inference,
+  call-graph, or cross-file binding). Shell is parser-only: it feeds the index but
+  the edit-time guard deliberately does not validate shell (a bare command is
+  indistinguishable from an external binary).
 - **File cap is enforced.** `repo add --cap N` stops indexing after N files (the
   walk continues counting supported files, so the coverage denominator stays
   honest). The root hash reflects only the capped file set — truncation changes

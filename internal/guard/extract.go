@@ -86,6 +86,21 @@ var jsBuiltins = setOf(
 	"undefined", "null", "true", "false",
 )
 
+// jsTestGlobals are the ambient globals JS/TS test runners (Vitest, Jest, Mocha)
+// inject into a spec file's scope — never imported, never defined, so a bare call
+// to one reads as a hallucination to the additive check. Folded into the known
+// set ONLY for test files (see IsJSTestFile / FoldTestGlobals), so a genuinely
+// hallucinated it()/test()/expect() in PRODUCT code is still caught — FN (a silent
+// miss) is the worst class, so this stays scoped rather than joining jsBuiltins.
+// `vi`/`jest` are omitted: they are used qualified (`vi.fn()`, `jest.mock()`) and
+// so already exempt via the qualified-`.` skip; a bare `vi(`/`jest(` never occurs.
+var jsTestGlobals = setOf(
+	"describe", "it", "test", "expect",
+	"beforeEach", "afterEach", "beforeAll", "afterAll",
+	"suite", "context", "specify",
+	"xit", "xdescribe", "fit", "fdescribe",
+)
+
 var pyBuiltins = setOf(
 	// keywords that can appear immediately before '(' (`return (x)`, `for i in (…)`,
 	// `raise X`, `a or (b)`). Without these, ~half of all Python edits false-positive.
@@ -360,6 +375,150 @@ func parseJSBindingTarget(s string) []string {
 		return []string{s}
 	}
 	return nil
+}
+
+// JSDeclaredNames returns the identifiers bound by `const`/`let`/`var`
+// declarations on the given lines — the LHS binding targets ONLY. It exists
+// because a huge share of JS/TS additive false positives are bare calls to a
+// name bound by a form ExtractDefs/ExtractImports miss: a useState setter
+// (`const [x, setX] = useState()`), an object destructure (`const {a, b} = o`),
+// or a callable assigned from a computed member (`const fn = handlers[k]`).
+//
+// Precision matters here in a way it does NOT for LocallyBoundNames (which is
+// over-inclusive and used only to SUPPRESS dropped-import warnings): folding a
+// name into the additive known set means a genuine hallucination of that name is
+// no longer caught. So this binds only true declarator targets — it takes the
+// value side of an object rename (`b: c` → c, never the key), the leading
+// identifier of a bare/annotated declarator (`x: Foo` → x, never the type), and
+// recurses into nested patterns. Function/arrow parameters are deliberately
+// EXCLUDED: a parameter's TS type annotation (`ctx: RouteContext`) would leak the
+// type name as a bound symbol and mask a real undefined-type reference.
+func JSDeclaredNames(lines []AddedLine) []string {
+	var out []string
+	scanStripped(LangJS, lines, func(s string, _ AddedLine) {
+		mm := reJSDeclList.FindStringSubmatch(s)
+		if mm == nil {
+			return
+		}
+		for _, decl := range splitTopLevelCommas(mm[1]) {
+			lhs := assignLHS(decl)
+			if lhs == "" {
+				lhs = decl // declarator with no initializer (`let a, b;`)
+			}
+			out = append(out, jsBindingTargets(lhs)...)
+		}
+	})
+	return out
+}
+
+// jsBindingTargets returns the identifiers a single binding pattern introduces:
+// a bare name (annotation/default dropped), an array pattern (`[a, setA]` → a,
+// setA), or an object pattern (`{a, b: c}` → a, c). reIdentAll.FindString takes
+// the leftmost identifier of each element, which also absorbs a default value
+// (`a = 1` → a) since the binding name leads. Nested patterns recurse.
+func jsBindingTargets(p string) []string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return nil
+	}
+	switch p[0] {
+	case '[':
+		inner, _ := jsPatternInner(p)
+		var out []string
+		for _, el := range splitTopLevelCommas(inner) {
+			out = appendJSBindElem(out, el, false)
+		}
+		return out
+	case '{':
+		inner, _ := jsPatternInner(p)
+		var out []string
+		for _, el := range splitTopLevelCommas(inner) {
+			out = appendJSBindElem(out, el, true)
+		}
+		return out
+	default:
+		if id := reIdentAll.FindString(p); id != "" {
+			return []string{id}
+		}
+		return nil
+	}
+}
+
+// appendJSBindElem adds the binding identifier(s) of one destructuring element.
+// For an object element (obj=true) with a top-level rename colon (`b: c`), the
+// binding is the value side (`c`) — the key is never bound. A nested pattern
+// recurses; otherwise the leading identifier is taken (defaults/annotations
+// trail it and are ignored).
+func appendJSBindElem(out []string, el string, obj bool) []string {
+	el = strings.TrimSpace(el)
+	if el == "" {
+		return out
+	}
+	if obj {
+		if i := jsTopLevelColon(el); i >= 0 {
+			el = strings.TrimSpace(el[i+1:])
+		}
+	}
+	if strings.HasPrefix(el, "[") || strings.HasPrefix(el, "{") {
+		return append(out, jsBindingTargets(el)...)
+	}
+	if id := reIdentAll.FindString(el); id != "" {
+		out = append(out, id)
+	}
+	return out
+}
+
+// jsPatternInner returns the content between the leading bracket of p and its
+// matching close (excluding both), so a trailing type annotation on the whole
+// pattern (`{a}: Props`) is discarded, not mistaken for a binding. On an
+// unbalanced pattern (one that spanned a diff-hunk gap) it returns the remainder
+// after the opening bracket — best effort, never a panic.
+func jsPatternInner(p string) (string, bool) {
+	if p == "" {
+		return "", false
+	}
+	var close byte
+	switch p[0] {
+	case '[':
+		close = ']'
+	case '{':
+		close = '}'
+	default:
+		return "", false
+	}
+	depth := 0
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '[', '{', '(':
+			depth++
+		case ']', '}', ')':
+			depth--
+			if depth == 0 && p[i] == close {
+				return p[1:i], true
+			}
+		}
+	}
+	return p[1:], true
+}
+
+// jsTopLevelColon returns the index of the first ':' in s at bracket depth 0, or
+// -1. Used to split an object-destructure rename (`b: c`) at its key/value colon
+// without being fooled by a colon inside a nested pattern or computed key.
+func jsTopLevelColon(s string) int {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[', '{', '(':
+			depth++
+		case ']', '}', ')':
+			depth--
+		case ':':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // --- reference extraction ---
@@ -667,6 +826,37 @@ func builtinsFor(lang Lang) map[string]struct{} {
 		return pyBuiltins
 	}
 	return nil
+}
+
+// IsJSTestFile reports whether path is a JS/TS test/spec file by the conventional
+// filename markers (`*.test.*`, `*.spec.*`) or a `__tests__/` directory. Used to
+// scope jsTestGlobals to files where the runner actually injects them, so product
+// code keeps full precision. Non-JS paths are always false.
+func IsJSTestFile(path string) bool {
+	if LangFor(path) != LangJS {
+		return false
+	}
+	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	if strings.Contains(p, "/__tests__/") || strings.HasPrefix(p, "__tests__/") {
+		return true
+	}
+	base := p
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		base = p[i+1:]
+	}
+	return strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")
+}
+
+// FoldTestGlobals adds the ambient test-runner globals to known when path is a
+// JS/TS test file; no-op otherwise. Centralizing the test-file gate here keeps the
+// pre-commit and hook known-set builders in sync through one call site each.
+func FoldTestGlobals(known map[string]struct{}, path string) {
+	if !IsJSTestFile(path) {
+		return
+	}
+	for name := range jsTestGlobals {
+		known[name] = struct{}{}
+	}
 }
 
 // isCommentLine reports whether a line is a *whole-line* comment that should be

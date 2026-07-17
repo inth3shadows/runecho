@@ -51,10 +51,10 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// not a hallucination. The hook-mode known-set builder folds imports the same
 	// way; without this, the pre-commit path flagged bare calls to any imported
 	// symbol whose import line sat outside a hunk's def set (issues #76, #80).
-	// NOTE: this covers imports present IN the diff. An import that is pre-existing
-	// (outside the staged hunk) is only resolvable via the indexed IR, whose
-	// FileStructure.Imports currently stores module paths not bound names — a
-	// separate, deeper fix tracked on #76/#80.
+	// A pre-existing import (outside the staged hunk) is resolved separately via
+	// the indexed IR: generator.go indexes each file's bound import names under the
+	// "import_name" symbol kind, so SymbolsForLatestSnapshot already carries them
+	// into `symbols` here — the deeper half of #76/#80, closed by PR #82.
 	for _, fd := range diffs {
 		lang := LangFor(fd.Path)
 		for _, def := range ExtractDefs(lang, fd.AddedLines) {
@@ -63,6 +63,24 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		for _, imp := range ExtractImports(lang, fd.AddedLines) {
 			known[imp] = struct{}{}
 		}
+		// JS binds callables by forms ExtractDefs/ExtractImports miss —
+		// destructuring (`const [x, setX] = useState()`), object destructure, and
+		// computed-assign (`const fn = handlers[k]`). A bare call to one of those is
+		// not a hallucination, so fold the declarator binding targets in. JSDeclared-
+		// Names (not the over-inclusive LocallyBoundNames) is used precisely so a
+		// param type annotation can't leak a type name and mask a real undefined ref.
+		// This sees only the added lines here; the hook path additionally folds
+		// whole-file bindings via addInFileDefs for pre-existing binding lines.
+		// JS-only: Go/Python also use `const`/`var`, and Go already skips bare
+		// lowercase refs, so this fold belongs to JS/TS alone.
+		if lang == LangJS {
+			for _, name := range JSDeclaredNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
+		}
+		// Ambient test-runner globals (describe/it/expect/…) resolve only inside a
+		// spec file, where the runner injects them — see FoldTestGlobals.
+		FoldTestGlobals(known, fd.Path)
 	}
 
 	// Pass 2: collect references, flag anything not in known set.

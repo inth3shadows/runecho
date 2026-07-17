@@ -132,6 +132,23 @@ func TestShellParser_BodyHashing(t *testing.T) {
 	}
 }
 
+// TestShellParser_ParamNestedBraceBodySpan pins the masker's parameter-expansion
+// nesting: a `${…{…}…}` (e.g. a brace-shaped default) must not close the param at
+// the FIRST inner `}`. If it did, the leaked `}` would close the FUNCTION body early,
+// truncating its hash so an edit to the body AFTER the expansion goes undetected
+// (a modified-symbol diff false-negative). The hash must therefore change when the
+// tail after the `${…{…}…}` changes.
+func TestShellParser_ParamNestedBraceBodySpan(t *testing.T) {
+	base := "real() {\n  y=${z:-{a,b}}\n  echo original_tail\n}\n"
+	tailEdit := "real() {\n  y=${z:-{a,b}}\n  echo CHANGED_TAIL\n}\n"
+	if funcHash(t, base, "real") == "" {
+		t.Fatal("real should have a body hash")
+	}
+	if funcHash(t, base, "real") == funcHash(t, tailEdit, "real") {
+		t.Error("editing the body AFTER a ${…{…}…} must change the hash — the nested brace leaked and truncated the span")
+	}
+}
+
 // TestShellParser_MaskingKeepsBodySpanHonest pins the masker: a `}` or a
 // function-def-shaped line inside a string, command substitution, parameter
 // expansion, comment, or escape must NOT close a body early or be read as a def.

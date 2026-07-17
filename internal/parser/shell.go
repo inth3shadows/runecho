@@ -353,6 +353,13 @@ func maskShell(src []byte) []byte {
 				mask1(i)
 				pop()
 				i++
+			case c == '{':
+				// A bare `{` inside ${…} (a literal or brace-expansion-shaped default,
+				// e.g. `${x:-{a,b}}`) nests a brace level, so the FIRST inner `}` closes
+				// it rather than popping the param early and leaking a stray code `}`.
+				mask1(i)
+				push('p')
+				i++
 			case c == '$' && i+1 < n && src[i+1] == '{':
 				mask1(i)
 				mask1(i + 1)

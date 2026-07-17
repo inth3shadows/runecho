@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/store"
 )
 
 // DefaultIRPath is the default location for IR storage.
@@ -230,16 +232,11 @@ func (ir *IR) Save(path string) error {
 		return fmt.Errorf("failed to marshal IR: %w", err)
 	}
 
-	// Write atomically: a crash mid-write must never leave a half-written
-	// ir.json that fails to unmarshal. Write a sibling temp file, then rename
-	// (atomic on the same filesystem on Linux/macOS). The temp name must be
-	// unique per call: with a fixed name, two concurrent Saves interleave their
-	// writes into the same file and the loser renames a torn mix into place
-	// (concurrent PostToolUse hooks hit exactly this).
-	//
-	// Unique names never self-overwrite, so first reap temp files orphaned by a
-	// prior crash/kill between CreateTemp and Rename. Age-gated so a live
-	// concurrent Save's in-flight temp is never removed; best-effort throughout.
+	// Reap temp files orphaned by a prior crash/kill between CreateTemp and Rename
+	// in store.AtomicWriteFile below. Unique temp names never self-overwrite, so
+	// these only accumulate on abnormal exit; age-gated so a live concurrent Save's
+	// in-flight temp is never removed. Best-effort — the glob pattern matches the
+	// helper's "<base>.tmp-*" names.
 	if stale, _ := filepath.Glob(path + ".tmp-*"); len(stale) > 0 {
 		for _, s := range stale {
 			if fi, err := os.Stat(s); err == nil && time.Since(fi.ModTime()) > time.Hour {
@@ -247,25 +244,14 @@ func (ir *IR) Save(path string) error {
 			}
 		}
 	}
-	tmpF, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("failed to create IR temp file: %w", err)
-	}
-	tmp := tmpF.Name()
-	if _, err := tmpF.Write(data); err != nil {
-		tmpF.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("failed to write IR file: %w", err)
-	}
-	if err := tmpF.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("failed to write IR file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) // best-effort cleanup; the real file is untouched
-		return fmt.Errorf("failed to replace IR file: %w", err)
-	}
 
+	// Write atomically (temp file + rename): a crash mid-write must never leave a
+	// half-written ir.json that fails to unmarshal, and a unique per-call temp name
+	// keeps two concurrent Saves (concurrent PostToolUse hooks hit exactly this)
+	// from interleaving into one file and renaming a torn mix into place.
+	if err := store.AtomicWriteFile(path, data); err != nil {
+		return fmt.Errorf("failed to save IR file: %w", err)
+	}
 	return nil
 }
 

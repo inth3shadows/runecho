@@ -98,32 +98,17 @@ func loadLearnedAllow(dir string) learnedAllow {
 	return parsed
 }
 
-// saveLearnedAllow writes the store atomically (temp file + rename) so a crashed
-// or concurrent write can never leave a half-written, unparseable file. Fail-open:
-// any error is silently discarded — persistence is best-effort.
+// saveLearnedAllow writes the store atomically (temp file + rename, via
+// store.AtomicWriteFile) so a crashed or concurrent write can never leave a
+// half-written, unparseable file. Fail-open: any error is silently discarded —
+// persistence is best-effort.
 func saveLearnedAllow(dir string, la learnedAllow) {
 	la.V = 1
 	b, err := json.Marshal(la)
 	if err != nil {
 		return
 	}
-	tmp, err := os.CreateTemp(dir, learnedAllowFile+".*.tmp")
-	if err != nil {
-		return
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return
-	}
-	if err := os.Rename(tmpPath, filepath.Join(dir, learnedAllowFile)); err != nil {
-		_ = os.Remove(tmpPath)
-	}
+	_ = store.AtomicWriteFile(filepath.Join(dir, learnedAllowFile), b)
 }
 
 // recordApprovals folds one approval event (repo + the just-approved symbols)

@@ -340,7 +340,7 @@ func refreshIRForFile(filePath string) (outcome string) {
 	// unchanged/fail outcomes where nothing is ever saved. Holding the lock
 	// across a bootstrap Generate is deliberate: a waiter then takes the cheap
 	// UpdateFile path against the fresh IR instead of repeating the full walk.
-	withFileLock(filepath.Join(storeDir, fmt.Sprintf("e6-refresh-%d.lock", repo.ID)), func() {
+	store.WithFileLock(store.RefreshLockPath(storeDir, repo.ID), func() {
 		// Re-read the repo row now that the lock is held: a concurrent hook may
 		// have bootstrapped while we waited, and TouchRepo below must not
 		// clobber its fresh full-walk coverage counters with the stale values

@@ -265,25 +265,36 @@ func runRepoReindexAll() int {
 // stores a snapshot, and updates the repo's last-indexed timestamp.
 func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 	srcRoot := repo.EffectiveSourceRoot()
-	irData, stats, code := buildIR(srcRoot, repo.FileCap)
-	if code != 0 {
-		return code
-	}
-	if err := irData.Save(filepath.Join(srcRoot, ".ai", "ir.json")); err != nil {
-		return printErr(fmt.Errorf("save ir.json: %w", err))
-	}
-	id, err := db.SaveSnapshot(repo.ID, "", "reindex", srcRoot, irData)
-	if err != nil {
-		return printErr(err)
-	}
-	if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
-	}
-	short := irData.RootHash
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
-		repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
-	return 0
+	// Hold the E6 refresh lock across the whole build→save→snapshot: buildIR reads
+	// the existing ir.json for incremental reuse, so a concurrent PostToolUse hook
+	// that also load-modify-saves ir.json would otherwise lose (or be lost to) this
+	// reindex — exactly what CLAUDE.md tells the user to run on staleness (#137).
+	// Mirrors the hook, which holds the same lock across its own generate→save.
+	exitCode := 0
+	withRepoRefreshLock(repo.ID, func() {
+		irData, stats, code := buildIR(srcRoot, repo.FileCap)
+		if code != 0 {
+			exitCode = code
+			return
+		}
+		if err := irData.Save(filepath.Join(srcRoot, ".ai", "ir.json")); err != nil {
+			exitCode = printErr(fmt.Errorf("save ir.json: %w", err))
+			return
+		}
+		id, err := db.SaveSnapshot(repo.ID, "", "reindex", srcRoot, irData)
+		if err != nil {
+			exitCode = printErr(err)
+			return
+		}
+		if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
+		}
+		short := irData.RootHash
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
+			repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
+	})
+	return exitCode
 }

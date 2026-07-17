@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/store"
 )
 
 // C3 learned-allow: per-repo symbols the user has approved enough times that the
@@ -140,7 +142,7 @@ func recordApprovals(dir, repo string, symbols []string, now time.Time) {
 	// increment, and the second save would clobber the first's increments
 	// (last-writer-wins). The atomic rename in saveLearnedAllow prevents a torn
 	// file but not lost updates — only the lock closes that window.
-	withFileLock(filepath.Join(dir, learnedAllowFile+".lock"), func() {
+	store.WithFileLock(filepath.Join(dir, learnedAllowFile+".lock"), func() {
 		la := loadLearnedAllow(dir)
 		if la.Repos == nil {
 			la.Repos = map[string]map[string]learnedEntry{}

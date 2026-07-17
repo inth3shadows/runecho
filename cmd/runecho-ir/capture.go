@@ -193,15 +193,34 @@ func runIndex(args []string) int {
 
 	generator := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, GenerateTimeout: cliGenerateTimeout()})
 
-	result, stats, err := generateIR(generator, absRoot)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return ExitError
+	// generateIR reads the existing ir.json for incremental reuse, then Save
+	// overwrites it — a read-modify-write that must not interleave with a
+	// concurrent PostToolUse hook doing the same (#137). Take the E6 refresh lock,
+	// but ONLY when this tree is already enrolled: the bare index stays ungated, so
+	// a non-enrolled tree (or no store) runs unlocked, exactly as before.
+	var result *ir.IR
+	var stats ir.Stats
+	exitCode := 0
+	build := func() {
+		var err error
+		result, stats, err = generateIR(generator, absRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			exitCode = ExitError
+			return
+		}
+		if err := result.Save(irPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to save IR: %v\n", err)
+			exitCode = ExitError
+		}
 	}
-
-	if err := result.Save(irPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to save IR: %v\n", err)
-		return ExitError
+	if id := enrolledRepoID(absRoot); id >= 0 {
+		withRepoRefreshLock(id, build)
+	} else {
+		build()
+	}
+	if exitCode != 0 {
+		return exitCode
 	}
 
 	shortHash := result.RootHash

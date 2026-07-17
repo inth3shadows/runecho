@@ -25,11 +25,13 @@ import (
 //     regex-parser degradation in FileStructure. Body hashing is a future
 //     enhancement, not part of this MVP.
 //
-// Known limitations (documented, not bugs): a heredoc opened with a quoted or
-// variable delimiter (`<<"$x"`) is not detected, and a `<<WORD` appearing inside
-// a string literal could be misread as a heredoc opener (masking shell strings
-// properly is the future-enhancement counterpart to body hashing). Neither occurs
-// in ordinary end-of-line heredocs.
+// Known limitations (documented, not bugs; tracked in issue #155): a heredoc
+// opened with a quoted or variable delimiter (`<<"$x"`) is not detected; a
+// `<<WORD` appearing inside a string literal could be misread as a heredoc opener
+// (masking shell strings properly is the future-enhancement counterpart to body
+// hashing); and only the FIRST heredoc on a line is tracked, so a stacked
+// `cmd <<A <<B` skips A's body but not B's. None occur in ordinary end-of-line
+// heredocs.
 type ShellParser struct{}
 
 // NewShellParser creates a new shell parser.
@@ -53,9 +55,9 @@ var (
 	reShellFuncKw = regexp.MustCompile(`^\s*function\s+(` + shellNameClass + `)\b`)
 	// Heredoc opener: `<<WORD`, `<<-WORD`, `<< 'WORD'`, `<< "WORD"`. The leading
 	// `(^|[^<])` ensures the operator is exactly `<<` and not `<<<` (a herestring,
-	// which has no body). Group 2 is the `-` (tab-strip) flag; group 4 is the
-	// terminator word. The body is skipped so function-def-looking lines inside it
-	// are never extracted.
+	// which has no body). Capture groups: 1 = the leading `^`/non-`<` char, 2 = the
+	// `-` (tab-strip) flag, 3 = the terminator word. The body is skipped so
+	// function-def-looking lines inside it are never extracted.
 	reHeredocOpen = regexp.MustCompile(`(^|[^<])<<(-?)\s*['"]?(` + shellNameClass + `)`)
 )
 
@@ -89,9 +91,14 @@ func (p *ShellParser) Parse(source string) (FileStructure, error) {
 		if heredocTerm != "" {
 			term := line
 			if heredocDash {
-				term = strings.TrimLeft(term, "\t")
+				term = strings.TrimLeft(term, "\t") // <<- strips leading TABS from the terminator
 			}
-			if strings.TrimRight(term, " \t") == heredocTerm {
+			// Bash recognizes the delimiter only on a line that is EXACTLY the word
+			// (no leading/trailing blanks; <<- strips leading tabs only). Matching
+			// exactly — not a trimmed compare — avoids ending the heredoc early on a
+			// body line like `EOF ` that bash treats as body, which would then leak
+			// the rest of the body as code.
+			if term == heredocTerm {
 				heredocTerm = ""
 			}
 			continue
@@ -109,10 +116,14 @@ func (p *ShellParser) Parse(source string) (FileStructure, error) {
 		}
 
 		// Check whether this line OPENS a heredoc last, so a `foo() { cat <<EOF`
-		// line is still recorded as a function before its body is skipped.
-		if hm := reHeredocOpen.FindStringSubmatch(line); hm != nil {
-			heredocDash = hm[2] == "-"
-			heredocTerm = hm[3]
+		// line is still recorded as a function before its body is skipped. The
+		// Contains guard skips the regex on the common no-heredoc line. Only the
+		// FIRST heredoc on a line is tracked (stacked `<<A <<B` is a documented limit).
+		if strings.Contains(line, "<<") {
+			if hm := reHeredocOpen.FindStringSubmatch(line); hm != nil {
+				heredocDash = hm[2] == "-"
+				heredocTerm = hm[3]
+			}
 		}
 	}
 

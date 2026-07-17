@@ -198,6 +198,16 @@ func TestShellParser_MaskingKeepsBodySpanHonest(t *testing.T) {
 			src:  "sub() (\n  cd /tmp && ls\n)\nafter() { echo x; }\n",
 			want: []string{"after", "sub"}, // `()` body brace-matched too
 		},
+		{
+			name: "backtick command substitution",
+			src:  "real() {\n  x=`echo '{' ; echo '}'`\n  echo ok\n}\n",
+			want: []string{"real"}, // backtick body blanked; the `}` inside must not close the body
+		},
+		{
+			name: "param default with nested string and backtick",
+			src:  "real() {\n  y=${z:-\"a`echo b`c\"}\n  echo ok\n}\n",
+			want: []string{"real"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

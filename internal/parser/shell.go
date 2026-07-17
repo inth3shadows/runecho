@@ -41,6 +41,18 @@ func (p *ShellParser) SupportsExtension(ext string) bool {
 	return ext == ".sh" || ext == ".bash"
 }
 
+// maskShell context-stack frame kinds. s/d/b/c/p are "blanking" frames (their
+// content is masked); g/r are structural (kept, unless nested in a blanking frame).
+const (
+	frameSingle   byte = 's' // '…' single-quoted string
+	frameDouble   byte = 'd' // "…" double-quoted string
+	frameBacktick byte = 'b' // `…` command substitution
+	frameCmdSub   byte = 'c' // $(…) command substitution
+	frameParam    byte = 'p' // ${…} parameter expansion
+	frameGroup    byte = 'g' // { … } command group / brace expansion
+	frameSubshell byte = 'r' // ( … ) subshell / parens
+)
+
 // shellNameClass is the function-name charset. Conventionally an identifier, but
 // bash permits `-`, `.`, and `:` (common in git hooks and namespaced helpers), so
 // they are allowed. The `-` is last in the class so it is a literal, not a range.
@@ -247,7 +259,7 @@ func maskShell(src []byte) []byte {
 	push := func(k byte) {
 		stack = append(stack, k)
 		switch k {
-		case 's', 'd', 'b', 'c', 'p':
+		case frameSingle, frameDouble, frameBacktick, frameCmdSub, frameParam:
 			blanking++
 		}
 	}
@@ -255,7 +267,7 @@ func maskShell(src []byte) []byte {
 		k := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		switch k {
-		case 's', 'd', 'b', 'c', 'p':
+		case frameSingle, frameDouble, frameBacktick, frameCmdSub, frameParam:
 			blanking--
 		}
 	}
@@ -279,7 +291,7 @@ func maskShell(src []byte) []byte {
 		t := top()
 
 		// Single quotes are fully literal: nothing but the closing ' is special.
-		if t == 's' {
+		if t == frameSingle {
 			mask1(i)
 			if c == '\'' {
 				pop()
@@ -311,7 +323,7 @@ func maskShell(src []byte) []byte {
 		// Treating `{`/`(` as structural inside a string would corrupt the stack (an
 		// unbalanced `{` in `"fake() {"` must not open a group). $(…)/${…}/backtick
 		// inside double quotes still nest into code, so those are handled.
-		if t == 'd' { // double-quoted string
+		if t == frameDouble { // double-quoted string
 			switch {
 			case c == '"':
 				mask1(i)
@@ -319,17 +331,17 @@ func maskShell(src []byte) []byte {
 				i++
 			case c == '`':
 				mask1(i)
-				push('b')
+				push(frameBacktick)
 				i++
 			case c == '$' && i+1 < n && src[i+1] == '(':
 				mask1(i)
 				mask1(i + 1)
-				push('c')
+				push(frameCmdSub)
 				i += 2
 			case c == '$' && i+1 < n && src[i+1] == '{':
 				mask1(i)
 				mask1(i + 1)
-				push('p')
+				push(frameParam)
 				i += 2
 			default:
 				mask1(i)
@@ -338,7 +350,7 @@ func maskShell(src []byte) []byte {
 			atWordStart = false
 			continue
 		}
-		if t == 'b' { // `…` command substitution: only the closing backtick matters
+		if t == frameBacktick { // `…` command substitution: only the closing backtick matters
 			mask1(i)
 			if c == '`' {
 				pop()
@@ -347,7 +359,7 @@ func maskShell(src []byte) []byte {
 			atWordStart = false
 			continue
 		}
-		if t == 'p' { // ${…} parameter expansion
+		if t == frameParam { // ${…} parameter expansion
 			switch {
 			case c == '}':
 				mask1(i)
@@ -358,29 +370,29 @@ func maskShell(src []byte) []byte {
 				// e.g. `${x:-{a,b}}`) nests a brace level, so the FIRST inner `}` closes
 				// it rather than popping the param early and leaking a stray code `}`.
 				mask1(i)
-				push('p')
+				push(frameParam)
 				i++
 			case c == '$' && i+1 < n && src[i+1] == '{':
 				mask1(i)
 				mask1(i + 1)
-				push('p')
+				push(frameParam)
 				i += 2
 			case c == '$' && i+1 < n && src[i+1] == '(':
 				mask1(i)
 				mask1(i + 1)
-				push('c')
+				push(frameCmdSub)
 				i += 2
 			case c == '\'':
 				mask1(i)
-				push('s')
+				push(frameSingle)
 				i++
 			case c == '"':
 				mask1(i)
-				push('d')
+				push(frameDouble)
 				i++
 			case c == '`':
 				mask1(i)
-				push('b')
+				push(frameBacktick)
 				i++
 			default:
 				mask1(i)
@@ -399,7 +411,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push('s')
+			push(frameSingle)
 			i++
 			atWordStart = false
 
@@ -407,7 +419,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push('d')
+			push(frameDouble)
 			i++
 			atWordStart = false
 
@@ -415,7 +427,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push('b')
+			push(frameBacktick)
 			i++
 			atWordStart = false
 
@@ -424,7 +436,7 @@ func maskShell(src []byte) []byte {
 				mask1(i)
 			}
 			mask1(i + 1) // blank the '(' delimiter; content follows blanked
-			push('c')
+			push(frameCmdSub)
 			i += 2
 			atWordStart = false
 		case c == '$' && i+1 < n && src[i+1] == '{':
@@ -432,18 +444,18 @@ func maskShell(src []byte) []byte {
 				mask1(i)
 			}
 			mask1(i + 1)
-			push('p')
+			push(frameParam)
 			i += 2
 			atWordStart = false
 
-		case c == ')' && (t == 'c' || t == 'r'):
+		case c == ')' && (t == frameCmdSub || t == frameSubshell):
 			if wasBlank {
 				mask1(i)
 			}
 			pop()
 			i++
 			atWordStart = true
-		case c == '}' && (t == 'g' || t == 'p'):
+		case c == '}' && (t == frameGroup || t == frameParam):
 			if wasBlank {
 				mask1(i)
 			}
@@ -455,18 +467,18 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push('r')
+			push(frameSubshell)
 			i++
 			atWordStart = true
 		case c == '{':
 			if wasBlank {
 				mask1(i)
 			}
-			push('g')
+			push(frameGroup)
 			i++
 			atWordStart = true
 
-		case c == '#' && atWordStart && (t == 0 || t == 'g' || t == 'r' || t == 'c'):
+		case c == '#' && atWordStart && (t == 0 || t == frameGroup || t == frameSubshell || t == frameCmdSub):
 			// Comment to end of line (not inside a string; # mid-word or after $ is
 			// not a comment — atWordStart guards that).
 			for i < n && src[i] != '\n' {

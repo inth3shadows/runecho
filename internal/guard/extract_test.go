@@ -940,6 +940,13 @@ func TestLangFor(t *testing.T) {
 		{"commonjs.cjs", LangJS},
 		{"script.py", LangPython},
 		{"data.json", LangUnknown},
+		// Shell is intentionally parser-only: the ShellParser indexes .sh/.bash
+		// functions for the IR, but the guard's hallucination check stays OUT of
+		// shell (a bare command is indistinguishable from an external binary), so
+		// LangFor must keep reporting Unknown for these — do NOT "fix" this to
+		// match the parser.
+		{"deploy.sh", LangUnknown},
+		{"lib.bash", LangUnknown},
 	}
 	for _, tc := range cases {
 		if got := LangFor(tc.path); got != tc.lang {

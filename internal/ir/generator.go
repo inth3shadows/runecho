@@ -125,7 +125,7 @@ func NewGenerator(config GeneratorConfig) *Generator {
 		genTimeout = DefaultGenerateTimeout
 	}
 	return &Generator{
-		parsers:       []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser()},
+		parsers:       []parser.Parser{parser.NewJSParser(), parser.NewGoParser(), parser.NewPythonParser(), parser.NewShellParser()},
 		ignoredPaths:  ignored,
 		fileCap:       config.FileCap,
 		maxParseBytes: defaultMaxParseBytes,

@@ -92,6 +92,45 @@ func lookupRepoID(db *snapshot.DB, root string) int64 {
 	return repo.ID
 }
 
+// withRepoRefreshLock runs fn while holding the E6 refresh lock for repoID — the
+// same cross-process advisory lock the PostToolUse guard hook takes around its
+// ir.json load-modify-save. Without it a CLI reindex/index and a concurrent hook
+// interleave their ir.json writes and one silently loses (the guard then validates
+// against a stale symbol set right after the user explicitly refreshed — #137).
+// Fail-open: if the store dir can't be resolved, fn runs unlocked (the lock is
+// best-effort and shares the store dir with the hook, so the paths always match).
+func withRepoRefreshLock(repoID int64, fn func()) {
+	dir, err := runechoDir()
+	if err != nil {
+		fn()
+		return
+	}
+	store.WithFileLock(store.RefreshLockPath(dir, repoID), fn)
+}
+
+// enrolledRepoID returns the repo_id of an already-enrolled repo at root, or -1.
+// Unlike mustOpenDB it never creates the store dir, and unlike resolveRepoForWrite
+// it never enrolls — the bare `runecho-ir [root]` index stays ungated. It exists
+// only to let that path coordinate on the E6 refresh lock when the tree happens to
+// be enrolled (so a bare index and the hook don't lose each other's ir.json). Any
+// failure to resolve returns -1, which callers treat as "run unlocked".
+func enrolledRepoID(root string) int64 {
+	dir, err := runechoDir()
+	if err != nil {
+		return -1
+	}
+	dbPath := filepath.Join(dir, "history.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return -1 // no store here — nothing to coordinate with
+	}
+	db, err := snapshot.OpenFast(dbPath)
+	if err != nil {
+		return -1
+	}
+	defer db.Close()
+	return lookupRepoID(db, root)
+}
+
 // printErr writes "Error: <err>" to stderr and returns ExitError.
 // It replaces the old fatal() helper: instead of calling os.Exit directly,
 // callers return the code so main() (and tests) control process exit.

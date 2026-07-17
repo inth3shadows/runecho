@@ -222,6 +222,41 @@ func TestRepoAdd_Duplicate(t *testing.T) {
 	}
 }
 
+// TestReindex_TakesRefreshLock pins #137: doReindex must acquire the E6 refresh
+// lock the PostToolUse hook keys on, so a CLI reindex and a concurrent hook can't
+// lose each other's ir.json write. `repo add` auto-reindexes via doReindex, so a
+// successful add must leave the store-dir lock file (e6-refresh-<id>.lock) behind —
+// WithFileLock creates it on open. A bare index of a NON-enrolled tree must NOT
+// create one: that path stays ungated.
+func TestReindex_TakesRefreshLock(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+
+	code, _, _ := runWith(t, home, []string{"runecho-ir", "repo", "add", dir})
+	if code != 0 {
+		t.Fatalf("repo add: got code %d, want 0", code)
+	}
+	locks, _ := filepath.Glob(filepath.Join(home, "e6-refresh-*.lock"))
+	if len(locks) == 0 {
+		t.Error("repo add (doReindex) did not create the E6 refresh lock — hook and CLI would not mutually exclude (#137)")
+	}
+
+	// Ungated contract: a bare index of a non-enrolled tree (fresh store, nothing
+	// enrolled) must not take the lock.
+	home2 := t.TempDir()
+	plain := t.TempDir()
+	if err := os.WriteFile(filepath.Join(plain, "b.go"), []byte("package b\n\nfunc G() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runWith(t, home2, []string{"runecho-ir", plain}); code != 0 {
+		t.Fatalf("bare index: got code %d, want 0", code)
+	}
+	if locks2, _ := filepath.Glob(filepath.Join(home2, "e6-refresh-*.lock")); len(locks2) != 0 {
+		t.Errorf("bare index of a non-enrolled tree must not take the refresh lock (ungated), found %v", locks2)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // repo list
 // ---------------------------------------------------------------------------

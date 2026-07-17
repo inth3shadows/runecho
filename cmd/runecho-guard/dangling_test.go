@@ -453,3 +453,35 @@ func TestDangling_RefsQueryError_StrictAdvisory(t *testing.T) {
 		t.Errorf("decision log reason = %v, want check-degraded", rec["reason"])
 	}
 }
+
+// TestOpenLatestSnapshot_StoreError_CountsDegraded pins #138: a STORE-LEVEL failure
+// in openLatestSnapshot — here db.List failing because the snapshots table is gone —
+// must be reported as degraded so checkDanglingRefs/checkDuplicateDefs return
+// queryErrs>0, not the silent (nil, 0) that used to make a broken store read as a
+// clean E1/E5 pass. This is the layer above the per-symbol query the F21 test covers.
+func TestOpenLatestSnapshot_StoreError_CountsDegraded(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+
+	// Drop the snapshots table so ResolveRepo still succeeds (repos intact) but
+	// db.List fails — exactly the store-level path that folded into a silent ok=false.
+	dbPath := filepath.Join(os.Getenv("RUNECHO_HOME"), "history.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw store: %v", err)
+	}
+	if _, err := raw.Exec("DROP TABLE snapshots"); err != nil {
+		raw.Close()
+		t.Fatalf("drop snapshots: %v", err)
+	}
+	raw.Close()
+
+	file := filepath.Join(top, "known.go")
+	if warns, qErrs := checkDanglingRefs(filepath.Dir(file), file, []string{"DoThing"}); qErrs != 1 || warns != nil {
+		t.Errorf("checkDanglingRefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
+	}
+	if warns, qErrs := checkDuplicateDefs(filepath.Dir(file), file, []string{"DoThing"}); qErrs != 1 || warns != nil {
+		t.Errorf("checkDuplicateDefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
+	}
+}

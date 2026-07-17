@@ -51,10 +51,10 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// not a hallucination. The hook-mode known-set builder folds imports the same
 	// way; without this, the pre-commit path flagged bare calls to any imported
 	// symbol whose import line sat outside a hunk's def set (issues #76, #80).
-	// NOTE: this covers imports present IN the diff. An import that is pre-existing
-	// (outside the staged hunk) is only resolvable via the indexed IR, whose
-	// FileStructure.Imports currently stores module paths not bound names — a
-	// separate, deeper fix tracked on #76/#80.
+	// A pre-existing import (outside the staged hunk) is resolved separately via
+	// the indexed IR: generator.go indexes each file's bound import names under the
+	// "import_name" symbol kind, so SymbolsForLatestSnapshot already carries them
+	// into `symbols` here — the deeper half of #76/#80, closed by PR #82.
 	for _, fd := range diffs {
 		lang := LangFor(fd.Path)
 		for _, def := range ExtractDefs(lang, fd.AddedLines) {

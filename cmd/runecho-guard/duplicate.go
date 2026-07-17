@@ -102,8 +102,14 @@ func checkDuplicateDefs(dir, filePath string, added []string) (warns []duplicate
 	if isTestFile(filePath) {
 		return nil, 0
 	}
-	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
+	db, snapID, self, ok, degraded := openLatestSnapshot(dir, filePath)
 	if !ok {
+		if degraded {
+			// Store-level failure (unreadable store, failed List, schema-newer):
+			// the check could not run at all — count it so zero warnings does not
+			// read as a clean pass (#138), mirroring the per-symbol queryErrs below.
+			return nil, 1
+		}
 		return nil, 0
 	}
 	defer db.Close()

@@ -96,44 +96,51 @@ func defSet(lang guard.Lang, text string) map[string]struct{} {
 // openLatestSnapshot opens the central store, resolves the repo containing
 // dir, and returns its latest snapshot ID plus the edited file's self-path
 // (for self-exclusion) — the shared preamble for every deletion/definition-
-// side check (checkDanglingRefs, checkDuplicateDefs). ok=false on any
-// failure (missing store, unenrolled repo, no snapshot) — fail-open, never a
-// false block; the caller is expected to just return nil warnings.
+// side check (checkDanglingRefs, checkDuplicateDefs). ok=false on any failure;
+// the caller returns no warnings (fail-open, never a false block).
 //
-// KNOWN GAP, not fixed here: a schema-newer store (OpenFast returning
-// snapshot.ErrSchemaNewer) is folded into the same silent ok=false as "no
-// store" — main()/lookupSymbolsFor instead surface that case as a "rebuild
-// the guard binary" advisory, but these deletion/definition-side checks have
-// no channel back to the ask message to do the same. Worth threading through
-// if it turns out to matter in dogfooding; not done here to keep this a pure
-// de-duplication of the two existing call sites' behavior, not a behavior change.
-func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, self string, ok bool) {
+// degraded distinguishes the two flavors of ok=false so a store-level failure is
+// not silently indistinguishable from a clean pass (#138). It is true when the
+// store EXISTS but could not be read — OpenFast failed (including
+// snapshot.ErrSchemaNewer, the binary-older-than-store case that was the F84
+// known gap), or db.List failed — and false for the legitimate "nothing to check"
+// states (runecho not installed, store never created, repo unenrolled, no snapshot
+// yet). The callers fold a true degraded into their queryErrs count, so a transient
+// sqlite/disk error — or a schema-newer store — during an E1/E5 check surfaces as a
+// degraded advisory under strict mode instead of reading as a clean pass.
+func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, self string, ok, degraded bool) {
 	storeDir, err := runechoDir()
 	if err != nil {
-		return nil, 0, "", false
+		return nil, 0, "", false, false // runecho not configured here — nothing to check
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, 0, "", false
+		return nil, 0, "", false, false // store never created — nothing to check
 	}
 	// OpenFast skips the on-open integrity scan — this fires only on
 	// deletion/definition edits, but still on a latency-sensitive path;
 	// integrity is the writer's job.
 	db, err = snapshot.OpenFast(dbPath)
 	if err != nil {
-		return nil, 0, "", false
+		// Store exists but won't open (corruption, lock, or ErrSchemaNewer): a real
+		// failure to check, not an absence of anything to check — count as degraded.
+		return nil, 0, "", false, true
 	}
 	repo, _, resolved := db.ResolveRepo(dir)
 	if !resolved {
 		db.Close()
-		return nil, 0, "", false
+		return nil, 0, "", false, false // repo unenrolled — nothing to check
 	}
 	snaps, err := db.List(repo.ID, 1)
-	if err != nil || len(snaps) == 0 {
+	if err != nil {
 		db.Close()
-		return nil, 0, "", false
+		return nil, 0, "", false, true // store query failed — could not check
 	}
-	return db, snaps[0].ID, repoRelPath(filePath), true
+	if len(snaps) == 0 {
+		db.Close()
+		return nil, 0, "", false, false // no snapshot yet — nothing to check
+	}
+	return db, snaps[0].ID, repoRelPath(filePath), true, false
 }
 
 // checkDanglingRefs returns one warning per deleted def that is still referenced
@@ -144,17 +151,24 @@ func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, se
 //
 // Fail-open everywhere: a missing store, unenrolled repo, no snapshot, or any
 // query error yields no warning, never a false block. An empty deleted set
-// short-circuits before opening the store. queryErrs counts per-symbol store
-// queries that failed: those symbols were skipped without being checked, so a
-// caller must not read a zero-warning result as a definitive clean pass when
-// queryErrs > 0 (the hook surfaces that under strict mode as an advisory
-// instead of staying silent — a transient store error must not look clean).
+// short-circuits before opening the store. queryErrs counts checks that could not
+// run to completion: each per-symbol store query that failed, plus 1 when the store
+// itself could not be opened/queried (openLatestSnapshot degraded — #138). A caller
+// must not read a zero-warning result as a definitive clean pass when queryErrs > 0
+// (the hook surfaces that under strict mode as an advisory instead of staying silent
+// — a transient store error, or a schema-newer store, must not look clean).
 func checkDanglingRefs(dir, filePath string, deleted []string) (warns []danglingWarning, queryErrs int) {
 	if len(deleted) == 0 {
 		return nil, 0
 	}
-	db, snapID, self, ok := openLatestSnapshot(dir, filePath)
+	db, snapID, self, ok, degraded := openLatestSnapshot(dir, filePath)
 	if !ok {
+		if degraded {
+			// Store-level failure (unreadable store, failed List, schema-newer):
+			// the check could not run at all — count it so zero warnings does not
+			// read as a clean pass (#138), mirroring the per-symbol queryErrs below.
+			return nil, 1
+		}
 		return nil, 0
 	}
 	defer db.Close()

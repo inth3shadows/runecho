@@ -694,6 +694,20 @@ func addInFileDefs(symbols map[string]struct{}, fileLines []guard.AddedLine, lan
 	for _, imp := range guard.ExtractImports(lang, fileLines) {
 		symbols[imp] = struct{}{}
 	}
+	// JS binds callables by forms the def/import extractors miss — destructuring
+	// (`const [x, setX] = useState()`), object destructure, and computed-assign
+	// (`const fn = handlers[k]`). Fold the whole-file declarator binding targets in
+	// so a bare call to one is not a false hallucination — crucially the binding
+	// line (e.g. a useState destructure) usually sits OUTSIDE the edited hunk, which
+	// the hunk-scoped diff never sees. JSDeclaredNames (not the over-inclusive
+	// LocallyBoundNames) keeps a param type annotation from leaking a type name and
+	// masking a real undefined reference. JS-only: Go skips bare lowercase refs
+	// already, and Python's locals are out of scope for this pass.
+	if lang == guard.LangJS {
+		for _, name := range guard.JSDeclaredNames(fileLines) {
+			symbols[name] = struct{}{}
+		}
+	}
 }
 
 // wholeFileBoundNames returns the union of the file's locally-bound names

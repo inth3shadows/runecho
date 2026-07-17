@@ -54,12 +54,40 @@
     "expect": []
   },
   {
-    "name": "js-fp-dynamic-callable",
-    "desc": "KNOWN FP: a variable holding a callable cannot be resolved statically",
+    "name": "js-tn-dynamic-callable",
+    "desc": "a variable bound to a callable (computed member access) is a local binding, so a bare call to it resolves — folded via LocallyBoundNames (was a tracked FP before that fold-in)",
     "file": "dispatch.js",
     "edit": "function dispatch(handlers, evt) {\n  const fn = handlers[evt.type];\n  fn(evt);\n}\n",
-    "expect": [],
-    "known_fp": ["fn"]
+    "expect": []
+  },
+  {
+    "name": "js-tn-usestate-setter-in-hunk",
+    "desc": "a useState destructured setter defined and called within the edit resolves via the LocallyBoundNames fold (the largest real-world FP cluster)",
+    "file": "Field.tsx",
+    "edit": "import { useState } from 'react';\nfunction Field() {\n  const [text, setText] = useState('');\n  setText('hi');\n  return text;\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-usestate-setter-outside-hunk",
+    "desc": "a useState setter bound on an UNTOUCHED line resolves via the whole-file LocallyBoundNames fold (the common hook-mode case: the edited hunk calls setText, the destructure lives elsewhere)",
+    "file": "useLabel.ts",
+    "infile": "import { useState } from 'react';\nfunction useLabel() {\n  const [text, setText] = useState('');\n  return { text, setText };\n}\n",
+    "edit": "function reset() {\n  setText('');\n}\n",
+    "expect": []
+  },
+  {
+    "name": "js-tn-test-globals",
+    "desc": "test-runner ambient globals (describe/it/expect/beforeEach/afterEach) resolve inside a spec file",
+    "file": "math.test.ts",
+    "edit": "describe('math', () => {\n  beforeEach(() => {});\n  afterEach(() => {});\n  it('adds', () => {\n    expect(1 + 1).toBe(2);\n  });\n});\n",
+    "expect": []
+  },
+  {
+    "name": "js-tp-test-global-in-product",
+    "desc": "the test-global gate is scoped: a bare describe() in a NON-test file is still flagged, so a hallucinated call is not masked by the test-runner allowlist",
+    "file": "math.ts",
+    "edit": "export function check() {\n  return describe(1);\n}\n",
+    "expect": ["describe"]
   },
   {
     "name": "js-export-function-decl",

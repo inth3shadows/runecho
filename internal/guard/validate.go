@@ -63,6 +63,24 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		for _, imp := range ExtractImports(lang, fd.AddedLines) {
 			known[imp] = struct{}{}
 		}
+		// JS binds callables by forms ExtractDefs/ExtractImports miss —
+		// destructuring (`const [x, setX] = useState()`), object destructure, and
+		// computed-assign (`const fn = handlers[k]`). A bare call to one of those is
+		// not a hallucination, so fold the declarator binding targets in. JSDeclared-
+		// Names (not the over-inclusive LocallyBoundNames) is used precisely so a
+		// param type annotation can't leak a type name and mask a real undefined ref.
+		// This sees only the added lines here; the hook path additionally folds
+		// whole-file bindings via addInFileDefs for pre-existing binding lines.
+		// JS-only: Go/Python also use `const`/`var`, and Go already skips bare
+		// lowercase refs, so this fold belongs to JS/TS alone.
+		if lang == LangJS {
+			for _, name := range JSDeclaredNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
+		}
+		// Ambient test-runner globals (describe/it/expect/…) resolve only inside a
+		// spec file, where the runner injects them — see FoldTestGlobals.
+		FoldTestGlobals(known, fd.Path)
 	}
 
 	// Pass 2: collect references, flag anything not in known set.

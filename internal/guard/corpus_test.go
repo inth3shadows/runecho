@@ -48,6 +48,15 @@ func replayCase(c corpusCase) []Violation {
 		for _, im := range ExtractImports(lang, lines) {
 			known[im] = struct{}{}
 		}
+		// Mirror addInFileDefs: JS folds whole-file declarator binding targets
+		// (destructuring, object destructure, computed-assign) so a setter/callable
+		// bound outside the edited hunk resolves — the useState-destructure-on-an-
+		// untouched-line case.
+		if lang == LangJS {
+			for _, name := range JSDeclaredNames(lines) {
+				known[name] = struct{}{}
+			}
+		}
 	}
 	diffs := []FileDiff{{Path: c.File, AddedLines: TextToAddedLines(c.Edit)}}
 	return Run(known, "", diffs)

@@ -268,7 +268,7 @@
 
   <div class="moat">
     <span class="tag">The one thing it's built to do better</span>
-    <p>Gate an edit <span class="before">before it's written.</span> The <code>PreToolUse</code> guard vets an <code>Edit</code>/<code>Write</code> inside the agent loop — blocking an invented symbol in ~12&nbsp;ms, with <b>no build</b>, <b>no language server</b>, and a <b>deterministic, model-free receipt</b>. Compilers, LSPs, and semantic MCP servers are all more accurate — and all run too late to stop the write.</p>
+    <p>Gate an edit <span class="before">before it's written.</span> The <code>PreToolUse</code> guard vets an <code>Edit</code>/<code>Write</code> inside the agent loop — blocking an invented symbol within a ~12&nbsp;ms hook budget, with <b>no build</b>, <b>no language server</b>, and a <b>deterministic, model-free receipt</b>. Compilers, LSPs, and semantic MCP servers are all more accurate — and all run too late to stop the write.</p>
     <div class="timeline">
       <span class="step hot"><span class="dot"></span>agent proposes edit</span>
       <span class="arrow">→</span>
@@ -296,7 +296,7 @@
         <tbody>
           <tr>
             <td class="job">Block a hallucinated symbol<small>pre-write guard</small></td>
-            <td class="re"><span class="mk win">Wins</span> Pre-write, in-loop, language-agnostic, ~12&nbsp;ms, no build.</td>
+            <td class="re"><span class="mk win">Wins</span> Pre-write, in-loop, language-agnostic, ~12&nbsp;ms budget, no build.</td>
             <td class="rival"><b>Compiler / linter</b> — <span class="rival">tsc, go&nbsp;build, ruff, eslint no-undef</span></td>
             <td class="verdict"><b>RunEcho</b> — rivals catch the same error class, but only at build/lint time, per language, after the code exists. Timing is the moat.</td>
           </tr>
@@ -314,9 +314,9 @@
           </tr>
           <tr>
             <td class="job">What structurally changed?<small>drift between two points</small></td>
-            <td class="re"><span class="mk win">Edge</span> Symbol-level IR root-hash diff over snapshots.</td>
+            <td class="re"><span class="mk part">Substrate</span> Symbol-level IR root-hash diff — the engine the guard runs on, not a shipped diff product.</td>
             <td class="rival"><b>git diff</b>; difftastic; tree-sitter diff; Sourcegraph</td>
-            <td class="verdict"><b>RunEcho</b> narrowly — others diff lines or ASTs; a hashed <i>symbol-level</i> drift receipt built for an agent is genuinely niche.</td>
+            <td class="verdict"><b>Not a competitor here.</b> difftastic and Sourcegraph win as human-facing diff tools. RunEcho's symbol-level drift receipt isn't a rival in that lane — it's the plumbing that powers the pre-write gate above. Judge RunEcho by the airbag, not the diff.</td>
           </tr>
         </tbody>
       </table>

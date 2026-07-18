@@ -1,0 +1,402 @@
+<title>RunEcho vs. the field — competitive positioning</title>
+<style>
+  :root {
+    --ground: #f6f8f8;
+    --panel: #ffffff;
+    --panel-2: #eef2f2;
+    --ink: #14191d;
+    --muted: #58636c;
+    --faint: #8b959d;
+    --border: #dde3e4;
+    --border-strong: #c6cfd0;
+    --accent: #0d7d84;      /* signal teal — RunEcho */
+    --accent-soft: #e2f1f1;
+    --win: #0d7d84;
+    --partial: #a86a12;
+    --lose: #98a2aa;
+    --shadow: 0 1px 2px rgba(20,25,29,.05), 0 8px 24px -12px rgba(20,25,29,.14);
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0b0e12;
+      --panel: #12171d;
+      --panel-2: #171d24;
+      --ink: #e7edf1;
+      --muted: #939ea8;
+      --faint: #6a747d;
+      --border: #232b33;
+      --border-strong: #2f3945;
+      --accent: #35d4c2;
+      --accent-soft: #0f2a2a;
+      --win: #35d4c2;
+      --partial: #dca23f;
+      --lose: #6b757e;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 30px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f8f8; --panel: #ffffff; --panel-2: #eef2f2; --ink: #14191d;
+    --muted: #58636c; --faint: #8b959d; --border: #dde3e4; --border-strong: #c6cfd0;
+    --accent: #0d7d84; --accent-soft: #e2f1f1; --win: #0d7d84; --partial: #a86a12; --lose: #98a2aa;
+    --shadow: 0 1px 2px rgba(20,25,29,.05), 0 8px 24px -12px rgba(20,25,29,.14);
+  }
+  :root[data-theme="dark"] {
+    --ground: #0b0e12; --panel: #12171d; --panel-2: #171d24; --ink: #e7edf1;
+    --muted: #939ea8; --faint: #6a747d; --border: #232b33; --border-strong: #2f3945;
+    --accent: #35d4c2; --accent-soft: #0f2a2a; --win: #35d4c2; --partial: #dca23f; --lose: #6b757e;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 30px -14px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: clamp(2.5rem, 6vw, 5rem) clamp(1.1rem, 4vw, 2.5rem) 5rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 1.6rem; height: 1px;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: clamp(1.9rem, 5.2vw, 3rem);
+    line-height: 1.08;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0 0 1.1rem;
+  }
+  h1 .sig { color: var(--accent); }
+
+  .thesis {
+    font-size: clamp(1.05rem, 2.4vw, 1.3rem);
+    color: var(--muted);
+    max-width: 40ch;
+    text-wrap: balance;
+    margin: 0 0 2.4rem;
+  }
+  .thesis b { color: var(--ink); font-weight: 600; }
+
+  /* moat callout */
+  .moat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 1.5rem 1.6rem;
+    box-shadow: var(--shadow);
+    margin-bottom: 3.2rem;
+  }
+  .moat .tag {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: .7rem;
+  }
+  .moat p { margin: 0; font-size: 1.05rem; }
+  .moat-note { margin-top: 1.2rem !important; padding-top: 1.1rem; border-top: 1px dashed var(--border-strong); font-size: .88rem !important; color: var(--muted); }
+  .moat-note b { color: var(--ink); font-weight: 600; }
+  .moat-note code { font-family: var(--mono); font-size: .84em; color: var(--accent); }
+  .moat .before {
+    font-family: var(--mono);
+    color: var(--accent);
+    font-weight: 600;
+    padding: 0 .15em;
+  }
+  .timeline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin-top: 1.2rem;
+    font-family: var(--mono);
+    font-size: .8rem;
+  }
+  .step {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    padding: .3rem .7rem;
+    border-radius: 100px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .step.hot {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+  .step .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--faint); }
+  .step.hot .dot { background: var(--accent); }
+  .arrow { color: var(--faint); align-self: center; font-family: var(--mono); }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: .8rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 0 0 1.2rem;
+    padding-bottom: .6rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  section { margin-bottom: 3.2rem; }
+
+  /* matrix */
+  .table-scroll { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; min-width: 660px; background: var(--panel); }
+  thead th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    padding: .85rem 1rem;
+    border-bottom: 1px solid var(--border-strong);
+    vertical-align: bottom;
+  }
+  thead th.re { color: var(--accent); }
+  tbody td { padding: 1rem; border-bottom: 1px solid var(--border); vertical-align: top; font-size: .93rem; }
+  tbody tr:last-child td { border-bottom: none; }
+  .job { font-weight: 600; color: var(--ink); }
+  .job small { display: block; font-family: var(--mono); font-size: .72rem; color: var(--faint); font-weight: 400; margin-top: .2rem; letter-spacing: .02em; }
+  td.re { background: color-mix(in srgb, var(--accent) 6%, var(--panel)); color: var(--ink); }
+  .verdict { color: var(--muted); }
+  .rival { color: var(--muted); }
+  .rival b { color: var(--ink); font-weight: 600; }
+
+  .mk { font-family: var(--mono); font-size: .72rem; font-weight: 600; display: inline-flex; align-items: center; gap: .35rem; margin-bottom: .35rem; letter-spacing: .04em; }
+  .mk::before { content: ""; width: .55rem; height: .55rem; border-radius: 2px; display: inline-block; }
+  .mk.win { color: var(--win); }
+  .mk.win::before { background: var(--win); }
+  .mk.part { color: var(--partial); }
+  .mk.part::before { background: var(--partial); }
+  .mk.lose { color: var(--lose); }
+  .mk.lose::before { background: var(--lose); border-radius: 50%; }
+
+  /* honest split */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 620px) { .split { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1.3rem 1.4rem; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 1rem; font-family: var(--mono); font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; display: flex; align-items: center; gap: .5rem; }
+  .card.wins h3 { color: var(--win); }
+  .card.loses h3 { color: var(--muted); }
+  .card ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .85rem; }
+  .card li { font-size: .92rem; color: var(--muted); padding-left: 1.1rem; position: relative; }
+  .card li b { color: var(--ink); font-weight: 600; }
+  .card.wins li::before { content: "▸"; position: absolute; left: 0; color: var(--win); }
+  .card.loses li::before { content: "–"; position: absolute; left: 0; color: var(--faint); }
+
+  /* read / recommendation */
+  .read { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 1.6rem 1.7rem; }
+  .read h2 { border: none; margin-bottom: .8rem; }
+  .read p { margin: 0 0 .9rem; font-size: 1.02rem; }
+  .read p:last-child { margin-bottom: 0; }
+  .read .lede { color: var(--ink); }
+  .read code { font-family: var(--mono); font-size: .86em; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; padding: .08em .4em; color: var(--accent); }
+  .read b { font-weight: 600; }
+
+  /* evidence */
+  .sub { color: var(--muted); font-size: .95rem; margin: -.4rem 0 1.5rem; max-width: 68ch; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .stat.move { border-left: 3px solid var(--accent); }
+  .stat .num .to { color: var(--ink); }
+  .stat .num .arrow-i { color: var(--faint); font-weight: 400; padding: 0 .12em; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1.3rem 1.4rem; box-shadow: var(--shadow); }
+  .stat .num { font-family: var(--mono); font-size: 2.1rem; font-weight: 600; color: var(--accent); letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .stat .num small { font-size: .95rem; color: var(--muted); font-weight: 400; letter-spacing: 0; }
+  .stat .lab { font-family: var(--mono); font-size: .68rem; letter-spacing: .13em; text-transform: uppercase; color: var(--ink); margin-top: .7rem; font-weight: 600; }
+  .stat .sub2 { font-size: .8rem; color: var(--faint); margin-top: .3rem; line-height: 1.4; }
+  .cov { min-width: 520px; background: var(--panel); }
+  .cov-row { display: grid; grid-template-columns: 128px 1fr 42px 92px; gap: .9rem; align-items: center; padding: .78rem 1.1rem; border-top: 1px solid var(--border); }
+  .cov-row:first-child { border-top: none; }
+  .pos { font-family: var(--mono); font-size: .82rem; color: var(--ink); }
+  .pos em { color: var(--faint); font-style: normal; font-size: .72rem; }
+  .bar { height: 7px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .bar.empty span { background: var(--border-strong); }
+  .frac { font-family: var(--mono); font-size: .82rem; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .chip { font-family: var(--mono); font-size: .62rem; letter-spacing: .06em; text-transform: uppercase; text-align: center; padding: .3rem .2rem; border-radius: 100px; }
+  .chip.cov { background: var(--accent-soft); color: var(--accent); }
+  .chip.byd { background: var(--panel-2); color: var(--faint); }
+  .caveat { margin-top: 1.4rem; background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--partial); border-radius: 10px; padding: 1.1rem 1.3rem; font-size: .88rem; color: var(--muted); }
+  .caveat b { color: var(--ink); font-weight: 600; }
+  .caveat .h { font-family: var(--mono); font-size: .66rem; letter-spacing: .13em; text-transform: uppercase; color: var(--partial); display: block; margin-bottom: .5rem; }
+
+  footer { margin-top: 3.5rem; padding-top: 1.4rem; border-top: 1px solid var(--border); font-size: .82rem; color: var(--faint); font-family: var(--mono); line-height: 1.7; }
+  footer b { color: var(--muted); font-weight: 600; }
+  footer code { font-family: var(--mono); color: var(--accent); }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Competitive positioning</p>
+  <h1>RunEcho vs.&nbsp;the field:<br><span class="sig">prevention</span>, not detection.</h1>
+  <p class="thesis">Every tool that beats RunEcho on accuracy only speaks <b>after</b> the code exists. RunEcho's job is to speak <b>before</b> it does.</p>
+
+  <div class="moat">
+    <span class="tag">The one thing it's built to do better</span>
+    <p>Gate an edit <span class="before">before it's written.</span> The <code>PreToolUse</code> guard vets an <code>Edit</code>/<code>Write</code> inside the agent loop — blocking an invented symbol in ~12&nbsp;ms, with <b>no build</b>, <b>no language server</b>, and a <b>deterministic, model-free receipt</b>. Compilers, LSPs, and semantic MCP servers are all more accurate — and all run too late to stop the write.</p>
+    <div class="timeline">
+      <span class="step hot"><span class="dot"></span>agent proposes edit</span>
+      <span class="arrow">→</span>
+      <span class="step hot"><span class="dot"></span>RunEcho guard: block / ask</span>
+      <span class="arrow">→</span>
+      <span class="step"><span class="dot"></span>write lands</span>
+      <span class="arrow">→</span>
+      <span class="step"><span class="dot"></span>compiler / LSP / tests react</span>
+    </div>
+    <p class="moat-note">A search of MCP servers, IDE agents (Aider, Cline, Continue, Cody) and Claude Code hooks found <b>no rival that deterministically blocks an undefined symbol pre-write.</b> The one adjacent pre-write gate — <b>GateGuard</b> — only <i>forces the agent to go look</i> (run Grep/Read); it can't tell you a symbol doesn't exist. Verified against RunEcho's own code: <code>liveIR</code> re-parses a fresh IR on every call — no index to go stale.</p>
+  </div>
+
+  <section>
+    <h2>Head-to-head, by the job it's actually doing</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>The job</th>
+            <th class="re">RunEcho</th>
+            <th>Strongest rival</th>
+            <th>Who wins, and why</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="job">Block a hallucinated symbol<small>pre-write guard</small></td>
+            <td class="re"><span class="mk win">Wins</span> Pre-write, in-loop, language-agnostic, ~12&nbsp;ms, no build.</td>
+            <td class="rival"><b>Compiler / linter</b> — <span class="rival">tsc, go&nbsp;build, ruff, eslint no-undef</span></td>
+            <td class="verdict"><b>RunEcho</b> — rivals catch the same error class, but only at build/lint time, per language, after the code exists. Timing is the moat.</td>
+          </tr>
+          <tr>
+            <td class="job">"Does symbol X exist?" / locate<small>definition lookup</small></td>
+            <td class="re"><span class="mk lose">Loses on depth</span> Regex; top-level &amp; exported only; 7 languages.</td>
+            <td class="rival"><b>LSP</b> — <span class="rival">gopls, tsserver, pyright</span>; ctags; ast-grep; Sourcegraph</td>
+            <td class="verdict"><b>Rivals</b> — LSPs <i>resolve</i> nested, unexported, typed symbols via go-to-definition / references / hover (their outline endpoint is often top-level too). RunEcho counters only on zero-setup + determinism.</td>
+          </tr>
+          <tr>
+            <td class="job">Ground an agent's context<small>MCP / repo map</small></td>
+            <td class="re"><span class="mk part">Thinner, never stale</span> Re-parses every call; no backend process.</td>
+            <td class="rival"><b>Serena</b> <span class="rival">(LSP-backed MCP, 40+ langs, symbol-level refactor)</span>; Aider repo-map; Cody / Continue</td>
+            <td class="verdict"><b>Serena</b> on depth (find-references, rename, symbol-level edits). <b>RunEcho</b> on freshness — Serena auto-manages language servers but still carries a per-language backend + first-run indexing; RunEcho carries neither and can't go stale.</td>
+          </tr>
+          <tr>
+            <td class="job">What structurally changed?<small>drift between two points</small></td>
+            <td class="re"><span class="mk win">Edge</span> Symbol-level IR root-hash diff over snapshots.</td>
+            <td class="rival"><b>git diff</b>; difftastic; tree-sitter diff; Sourcegraph</td>
+            <td class="verdict"><b>RunEcho</b> narrowly — others diff lines or ASTs; a hashed <i>symbol-level</i> drift receipt built for an agent is genuinely niche.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>The fair scorecard</h2>
+    <div class="split">
+      <div class="card wins">
+        <h3>Where it genuinely wins</h3>
+        <ul>
+          <li><b>Timing.</b> The only tool that intervenes <b>before</b> the write, inside the agent loop.</li>
+          <li><b>Determinism.</b> No LLM, no network — same input, same answer, every time. An auditable <code>truth-trail</code> receipt.</li>
+          <li><b>Never stale.</b> Re-parse on every call; no index to fall behind the code.</li>
+          <li><b>Zero setup.</b> One binary. No per-language server, no build, no API key.</li>
+        </ul>
+      </div>
+      <div class="card loses">
+        <h3>Where it honestly loses</h3>
+        <ul>
+          <li><b>Accuracy of "exists?"</b> A compiler or LSP is strictly more correct on any language it supports.</li>
+          <li><b>Depth.</b> No types, no unexported/nested symbols, no receiver resolution — by design.</li>
+          <li><b>Semantic search.</b> No embeddings, no "find code like this." Not its game.</li>
+          <li><b>Qualified refs.</b> The guard skips <code>obj.method()</code> / <code>pkg.Thing</code> — a measured, deliberate gap.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The evidence — measured, not asserted</h2>
+    <p class="sub">RunEcho's own benchmark: <b>N=15 hand-verified cases</b> mined from real session transcripts — 9 hallucinations, 6 real references as controls — each backed by an in-session compiler or runtime error as independent ground truth. Two numbers, both true, told together.</p>
+    <div class="stats">
+      <div class="stat">
+        <div class="num">100<small> / </small>0<small>%</small></div>
+        <div class="lab">Synthetic recall / FP</div>
+        <div class="sub2">Exact within scope — in-scope, call-position refs.</div>
+      </div>
+      <div class="stat">
+        <div class="num">4<small> of </small>9</div>
+        <div class="lab">Real hallucinations caught</div>
+        <div class="sub2">Captured corpus. The 5 misses are all qualified positions.</div>
+      </div>
+      <div class="stat">
+        <div class="num">0<small> of </small>6</div>
+        <div class="lab">False positives</div>
+        <div class="sub2">Flagged none of the real references — partly by abstaining on qualified positions.</div>
+      </div>
+      <div class="stat move">
+        <div class="num">1<span class="arrow-i">→</span><span class="to">4</span><small> of 9</small></div>
+        <div class="lab">Moved by extending the guard</div>
+        <div class="sub2">#56 added const-ref &amp; type-ref extraction — no type inference. FP held at 0/6, synthetic held 100%. The benchmark makes "does wider extraction catch more?" a measurable lever.</div>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <div class="cov">
+        <div class="cov-row"><span class="pos">bare-call</span><span class="bar"><span style="width:100%"></span></span><span class="frac">1/1</span><span class="chip cov">covered</span></div>
+        <div class="cov-row"><span class="pos">const-ref <em>#56</em></span><span class="bar"><span style="width:100%"></span></span><span class="frac">1/1</span><span class="chip cov">covered</span></div>
+        <div class="cov-row"><span class="pos">type-ref <em>#56</em></span><span class="bar"><span style="width:100%"></span></span><span class="frac">2/2</span><span class="chip cov">covered</span></div>
+        <div class="cov-row"><span class="pos">qualified-attr</span><span class="bar empty"><span style="width:3%"></span></span><span class="frac">0/3</span><span class="chip byd">by design</span></div>
+        <div class="cov-row"><span class="pos">qualified-method</span><span class="bar empty"><span style="width:3%"></span></span><span class="frac">0/1</span><span class="chip byd">by design</span></div>
+        <div class="cov-row"><span class="pos">qualified-prop</span><span class="bar empty"><span style="width:3%"></span></span><span class="frac">0/1</span><span class="chip byd">by design</span></div>
+      </div>
+    </div>
+    <div class="caveat">
+      <span class="h">Read before quoting 4/9</span>
+      The corpus was mined from loud compiler/runtime errors (<b>AttributeError</b>, <b>undefined type</b>, <b>TS2304</b>), which inherently skew toward qualified and type positions. So 4/9 is a <b>count, not a population rate</b> — not "RunEcho catches 44% of all hallucinations." Every miss is a receiver-typed reference the guard <b>abstains on by design</b> (catching it needs type resolution RunEcho deliberately avoids). The direction is robust; the ratio isn't a percentage.
+    </div>
+  </section>
+
+  <div class="read">
+    <h2>The read</h2>
+    <p class="lede"><b>Position RunEcho as the deterministic hallucination airbag for agent edits — not as a code-intelligence tool.</b></p>
+    <p>Framed as "code intelligence," it walks into a fight with Serena and every LSP and loses on depth. Framed as a <b>pre-write, model-free gate</b>, it stands where nothing else does: intervening before the mistake lands, across languages, with a receipt you can trust because no model produced it. The one adjacent pre-write gate — <b>GateGuard</b> — only <i>forces the agent to go look</i>; it can't tell you a symbol is undefined. That empty square is the whole position.</p>
+    <p>Concede depth on purpose. Against the compiler, win on <b>timing + no build + language-agnostic</b>. Against Serena, win on <b>never-stale + zero setup</b>. Lead with the <code>bench/FINDINGS.md</code> catch-rate corpus — measured evidence is the right weapon for a tool whose whole pitch is determinism.</p>
+  </div>
+
+  <footer>
+    <b>Sourcing — verified.</b> RunEcho: README/TECHNICAL docs; never-stale claim confirmed in code (<code>liveIR</code>, tools_oracle.go); catch-rate figures from <code>bench/FINDINGS.md</code> (post-#56). Rival columns checked against primary docs: Serena (oraios/serena — LSP-backed MCP, 40+ langs, symbol-level edit/refactor); LSP spec + gopls/pyright docs; universal-ctags man page; ast-grep, difftastic (tree-sitter); tsc TS2304, go build, ruff F821, eslint no-undef (all post-write, per-language). Pre-write-uniqueness: no deterministic symbol-gating rival found; nearest, GateGuard, only forces the agent to look. Not a benchmarked head-to-head — capability claims from docs, not timed runs.
+  </footer>
+
+</div>

@@ -303,11 +303,12 @@ which member changed.
   parse cleanly under the reduced subset grammar and yields fewer symbols. Same
   gap the prior regex parser had; documented, not silently dropped. (Plain and
   parameter-typed arrows are captured.)
-- **JS/TS** `export * from './mod'` / `export * as ns from './mod'` — star
-  re-exports are not enumerable by the regex export pass; the re-exported set is
-  dropped. Under-capture in Exports.
-- **JS/TS** `export { local as alias }` — the pre-alias local name is recorded,
-  not the exported alias (we index local definitions).
+- **JS/TS** `export * from './mod'` — a **bare** star re-export cannot enumerate
+  the re-exported names without cross-module resolution (which the parser does
+  not do), so the individual names are not captured. The source module is still
+  recorded as a wildcard re-export marker (`./mod`) rather than silently dropped.
+  The named form `export * as ns from './mod'` is *not* affected: it binds the
+  local name `ns`, which **is** captured in Exports.
 - **All** Imports/exports for JS/TS and Python are still regex; only function/
   class/method *definitions* go through the AST.
 - **Python** no-`__all__` export fallback is line-oriented: tuple-target constants

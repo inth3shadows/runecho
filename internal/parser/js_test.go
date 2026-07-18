@@ -346,6 +346,52 @@ func TestJSParser_WildcardReexport(t *testing.T) {
 	}
 }
 
+// TestJSParser_ExportGapDocContract pins the JS/TS export behaviors that
+// TECHNICAL.md's "Parser Capability Matrix → Known gaps" section documents, so
+// the honesty matrix cannot silently drift from the parser again — it did: the
+// alias-export and `export * as ns` claims went stale while the code moved on.
+// Each assertion below corresponds to a sentence in that doc section; a change
+// that trips this test is a signal to update TECHNICAL.md in the same commit.
+func TestJSParser_ExportGapDocContract(t *testing.T) {
+	p := NewJSParser()
+
+	// Doc: `export * as ns from './mod'` binds the local name `ns`, captured in Exports.
+	nsRes, err := p.Parse("export * as ns from './mod';")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(nsRes.Exports, "ns") {
+		t.Errorf("`export * as ns` Exports = %v, want it to contain %q", nsRes.Exports, "ns")
+	}
+
+	// Doc: a bare `export * from './mod'` does not enumerate the re-exported
+	// names (needs cross-module resolution) but records the module as a wildcard
+	// re-export marker — it is not silently dropped.
+	bareRes, err := p.Parse("export * from './mod';")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bareRes.Exports) != 0 {
+		t.Errorf("bare `export *` Exports = %v, want none enumerated", bareRes.Exports)
+	}
+	if !containsStr(bareRes.WildcardReexports, "./mod") {
+		t.Errorf("bare `export *` WildcardReexports = %v, want it to contain %q", bareRes.WildcardReexports, "./mod")
+	}
+
+	// Doc (gap CLOSED): `export { local as alias }` records the exported alias,
+	// not the pre-alias local name.
+	aliasRes, err := p.Parse("const foo = 1;\nexport { foo as Bar };")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(aliasRes.Exports, "Bar") {
+		t.Errorf("alias export Exports = %v, want it to contain %q", aliasRes.Exports, "Bar")
+	}
+	if containsStr(aliasRes.Exports, "foo") {
+		t.Errorf("alias export Exports = %v, should NOT contain pre-alias %q", aliasRes.Exports, "foo")
+	}
+}
+
 func TestJSParser_MultiNameDeclExport(t *testing.T) {
 	cases := []struct {
 		name    string

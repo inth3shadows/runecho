@@ -299,10 +299,13 @@ which member changed.
 
 **Known gaps:**
 
-- **JS/TS** `const f = (x: T): R => …` — a return-typed arrow const does not
-  parse cleanly under the reduced subset grammar and yields fewer symbols. Same
-  gap the prior regex parser had; documented, not silently dropped. (Plain and
-  parameter-typed arrows are captured.)
+- **JS/TS** `const f = (x: T): R => …` — a type-annotated arrow const (parameter
+  or return type) does not parse cleanly under the reduced subset grammar, so the
+  AST drops it and the regex fallback recovers it. The name **and a start line**
+  are captured (so `locate` resolves it to `file:line`), but the body is **not
+  hashed** — a change confined to the arrow's body will not surface as `~
+  modified`. Same grammar gap the prior regex parser had; documented, not
+  silently dropped. (Plain, untyped arrows parse fully via the AST.)
 - **JS/TS** `export * from './mod'` — a **bare** star re-export cannot enumerate
   the re-exported names without cross-module resolution (which the parser does
   not do), so the individual names are not captured. The source module is still

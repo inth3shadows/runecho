@@ -156,10 +156,12 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 		functions, classes, imports, exports, wildcardReexports []string
 		hashes                                                  map[string]string
 		lines                                                   map[string]int
+		fallbackRan                                             bool
 	)
 	if lang := jsLanguageFor(ext); lang != nil {
 		var hasError bool
 		functions, classes, hashes, lines, hasError = jsSymbolsFromAST(source, lang)
+		fallbackRan = hasError
 		if hasError {
 			// The reduced grammar failed to cleanly parse at least part of this
 			// file (e.g. a typed arrow parameter/return type) — error recovery
@@ -197,6 +199,21 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 		imports = extractImports(noComments)
 		exports = extractExports(noComments)
 		wildcardReexports = extractWildcardReexports(noComments)
+		fallbackRan = true
+	}
+
+	// Give regex-fallback symbols a start line so locate can resolve them (the
+	// AST path already recorded lines for everything it saw; a typed arrow const
+	// it could not parse arrives here name-only). Only fills gaps — an
+	// AST-recorded line always wins — and only for names actually in the symbol
+	// set, so a stray fallback match never plants an orphan line entry.
+	if fallbackRan {
+		fLines, cLines := fallbackSymbolLines(source)
+		if lines == nil {
+			lines = make(map[string]int, len(fLines)+len(cLines))
+		}
+		mergeFallbackLines(lines, "function:", functions, fLines)
+		mergeFallbackLines(lines, "class:", classes, cLines)
 	}
 
 	sort.Strings(imports)
@@ -739,15 +756,90 @@ func restPatternTarget(n *ts.Node) *ts.Node {
 // Multi-line /* … */ comments are removed via regex. Single-line // comments
 // are stripped per-line with string-literal awareness so that URLs inside
 // import strings (e.g. import 'http://example.com') are preserved correctly.
+// blockCommentRegex matches a /* ... */ block comment (non-greedy, spans lines).
+var blockCommentRegex = regexp.MustCompile(`/\*[\s\S]*?\*/`)
+
 func removeComments(source string) string {
-	multiLineRegex := regexp.MustCompile(`/\*[\s\S]*?\*/`)
-	source = multiLineRegex.ReplaceAllString(source, "")
+	source = blockCommentRegex.ReplaceAllString(source, "")
 
 	lines := strings.Split(source, "\n")
 	for i, line := range lines {
 		lines[i] = stripLineComment(line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// maskCommentsLineFaithful blanks comment content but preserves every newline,
+// so byte offsets into the result map to the same 1-based line numbers as the
+// original source. removeComments deletes block comments outright, which shifts
+// every line after a multi-line comment — unusable for computing a symbol's
+// start line. Block comments are replaced by just their newlines (dropping the
+// intra-line bytes is harmless: line numbers depend only on newline counts, and
+// the regex fallback matches against this same masked string), and line
+// comments are stripped per line.
+func maskCommentsLineFaithful(source string) string {
+	masked := blockCommentRegex.ReplaceAllStringFunc(source, func(m string) string {
+		return strings.Repeat("\n", strings.Count(m, "\n"))
+	})
+	lines := strings.Split(masked, "\n")
+	for i, line := range lines {
+		lines[i] = stripLineComment(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fallbackSymbolLines computes 1-based start lines for the function and class
+// names the regex fallback recovers, keyed by leaf name. It exists so locate
+// can resolve symbols the AST path missed — notably a typed arrow const
+// (`const f = (x: T): R => …`) the reduced grammar cannot parse, which the
+// fallback otherwise recovers name-only (no line). Comments are masked
+// line-faithfully so the reported line is the real source line. The start line
+// is taken from the captured name's offset (not the whole match), which avoids
+// the leading `(?:^|\s)` in funcDeclRegex counting the preceding newline.
+func fallbackSymbolLines(source string) (funcLines, classLines map[string]int) {
+	masked := maskCommentsLineFaithful(source)
+	funcLines = map[string]int{}
+	classLines = map[string]int{}
+	record := func(m map[string]int, idx []int) {
+		// idx[2]/idx[3] delimit capture group 1 (the symbol name); -1 when absent.
+		if len(idx) < 4 || idx[2] < 0 {
+			return
+		}
+		name := masked[idx[2]:idx[3]]
+		if name == "" {
+			return
+		}
+		if _, ok := m[name]; ok {
+			return // first declaration wins, matching the AST's first-seen line
+		}
+		m[name] = 1 + strings.Count(masked[:idx[2]], "\n")
+	}
+	for _, re := range []*regexp.Regexp{funcDeclRegex, funcExprRegex, arrowFuncRegex} {
+		for _, idx := range re.FindAllStringSubmatchIndex(masked, -1) {
+			record(funcLines, idx)
+		}
+	}
+	for _, idx := range classDeclRegex.FindAllStringSubmatchIndex(masked, -1) {
+		record(classLines, idx)
+	}
+	return funcLines, classLines
+}
+
+// mergeFallbackLines records "<prefix><name>" → line into lines for each name
+// in names that has a computed line in nameLines and no line yet. It never
+// overrides an existing entry (AST lines win) and only touches names present in
+// the accepted symbol set, so orphan line entries are impossible.
+func mergeFallbackLines(lines map[string]int, prefix string, names []string, nameLines map[string]int) {
+	for _, n := range names {
+		ln, ok := nameLines[n]
+		if !ok {
+			continue
+		}
+		key := prefix + n
+		if _, exists := lines[key]; !exists {
+			lines[key] = ln
+		}
+	}
 }
 
 // stripLineComment removes a // comment from a line, skipping // that appears

@@ -303,6 +303,48 @@ func TestJSParser_TypedArrowConst_HasLine(t *testing.T) {
 	})
 }
 
+// TestJSParser_TypedArrowConst_BlockBodyHash covers body-hashing for a
+// block-bodied typed arrow const the reduced grammar cannot parse: a change
+// confined to its body must flip SymbolHashes["function:<name>"] (so diff shows
+// `~ modified`), while a change to a sibling symbol must NOT — proving the
+// hashed span is exact (matching brace) and never bleeds into surrounding code.
+// Expression-bodied arrows (`=> expr`) are deliberately left unhashed.
+func TestJSParser_TypedArrowConst_BlockBodyHash(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	base := "export const f = (x: string): number => {\n\treturn x.length;\n};\nexport const g = (y) => y;\n"
+	bodyEdit := "export const f = (x: string): number => {\n\treturn x.length + 1;\n};\nexport const g = (y) => y;\n"
+	siblingEdit := "export const f = (x: string): number => {\n\treturn x.length;\n};\nexport const g = (y) => y + 9;\n"
+
+	fb, err := p.ParseExt(base, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fe, err := p.ParseExt(bodyEdit, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := p.ParseExt(siblingEdit, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h0 := fb.SymbolHashes["function:f"]
+	if h0 == "" {
+		t.Fatal("block-bodied typed arrow f got no body hash")
+	}
+	if fe.SymbolHashes["function:f"] == h0 {
+		t.Errorf("f body hash did not change after a body edit (%q)", h0)
+	}
+	if fs.SymbolHashes["function:f"] != h0 {
+		t.Errorf("f body hash changed after a SIBLING edit — span bleeds: base=%q sibling=%q", h0, fs.SymbolHashes["function:f"])
+	}
+	// Expression-bodied arrow stays unhashed (deferred, documented gap).
+	if fb.SymbolHashes["function:g"] != "" {
+		t.Errorf("expression-bodied arrow g should be unhashed, got %q", fb.SymbolHashes["function:g"])
+	}
+}
+
 func containsStr(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {

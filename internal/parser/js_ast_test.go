@@ -248,6 +248,61 @@ export const plain = (x) => x;
 	}
 }
 
+// TestJSParser_TypedArrowConst_HasLine covers the follow-on to #84: a typed
+// arrow const the reduced grammar cannot parse is recovered name-only by the
+// regex fallback, which historically left it with NO start line — so locate
+// (name → file:line) could not point to the most common TS declaration form.
+// The fallback now computes a start line from a line-faithful comment mask, so
+// SymbolLines carries the correct 1-based line even when a multi-line block
+// comment sits above the declaration (the mask preserves newlines that
+// removeComments would delete). Body hashing for these remains a separate gap.
+func TestJSParser_TypedArrowConst_HasLine(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+
+	t.Run("typed arrow gets a start line", func(t *testing.T) {
+		src := "export const withReturnType = (x: string): string => x;\n"
+		fs, err := p.ParseExt(src, ".ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fs.SymbolLines["function:withReturnType"]; got != 1 {
+			t.Errorf("SymbolLines[function:withReturnType] = %d, want 1", got)
+		}
+	})
+
+	t.Run("line is faithful under a preceding multi-line block comment", func(t *testing.T) {
+		// The block comment spans lines 1-3; removeComments would delete it and
+		// mis-report the arrow's line. The line-faithful mask keeps the arrow on
+		// its true line 4.
+		src := "/* line one\n   line two\n   line three */\nexport const typed = (x: number): number => x;\n"
+		fs, err := p.ParseExt(src, ".ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fs.SymbolLines["function:typed"]; got != 4 {
+			t.Errorf("SymbolLines[function:typed] = %d, want 4 (line-faithful past block comment)", got)
+		}
+	})
+
+	t.Run("typed arrow and a clean function in the same file both resolve", func(t *testing.T) {
+		// The typed arrow forces the whole file into error recovery so the
+		// fallback runs; a normally-declared function in the same file must still
+		// resolve to its own correct line, not be dropped or reassigned.
+		src := "export const typed = (x: string): string => x;\nfunction clean() { return 1; }\n"
+		fs, err := p.ParseExt(src, ".ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fs.SymbolLines["function:typed"]; got != 1 {
+			t.Errorf("SymbolLines[function:typed] = %d, want 1", got)
+		}
+		if got := fs.SymbolLines["function:clean"]; got != 2 {
+			t.Errorf("SymbolLines[function:clean] = %d, want 2", got)
+		}
+	})
+}
+
 func containsStr(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {

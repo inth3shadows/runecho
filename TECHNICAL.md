@@ -302,9 +302,11 @@ which member changed.
 - **JS/TS** `const f = (x: T): R => …` — a type-annotated arrow const (parameter
   or return type) does not parse cleanly under the reduced subset grammar, so the
   AST drops it and the regex fallback recovers it. The name **and a start line**
-  are captured (so `locate` resolves it to `file:line`), but the body is **not
-  hashed** — a change confined to the arrow's body will not surface as `~
-  modified`. Same grammar gap the prior regex parser had; documented, not
+  are captured (so `locate` resolves it to `file:line`). A **block body**
+  (`=> { … }`) is hashed over its exact matching-brace span, so a body-only edit
+  surfaces as `~ modified`; an **expression body** (`=> expr`) has no unambiguous
+  end without full parsing and is left unhashed (a body-only edit to one will not
+  show as modified). Same grammar gap the prior regex parser had; documented, not
   silently dropped. (Plain, untyped arrows parse fully via the AST.)
 - **JS/TS** `export * from './mod'` — a **bare** star re-export cannot enumerate
   the re-exported names without cross-module resolution (which the parser does

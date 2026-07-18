@@ -214,6 +214,21 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 		}
 		mergeFallbackLines(lines, "function:", functions, fLines)
 		mergeFallbackLines(lines, "class:", classes, cLines)
+
+		// Body-hash block-bodied arrow consts the AST could not parse, so a
+		// change confined to such a body still surfaces as `~ modified`. Gaps
+		// only (an AST hash always wins) and only for accepted function names.
+		if hashes == nil {
+			hashes = make(map[string]string)
+		}
+		bodyHashes := typedArrowBlockHashes(source)
+		for _, n := range functions {
+			if h, ok := bodyHashes[n]; ok {
+				if key := "function:" + n; hashes[key] == "" {
+					hashes[key] = h
+				}
+			}
+		}
 	}
 
 	sort.Strings(imports)
@@ -823,6 +838,107 @@ func fallbackSymbolLines(source string) (funcLines, classLines map[string]int) {
 		record(classLines, idx)
 	}
 	return funcLines, classLines
+}
+
+// blankCommentsAndStrings returns src with the interior of every string literal
+// and comment replaced by spaces, preserving length and newlines so byte
+// offsets still map 1:1 to the original. Brace scanning over the result cannot
+// be fooled by a { or } that lives inside a string or a comment.
+func blankCommentsAndStrings(src string) string {
+	b := []byte(src)
+	out := make([]byte, len(b))
+	copy(out, b)
+	blank := func(i int) {
+		if out[i] != '\n' {
+			out[i] = ' '
+		}
+	}
+	i := 0
+	for i < len(b) {
+		switch c := b[i]; {
+		case c == '/' && i+1 < len(b) && b[i+1] == '/':
+			for i < len(b) && b[i] != '\n' {
+				blank(i)
+				i++
+			}
+		case c == '/' && i+1 < len(b) && b[i+1] == '*':
+			blank(i)
+			i++
+			for i < len(b) && !(b[i] == '*' && i+1 < len(b) && b[i+1] == '/') {
+				blank(i)
+				i++
+			}
+			for n := 0; n < 2 && i < len(b); n++ { // blank the closing */
+				blank(i)
+				i++
+			}
+		case c == '\'' || c == '"' || c == '`':
+			blank(i)
+			i++
+			for i < len(b) && b[i] != c {
+				if b[i] == '\\' && i+1 < len(b) {
+					blank(i)
+					i++
+				}
+				blank(i)
+				i++
+			}
+			if i < len(b) {
+				blank(i) // closing quote
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
+// typedArrowBlockHashes hashes the body span of each block-bodied arrow const
+// the regex fallback recovered (`const NAME = (...) => { ... }`), keyed by leaf
+// name. Only block bodies are handled: the span runs from the declaration to
+// the brace matching the body's opening `{`, which is exact — so the hash can
+// never bleed into sibling code. Expression-bodied arrows (`=> expr`) have no
+// unambiguous end without full parsing and are deliberately left unhashed (no
+// regression: the fallback never hashed them). Braces are matched on a
+// comment/string-blanked view so a `}` inside a literal never miscounts.
+func typedArrowBlockHashes(source string) map[string]string {
+	masked := blankCommentsAndStrings(source)
+	out := map[string]string{}
+	for _, idx := range arrowFuncRegex.FindAllStringSubmatchIndex(masked, -1) {
+		if len(idx) < 4 || idx[2] < 0 {
+			continue
+		}
+		name := masked[idx[2]:idx[3]]
+		if name == "" {
+			continue
+		}
+		j := idx[1] // just past the matched `=>`
+		for j < len(masked) && (masked[j] == ' ' || masked[j] == '\t' || masked[j] == '\n' || masked[j] == '\r') {
+			j++
+		}
+		if j >= len(masked) || masked[j] != '{' {
+			continue // expression body — deferred
+		}
+		depth, end := 0, -1
+		for k := j; k < len(masked) && end < 0; k++ {
+			switch masked[k] {
+			case '{':
+				depth++
+			case '}':
+				if depth--; depth == 0 {
+					end = k + 1
+				}
+			}
+		}
+		if end < 0 {
+			continue // unbalanced — skip rather than hash a runaway span
+		}
+		if _, seen := out[name]; !seen {
+			out[name] = hashBytesHex([]byte(source[idx[0]:end]))
+		}
+	}
+	return out
 }
 
 // mergeFallbackLines records "<prefix><name>" → line into lines for each name

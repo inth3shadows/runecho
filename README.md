@@ -175,7 +175,7 @@ not general-purpose code intelligence.
 | `cmd/runecho-ir/` | The CLI: index, snapshot, diff, log, churn, verify, truth-trail, validate-claims, repo, backup |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
 | `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode |
-| `internal/parser/` | Per-language structure extraction (Go/JS/TS/Python) |
+| `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell) |
 | `internal/ir/` | IR build, deterministic hashing, JSON storage |
 | `internal/snapshot/` | Central store: migrations, registry, diff, churn, backup |
 | `internal/mcp/` | Minimal MCP plumbing + the oracle tools |

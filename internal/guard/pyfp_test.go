@@ -30,6 +30,11 @@ func TestPyDeclaredNames(t *testing.T) {
 			must: []string{"setup", "teardown"},
 		},
 		{
+			name: "parenthesized and nested tuple targets",
+			src:  []string{"(a, b) = f()", "first, (g, h) = pair"},
+			must: []string{"a", "b", "first", "g", "h"},
+		},
+		{
 			name:    "annotated assignment drops the type",
 			src:     []string{"svc: RouteContext = build()"},
 			must:    []string{"svc"},

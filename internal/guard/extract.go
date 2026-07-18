@@ -612,6 +612,13 @@ func pyBindTargets(lhs string) []string {
 	for _, t := range splitTopLevelCommas(lhs) {
 		t = strings.TrimSpace(t)
 		t = strings.TrimSpace(strings.TrimPrefix(t, "*"))
+		// A parenthesized/bracketed tuple target (`(a, b) = f()`, `[a, b] = xs`,
+		// or nested `a, (b, c) = …`) is a target list itself — recurse into it so
+		// each inner name binds, rather than dropping the whole element below.
+		if len(t) >= 2 && ((t[0] == '(' && t[len(t)-1] == ')') || (t[0] == '[' && t[len(t)-1] == ']')) {
+			out = append(out, pyBindTargets(t[1:len(t)-1])...)
+			continue
+		}
 		if i := jsTopLevelColon(t); i >= 0 { // `x: int` → x (colon logic is language-neutral)
 			t = strings.TrimSpace(t[:i])
 		}

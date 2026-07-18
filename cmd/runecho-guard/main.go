@@ -215,6 +215,22 @@ func runArgs(args []string) int {
 
 	violations := guard.Run(symbols, ignorePath, diffs)
 
+	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
+	// default off). Reads each staged Go file's whole current text for import
+	// parsing and the shadow gate; repoRoot anchors the go.mod lookup, resolved
+	// once for the whole commit.
+	if qualifiedEnabled() {
+		if modulePath := guard.GoModulePath(repoRoot); modulePath != "" {
+			for _, fd := range diffs {
+				if guard.LangFor(fd.Path) != guard.LangGo {
+					continue
+				}
+				whole := readFileLines(fd.AbsPath)
+				violations = append(violations, qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)...)
+			}
+		}
+	}
+
 	if len(violations) == 0 {
 		if *verbose {
 			infof("all references resolved")
@@ -527,6 +543,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
+
+	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
+	// default off). fileLines is the pre-edit whole file (read above); newLines is
+	// the proposed added text — passing both lets an in-edit shadow or a newly
+	// added same-repo import be seen. The file's own directory anchors go.mod.
+	if qualifiedEnabled() && lang == guard.LangGo {
+		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
+			violations = append(violations, qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)...)
+		}
+	}
 
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for

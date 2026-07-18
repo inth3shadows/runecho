@@ -302,12 +302,16 @@ which member changed.
 - **JS/TS** `const f = (x: T): R => …` — a type-annotated arrow const (parameter
   or return type) does not parse cleanly under the reduced subset grammar, so the
   AST drops it and the regex fallback recovers it. The name **and a start line**
-  are captured (so `locate` resolves it to `file:line`). A **block body**
-  (`=> { … }`) is hashed over its exact matching-brace span, so a body-only edit
-  surfaces as `~ modified`; an **expression body** (`=> expr`) has no unambiguous
-  end without full parsing and is left unhashed (a body-only edit to one will not
-  show as modified). Same grammar gap the prior regex parser had; documented, not
-  silently dropped. (Plain, untyped arrows parse fully via the AST.)
+  are captured (so `locate` resolves it to `file:line`), and the body is hashed
+  so a body-only edit surfaces as `~ modified`. A **block body** (`=> { … }`) is
+  hashed over its exact matching-brace span. An **expression body** (`=> expr`)
+  is hashed to the first statement boundary (`;`, a declarator `,`, or a
+  newline) — exact for the common single-line form; a body **continued across
+  multiple lines** is under-captured (later lines are excluded), so an edit
+  confined to those trailing lines may not show as modified. This is the safe
+  direction: the span never bleeds into the next statement, so a sibling edit
+  never falsely flags this symbol. Same grammar gap the prior regex parser had;
+  documented, not silently dropped. (Plain, untyped arrows parse fully via the AST.)
 - **JS/TS** `export * from './mod'` — a **bare** star re-export cannot enumerate
   the re-exported names without cross-module resolution (which the parser does
   not do), so the individual names are not captured. The source module is still

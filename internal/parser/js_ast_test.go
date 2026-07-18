@@ -339,9 +339,50 @@ func TestJSParser_TypedArrowConst_BlockBodyHash(t *testing.T) {
 	if fs.SymbolHashes["function:f"] != h0 {
 		t.Errorf("f body hash changed after a SIBLING edit — span bleeds: base=%q sibling=%q", h0, fs.SymbolHashes["function:f"])
 	}
-	// Expression-bodied arrow stays unhashed (deferred, documented gap).
-	if fb.SymbolHashes["function:g"] != "" {
-		t.Errorf("expression-bodied arrow g should be unhashed, got %q", fb.SymbolHashes["function:g"])
+	// Expression-bodied arrows are now hashed too (see the dedicated test below).
+	if fb.SymbolHashes["function:g"] == "" {
+		t.Error("expression-bodied arrow g should be hashed")
+	}
+}
+
+// TestJSParser_TypedArrowConst_ExprBodyHash covers body-hashing for an
+// expression-bodied typed arrow (`const f = (x: T) => expr`). A change to the
+// body must flip the hash; critically, a change to a SIBLING declaration on the
+// next line must NOT — the newline boundary in arrowBodyEnd stops the span from
+// bleeding into the following statement. A body continued across lines is
+// under-captured by design (safe: can only miss a change, never invent one).
+func TestJSParser_TypedArrowConst_ExprBodyHash(t *testing.T) {
+	requireJSGrammar(t, ".ts")
+	p := NewJSParser()
+	// No trailing semicolons: the newline (ASI) is the ONLY boundary between a
+	// and b, so this genuinely exercises arrowBodyEnd's newline case — with a
+	// semicolon present, the `;` would stop the span regardless.
+	base := "export const a = (x: number) => x + 1\nexport const b = (y: number) => y + 2\n"
+	bodyEdit := "export const a = (x: number) => x + 99\nexport const b = (y: number) => y + 2\n"
+	siblingEdit := "export const a = (x: number) => x + 1\nexport const b = (y: number) => y + 99\n"
+
+	fbase, err := p.ParseExt(base, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fbody, err := p.ParseExt(bodyEdit, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsib, err := p.ParseExt(siblingEdit, ".ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h0 := fbase.SymbolHashes["function:a"]
+	if h0 == "" {
+		t.Fatal("expression-bodied typed arrow a got no body hash")
+	}
+	if fbody.SymbolHashes["function:a"] == h0 {
+		t.Errorf("a hash did not change after a body edit (%q)", h0)
+	}
+	if fsib.SymbolHashes["function:a"] != h0 {
+		t.Errorf("a hash changed after a SIBLING edit — span bleeds past the newline: base=%q sibling=%q", h0, fsib.SymbolHashes["function:a"])
 	}
 }
 

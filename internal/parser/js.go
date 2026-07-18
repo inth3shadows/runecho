@@ -221,7 +221,7 @@ func (p *JSParser) parse(source, ext string) (FileStructure, error) {
 		if hashes == nil {
 			hashes = make(map[string]string)
 		}
-		bodyHashes := typedArrowBlockHashes(source)
+		bodyHashes := typedArrowHashes(source)
 		for _, n := range functions {
 			if h, ok := bodyHashes[n]; ok {
 				if key := "function:" + n; hashes[key] == "" {
@@ -894,15 +894,18 @@ func blankCommentsAndStrings(src string) string {
 	return string(out)
 }
 
-// typedArrowBlockHashes hashes the body span of each block-bodied arrow const
-// the regex fallback recovered (`const NAME = (...) => { ... }`), keyed by leaf
-// name. Only block bodies are handled: the span runs from the declaration to
-// the brace matching the body's opening `{`, which is exact — so the hash can
-// never bleed into sibling code. Expression-bodied arrows (`=> expr`) have no
-// unambiguous end without full parsing and are deliberately left unhashed (no
-// regression: the fallback never hashed them). Braces are matched on a
-// comment/string-blanked view so a `}` inside a literal never miscounts.
-func typedArrowBlockHashes(source string) map[string]string {
+// typedArrowHashes hashes the body span of each arrow const the regex fallback
+// recovered (`const NAME = (...) => …`), keyed by leaf name, so a body-only edit
+// to a typed arrow the AST could not parse still surfaces as `~ modified`.
+//
+// A block body (`=> { … }`) is hashed to the brace matching its opening `{` —
+// an exact span. An expression body (`=> expr`) is hashed to the first
+// statement boundary (see arrowBodyEnd): exact for the common single-line form,
+// and for a body continued across lines it under-captures (drops later lines)
+// rather than over-captures, so the hash can only MISS a change, never invent
+// one from a sibling. Braces/boundaries are scanned on a comment/string-blanked
+// view so a delimiter inside a literal never miscounts.
+func typedArrowHashes(source string) map[string]string {
 	masked := blankCommentsAndStrings(source)
 	out := map[string]string{}
 	for _, idx := range arrowFuncRegex.FindAllStringSubmatchIndex(masked, -1) {
@@ -913,32 +916,80 @@ func typedArrowBlockHashes(source string) map[string]string {
 		if name == "" {
 			continue
 		}
+		if _, seen := out[name]; seen {
+			continue // first declaration wins, matching recordLine/recordHash
+		}
 		j := idx[1] // just past the matched `=>`
-		for j < len(masked) && (masked[j] == ' ' || masked[j] == '\t' || masked[j] == '\n' || masked[j] == '\r') {
+		for j < len(masked) && isASCIISpace(masked[j]) {
 			j++
 		}
-		if j >= len(masked) || masked[j] != '{' {
-			continue // expression body — deferred
+		if j >= len(masked) {
+			continue
 		}
-		depth, end := 0, -1
-		for k := j; k < len(masked) && end < 0; k++ {
-			switch masked[k] {
-			case '{':
-				depth++
-			case '}':
-				if depth--; depth == 0 {
-					end = k + 1
-				}
-			}
+		var end int
+		if masked[j] == '{' {
+			end = braceMatchEnd(masked, j) // block body: exact matching brace
+		} else {
+			end = arrowBodyEnd(masked, j) // expression body: first depth-0 boundary
 		}
-		if end < 0 {
-			continue // unbalanced — skip rather than hash a runaway span
+		if end <= idx[0] {
+			continue // unbalanced / empty — skip rather than hash a runaway span
 		}
-		if _, seen := out[name]; !seen {
-			out[name] = hashBytesHex([]byte(source[idx[0]:end]))
-		}
+		out[name] = hashBytesHex([]byte(source[idx[0]:end]))
 	}
 	return out
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// braceMatchEnd returns the offset just past the `}` matching the `{` at open,
+// or -1 if unbalanced. masked must have comment/string interiors blanked so a
+// brace inside a literal never miscounts.
+func braceMatchEnd(masked string, open int) int {
+	depth := 0
+	for k := open; k < len(masked); k++ {
+		switch masked[k] {
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth == 0 {
+				return k + 1
+			}
+		}
+	}
+	return -1
+}
+
+// arrowBodyEnd returns the end offset (exclusive) of an arrow's expression body
+// starting at from, tracking bracket depth on a comment/string-blanked view. It
+// stops at the first depth-0 statement boundary — `;`, a declarator `,`, or a
+// newline (ASI) — or where an unbalanced close drops depth below zero, or EOF.
+// Treating every depth-0 newline as a boundary is what keeps the span from
+// bleeding into the next statement: the cost is that a body continued across
+// lines is under-captured, which can only miss a modification, never invent one.
+func arrowBodyEnd(masked string, from int) int {
+	depth := 0
+	for k := from; k < len(masked); k++ {
+		switch masked[k] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth--; depth < 0 {
+				return k // closed past our start — stop before it
+			}
+		case ';', ',':
+			if depth == 0 {
+				return k
+			}
+		case '\n':
+			if depth == 0 {
+				return k
+			}
+		}
+	}
+	return len(masked)
 }
 
 // mergeFallbackLines records "<prefix><name>" → line into lines for each name

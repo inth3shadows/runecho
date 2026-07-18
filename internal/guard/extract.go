@@ -521,6 +521,125 @@ func jsTopLevelColon(s string) int {
 	return -1
 }
 
+// PyDeclaredNames returns the names bound by plain assignment statements on the
+// given lines — the LHS target(s) only. It is the Python sibling of
+// JSDeclaredNames: the additive check would otherwise flag a bare call to a name
+// bound from a computed member (`handler = HANDLERS[key]; handler(payload)`) or
+// any local assignment as a hallucination, because ExtractDefs sees only
+// `def`/`class`.
+//
+// Precision is preserved the same way JSDeclaredNames preserves it — bind only
+// real targets, never a type name or a keyword argument, so a genuine
+// hallucination of that name is still caught (a false negative is the worst
+// class). Concretely it:
+//   - takes only the target list before a TOP-LEVEL plain `=` (skips ==, !=,
+//     <=, >=, walrus :=, and augmented ops like += *= //=);
+//   - skips a line that begins inside an unclosed bracket carried from a prior
+//     line, so a kwarg on a wrapped call (`  timeout=30,`) is not read as a
+//     binding; bracket depth is carried across lines and reset on a diff-hunk gap;
+//   - drops attribute/subscript targets (`a.b`, `a[i]` rebind no new name),
+//     annotation types (`x: int` → x, never int), and a leading `*` (starred
+//     target). Tuple targets (`a, b = f()`) bind each name.
+//
+// Known limitation (accepted, FP-suppression side): a chained assignment
+// (`a = b = c = 0`) binds only the first target — under-capture, never a false
+// alarm.
+func PyDeclaredNames(lines []AddedLine) []string {
+	var out []string
+	depth := 0
+	prevNo := 0
+	first := true
+	scanStripped(LangPython, lines, func(s string, l AddedLine) {
+		// A diff hunk's added lines may be non-contiguous; bracket continuity
+		// can't be assumed across a gap (mirrors the open-string reset elsewhere).
+		if !first && l.LineNo != prevNo+1 {
+			depth = 0
+		}
+		first = false
+		prevNo = l.LineNo
+		// Only a line that starts OUTSIDE any bracket is a statement-level
+		// assignment; otherwise a `=` here is a kwarg/default inside a call.
+		if depth == 0 {
+			if lhs := pyAssignLHS(s); lhs != "" {
+				out = append(out, pyBindTargets(lhs)...)
+			}
+		}
+		depth += pyBracketDelta(s)
+		if depth < 0 {
+			depth = 0
+		}
+	})
+	return out
+}
+
+// pyAssignLHS returns the target-list text before the first TOP-LEVEL plain `=`
+// in s, or "" if s carries no such operator (not an assignment, or the `=` is
+// part of ==/!=/<=/>=/:= or an augmented op like += //=).
+func pyAssignLHS(s string) string {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '=':
+			if depth != 0 {
+				continue
+			}
+			if i+1 < len(s) && s[i+1] == '=' {
+				i++ // `==`
+				continue
+			}
+			if i > 0 {
+				switch s[i-1] {
+				case '=', '!', '<', '>', ':', '+', '-', '*', '/', '%', '&', '|', '^', '@', '~':
+					continue // tail of ==/!=/<=/>=/:= or an augmented assignment
+				}
+			}
+			return s[:i]
+		}
+	}
+	return ""
+}
+
+// pyBindTargets extracts the plain identifiers a target list binds, skipping
+// attribute/subscript targets (`a.b`, `a[i]`), annotation types (`x: T` → x),
+// and a leading `*`. Reuses splitTopLevelCommas so a tuple target with call
+// commas in a nested annotation doesn't split wrongly.
+func pyBindTargets(lhs string) []string {
+	var out []string
+	for _, t := range splitTopLevelCommas(lhs) {
+		t = strings.TrimSpace(t)
+		t = strings.TrimSpace(strings.TrimPrefix(t, "*"))
+		if i := jsTopLevelColon(t); i >= 0 { // `x: int` → x (colon logic is language-neutral)
+			t = strings.TrimSpace(t[:i])
+		}
+		if strings.ContainsAny(t, ".[]()") {
+			continue // attribute/subscript/call target binds no new name
+		}
+		if reIdent.MatchString(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// pyBracketDelta returns the net bracket nesting change across s ((/[/{ minus
+// )/]/}), on already literal-stripped text so brackets in strings don't count.
+func pyBracketDelta(s string) int {
+	d := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			d++
+		case ')', ']', '}':
+			d--
+		}
+	}
+	return d
+}
+
 // --- reference extraction ---
 
 // callPattern matches an identifier immediately followed by '(' that is NOT

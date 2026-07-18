@@ -16,6 +16,16 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- Guard no longer false-positives on bare calls to locally-bound callables. It
+  now folds local binding targets into the additive known set — JS/TS
+  destructures and `useState` setters (#156), and Python assignment targets
+  (`handler = HANDLERS[key]; handler(payload)`). Extraction is deliberately
+  precise (assignment/declarator targets only, never a parameter's type
+  annotation or a keyword argument) so a genuine hallucination of the same name
+  is still caught. Promotes the two tracked corpus false positives
+  (`js-fp-dynamic-callable`, `py-fp-local-callable`) to true negatives.
+
 ## [0.7.0] — 2026-07-12
 
 44 commits since 0.6.0: parser fidelity, guard hardening, and CLI/IR features.

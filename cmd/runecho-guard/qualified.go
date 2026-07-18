@@ -17,16 +17,20 @@ func qualifiedEnabled() bool { return os.Getenv("RUNECHO_GUARD_QUALIFIED") == "1
 
 // qualifiedViolations runs the Go same-repo qualified-call check for one file and
 // stamps each violation's File field. wholeFileLines is the current on-disk file
-// (pre-edit in hook mode); addedLines is the new/added text; moduleDir is where
-// the go.mod walk starts (repo root, or the edited file's directory in hook
-// mode). Returns nil — fail-open — when the flag is off, the language is not Go,
-// or no module path resolves.
-func qualifiedViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, symbols map[string]struct{}, moduleDir, path string) []guard.Violation {
-	if !qualifiedEnabled() || lang != guard.LangGo {
-		return nil
-	}
-	modulePath := guard.GoModulePath(moduleDir)
-	if modulePath == "" {
+// (pre-edit in hook mode); addedLines is the new/added text; modulePath is the
+// already-resolved go.mod module path (callers resolve it once — see GoModulePath).
+// Returns nil — fail-open — when the flag is off, the language is not Go, or
+// modulePath is empty.
+//
+// Accepted limitation (matches the guard's existing oversized-file posture, e.g.
+// addInFileDefs): if wholeFileLines is nil because the on-disk file exceeded the
+// read cap, the shadow gate sees only addedLines, so a shadow elsewhere in the
+// unread file is invisible. This can only bite when the SAME edit both adds a
+// same-repo import and calls a nonexistent selector on an alias that a pre-existing
+// (unread) local shadows — a rare corner on an 8 MiB+ file, degraded exactly as the
+// rest of the guard degrades on oversized input.
+func qualifiedViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, symbols map[string]struct{}, modulePath, path string) []guard.Violation {
+	if !qualifiedEnabled() || lang != guard.LangGo || modulePath == "" {
 		return nil
 	}
 	vs := guard.GoQualifiedViolations(wholeFileLines, addedLines, symbols, modulePath)

@@ -88,6 +88,40 @@ func TestGoQualifiedViolations_FlagsHallucination(t *testing.T) {
 	}
 }
 
+func TestGoQualifiedViolations_AliasedImport(t *testing.T) {
+	mod := "github.com/acme/proj"
+	// Explicitly aliased same-repo import: the alias token on the import spec is a
+	// binding, not a use, so it must NOT disqualify the alias (regression for the
+	// bug where aliased imports were silently never validated).
+	// Both single-line `import sn "path"` and block-form aliased specs must be
+	// recognized without disqualifying the alias.
+	whole := linesOf(
+		`import sn "github.com/acme/proj/internal/snapshot"`,
+		"func f() { sn.NoSuchFunc() }",
+	)
+	added := linesOf("func f() { sn.NoSuchFunc() }")
+	known := map[string]struct{}{"RealFunc": {}}
+	v := GoQualifiedViolations(whole, added, known, mod)
+	if len(v) != 1 || v[0].Symbol != "sn.NoSuchFunc" {
+		t.Fatalf("aliased same-repo hallucination must be flagged, got %+v", v)
+	}
+	// Block-form aliased spec.
+	wholeBlock := linesOf(
+		"import (",
+		`	sn "github.com/acme/proj/internal/snapshot"`,
+		")",
+		"func f() { sn.NoSuchFunc() }",
+	)
+	if v := GoQualifiedViolations(wholeBlock, added, known, mod); len(v) != 1 {
+		t.Fatalf("block-form aliased hallucination must be flagged, got %+v", v)
+	}
+	// A real symbol on the aliased import is not flagged.
+	whole2 := linesOf(`import sn "github.com/acme/proj/internal/snapshot"`, "x := sn.RealFunc()")
+	if v := GoQualifiedViolations(whole2, linesOf("x := sn.RealFunc()"), known, mod); len(v) != 0 {
+		t.Fatalf("real symbol on aliased import must not be flagged, got %+v", v)
+	}
+}
+
 func TestGoQualifiedViolations_NoFalsePositives(t *testing.T) {
 	mod := "github.com/acme/proj"
 	known := map[string]struct{}{"RealFunc": {}}

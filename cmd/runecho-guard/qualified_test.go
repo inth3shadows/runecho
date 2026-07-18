@@ -28,16 +28,22 @@ func TestQualifiedViolations_FlagGating(t *testing.T) {
 	added := []guard.AddedLine{{Text: "func f() { snap.NoSuchFunc() }", LineNo: 2}}
 	known := map[string]struct{}{"RealFunc": {}}
 
+	// Resolve the module path from the real go.mod on disk (the resolution the
+	// call sites perform once before invoking the helper).
+	modulePath := guard.GoModulePath(dir)
+	if modulePath != "github.com/acme/proj" {
+		t.Fatalf("GoModulePath = %q, want github.com/acme/proj", modulePath)
+	}
+
 	// Flag OFF → no-op regardless of content.
 	t.Setenv("RUNECHO_GUARD_QUALIFIED", "")
-	if v := qualifiedViolations(guard.LangGo, whole, added, known, dir, "internal/x/x.go"); v != nil {
+	if v := qualifiedViolations(guard.LangGo, whole, added, known, modulePath, "internal/x/x.go"); v != nil {
 		t.Fatalf("flag off must yield no violations, got %+v", v)
 	}
 
-	// Flag ON → the hallucinated same-repo call is flagged, File is stamped, and
-	// the go.mod module path resolved from a real file on disk.
+	// Flag ON → the hallucinated same-repo call is flagged and File is stamped.
 	t.Setenv("RUNECHO_GUARD_QUALIFIED", "1")
-	v := qualifiedViolations(guard.LangGo, whole, added, known, dir, "internal/x/x.go")
+	v := qualifiedViolations(guard.LangGo, whole, added, known, modulePath, "internal/x/x.go")
 	if len(v) != 1 {
 		t.Fatalf("flag on must flag the hallucination, got %+v", v)
 	}
@@ -46,12 +52,15 @@ func TestQualifiedViolations_FlagGating(t *testing.T) {
 	}
 
 	// Non-Go language is a no-op even with the flag on.
-	if v := qualifiedViolations(guard.LangPython, whole, added, known, dir, "x.py"); v != nil {
+	if v := qualifiedViolations(guard.LangPython, whole, added, known, modulePath, "x.py"); v != nil {
 		t.Errorf("non-Go must be a no-op, got %+v", v)
 	}
 
-	// No go.mod (abstain) even with the flag on.
-	if v := qualifiedViolations(guard.LangGo, whole, added, known, t.TempDir(), "x.go"); v != nil {
-		t.Errorf("missing go.mod must abstain, got %+v", v)
+	// Empty module path (no go.mod resolved) abstains even with the flag on.
+	if guard.GoModulePath(t.TempDir()) != "" {
+		t.Error("a dir without go.mod must resolve to empty module path")
+	}
+	if v := qualifiedViolations(guard.LangGo, whole, added, known, "", "x.go"); v != nil {
+		t.Errorf("empty module path must abstain, got %+v", v)
 	}
 }

@@ -170,9 +170,32 @@ func onlySelectorQualifiers(wholeFile []AddedLine, candidates map[string]struct{
 	}
 	disqualified := make(map[string]struct{})
 	open := ""
+	inImportBlock := false
 	for _, l := range wholeFile {
+		lineStartOpen := open
 		scan, newOpen := stripLiteralsStateful(LangGo, l.Text, open)
 		open = newOpen
+		// Skip import statements and import-block contents. On `import sn "path"` or
+		// a block spec `sn "path"`, the alias `sn` is a BINDING, not a bare use —
+		// counting it would disqualify every aliased same-repo import and silently
+		// never validate it. Block state is tracked exactly as sameRepoGoAliases does;
+		// only when not already inside a multiline string (lineStartOpen == "").
+		if lineStartOpen == "" {
+			trimmed := strings.TrimSpace(l.Text)
+			if inImportBlock {
+				if trimmed == ")" {
+					inImportBlock = false
+				}
+				continue
+			}
+			if trimmed == "import (" || trimmed == "import(" {
+				inImportBlock = true
+				continue
+			}
+			if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "import\"") {
+				continue
+			}
+		}
 		for _, loc := range reGoBareIdent.FindAllStringIndex(scan, -1) {
 			name := scan[loc[0]:loc[1]]
 			if _, ok := candidates[name]; !ok {

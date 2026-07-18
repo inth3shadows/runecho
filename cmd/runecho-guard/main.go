@@ -717,6 +717,14 @@ func addInFileDefs(symbols map[string]struct{}, fileLines []guard.AddedLine, lan
 			symbols[name] = struct{}{}
 		}
 	}
+	// Python sibling: a local callable bound by assignment (`handler =
+	// HANDLERS[key]; handler(payload)`) is not a hallucination. Fold whole-file
+	// assignment targets so a binding on a line outside the edited hunk resolves.
+	if lang == guard.LangPython {
+		for _, name := range guard.PyDeclaredNames(fileLines) {
+			symbols[name] = struct{}{}
+		}
+	}
 }
 
 // wholeFileBoundNames returns the union of the file's locally-bound names

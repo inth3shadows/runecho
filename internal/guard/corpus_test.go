@@ -57,6 +57,13 @@ func replayCase(c corpusCase) []Violation {
 				known[name] = struct{}{}
 			}
 		}
+		// Mirror addInFileDefs: Python folds whole-file assignment targets so a
+		// local callable bound outside the edited hunk resolves.
+		if lang == LangPython {
+			for _, name := range PyDeclaredNames(lines) {
+				known[name] = struct{}{}
+			}
+		}
 	}
 	diffs := []FileDiff{{Path: c.File, AddedLines: TextToAddedLines(c.Edit)}}
 	return Run(known, "", diffs)

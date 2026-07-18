@@ -110,12 +110,26 @@
     "expect": []
   },
   {
-    "name": "py-fp-local-callable",
-    "desc": "KNOWN FP: a local variable holding a callable cannot be resolved statically",
+    "name": "py-tn-local-callable",
+    "desc": "a local variable bound to a callable (computed member access) resolves via the PyDeclaredNames assignment-target fold — was a tracked FP before that fold-in (mirrors JS #156)",
     "file": "dispatch.py",
     "edit": "def dispatch(key, payload):\n    handler = HANDLERS[key]\n    handler(payload)\n",
-    "expect": [],
-    "known_fp": ["handler"]
+    "expect": []
+  },
+  {
+    "name": "py-tn-tuple-target-callable",
+    "desc": "tuple-unpacked assignment targets are bound (a bare call to one is not a hallucination)",
+    "file": "unpack.py",
+    "edit": "def run(pair):\n    setup, teardown = pair\n    setup()\n    teardown()\n",
+    "expect": []
+  },
+  {
+    "name": "py-tp-kwarg-not-a-binding",
+    "desc": "precision guard: a keyword argument on a wrapped-call continuation line is NOT an assignment target (bracket depth is carried across lines), so it can't mask a genuine hallucination — bogusHelper is still flagged",
+    "file": "call.py",
+    "known": ["configure"],
+    "edit": "def go(cfg):\n    result = configure(\n        timeout=30,\n    )\n    return bogusHelper(result)\n",
+    "expect": ["bogusHelper"]
   },
   {
     "name": "py-async-def",

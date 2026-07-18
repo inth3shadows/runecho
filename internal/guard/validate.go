@@ -78,6 +78,15 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 				known[name] = struct{}{}
 			}
 		}
+		// Python's sibling gap: a local callable bound by assignment
+		// (`handler = HANDLERS[key]; handler(payload)`) is not a hallucination.
+		// PyDeclaredNames binds only assignment targets (not params/annotations),
+		// same precision discipline as JSDeclaredNames.
+		if lang == LangPython {
+			for _, name := range PyDeclaredNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
+		}
 		// Ambient test-runner globals (describe/it/expect/…) resolve only inside a
 		// spec file, where the runner injects them — see FoldTestGlobals.
 		FoldTestGlobals(known, fd.Path)

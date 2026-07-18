@@ -70,7 +70,7 @@ edit time still sees the old import on disk and stays silent. Gated OFF by defau
 is a hook-level check (operates on edit old-vs-new text), so it is not exercised by
 this benchmark's `guard.Run` path — its validation is the unit suite.
 
-## Honest caveats (read before quoting the 1/9)
+## Honest caveats (read before quoting the captured catch-rate — 4/9 post-#56; the 1/9 below is the pre-#56 first measurement)
 
 - **Selection bias toward qualified positions.** The corpus was mined by
   searching for *compiler/runtime errors*, and the loudest error signatures

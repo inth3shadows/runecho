@@ -231,6 +231,20 @@ func runArgs(args []string) int {
 		}
 	}
 
+	// External-dependency qualified-call check for Python (RUNECHO_GUARD_DEPS_PY=1,
+	// default off). The index is built once per commit from the virtualenv that
+	// governs repoRoot; with no venv it resolves everything to Unknown and the
+	// loop below is a no-op.
+	if depIdx := newPythonDepIndex(repoRoot); depIdx != nil {
+		for _, fd := range diffs {
+			if guard.LangFor(fd.Path) != guard.LangPython {
+				continue
+			}
+			whole := readFileLines(fd.AbsPath)
+			violations = append(violations, depQualifiedViolations(guard.LangPython, whole, fd.AddedLines, depIdx, fd.Path)...)
+		}
+	}
+
 	if len(violations) == 0 {
 		if *verbose {
 			infof("all references resolved")
@@ -551,6 +565,15 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
 			violations = append(violations, qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)...)
+		}
+	}
+
+	// External-dependency qualified-call check for Python (RUNECHO_GUARD_DEPS_PY=1,
+	// default off). The edited file's own directory anchors venv discovery, so a
+	// monorepo with per-project virtualenvs resolves against the right one.
+	if lang == guard.LangPython {
+		if depIdx := newPythonDepIndex(filepath.Dir(filePath)); depIdx != nil {
+			violations = append(violations, depQualifiedViolations(lang, fileLines, newLines, depIdx, filePath)...)
 		}
 	}
 

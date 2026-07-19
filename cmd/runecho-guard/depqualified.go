@@ -18,6 +18,38 @@ import (
 // blast radius small until that has been proven in real use.
 func depQualifiedEnabled() bool { return os.Getenv("RUNECHO_GUARD_DEPS_PY") == "1" }
 
+// depQualifiedGoEnabled reports whether the Go half is on
+// (RUNECHO_GUARD_DEPS_GO=1). Separate from the Python flag so each language can
+// be dogfooded on its own: they share the tri-state resolver but not their
+// failure modes — Python's risk is runtime dynamism, Go's is resolving the wrong
+// copy of a package (version, replace, vendor, workspace).
+func depQualifiedGoEnabled() bool { return os.Getenv("RUNECHO_GUARD_DEPS_GO") == "1" }
+
+// newGoDepIndex builds the per-run Go dependency index rooted at startDir, or nil
+// when the check is disabled. nil is a valid argument to
+// GoDepQualifiedViolations, so callers need no extra branch.
+func newGoDepIndex(startDir string) depindex.Index {
+	if !depQualifiedGoEnabled() {
+		return nil
+	}
+	return depindex.NewGoIndex(startDir)
+}
+
+// goDepQualifiedViolations runs the external-dependency check for one Go file and
+// stamps each violation's File field. modulePath is the repo's own module path,
+// used only to exclude same-repo imports (qualified.go owns those). Returns nil
+// when the flag is off, the index is nil, or the language is not Go.
+func goDepQualifiedViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, modulePath string, idx depindex.Index, path string) []guard.Violation {
+	if idx == nil || lang != guard.LangGo {
+		return nil
+	}
+	vs := guard.GoDepQualifiedViolations(wholeFileLines, addedLines, modulePath, idx)
+	for i := range vs {
+		vs[i].File = path
+	}
+	return vs
+}
+
 // newPythonDepIndex builds the per-run dependency index rooted at startDir, or
 // returns nil when the check is disabled. nil is a valid argument to
 // PyDepQualifiedViolations (it yields no violations), so callers need no branch

@@ -85,7 +85,9 @@ func FindSitePackages(startDir string) (string, string) {
 		}
 		return "", "VIRTUAL_ENV set but no unambiguous site-packages under " + ve
 	}
-	dir := startDir
+	// Absolute first: filepath.Dir(".") is ".", so a relative start would end the
+	// walk on its first step and report "no virtualenv" from inside one.
+	dir := absDir(startDir)
 	for i := 0; i < maxVenvWalk; i++ {
 		for _, name := range []string{".venv", "venv"} {
 			cand := filepath.Join(dir, name)
@@ -708,6 +710,19 @@ func pyImportBindings(line string) []string {
 		}
 	}
 	return names
+}
+
+// absDir returns dir as an absolute path, falling back to the input when the
+// working directory cannot be determined.
+func absDir(dir string) string {
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }
 
 func isFile(p string) bool {

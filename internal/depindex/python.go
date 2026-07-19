@@ -157,17 +157,119 @@ func (idx *PythonIndex) Lookup(module string) PackageSymbols {
 // it. Folding every child .py/package name into the export set removes that whole
 // class of false positive without needing to know what else the program imports.
 func (idx *PythonIndex) resolve(module string) PackageSymbols {
+	return idx.resolveDepth(module, 0)
+}
+
+// maxStarDepth bounds how far a chain of `from X import *` re-exports is
+// followed. Depth 1 covers the common shape — a package whose __init__ star-imports
+// one internal module (httpx's ._api, PyYAML's .error) — and depth 2 covers that
+// module doing the same. Beyond it the cost stops being worth the reach, and the
+// chain abstains. As with maxResolvesPerRun this is a count, so the verdict stays
+// a pure function of the input.
+const maxStarDepth = 2
+
+// resolveDepth reads one module and unions in the export surface of anything it
+// star-imports.
+//
+// Following the star is what separates "we cannot know" from "we have not looked":
+// `from ._api import *` names a module sitting on disk, so treating it as an
+// automatic abstain gave up reach for no safety gain. The safety comes from the
+// same rule as everywhere else — if a target does not resolve cleanly, the WHOLE
+// importing module degrades to Partial rather than being reported with a set that
+// is missing whatever the star would have contributed.
+//
+// Note the union takes the target's full export set rather than the subset a real
+// `import *` would bind (which honors the target's __all__ and skips underscore
+// names). That over-approximates on purpose: a wider set can only suppress
+// violations, never create them.
+func (idx *PythonIndex) resolveDepth(module string, depth int) PackageSymbols {
 	src, pkgDir, ps, ok := idx.readModuleSource(module)
 	if !ok {
 		return ps
 	}
-	syms := exportsFromPythonModule(src)
-	if syms.Res == Resolved && pkgDir != "" {
+	syms, starTargets := exportsFromPythonModule(src)
+	if syms.Res != Resolved {
+		return syms
+	}
+
+	for _, spec := range starTargets {
+		if depth >= maxStarDepth {
+			return partial("star-import chain deeper than %d levels (at %s)", maxStarDepth, module)
+		}
+		target, ok := resolveStarTarget(module, pkgDir != "", spec)
+		if !ok {
+			return partial("%s: cannot resolve star-import %q", module, spec)
+		}
+		if !idx.spendResolve() {
+			return partial("%s: resolve budget exhausted following star-imports", module)
+		}
+		sub := idx.resolveDepth(target, depth+1)
+		if sub.Res != Resolved {
+			return partial("%s: star-import target %s is %v (%s)", module, target, sub.Res, sub.Reason)
+		}
+		for name := range sub.Exports {
+			syms.Exports[name] = struct{}{}
+		}
+	}
+
+	if pkgDir != "" {
 		for _, name := range submoduleNames(pkgDir) {
 			syms.Exports[name] = struct{}{}
 		}
 	}
 	return syms
+}
+
+// spendResolve claims one unit of the per-run disk budget, reporting false when
+// it is exhausted. Star-import targets are real disk reads, so they must draw on
+// the same budget as top-level lookups or a deep chain could evade it entirely.
+func (idx *PythonIndex) spendResolve() bool {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.resolves >= maxResolvesPerRun {
+		return false
+	}
+	idx.resolves++
+	return true
+}
+
+// resolveStarTarget turns a `from X import *` specifier into an absolute module
+// path, applying PEP 328 relative-import rules. isPkg says whether the importing
+// module is a package (its own __init__.py), which determines the base that
+// leading dots count from: a package is its own base, a plain module uses its
+// parent. ok=false when the specifier climbs past the top level or is empty.
+func resolveStarTarget(module string, isPkg bool, spec string) (string, bool) {
+	dots := 0
+	for dots < len(spec) && spec[dots] == '.' {
+		dots++
+	}
+	rest := strings.Trim(spec[dots:], ".")
+
+	if dots == 0 { // absolute: `from pkg.core import *`
+		if rest == "" {
+			return "", false
+		}
+		return rest, true
+	}
+
+	base := strings.Split(module, ".")
+	if !isPkg && len(base) > 0 {
+		base = base[:len(base)-1] // a plain module resolves relative to its package
+	}
+	// Each dot BEYOND the first climbs one level.
+	for i := 1; i < dots; i++ {
+		if len(base) == 0 {
+			return "", false // climbed past the top-level package
+		}
+		base = base[:len(base)-1]
+	}
+	if len(base) == 0 {
+		return "", false
+	}
+	if rest == "" {
+		return strings.Join(base, "."), true
+	}
+	return strings.Join(base, ".") + "." + rest, true
 }
 
 // submoduleNames lists the importable children of a package directory: each
@@ -261,10 +363,16 @@ func (idx *PythonIndex) readModuleSource(module string) (string, string, Package
 //
 //   - `def __getattr__` — PEP 562 module-level lazy attributes (how polars,
 //     scipy, and friends defer submodule imports)
-//   - `import *`        — pulls in an unknowable set of names
 //   - globals()/setattr/sys.modules/importlib — explicit dynamic namespace writes
+//
+// `from x import *` is NOT here: it names a module we can go and read, so it is
+// collected as a star target and followed instead of being an automatic abstain.
 var reDynamicSurface = regexp.MustCompile(
-	`(?m)^\s*def\s+__getattr__\s*\(|^\s*from\s+\S+\s+import\s+\*|\bglobals\s*\(\s*\)|\bsetattr\s*\(|\bsys\.modules\b|\bimportlib\b`)
+	`(?m)^\s*def\s+__getattr__\s*\(|\bglobals\s*\(\s*\)|\bsetattr\s*\(|\bsys\.modules\b|\bimportlib\b`)
+
+// reStarImport captures the module specifier of a `from X import *`, including
+// the relative forms (`from .core import *`, `from ..pkg import *`).
+var reStarImport = regexp.MustCompile(`(?m)^\s*from\s+(\.*[\w.]*)\s+import\s+\*`)
 
 // reAllAssign finds an `__all__` assignment and captures the RHS start, so we can
 // verify it is a plain literal sequence rather than something computed.
@@ -285,20 +393,22 @@ var reTopLevelDef = regexp.MustCompile(`^(?:async\s+)?(?:def|class)\s+([A-Za-z_]
 // `NAME =` / `NAME: T =` (but not `==`, and not a dunder we handle separately).
 var reTopLevelAssign = regexp.MustCompile(`^([A-Za-z_]\w*)\s*(?::[^=]+)?=[^=]`)
 
-// exportsFromPythonModule derives the export surface of one module's source.
+// exportsFromPythonModule derives the export surface of one module's source, plus
+// the module specifiers of any `from X import *` it performs. The caller resolves
+// those targets and unions them in; this function does no I/O.
 //
-// The set unions __all__ with every top-level binding — defs, classes,
+// The set unions __all__ with every module-level binding — defs, classes,
 // assignments, and imported names. That is intentionally wider than the module's
 // public API: a name bound anywhere at module level IS reachable as an attribute,
 // so including it prevents flagging a real (if private or re-exported) access.
-func exportsFromPythonModule(src string) PackageSymbols {
+func exportsFromPythonModule(src string) (PackageSymbols, []string) {
 	src = strings.ReplaceAll(src, "\r\n", "\n")
 
 	if m := reDynamicSurface.FindString(src); m != "" {
-		return partial("module has a dynamic attribute surface (%s)", strings.TrimSpace(m))
+		return partial("module has a dynamic attribute surface (%s)", strings.TrimSpace(m)), nil
 	}
 	if reAllMutate.MatchString(src) {
-		return partial("__all__ is mutated in place")
+		return partial("__all__ is mutated in place"), nil
 	}
 
 	exports := map[string]struct{}{}
@@ -310,7 +420,7 @@ func exportsFromPythonModule(src string) PackageSymbols {
 	for _, loc := range reAllAssign.FindAllStringSubmatchIndex(src, -1) {
 		items, ok := literalSequenceItems(src, loc[4])
 		if !ok {
-			return partial("__all__ is not a static literal sequence")
+			return partial("__all__ is not a static literal sequence"), nil
 		}
 		for _, it := range items {
 			exports[it] = struct{}{}
@@ -363,7 +473,11 @@ func exportsFromPythonModule(src string) PackageSymbols {
 		}
 	}
 
-	return PackageSymbols{Res: Resolved, Exports: exports}
+	var starTargets []string
+	for _, m := range reStarImport.FindAllStringSubmatch(src, -1) {
+		starTargets = append(starTargets, m[1])
+	}
+	return PackageSymbols{Res: Resolved, Exports: exports}, starTargets
 }
 
 // literalSequenceItems parses the RHS of an `__all__` assignment that begins on

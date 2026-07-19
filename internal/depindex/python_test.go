@@ -73,8 +73,12 @@ func TestLookup_AbstainCases(t *testing.T) {
 		// PEP 562 module-level __getattr__: attributes materialize on access, so
 		// absence from the static surface proves nothing.
 		{"lazy __getattr__", "lazypkg", Partial},
-		// `from x import *` pulls in an unknowable set of names.
-		{"star import", "starpkg", Partial},
+		// A star-import whose target is not installed: the chain cannot be
+		// followed, so the importer must abstain rather than report a set that
+		// silently omits whatever the target would have contributed.
+		{"unfollowable star import", "starbadpkg", Partial},
+		// The target exists but is itself non-enumerable; Partial propagates out.
+		{"star import of a lazy module", "starlazypkg", Partial},
 		// __all__ built by concatenating an imported list cannot be evaluated.
 		{"computed __all__", "computedpkg", Partial},
 		// Never installed: must be Unknown, NOT "no such symbol".
@@ -152,7 +156,6 @@ func TestExportsFromPythonModule_TruncatedIndexNeverResolves(t *testing.T) {
 	// construct that hides names, and each must degrade rather than resolve.
 	sources := map[string]string{
 		"module __getattr__":  "def __getattr__(name):\n    return 1\n",
-		"star import":         "from x import *\n",
 		"globals() write":     "globals().update({'a': 1})\n",
 		"setattr write":       "import sys\nsetattr(sys.modules[__name__], 'a', 1)\n",
 		"importlib":           "import importlib\n",
@@ -162,7 +165,7 @@ func TestExportsFromPythonModule_TruncatedIndexNeverResolves(t *testing.T) {
 	}
 	for name, src := range sources {
 		t.Run(name, func(t *testing.T) {
-			if ps := exportsFromPythonModule(src); ps.Res == Resolved {
+			if ps, _ := exportsFromPythonModule(src); ps.Res == Resolved {
 				t.Fatalf("Res = Resolved for a non-enumerable module; exports=%v", ps.Exports)
 			}
 		})
@@ -174,7 +177,7 @@ func TestExportsFromPythonModule_MultiLineImportBindings(t *testing.T) {
 	// so without logical-line joining the names would be dropped — an under-count,
 	// which is precisely the false-positive direction.
 	src := "from mod import (\n    alpha,\n    beta as gamma,\n)\n"
-	ps := exportsFromPythonModule(src)
+	ps, _ := exportsFromPythonModule(src)
 	if ps.Res != Resolved {
 		t.Fatalf("Res = %v (%s), want Resolved", ps.Res, ps.Reason)
 	}
@@ -245,5 +248,58 @@ func TestLookup_ResolveBudget(t *testing.T) {
 	// A module already in the cache is still answered — no disk work needed.
 	if again := idx.Lookup("absent_module_0"); again.Res != Unknown || strings.Contains(again.Reason, "budget") {
 		t.Errorf("cached lookup should be served from cache, got %q", again.Reason)
+	}
+}
+
+// TestLookup_FollowsStarImports pins the reach win from following
+// `from X import *` one level instead of abstaining on sight. Star-imports are
+// how httpx (`._api`) and PyYAML (`.error`) build their public surface, so
+// treating them as automatically unknowable gave up real coverage for no safety
+// gain: the target is a module sitting on disk that we can simply read.
+func TestLookup_FollowsStarImports(t *testing.T) {
+	idx := newFixtureIndex(t)
+	ps := idx.Lookup("starpkg")
+	if ps.Res != Resolved {
+		t.Fatalf("Res = %v (%s), want Resolved", ps.Res, ps.Reason)
+	}
+	if !ps.Has("hidden") {
+		t.Errorf("Has(\"hidden\") = false; the star-import target was not followed")
+	}
+	if !ps.Has("local") {
+		t.Errorf("Has(\"local\") = false; the importer's own bindings were lost")
+	}
+	if ps.Has("definitely_absent") {
+		t.Errorf("following a star must not make the set match everything")
+	}
+}
+
+func TestResolveStarTarget(t *testing.T) {
+	// PEP 328 relative-import arithmetic: a package is its own base, a plain
+	// module resolves against its parent, and each dot beyond the first climbs one
+	// level. Getting this wrong resolves to the WRONG module, which would union in
+	// an unrelated export set — a silent correctness hole rather than an abstain.
+	tests := []struct {
+		module string
+		isPkg  bool
+		spec   string
+		want   string
+		ok     bool
+	}{
+		{"httpx", true, ".", "httpx", true},
+		{"httpx", true, "._api", "httpx._api", true},
+		{"yaml", true, ".error", "yaml.error", true},
+		{"pkg.sub", true, ".mod", "pkg.sub.mod", true},
+		{"pkg.sub", true, "..other", "pkg.other", true},
+		{"pkg.mod", false, ".sibling", "pkg.sibling", true},
+		{"pkg", true, "absolute.thing", "absolute.thing", true},
+		{"pkg", true, "..too_high", "", false},
+		{"pkg", true, "", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := resolveStarTarget(tt.module, tt.isPkg, tt.spec)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("resolveStarTarget(%q, %v, %q) = (%q, %v), want (%q, %v)",
+				tt.module, tt.isPkg, tt.spec, got, ok, tt.want, tt.ok)
+		}
 	}
 }

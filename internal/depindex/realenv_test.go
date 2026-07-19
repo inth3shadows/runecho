@@ -43,7 +43,6 @@ func TestRealEnvGroundTruth(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("VIRTUAL_ENV", venv)
-	idx := NewPythonIndex(t.TempDir())
 
 	mods := make([]string, 0, len(truth))
 	for m := range truth {
@@ -53,6 +52,10 @@ func TestRealEnvGroundTruth(t *testing.T) {
 
 	totalFP, resolved := 0, 0
 	for _, m := range mods {
+		// A FRESH index per module, because maxResolvesPerRun is a per-guard-run
+		// budget: sharing one index across the whole sample would exhaust it and
+		// report every later module as Unknown, understating reach badly.
+		idx := NewPythonIndex(t.TempDir())
 		ps := idx.Lookup(m)
 		if ps.Res != Resolved {
 			t.Logf("%-12s %-8s (abstains — cannot false-positive)", m, ps.Res)

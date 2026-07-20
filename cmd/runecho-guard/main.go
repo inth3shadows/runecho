@@ -27,6 +27,12 @@
 //	                            symbol definition that other files still reference
 //	                            (per the latest snapshot's refs index). Default OFF
 //	                            (dogfood gate); ask-posture, fail-open.
+//	RUNECHO_GUARD_DEPS_GO=1    enable external-dependency validation for Go: flag a
+//	                            call to a symbol absent from an imported external or
+//	                            stdlib package (http.Gett where net/http has Get).
+//	                            Abstains under go.work, behind a replace directive,
+//	                            or when a package is not in the module cache.
+//	                            Default OFF (dogfood gate).
 //	RUNECHO_GUARD_DUPLICATE=1  enable E5 duplicate-symbol guard: ask when an edit
 //	                            introduces a symbol definition whose name is
 //	                            already defined in a different file (per the
@@ -228,6 +234,20 @@ func runArgs(args []string) int {
 				whole := readFileLines(fd.AbsPath)
 				violations = append(violations, qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)...)
 			}
+		}
+	}
+
+	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
+	// default off). One index per commit, rooted at repoRoot so go.mod, the
+	// module cache, and any vendor/ or go.work are resolved once.
+	if goDepIdx := newGoDepIndex(repoRoot); goDepIdx != nil {
+		modulePath := guard.GoModulePath(repoRoot)
+		for _, fd := range diffs {
+			if guard.LangFor(fd.Path) != guard.LangGo {
+				continue
+			}
+			whole := readFileLines(fd.AbsPath)
+			violations = append(violations, goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)...)
 		}
 	}
 
@@ -551,6 +571,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
 			violations = append(violations, qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)...)
+		}
+	}
+
+	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
+	// default off). The edited file's directory anchors go.mod discovery, so a
+	// multi-module repo resolves against the module the file actually belongs to.
+	if lang == guard.LangGo {
+		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
+			modulePath := guard.GoModulePath(filepath.Dir(filePath))
+			violations = append(violations, goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)...)
 		}
 	}
 

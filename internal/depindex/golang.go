@@ -167,23 +167,30 @@ func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 	if len(files) == 0 {
 		return unknown("%s: no Go source in %s", importPath, dir)
 	}
-
-	// The memo is keyed on what is actually on disk, so a hit is as trustworthy
-	// as a parse. Checked before the byte cap on purpose: a package already
-	// parsed once costs a file read regardless of its size, so there is no reason
-	// to decline it for being large.
-	key := packageCacheKey(importPath, files)
-	if exports, hit := readCachedExports(key); hit {
-		return PackageSymbols{Res: Resolved, Exports: exports}
-	}
-
 	if !idx.spendBytes(size) {
 		return unknown("%s: would exceed the %d-byte scan budget for this run", importPath, maxGoBytesPerRun)
 	}
+
+	// Reading precedes the memo lookup because the key is a hash of the source
+	// bytes, and hashing what is on disk is the only way staleness can be made
+	// impossible rather than merely unlikely (see cache.go). The cost is right:
+	// the files must be read to parse them on a miss anyway, and read-plus-hash on
+	// net/http's 945 KB is ~2ms against a ~107ms parse.
+	//
+	// Note this means the per-package byte cap in goPackageFiles applies on every
+	// run, memo hit or not — a package over the cap is never resolved and never
+	// memoized. That is lost reach on the ~1.7% of packages above 1 MiB, not a
+	// correctness problem.
 	sources, ok, reason := readGoPackageSources(dir, files)
 	if !ok {
 		return unknown("%s: %s", importPath, reason)
 	}
+
+	key := packageCacheKey(importPath, files, sources)
+	if exports, hit := readCachedExports(key); hit {
+		return PackageSymbols{Res: Resolved, Exports: exports}
+	}
+
 	exports, ok := GoPackageExports(sources)
 	if !ok {
 		return partial("%s: source did not parse", importPath)

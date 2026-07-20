@@ -24,19 +24,44 @@ import (
 // write; on a hit, read one small file. First edit pays full cost, every
 // subsequent edit pays a file read.
 //
-// KEYING IS THE WHOLE DESIGN. The key is a content hash over the package
-// directory's file list — names, sizes, and modification times — never the
-// declared module version. Version-keying would be wrong in exactly the cases
-// that matter: a `replace` directive points at a LOCAL directory that is mutable,
-// and a dependency can be rebuilt in place without its version changing. Hashing
-// what is actually on disk means a mutated dependency simply produces a different
-// key. Staleness becomes structurally impossible rather than something the code
-// has to detect and police.
+// KEYING IS THE WHOLE DESIGN, and the first attempt got it wrong in a way worth
+// recording. The key is a hash of the package's actual source BYTES, plus the
+// extractor version. It is emphatically NOT the declared module version, and no
+// longer the (name, size, mtime) stat triple it started as.
+//
+// Version-keying is wrong in exactly the cases that matter: a `replace` directive
+// points at a LOCAL directory that is mutable, and a dependency can be rebuilt in
+// place without its version changing.
+//
+// Stat-keying is subtler and was shipped before being caught. Filesystem mtime
+// granularity is not the nanosecond the API implies: measured on ext4 here it is
+// ~4ms (the kernel tick), and it is 1–2 SECONDS on exFAT, HFS+, NFS, and the
+// Windows drvfs mounts under /mnt/c. Any same-length rewrite inside that window
+// is invisible to a stat triple — which is not exotic, it is write-then-format-on-
+// save, generate-then-patch, or extract-then-fix-up. And the failure is not
+// symmetric: a stale set with an EXTRA name merely suppresses a violation, but a
+// renamed same-length export (Alpha -> Bravo, Setup -> Start) flips straight to a
+// FALSE POSITIVE, and nothing evicts it.
+//
+// Hashing the bytes costs what it should: the files must be read anyway to parse
+// them on a miss, and reading plus hashing net/http's 945 KB is ~2ms against a
+// ~107ms parse. Staleness then really is structurally impossible, rather than
+// asserted by a comment over a heuristic.
 //
 // Entries are immutable once written, so concurrent guard runs need no locking:
 // two processes computing the same key write identical bytes, and the write is a
 // temp-file rename. Nothing is ever invalidated or evicted by this code — a stale
 // key is simply never read again.
+
+// extractorVersion is mixed into every key. Without it, an entry written by one
+// extraction implementation would keep being served after that implementation was
+// replaced — concretely: had this memo existed before the line-scanner was swapped
+// for go/parser, all seven of the scanner's false-positive classes would have gone
+// on firing from cached entries after the fix shipped, forever, because the key
+// does not change when the EXTRACTOR does.
+//
+// Bump this on any change to what GoPackageExports considers an export.
+const extractorVersion = "go-parser-v1"
 
 // cacheEntry is the on-disk form. Only Resolved results are cached; abstains are
 // cheap to recompute and caching them would risk persisting a transient failure
@@ -46,27 +71,34 @@ type cacheEntry struct {
 	Exports []string `json:"exports"`
 }
 
-// goFileStat is one source file's identity for keying purposes.
+// goFileStat is one source file's identity, used for the size cap and to order
+// reads deterministically. It is NOT the cache key — see the file header.
 type goFileStat struct {
 	name  string
 	size  int64
 	mtime int64
 }
 
-// packageCacheKey hashes a package's identity: its import path plus the name,
-// size, and mtime of every source file that will be parsed. Any edit to any file
-// changes the key.
-func packageCacheKey(importPath string, files []goFileStat) string {
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+// packageCacheKey hashes what the extraction will actually see: the extractor
+// version, the import path, and every source file's name and full contents.
+//
+// sources must be in the same order as files; both come from goPackageFiles,
+// which sorts by name, so the key is stable across runs.
+func packageCacheKey(importPath string, files []goFileStat, sources []string) string {
+	if len(files) != len(sources) {
+		return "" // refuse to key a mismatched pair; "" disables the memo
+	}
 	h := sha256.New()
+	h.Write([]byte(extractorVersion))
+	h.Write([]byte{0})
 	h.Write([]byte(importPath))
 	h.Write([]byte{0})
-	for _, f := range files {
+	for i, f := range files {
 		h.Write([]byte(f.name))
 		h.Write([]byte{0})
-		h.Write([]byte(strconv.FormatInt(f.size, 10)))
+		h.Write([]byte(strconv.FormatInt(int64(len(sources[i])), 10)))
 		h.Write([]byte{0})
-		h.Write([]byte(strconv.FormatInt(f.mtime, 10)))
+		h.Write([]byte(sources[i]))
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -101,6 +133,13 @@ func readCachedExports(key string) (map[string]struct{}, bool) {
 	}
 	var entry cacheEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
+		return nil, false
+	}
+	// `null` and `{}` unmarshal cleanly into a zero cacheEntry, which would be
+	// served as "Resolved with no exports" — flagging EVERY qualified call on that
+	// package. The write path never produces such a file, so treating an empty
+	// entry as a miss costs nothing and closes the tampering/corruption case.
+	if len(entry.Exports) == 0 {
 		return nil, false
 	}
 	out := make(map[string]struct{}, len(entry.Exports))

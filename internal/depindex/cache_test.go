@@ -3,6 +3,8 @@ package depindex
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +74,113 @@ func TestCache_MutatedDependencyProducesANewKey(t *testing.T) {
 	if !after.Has("AddedLater") {
 		t.Fatal("memo served a stale export set after the dependency changed — " +
 			"calls to the new symbol would be flagged as hallucinations")
+	}
+}
+
+// TestCache_SameLengthRewriteIsNotServedStale is the regression for the memo's
+// one critical defect: the key was a (name, size, mtime) stat triple while the
+// documentation claimed it was a content hash.
+//
+// Filesystem mtime granularity is not the nanosecond the API implies — measured
+// ~4ms on ext4, and 1-2 SECONDS on exFAT, HFS+, NFS, and drvfs. A same-length
+// rewrite inside that window was invisible to the key, so the memo served the
+// PREVIOUS export set. The asymmetry is what made it critical: a stale set with an
+// extra name only suppresses a violation, but a RENAMED same-length export flips
+// straight to a false positive, and nothing evicts it.
+//
+// os.Chtimes here forces the collision deterministically rather than racing a 4ms
+// window, but the original hunt reproduced this with no clock manipulation at all.
+func TestCache_SameLengthRewriteIsNotServedStale(t *testing.T) {
+	cache := t.TempDir()
+	src := filepath.Join(cache, "example.com", "dep@v1.0.0", "a.go")
+	// Alpha and Bravo are the same length, so the file size is identical too.
+	writeFile(t, src, "package dep\n\nfunc Alpha() {}\n")
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "go.mod"),
+		"module example.com/app\n\ngo 1.24\n\nrequire example.com/dep v1.0.0\n")
+	t.Setenv("GOMODCACHE", cache)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+
+	info, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := info.ModTime()
+
+	first := NewGoIndex(repo).Lookup("example.com/dep")
+	if !first.Has("Alpha") {
+		t.Fatalf("cold lookup missing Alpha: %v (%s)", first.Exports, first.Reason)
+	}
+
+	// Rewrite to the same byte length and restore the original mtime: identical
+	// stat triple, different contents.
+	writeFile(t, src, "package dep\n\nfunc Bravo() {}\n")
+	if err := os.Chtimes(src, frozen, frozen); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != info.Size() || !after.ModTime().Equal(frozen) {
+		t.Fatalf("test setup failed to produce an identical stat triple")
+	}
+
+	second := NewGoIndex(repo).Lookup("example.com/dep")
+	if !second.Has("Bravo") {
+		t.Errorf("memo served a stale export set: Bravo exists on disk but is absent — " +
+			"a call to it would be flagged as a hallucination")
+	}
+	if second.Has("Alpha") {
+		t.Errorf("memo served the pre-rewrite export set (Alpha no longer exists)")
+	}
+}
+
+// TestCache_ExtractorVersionInvalidatesEntries pins the second-order failure: an
+// entry written by one extraction implementation must not be served after that
+// implementation changes. Without this, replacing a buggy extractor would leave
+// its bugs firing from cached entries indefinitely.
+func TestCache_ExtractorVersionInvalidatesEntries(t *testing.T) {
+	files := []goFileStat{{name: "a.go"}}
+	sources := []string{"package dep\n\nfunc Alpha() {}\n"}
+	key := packageCacheKey("example.com/dep", files, sources)
+	if key == "" {
+		t.Fatal("key should be non-empty")
+	}
+	if !strings.Contains(extractorVersion, "v") {
+		t.Fatalf("extractorVersion %q should carry a version marker", extractorVersion)
+	}
+	// Same inputs, same key — the memo is only useful if it is stable.
+	if again := packageCacheKey("example.com/dep", files, sources); again != key {
+		t.Errorf("key is not stable across calls")
+	}
+	// Different content, different key.
+	if other := packageCacheKey("example.com/dep", files, []string{"package dep\n\nfunc Bravo() {}\n"}); other == key {
+		t.Errorf("differing source produced an identical key")
+	}
+	// Different import path, different key.
+	if other := packageCacheKey("example.com/other", files, sources); other == key {
+		t.Errorf("differing import path produced an identical key")
+	}
+	// A mismatched files/sources pair must disable the memo rather than key badly.
+	if bad := packageCacheKey("example.com/dep", files, []string{"a", "b"}); bad != "" {
+		t.Errorf("mismatched files/sources should yield an empty (memo-disabling) key")
+	}
+}
+
+// TestCache_EmptyEntryIsAMiss covers `null` and `{}` on disk, which unmarshal
+// cleanly into a zero cacheEntry. Served as-is that is "Resolved with no
+// exports", which would flag EVERY qualified call on the package.
+func TestCache_EmptyEntryIsAMiss(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	dir := filepath.Join(home, "depcache")
+	for _, content := range []string{"null", "{}", `{"exports":[]}`} {
+		key := "deadbeef" + strconv.Itoa(len(content))
+		writeFile(t, filepath.Join(dir, key+".json"), content)
+		if _, hit := readCachedExports(key); hit {
+			t.Errorf("%q was treated as a cache hit; it must be a miss", content)
+		}
 	}
 }
 

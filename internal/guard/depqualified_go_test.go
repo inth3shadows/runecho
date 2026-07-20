@@ -6,6 +6,34 @@ import (
 	"github.com/inth3shadows/runecho/internal/depindex"
 )
 
+// stubIndex is a fixed answer table, so the gate tests below exercise the guard's
+// abstain logic in isolation from how a real environment is discovered.
+// Resolution correctness is depindex's own tests' job.
+type stubIndex map[string]depindex.PackageSymbols
+
+func (s stubIndex) Lookup(importPath string) depindex.PackageSymbols {
+	if ps, ok := s[importPath]; ok {
+		return ps
+	}
+	return depindex.PackageSymbols{Res: depindex.Unknown, Reason: "not in stub"}
+}
+
+func resolvedPkg(names ...string) depindex.PackageSymbols {
+	set := map[string]struct{}{}
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return depindex.PackageSymbols{Res: depindex.Resolved, Exports: set}
+}
+
+func symbolList(vs []Violation) []string {
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, v.Symbol)
+	}
+	return out
+}
+
 // httpStub mirrors net/http's shape closely enough for the gate tests: Get and
 // Post exist, Gett does not.
 var httpStub = stubIndex{

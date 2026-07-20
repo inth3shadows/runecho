@@ -27,11 +27,6 @@
 //	                            symbol definition that other files still reference
 //	                            (per the latest snapshot's refs index). Default OFF
 //	                            (dogfood gate); ask-posture, fail-open.
-//	RUNECHO_GUARD_DEPS_PY=1    enable external-dependency validation for Python:
-//	                            flag a call to a symbol absent from an installed
-//	                            third-party module (pl.pearsonr where polars has
-//	                            corr). Needs a virtualenv; abstains without one.
-//	                            Default OFF (dogfood gate).
 //	RUNECHO_GUARD_DEPS_GO=1    enable external-dependency validation for Go: flag a
 //	                            call to a symbol absent from an imported external or
 //	                            stdlib package (http.Gett where net/http has Get).
@@ -253,20 +248,6 @@ func runArgs(args []string) int {
 			}
 			whole := readFileLines(fd.AbsPath)
 			violations = append(violations, goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)...)
-		}
-	}
-
-	// External-dependency qualified-call check for Python (RUNECHO_GUARD_DEPS_PY=1,
-	// default off). The index is built once per commit from the virtualenv that
-	// governs repoRoot; with no venv it resolves everything to Unknown and the
-	// loop below is a no-op.
-	if depIdx := newPythonDepIndex(repoRoot); depIdx != nil {
-		for _, fd := range diffs {
-			if guard.LangFor(fd.Path) != guard.LangPython {
-				continue
-			}
-			whole := readFileLines(fd.AbsPath)
-			violations = append(violations, depQualifiedViolations(guard.LangPython, whole, fd.AddedLines, depIdx, fd.Path)...)
 		}
 	}
 
@@ -600,15 +581,6 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
 			violations = append(violations, goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)...)
-		}
-	}
-
-	// External-dependency qualified-call check for Python (RUNECHO_GUARD_DEPS_PY=1,
-	// default off). The edited file's own directory anchors venv discovery, so a
-	// monorepo with per-project virtualenvs resolves against the right one.
-	if lang == guard.LangPython {
-		if depIdx := newPythonDepIndex(filepath.Dir(filePath)); depIdx != nil {
-			violations = append(violations, depQualifiedViolations(lang, fileLines, newLines, depIdx, filePath)...)
 		}
 	}
 

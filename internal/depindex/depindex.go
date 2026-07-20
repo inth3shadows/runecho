@@ -1,7 +1,18 @@
 // Package depindex resolves an external dependency's real exported-symbol set so
-// the guard can validate a module-qualified call (`pl.pearsonr(...)`) against the
-// package that is actually installed — the external half of the qualified-call
+// the guard can validate a package-qualified call (`http.Gett(...)`) against the
+// dependency that is actually installed — the external half of the qualified-call
 // gap that internal/guard/qualified.go closed for same-repo packages (#176).
+//
+// Go only, deliberately. A Python resolver was built and removed: Python's
+// module surface is not statically knowable (module-level __getattr__, globals()
+// writes, setattr, importlib) so roughly half of installed packages could not be
+// resolved at all, and the packages that abstained — polars, numpy, flask,
+// pydantic — are precisely the ones agents hallucinate against most. Closing that
+// last gap would have required importing dependency code to ask the interpreter,
+// which means executing arbitrary third-party code from an editor hook that fires
+// on every AI-agent edit, in repositories the developer may only be reviewing.
+// That is not a trade a guard tool should make. Go has no dynamic-attribute
+// constructs, so the same design reaches every package.
 //
 // The whole point of RunEcho is zero false positives, and a dependency index is
 // the most dangerous thing that can feed the guard: an index that is merely
@@ -9,9 +20,8 @@
 // while being a valid call. So resolution is deliberately TRI-state, and the
 // guard may act on exactly one of the three:
 //
-//	Unknown  — package not found, no confident environment, unreadable → ABSTAIN
-//	Partial  — found, but its export surface is not exhaustively enumerable
-//	           (lazy __getattr__, star-imports, computed __all__) → ABSTAIN
+//	Unknown  — package not found, unreadable, or too large to parse → ABSTAIN
+//	Partial  — found, but its export surface could not be established → ABSTAIN
 //	Resolved — complete and trustworthy → the guard MAY flag an absent symbol
 //
 // The invariant that makes this safe: no code path constructs Resolved from a
@@ -53,11 +63,9 @@ func (r Resolution) String() string {
 
 // PackageSymbols is one dependency's resolved export surface.
 //
-// Exports is meaningful only when Res == Resolved. It is deliberately an
-// OVER-approximation of the package's public API — it unions the declared
-// __all__ with every top-level binding in the module, including private and
-// re-exported names. Over-approximating biases every disagreement toward
-// "don't flag", which is the correct direction for a zero-FP tool.
+// Exports is meaningful only when Res == Resolved. Where a choice exists, it
+// over-approximates: a wider set can only suppress violations, never create one,
+// which is the correct direction for a zero-false-positive tool.
 type PackageSymbols struct {
 	Res     Resolution
 	Exports map[string]struct{}
@@ -79,8 +87,9 @@ func (ps PackageSymbols) Has(name string) bool {
 	return ok
 }
 
-// Index resolves a module/import path to its export surface. Implementations are
-// per-ecosystem (Python first; Go and JS/TS follow in later phases of #175).
+// Index resolves an import path to its export surface. The interface is kept
+// ecosystem-agnostic so a future language can be added, but GoIndex is currently
+// the only implementation.
 //
 // Lookup must be safe for concurrent use and must never block long enough to
 // threaten the guard's ~12ms edit-time budget: an implementation that cannot

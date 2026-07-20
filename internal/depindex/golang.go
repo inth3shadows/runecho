@@ -40,20 +40,32 @@ const maxGoPackageFiles = 400
 // rather than spending the guard's budget on it.
 const maxGoFileSize = 4 << 20
 
-// maxGoBytesPerRun bounds the total Go source one index will scan. Scanning is
-// linear in bytes (~6ms for net/http's 945 KB), and some packages are far larger:
-// golang.org/x/text/unicode/norm carries ~2.3 MB of generated Unicode tables and
-// alone costs ~38ms, three times the guard's whole ~12ms edit-time budget.
+// maxGoPackageBytes caps a SINGLE package's source. Parse cost is roughly linear
+// in bytes, and this is the knob that bounds worst-case latency — measured across
+// 3000 real packages, go/parser is p50 0.29ms and p90 3.8ms, with a long tail
+// (x/text/collate reaches 340ms).
 //
-// The budget is measured in BYTES rather than milliseconds so the verdict stays a
-// pure function of the input, the same reasoning as maxResolvesPerRun. A package
-// that would blow it resolves Unknown, so the check narrows instead of stalling
-// the editor. Sizes come from directory stats, so an oversized package is
-// declined before any of it is read.
+// 1 MiB is a deliberate trade: it declines only ~1.7% of real packages while
+// keeping net/http (945 KB), the standard-library package most worth validating.
+// A 256 KiB cap would leave just 5 of 3000 packages over 12ms but would drop
+// net/http with them, which is the wrong thing to optimize.
 //
-// Sized to admit net/http — the stdlib package most worth validating — while
-// declining the generated-table packages nobody calls by hallucinated name.
-const maxGoBytesPerRun = 2 << 20
+// The budget is BYTES, never a wall clock, so a verdict stays a pure function of
+// the input. Sizes come from directory stats, so an oversized package is declined
+// before a byte of it is read, and declining means Unknown — the check narrows
+// rather than stalling the editor.
+const maxGoPackageBytes = 1 << 20
+
+// maxGoBytesPerRun is a whole-run backstop against a pathological repo, not a
+// per-edit latency control — maxGoPackageBytes does that.
+//
+// It is deliberately generous. The previous value of 2 MiB was shared across an
+// ENTIRE pre-commit run, so a commit touching several Go files silently stopped
+// checking after about five packages: go/types was already abstaining as the
+// sixth lookup. That is a safe direction but a silent one, and the budget was
+// calibrated for the ~12ms edit-time hook while a commit hook can afford far
+// more.
+const maxGoBytesPerRun = 64 << 20
 
 // reGoRequire matches one `require` line, in block or single form, capturing the
 // module path and version.
@@ -141,30 +153,42 @@ func (idx *GoIndex) Lookup(importPath string) PackageSymbols {
 	return ps
 }
 
-// resolve locates the package's source directory and scans its exports.
+// resolve locates the package's source directory and derives its exports,
+// consulting the on-disk memo before parsing.
 func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 	dir, ps, ok := idx.packageDir(importPath)
 	if !ok {
 		return ps
 	}
-	size, ok, reason := goPackageSourceSize(dir)
+	files, size, ok, reason := goPackageFiles(dir)
 	if !ok {
 		return unknown("%s: %s", importPath, reason)
 	}
+	if len(files) == 0 {
+		return unknown("%s: no Go source in %s", importPath, dir)
+	}
+
+	// The memo is keyed on what is actually on disk, so a hit is as trustworthy
+	// as a parse. Checked before the byte cap on purpose: a package already
+	// parsed once costs a file read regardless of its size, so there is no reason
+	// to decline it for being large.
+	key := packageCacheKey(importPath, files)
+	if exports, hit := readCachedExports(key); hit {
+		return PackageSymbols{Res: Resolved, Exports: exports}
+	}
+
 	if !idx.spendBytes(size) {
 		return unknown("%s: would exceed the %d-byte scan budget for this run", importPath, maxGoBytesPerRun)
 	}
-	sources, ok, reason := readGoPackageSources(dir)
+	sources, ok, reason := readGoPackageSources(dir, files)
 	if !ok {
 		return unknown("%s: %s", importPath, reason)
 	}
-	if len(sources) == 0 {
-		return unknown("%s: no Go source in %s", importPath, dir)
-	}
 	exports, ok := GoPackageExports(sources)
 	if !ok {
-		return partial("%s: source could not be scanned confidently", importPath)
+		return partial("%s: source did not parse", importPath)
 	}
+	writeCachedExports(key, exports)
 	return PackageSymbols{Res: Resolved, Exports: exports}
 }
 
@@ -255,62 +279,51 @@ func (idx *GoIndex) spendBytes(n int) bool {
 	return true
 }
 
-// goPackageSourceSize totals the bytes of a package directory's non-test .go
-// files without reading them, so the scan budget can be checked up front.
-func goPackageSourceSize(dir string) (int, bool, string) {
+// goPackageFiles stats a package directory's non-test .go files without reading
+// them, so both the cache key and the byte budget can be settled up front.
+//
+// It refuses (ok=false) rather than returning a subset: a partial file list
+// yields a partial export set, which is the false-positive direction.
+func goPackageFiles(dir string) ([]goFileStat, int, bool, string) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, false, "unreadable: " + err.Error()
+		return nil, 0, false, "unreadable: " + err.Error()
 	}
-	total, count := 0, 0
+	var files []goFileStat
+	total := 0
 	for _, e := range ents {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		count++
-		if count > maxGoPackageFiles {
-			return 0, false, "package has more source files than the cap allows"
+		if len(files) >= maxGoPackageFiles {
+			return nil, 0, false, "package has more source files than the cap allows"
 		}
 		info, err := e.Info()
 		if err != nil {
-			return 0, false, "stat failed for " + name
+			return nil, 0, false, "stat failed for " + name
 		}
 		if info.Size() > maxGoFileSize {
-			return 0, false, name + " exceeds the size cap"
+			return nil, 0, false, name + " exceeds the per-file size cap"
 		}
+		files = append(files, goFileStat{name: name, size: info.Size(), mtime: info.ModTime().UnixNano()})
 		total += int(info.Size())
 	}
-	return total, true, ""
+	if total > maxGoPackageBytes {
+		return nil, 0, false, "package source exceeds the per-package parse cap"
+	}
+	return files, total, true, ""
 }
 
-// readGoPackageSources reads a package directory's non-test .go files. It refuses
-// (ok=false) rather than returning a subset, because a partial file list yields a
-// partial export set, which is the false-positive direction.
-func readGoPackageSources(dir string) ([]string, bool, string) {
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, false, "unreadable: " + err.Error()
-	}
-	var sources []string
-	for _, e := range ents {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		if len(sources) >= maxGoPackageFiles {
-			return nil, false, "package has more source files than the cap allows"
-		}
-		info, err := e.Info()
+// readGoPackageSources reads the already-stat'd files. A file that vanished or
+// became unreadable between the stat and the read yields ok=false rather than a
+// short list, for the same reason as above.
+func readGoPackageSources(dir string, files []goFileStat) ([]string, bool, string) {
+	sources := make([]string, 0, len(files))
+	for _, f := range files {
+		data, err := os.ReadFile(filepath.Join(dir, f.name))
 		if err != nil {
-			return nil, false, "stat failed for " + name
-		}
-		if info.Size() > maxGoFileSize {
-			return nil, false, name + " exceeds the size cap"
-		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, false, "read failed for " + name
+			return nil, false, "read failed for " + f.name
 		}
 		sources = append(sources, string(data))
 	}
@@ -354,27 +367,55 @@ func parseGoModRequires(gomod string, versions map[string]string, replaced map[s
 		case block != "" && line == ")":
 			block = ""
 			continue
-		case block == "" && (line == "require (" || line == "require("):
+		case block == "" && isGoModGroupOpen(line, "require"):
 			block = "require"
 			continue
-		case block == "" && (line == "replace (" || line == "replace("):
+		case block == "" && isGoModGroupOpen(line, "replace"):
 			block = "replace"
 			continue
 		}
-		isReplace := block == "replace" || strings.HasPrefix(line, "replace ")
+		isReplace := block == "replace" || hasGoModKeyword(line, "replace")
 		if isReplace {
 			if m := reGoReplace.FindStringSubmatch(line); m != nil {
 				replaced[m[1]] = true
 			}
 			continue
 		}
-		if block == "require" || strings.HasPrefix(line, "require ") {
+		if block == "require" || hasGoModKeyword(line, "require") {
 			if m := reGoRequire.FindStringSubmatch(line); m != nil {
 				versions[m[1]] = m[2]
 			}
 		}
 	}
 }
+
+// hasGoModKeyword reports whether line opens a single-line directive for kw.
+//
+// The boundary must be any whitespace, not a literal space: go.mod is written by
+// hand as often as by tooling, and a TAB-separated `replace\texample.com/a\t=>\t./a`
+// is a directive `go mod edit` parses happily. Matching only "replace " missed it
+// entirely, and the module then resolved out of the module CACHE instead of
+// abstaining — returning symbols from the copy the replace directive had replaced
+// away. That is the identity failure this file exists to prevent, and it was the
+// one bug here that produced a wrong answer rather than no answer.
+func hasGoModKeyword(line, kw string) bool {
+	rest, ok := strings.CutPrefix(line, kw)
+	return ok && rest != "" && isGoModSpace(rest[0])
+}
+
+// isGoModGroupOpen reports whether line opens a parenthesized directive group,
+// with or without whitespace before the paren (`require (` and `require(` are
+// both valid).
+func isGoModGroupOpen(line, kw string) bool {
+	rest, ok := strings.CutPrefix(line, kw)
+	if !ok {
+		return false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	return rest == "("
+}
+
+func isGoModSpace(b byte) bool { return b == ' ' || b == '\t' }
 
 // escapeGoModulePath applies the module cache's case encoding: every uppercase
 // letter becomes "!" + its lowercase form, so github.com/BurntSushi/toml lives at
@@ -404,7 +445,7 @@ func findGoModRoot(startDir string) string { return findFileUpward(startDir, "go
 // terminate the walk on its first step and silently find nothing.
 func findFileUpward(dir, name string) string {
 	dir = absDir(dir)
-	for i := 0; i < maxVenvWalk; i++ {
+	for i := 0; i < maxWalkUp; i++ {
 		if isFile(filepath.Join(dir, name)) {
 			return dir
 		}

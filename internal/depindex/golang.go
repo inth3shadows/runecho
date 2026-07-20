@@ -306,9 +306,20 @@ func goPackageFiles(dir string) ([]goFileStat, int, bool, string) {
 		if len(files) >= maxGoPackageFiles {
 			return nil, 0, false, "package has more source files than the cap allows"
 		}
-		info, err := e.Info()
+		// os.Stat, not DirEntry.Info(): Info() reports lstat, so a SYMLINK is
+		// measured by the length of its target path rather than the file it points
+		// at. A symlinked source file therefore sailed past both size caps and was
+		// then read in full — observed at 3.3 MB against an 82-byte budgeted size,
+		// four orders of magnitude over. Correctness was never at risk (the key
+		// hashes the bytes actually read), but the caps are the only thing bounding
+		// this code's latency, so they have to measure what will be read.
+		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			return nil, 0, false, "stat failed for " + name
+		}
+		if !info.Mode().IsRegular() {
+			// A fifo or device named *.go would block or misreport on read.
+			return nil, 0, false, name + " is not a regular file"
 		}
 		if info.Size() > maxGoFileSize {
 			return nil, 0, false, name + " exceeds the per-file size cap"

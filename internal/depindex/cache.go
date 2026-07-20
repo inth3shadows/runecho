@@ -117,7 +117,11 @@ func cacheDir() string {
 		}
 		base = filepath.Join(home, ".runecho")
 	}
-	return filepath.Join(base, "depcache")
+	// Absolute, because a RELATIVE RUNECHO_HOME would silently follow the process
+	// around: the guard resolves paths against the edited file's directory, so the
+	// same logical cache would land in a different place after a chdir. Every
+	// lookup after that is a guaranteed miss — safe, but a permanent hidden cost.
+	return filepath.Join(absDir(base), "depcache")
 }
 
 // readCachedExports returns a memoized export set for key, or ok=false on any
@@ -138,7 +142,15 @@ func readCachedExports(key string) (map[string]struct{}, bool) {
 	// `null` and `{}` unmarshal cleanly into a zero cacheEntry, which would be
 	// served as "Resolved with no exports" — flagging EVERY qualified call on that
 	// package. The write path never produces such a file, so treating an empty
-	// entry as a miss costs nothing and closes the tampering/corruption case.
+	// entry as a miss costs nothing.
+	//
+	// This closes the EMPTY-entry case only, and deliberately claims no more. A
+	// planted non-empty entry — `{"exports":["Alpha"]}` under a correctly computed
+	// key for a package that also exports Bravo — is still served, and `dep.Bravo()`
+	// would be flagged. That needs write access to $RUNECHO_HOME/depcache, i.e. an
+	// already-compromised home directory, which is outside this tool's threat
+	// model. Saying so plainly beats a comment that implies tamper-resistance the
+	// code does not have.
 	if len(entry.Exports) == 0 {
 		return nil, false
 	}
@@ -162,6 +174,14 @@ func writeCachedExports(key string, exports map[string]struct{}) {
 		return
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	if len(exports) == 0 {
+		// readCachedExports treats an empty entry as a miss (see above), so writing
+		// one would leave a file that is re-parsed on every edit forever and never
+		// read. A package with no exported symbols is rare but real — an internal
+		// package of unexported helpers — so skip the write rather than persist a
+		// permanently dead entry.
 		return
 	}
 	names := make([]string, 0, len(exports))

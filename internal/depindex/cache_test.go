@@ -247,3 +247,68 @@ func countMemoEntries(t *testing.T, home string) int {
 	}
 	return n
 }
+
+// TestCache_SymlinkedSourceRespectsSizeCap pins the budget-integrity fix. The
+// caps are the only thing bounding this code's latency, so they have to measure
+// what will actually be READ. DirEntry.Info() reports lstat, so a symlink was
+// measured by the length of its target PATH — a symlinked source file sailed past
+// both caps and was then read in full, observed four orders of magnitude over the
+// budgeted size.
+func TestCache_SymlinkedSourceRespectsSizeCap(t *testing.T) {
+	cache := t.TempDir()
+	pkgDir := filepath.Join(cache, "example.com", "dep@v1.0.0")
+	writeFile(t, filepath.Join(pkgDir, "a.go"), "package dep\n\nfunc Alpha() {}\n")
+
+	// A real file well over the per-package cap, linked into the package dir.
+	bigDir := t.TempDir()
+	big := filepath.Join(bigDir, "big.go")
+	writeFile(t, big, "package dep\n\n"+strings.Repeat("// filler to exceed the cap\n", 80000))
+	if err := os.Symlink(big, filepath.Join(pkgDir, "b.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "go.mod"),
+		"module example.com/app\n\ngo 1.24\n\nrequire example.com/dep v1.0.0\n")
+	t.Setenv("GOMODCACHE", cache)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+
+	ps := NewGoIndex(repo).Lookup("example.com/dep")
+	if ps.Res != Unknown {
+		t.Fatalf("Res = %v, want Unknown: a symlinked oversized file must be measured by its TARGET", ps.Res)
+	}
+}
+
+// TestCache_ExportlessPackageIsNotPersisted covers the dead-entry case: an empty
+// entry is treated as a miss on read, so writing one would leave a file that is
+// re-parsed on every edit forever and never served.
+func TestCache_ExportlessPackageIsNotPersisted(t *testing.T) {
+	cache := t.TempDir()
+	writeFile(t, filepath.Join(cache, "example.com", "dep@v1.0.0", "a.go"),
+		"package dep\n\nfunc unexportedOnly() {}\n")
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "go.mod"),
+		"module example.com/app\n\ngo 1.24\n\nrequire example.com/dep v1.0.0\n")
+	t.Setenv("GOMODCACHE", cache)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	ps := NewGoIndex(repo).Lookup("example.com/dep")
+	if ps.Res != Resolved || len(ps.Exports) != 0 {
+		t.Fatalf("Res = %v with %d exports; want Resolved with none", ps.Res, len(ps.Exports))
+	}
+	if n := countMemoEntries(t, home); n != 0 {
+		t.Errorf("wrote %d memo entries for an export-less package; such an entry can never be served", n)
+	}
+}
+
+// TestCache_RelativeHomeIsAbsolutized pins the chdir case: a relative
+// RUNECHO_HOME would follow the process around, so the same logical cache would
+// land in different places and every later lookup would miss.
+func TestCache_RelativeHomeIsAbsolutized(t *testing.T) {
+	t.Setenv("RUNECHO_HOME", "relative-home")
+	dir := cacheDir()
+	if dir == "" || !filepath.IsAbs(dir) {
+		t.Fatalf("cacheDir() = %q, want an absolute path", dir)
+	}
+}

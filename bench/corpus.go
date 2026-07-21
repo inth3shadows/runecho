@@ -51,6 +51,14 @@ const (
 
 // Case is one labeled reference: a single line of source that calls Symbol,
 // classified against Known.
+//
+// WholeFile/ModulePath/DepExports are the optional whole-file context that lets
+// the harness exercise the guard's qualified-call checks (GoQualifiedViolations,
+// GoDepQualifiedViolations), which parse imports and a shadow gate and so cannot
+// run against a single detached line. They are empty for the synthetic corpus and
+// for every captured case that does not opt into qualified measurement, in which
+// case scoring falls back to exactly the call/const/type checks in guard.Run —
+// today's behavior.
 type Case struct {
 	Lang     guard.Lang
 	Path     string   // synthetic path, drives LangFor (e.g. "synthetic.go")
@@ -59,6 +67,17 @@ type Case struct {
 	Known    []string // the symbol universe for this language (sorted, deterministic)
 	Label    Label
 	Category Category
+
+	// WholeFile is the pre-edit file the Line sits in, one string per line. Used
+	// only for whole-file checks (import parsing + shadow gate). nil disables them.
+	WholeFile []string
+	// ModulePath is the repo's go.mod module path. Classifies a Go qualifier as
+	// same-repo (validate) vs external/stdlib (defer to the dep index). "" abstains.
+	ModulePath string
+	// DepExports freezes each imported package's exported names (import path →
+	// names), so external-dep resolution replays deterministically without a live
+	// module cache or a pinned dependency version — the same reason Known is frozen.
+	DepExports map[string][]string
 }
 
 // pool is a per-language set of realistic, non-builtin symbol names plus the

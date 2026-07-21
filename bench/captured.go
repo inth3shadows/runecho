@@ -43,6 +43,13 @@ type CapturedCase struct {
 	KnownSymbols     []string `json:"known_symbols"`     // frozen symbol universe for the repo snapshot
 	Provenance       string   `json:"provenance"`        // "transcript:<id>" | "elicited:<model>"
 	Notes            string   `json:"notes"`             // why it's (not) a hallucination
+
+	// Optional whole-file context for qualified-call measurement. Omitting all
+	// three replays the case exactly as before (call/const/type checks only). See
+	// Case for the field semantics; these are the JSON-fixture mirror.
+	FileContext []string            `json:"file_context,omitempty"` // pre-edit whole file, one entry per line
+	ModulePath  string              `json:"module_path,omitempty"`  // Go: go.mod module path
+	DepExports  map[string][]string `json:"dep_exports,omitempty"`  // import path → frozen exported names
 }
 
 // LoadCaptured reads and validates a JSON array of captured cases. Validation is
@@ -109,6 +116,22 @@ func (cc CapturedCase) validate() error {
 	if cc.Label == "hallucinated" && inKnown {
 		return fmt.Errorf("labeled hallucinated but %q present in known_symbols", cc.ReferencedSymbol)
 	}
+	// The qualified checks are Go-only (GoQualifiedViolations / GoDepQualifiedViolations).
+	// module_path/dep_exports on a non-Go case is a fixture bug: it would be silently
+	// ignored, giving a false sense that the case exercises the dependency path.
+	if cc.Lang != "go" {
+		if cc.ModulePath != "" {
+			return fmt.Errorf("module_path set on non-go case (lang %q); qualified checks are Go-only", cc.Lang)
+		}
+		if len(cc.DepExports) > 0 {
+			return fmt.Errorf("dep_exports set on non-go case (lang %q); qualified checks are Go-only", cc.Lang)
+		}
+	}
+	// If module_path/dep_exports are set, they drive whole-file checks that need the
+	// file — without file_context they can never fire, which is a mislabel, not an abstain.
+	if len(cc.FileContext) == 0 && (cc.ModulePath != "" || len(cc.DepExports) > 0) {
+		return fmt.Errorf("module_path/dep_exports set without file_context; the qualified checks need the whole file")
+	}
 	return nil
 }
 
@@ -120,13 +143,16 @@ func (cc CapturedCase) toCase() Case {
 	}
 	strat, _ := stratumOf(cc.Provenance) // validated already
 	return Case{
-		Lang:     lang,
-		Path:     pathFor(lang),
-		Line:     cc.SourceLine,
-		Symbol:   cc.ReferencedSymbol,
-		Known:    cc.KnownSymbols,
-		Label:    label,
-		Category: Category(strat),
+		Lang:       lang,
+		Path:       pathFor(lang),
+		Line:       cc.SourceLine,
+		Symbol:     cc.ReferencedSymbol,
+		Known:      cc.KnownSymbols,
+		Label:      label,
+		Category:   Category(strat),
+		WholeFile:  cc.FileContext,
+		ModulePath: cc.ModulePath,
+		DepExports: cc.DepExports,
 	}
 }
 
@@ -141,10 +167,16 @@ type CapturedReport struct {
 	N          int
 }
 
-// ScoreCaptured replays each case through the same guard classifier as the
-// synthetic benchmark (guardFlags) and tallies counts per stratum, language, and
-// reference position (parsed from the fixture's notes).
+// ScoreCaptured replays each case at the shipped baseline configuration
+// (qualified checks off) and tallies counts per stratum, language, and reference
+// position. This is the quotable number and the one existing callers expect;
+// ScoreCapturedDual adds the flags-on comparison.
 func ScoreCaptured(cases []CapturedCase) CapturedReport {
+	return scoreCapturedWith(cases, baselineConfig)
+}
+
+// scoreCapturedWith is ScoreCaptured parameterized by guard configuration.
+func scoreCapturedWith(cases []CapturedCase, cfg guardConfig) CapturedReport {
 	r := CapturedReport{
 		ByStratum:  map[Stratum]*Counts{},
 		ByLang:     map[guard.Lang]*Counts{},
@@ -154,12 +186,61 @@ func ScoreCaptured(cases []CapturedCase) CapturedReport {
 	for _, cc := range cases {
 		c := cc.toCase()
 		strat, _ := stratumOf(cc.Provenance)
-		flagged := guardFlags(c)
+		flagged := guardFlags(c, cfg)
 		tally(get(r.ByStratum, strat), c.Label, flagged)
 		tally(get(r.ByLang, c.Lang), c.Label, flagged)
 		tally(getStr(r.ByPosition, parsePosition(cc.Notes)), c.Label, flagged)
 	}
 	return r
+}
+
+// DualCapturedReport pairs the shipped-default score with the qualified-checks-on
+// score over the SAME corpus. The two are never pooled into one headline: the
+// baseline is what a user gets today, the enhanced number is the promotion case,
+// and their delta on the observed hallucinated stratum is the evidence for or
+// against flipping RUNECHO_GUARD_QUALIFIED / RUNECHO_GUARD_DEPS_GO on by default.
+type DualCapturedReport struct {
+	Baseline CapturedReport // qualified checks off (shipped default)
+	Enhanced CapturedReport // qualified checks on
+}
+
+// ScoreCapturedDual scores the corpus twice and returns both reports.
+func ScoreCapturedDual(cases []CapturedCase) DualCapturedReport {
+	return DualCapturedReport{
+		Baseline: scoreCapturedWith(cases, baselineConfig),
+		Enhanced: scoreCapturedWith(cases, enhancedConfig),
+	}
+}
+
+// Format renders both configurations and the observed-stratum delta between them.
+func (d DualCapturedReport) Format() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "=== BASELINE (shipped default: qualified checks off) ===\n")
+	fmt.Fprintf(&b, "%s", d.Baseline.Format())
+	fmt.Fprintf(&b, "\n=== ENHANCED (RUNECHO_GUARD_QUALIFIED + DEPS_GO on) ===\n")
+	fmt.Fprintf(&b, "%s", d.Enhanced.Format())
+
+	base, enh := d.Baseline.ByStratum[Observed], d.Enhanced.ByStratum[Observed]
+	fmt.Fprintf(&b, "\n=== PROMOTION DELTA (observed stratum) ===\n")
+	if base == nil || enh == nil {
+		fmt.Fprintf(&b, "  no observed cases to compare\n")
+		return b.String()
+	}
+	caughtDelta := enh.TP - base.TP
+	fpDelta := enh.FP - base.FP
+	fmt.Fprintf(&b, "  hallucinations caught: %d/%d → %d/%d  (%+d)\n",
+		base.TP, base.TP+base.FN, enh.TP, enh.TP+enh.FN, caughtDelta)
+	fmt.Fprintf(&b, "  false positives:       %d/%d → %d/%d  (%+d)\n",
+		base.FP, base.FP+base.TN, enh.FP, enh.FP+enh.TN, fpDelta)
+	switch {
+	case fpDelta > 0:
+		fmt.Fprintf(&b, "  VERDICT: enhanced introduces false positives — do NOT promote as-is\n")
+	case caughtDelta > 0:
+		fmt.Fprintf(&b, "  VERDICT: enhanced catches %+d more with no new FP — promotion candidate\n", caughtDelta)
+	default:
+		fmt.Fprintf(&b, "  VERDICT: no measurable delta on this corpus — needs qualified cases (see #171)\n")
+	}
+	return b.String()
 }
 
 func getStr(m map[string]*Counts, k string) *Counts {

@@ -87,3 +87,30 @@ func FuzzGuardDiff(f *testing.F) {
 		}
 	})
 }
+
+// FuzzPyParamNames exercises the parameter-name extractor on arbitrary text: it
+// parses def/lambda signatures (paren depth, top-level comma split, colon/equals
+// cuts) and must never panic or hang on malformed or adversarial input.
+func FuzzPyParamNames(f *testing.F) {
+	seeds := []string{
+		"def f(a, b: T = 1, *args, **kw):",
+		"lambda x, fetch: fetch()",
+		"def g(",
+		"def h(a, (b, c)):",
+		")))(((",
+		"lambda :",
+		"def n(a: Callable[[int], Callable[[], T]] = x):",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, src string) {
+		var lines []AddedLine
+		for i, s := range splitFuzzLines(src) {
+			lines = append(lines, AddedLine{LineNo: i + 1, Text: s})
+		}
+		_ = PyParamNames(lines) // must not panic
+	})
+}
+
+func splitFuzzLines(s string) []string { return strings.Split(s, "\n") }

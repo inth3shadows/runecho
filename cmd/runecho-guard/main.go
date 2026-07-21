@@ -784,6 +784,13 @@ func addInFileDefs(symbols map[string]struct{}, fileLines []guard.AddedLine, lan
 		for _, name := range guard.PyDeclaredNames(fileLines) {
 			symbols[name] = struct{}{}
 		}
+		// Parameters used as callables are bound by their signature (a
+		// `Callable`-typed param, a lambda arg). Fold the whole file's parameter
+		// names — names only, never their type annotations. This was the last
+		// surviving Python false-positive class in the live decision log.
+		for _, name := range guard.PyParamNames(fileLines) {
+			symbols[name] = struct{}{}
+		}
 	}
 }
 

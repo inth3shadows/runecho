@@ -86,6 +86,12 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			for _, name := range PyDeclaredNames(fd.AddedLines) {
 				known[name] = struct{}{}
 			}
+			// A parameter used as a callable (`def f(cb: Handler): cb()`,
+			// `lambda x, fetch: fetch()`) is bound by its signature, not a
+			// hallucination. Fold parameter NAMES only — never their types.
+			for _, name := range PyParamNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
 		}
 		// Ambient test-runner globals (describe/it/expect/…) resolve only inside a
 		// spec file, where the runner injects them — see FoldTestGlobals.

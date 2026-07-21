@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-07-21
+
 ### Fixed
 - Three guard false negatives found by a retroactive adversarial review of the
   v0.7.1–v0.9.0 releases, each a missed hallucination and each now regression-tested:

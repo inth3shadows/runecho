@@ -29,6 +29,16 @@ type FileDiff struct {
 	// carry real new-file line numbers) and left empty by the hook and full-file
 	// callers, whose line numbers are synthetic and can't index into the file.
 	AbsPath string
+	// SeedByLine is the hook path's equivalent of AbsPath seeding. The hook's
+	// AddedLines carry SYNTHETIC line numbers (1..N per edit block), so they can't
+	// index into the pre-edit file the way AbsPath seeding does — but the same
+	// leak exists: an Edit whose new_string begins inside a pre-existing docstring
+	// or string literal was scanned as code, because the opening delimiter sits in
+	// the untouched file above the block. This maps a block's synthetic starting
+	// LineNo to the open-string state in effect where that block's text sits in
+	// the pre-edit file. Missing entries (and a nil map) mean "starts outside any
+	// string", the previous behavior. Consulted only when AbsPath is empty.
+	SeedByLine map[int]string
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

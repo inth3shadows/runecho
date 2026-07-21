@@ -560,6 +560,10 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
 		AddedLines: newLines,
+		// Seed each block's open-string state from where it sits in the pre-edit
+		// file, so an Edit landing inside a docstring or string literal is masked
+		// instead of scanned as code. fileLines is the read already done above.
+		SeedByLine: hookSeedByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, fileLines, lang),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -863,6 +867,94 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 	default:
 		return nil
 	}
+}
+
+// hookSeedByLine computes, per added-line block, the open-string state in effect
+// where that block sits in the PRE-EDIT file — the seed guard.Run needs so a
+// block that begins inside a pre-existing docstring or string literal is masked
+// rather than scanned as code.
+//
+// Why this exists: issue #145 fixed exactly this leak for the pre-commit path,
+// via FileDiff.AbsPath and real new-file line numbers. The hook path's line
+// numbers are synthetic (1..N per block), so that mechanism could not apply and
+// the leak survived where all the real traffic is — measured as the largest
+// single source of live false positives (prose words followed by a parenthetical
+// in a docstring, and SQL keywords like `VALUES (` inside a query string, both
+// read as calls).
+//
+// The block's position is recovered by matching its old_string against the
+// pre-edit file in LINE space (fileLines is already in hand; no second read).
+// Write is deliberately absent: it replaces the file wholesale, so its content
+// genuinely starts outside any string. Every failure to locate a block is a
+// silent skip — no entry means "starts outside any string", the previous
+// behavior, so a bad match degrades to today's noise rather than to a missed
+// hallucination.
+func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
+	if len(fileLines) == 0 {
+		return nil
+	}
+	seeds := make(map[int]string)
+	switch toolName {
+	case "Edit":
+		if idx := blockStartLine(fileLines, oldString); idx >= 0 {
+			if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
+				seeds[1] = open
+			}
+		}
+	case "MultiEdit":
+		// Mirror hookAddedLines' block selection AND AddedLinesWithGap's line
+		// arithmetic exactly, so each seed lands on the synthetic LineNo that
+		// actually starts its block. Drifting from either would silently seed the
+		// wrong block.
+		no, first := 0, true
+		for _, e := range edits {
+			if e.NewString == "" {
+				continue
+			}
+			if !first {
+				no++ // the gap AddedLinesWithGap inserts between blocks
+			}
+			start := no + 1
+			no += len(strings.Split(e.NewString, "\n"))
+			first = false
+			if idx := blockStartLine(fileLines, e.OldString); idx >= 0 {
+				if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
+					seeds[start] = open
+				}
+			}
+		}
+	}
+	if len(seeds) == 0 {
+		return nil
+	}
+	return seeds
+}
+
+// blockStartLine returns the 0-based index in fileLines where block's lines first
+// appear as a consecutive run, or -1 if block is empty or not found. Matching is
+// done on lines rather than a byte offset because fileLines is what the hook
+// already read, and its per-line cap (capLine) means a byte-offset search against
+// a reconstructed text could drift. The Edit tools require old_string to be
+// unique in the file, so the first match is the right one; a non-match is the
+// fail-open case the caller treats as "no seed".
+func blockStartLine(fileLines []guard.AddedLine, block string) int {
+	if block == "" {
+		return -1
+	}
+	want := strings.Split(block, "\n")
+	for i := 0; i+len(want) <= len(fileLines); i++ {
+		hit := true
+		for j, w := range want {
+			if fileLines[i+j].Text != w {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return i
+		}
+	}
+	return -1
 }
 
 // hookOldLines builds the AddedLines of the text being REMOVED, mirroring

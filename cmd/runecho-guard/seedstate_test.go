@@ -149,3 +149,57 @@ func TestGuardRun_SQLInStringStillMasked(t *testing.T) {
 		t.Fatalf("SQL inside a string literal must not be flagged, got %+v", v)
 	}
 }
+
+// Regression (review FN, v0.7.1): a non-unique old_string (as a replace_all edit
+// applies) must NOT seed from the first occurrence. Seeding from an occurrence
+// inside a docstring would compute open-string state and mask a hallucinated call
+// in the replacement. Ambiguous → no seed → fail-open to flagging.
+func TestBlockStartLine_AmbiguousReturnsNoMatch(t *testing.T) {
+	file := guard.TextToAddedLines(
+		`"""doc
+DUPLICATE_LINE
+"""
+x = 1
+DUPLICATE_LINE
+y = 2
+`)
+	// "DUPLICATE_LINE" appears twice: once in the docstring, once as code.
+	if idx := blockStartLine(file, "DUPLICATE_LINE"); idx != -1 {
+		t.Fatalf("a block matching two locations must return -1 (ambiguous), got %d", idx)
+	}
+	// A unique block still resolves.
+	if idx := blockStartLine(file, "x = 1"); idx != 3 {
+		t.Fatalf("a unique block must resolve to its line, got %d", idx)
+	}
+}
+
+// End-to-end: with a duplicated block straddling a docstring boundary, a
+// hallucinated call in the edit must STILL flag (no wrong seed masks it).
+func TestGuardRun_AmbiguousOldStringDoesNotMaskHallucination(t *testing.T) {
+	preEdit := guard.TextToAddedLines(
+		`"""module doc
+marker_line = 0
+"""
+import os
+marker_line = 0
+`)
+	// old_string "marker_line = 0" is non-unique (docstring + code). new_string
+	// adds a hallucinated call. A wrong docstring-seed would mask it; ambiguity
+	// must instead yield no seed, so it flags.
+	newStr := "marker_line = 0\nzzhalluc()"
+	diffs := []guard.FileDiff{{
+		Path:       "m.py",
+		AddedLines: guard.TextToAddedLines(newStr),
+		SeedByLine: hookSeedByLine("Edit", "marker_line = 0", nil, preEdit, guard.LangPython),
+	}}
+	v := guard.Run(map[string]struct{}{"os": {}}, "", diffs)
+	found := false
+	for _, viol := range v {
+		if viol.Symbol == "zzhalluc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("hallucinated zzhalluc() must flag despite ambiguous old_string, got %+v", v)
+	}
+}

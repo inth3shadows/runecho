@@ -98,3 +98,46 @@ func TestRun_ParamFoldPreservesRecall(t *testing.T) {
 		t.Fatalf("a called type annotation must still flag, got %+v", v2)
 	}
 }
+
+// Regression (review FN-1, v0.9.0): a lambda whose default is a multi-arg call
+// must bind only the lambda's own params, never the call's arguments. Before the
+// splitTopLevelCommas fix, `beta`/`foo` leaked and would mask a hallucinated
+// beta()/foo() elsewhere in the file.
+func TestPyParamNames_LambdaCallDefaultNoArgLeak(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{"handler = lambda cfg=build(alpha, beta, gamma): cfg.run()", []string{"cfg"}},
+		{"f = lambda x=g(1, foo=bar): x", []string{"x"}},
+		{"h = lambda a, b=os.environ.get('K', fallback()): a", []string{"a", "b"}},
+		// A real multi-param lambda must still bind every param.
+		{"sort(xs, key=lambda item, idx: item)", []string{"item", "idx"}},
+	}
+	for _, tc := range cases {
+		got := PyParamNames(pyLines(tc.src))
+		gotSet := map[string]bool{}
+		for _, g := range got {
+			gotSet[g] = true
+		}
+		for _, w := range tc.want {
+			if !gotSet[w] {
+				t.Errorf("%q: missing param %q (got %v)", tc.src, w, got)
+			}
+		}
+		// No extra bindings beyond the wanted set (this is what catches the leak).
+		if len(got) != len(tc.want) {
+			t.Errorf("%q: bound %v, want exactly %v", tc.src, got, tc.want)
+		}
+	}
+}
+
+// The leaked name must actually still FLAG as a hallucination when it's a real
+// undefined call — the end-to-end proof that the fix restored recall.
+func TestRun_LambdaDefaultArgStillHallucinationChecked(t *testing.T) {
+	src := "run = lambda cfg=build(alpha, beta): beta()"
+	v := Run(map[string]struct{}{"build": {}, "alpha": {}}, "", []FileDiff{{Path: "m.py", AddedLines: pyLines(src)}})
+	if len(v) != 1 || v[0].Symbol != "beta" {
+		t.Fatalf("beta() (a call arg, not a param) must still flag, got %+v", v)
+	}
+}

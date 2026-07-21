@@ -89,6 +89,15 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			// A parameter used as a callable (`def f(cb: Handler): cb()`,
 			// `lambda x, fetch: fetch()`) is bound by its signature, not a
 			// hallucination. Fold parameter NAMES only — never their types.
+			//
+			// Known widening (accepted, same posture as PyDeclaredNames): the fold
+			// is whole-file, so a param in one function suppresses a bare call to
+			// that same name in another. Params skew toward exactly the generic
+			// callable names a hallucination invents (handler, cb, fn, process,
+			// transform), so this widens the false-negative surface more than the
+			// def/const folds do. Tightening it would require per-function scope
+			// tracking the line-based guard deliberately avoids; the tradeoff
+			// favors never falsely flagging a real parameter call.
 			for _, name := range PyParamNames(fd.AddedLines) {
 				known[name] = struct{}{}
 			}

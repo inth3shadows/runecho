@@ -156,19 +156,29 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string) (
 }
 
 // duplicateCandidates keeps only the other-file definitions that are a genuine
-// duplicate of a symbol added to the edited file: in the SAME directory (a proxy
-// for the same package/module) and not themselves a test file. A name shared
-// across directories is not a duplicate — it is an unrelated same-named symbol in
-// another package (every Go binary defines `main`; many packages define `Load` /
-// `New` / `String`), which for Go the compiler already keeps distinct and which
-// dominated the dogfood false positives. Within a single directory two files
-// sharing a top-level name is a real duplicate (a Go compile error the check
-// surfaces early; a genuine JS/Py reimplementation).
+// duplicate of a symbol added to the edited (Go) file: a GO file, in the SAME
+// directory (= the same package), and not itself a test file.
+//
+// Same-language is required, not just same-directory. The snapshot's DefsOfName
+// lookup matches on symbol name across every indexed language, so a Go file
+// adding `main` in a directory that also holds a Python `def main():` would
+// otherwise be reported as a duplicate of the Python one — a cross-language
+// false positive that contradicts this check's whole premise (Go and Python are
+// separate namespaces; only same-package Go files actually collide). The Go-only
+// gate in checkDuplicateDefs covers the EDITED file's side; this covers the
+// candidate side.
+//
+// A name shared across directories is not a duplicate either — it is an
+// unrelated same-named symbol in another package (every Go binary defines
+// `main`; many packages define `Load`/`New`/`String`), which the compiler keeps
+// distinct and which dominated the dogfood false positives. Within one directory,
+// two Go files sharing a top-level name is a real collision (a compile error the
+// check surfaces early).
 func duplicateCandidates(others []string, self string) []string {
 	selfDir := path.Dir(self)
 	var out []string
 	for _, o := range others {
-		if path.Dir(o) == selfDir && !isTestFile(o) {
+		if path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {
 			out = append(out, o)
 		}
 	}

@@ -762,10 +762,18 @@ func pyParamName(seg string) string {
 var rePyLambda = regexp.MustCompile(`\blambda\b([^:]*):`)
 
 // pyLambdaParams extracts parameter names from every lambda on one stripped line.
+//
+// The param list is split with splitTopLevelCommas, NOT a naive strings.Split:
+// a lambda default can be a multi-argument call (`lambda cfg=build(a, b): …`),
+// whose interior commas would otherwise split the param list and bind the call's
+// arguments (`b`) as if they were lambda parameters — folding a name a later
+// hallucinated `b()` would then be masked against (a false negative). The def
+// path already uses splitTopLevelCommas for the same reason; this brings lambda
+// to parity.
 func pyLambdaParams(s string) []string {
 	var out []string
 	for _, m := range rePyLambda.FindAllStringSubmatch(s, -1) {
-		for _, seg := range strings.Split(m[1], ",") {
+		for _, seg := range splitTopLevelCommas(m[1]) {
 			if n := pyParamName(seg); n != "" {
 				out = append(out, n)
 			}

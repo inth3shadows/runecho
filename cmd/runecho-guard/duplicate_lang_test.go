@@ -104,3 +104,60 @@ func TestDuplicate_GoSiblingSameDirStillAsks(t *testing.T) {
 		t.Errorf("reason should name the colliding symbol:\n%s", d.Hook.PermissionReason)
 	}
 }
+
+// Regression (review FP, v0.8.0): editing a Go file that adds `main` must NOT
+// warn about a sibling Python `def main` — Go and Python are separate namespaces.
+// The Go-only gate covers the edited file; duplicateCandidates must also filter
+// the candidate side to Go, since DefsOfName matches names across all languages.
+func TestDuplicate_CrossLanguageCandidateNotWarned(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, map[string]ir.FileIR{
+		// Same directory: a Go file and a Python file both defining `main`.
+		"cmd/tool/main.go":   {Hash: "h1", Symbols: funcsToSymbols([]string{"other"})},
+		"cmd/tool/helper.py": {Hash: "h2", Symbols: funcsToSymbols([]string{"main"})},
+	})
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+
+	file := filepath.Join(top, "cmd", "tool", "main.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package main\nfunc other() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func other() {}",
+		"func other() {}\nfunc main() {}", "", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("a Go main must not collide with a sibling Python def main:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+// Control: a sibling GO file with the same name in the same package MUST still
+// warn — the same-language filter must not disable the real Go collision case.
+func TestDuplicate_SameLanguageGoCandidateStillWarns(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, map[string]ir.FileIR{
+		"cmd/tool/a.go": {Hash: "h1", Symbols: funcsToSymbols([]string{"Helper"})},
+		"cmd/tool/b.go": {Hash: "h2", Symbols: funcsToSymbols([]string{"placeholder"})},
+	})
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+
+	file := filepath.Join(top, "cmd", "tool", "b.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package tool\nfunc placeholder() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	in := payloadOld(t, "Edit", file, "func placeholder() {}",
+		"func placeholder() {}\nfunc Helper() {}", "", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("a real Go same-package duplicate must still warn, got %q", d.Hook.PermissionDec)
+	}
+}

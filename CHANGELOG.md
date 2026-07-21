@@ -27,6 +27,22 @@ install time from `git describe --tags` (see `install.sh`).
   off, and a guard that is off protects nothing — so the scope is stated in the
   lede instead of the appendix.
 
+## [0.8.0] — 2026-07-21
+
+### Fixed
+- The duplicate-symbol guard (E5) no longer fires on Python or JS/TS. Its
+  same-directory rule encodes Go's package==directory model, where two files in
+  one directory sharing a top-level name genuinely collide. Python and JS/TS
+  files are independent module namespaces, so `scripts/a.py` and `scripts/b.py`
+  can both define `main()` with nothing shared between them — which is how a
+  directory of independent entry-point scripts is supposed to look. Every
+  Python and JS duplicate ask in six weeks of live decision logs was this false
+  positive: `main` most of all (20 of 35), plus per-script helpers (`pad`,
+  `parseArgs`, `escapeHtml`) and re-declared TS types. Go is unchanged and still
+  warns. The cost is no longer flagging a genuine Python/JS reimplementation —
+  a style concern with no compile or runtime consequence, in a guard whose job
+  is catching hallucinated symbols.
+
 ## [0.7.1] — 2026-07-21
 
 ### Added
@@ -53,6 +69,14 @@ install time from `git describe --tags` (see `install.sh`).
   resulting semver is mechanically consistent rather than semantically precise.
 
 ### Fixed
+- The edit-time guard no longer scans docstring prose or SQL string contents as
+  code. A Claude Code hook edit whose new text began inside a pre-existing
+  docstring was validated without the string-masking state that sits in the
+  untouched lines above it, so prose words followed by a parenthetical
+  (`candidates (#47)`) and SQL keywords (`VALUES (`) read as calls to undefined
+  symbols. Replaying six weeks of live decisions, this was the single largest
+  false-positive class — 37 of 40 reproducible cases, ~92%. (Shipped in the
+  v0.7.1 binary; this note was added retroactively.)
 - Guard no longer false-positives on bare calls to locally-bound callables. It
   now folds local binding targets into the additive known set — JS/TS
   destructures and `useState` setters (#156), and Python assignment targets

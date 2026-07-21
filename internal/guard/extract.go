@@ -632,6 +632,148 @@ func pyBindTargets(lhs string) []string {
 	return out
 }
 
+// rePyDefParamOpen matches the start of a `def`/`async def` signature up to and
+// including its opening paren, capturing everything after it on the same line as
+// the first slice of the parameter list. A def signature may span several lines,
+// so this only opens the capture; pyParamScan threads the rest.
+var rePyDefParamOpen = regexp.MustCompile(`^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s*\((.*)$`)
+
+// PyParamNames returns the parameter names bound by every `def`/`async def` and
+// `lambda` signature across lines. A parameter is a genuinely bound local: a bare
+// call to one (`transform(line)` where `transform` is a `Callable`-typed param,
+// or `fetch()` where `fetch` is a lambda arg) is not a hallucination, but neither
+// ExtractDefs (sees only `def`/`class`) nor PyDeclaredNames (assignment targets
+// only) folds it — so it was the last surviving Python false-positive class in the
+// live decision log (parameters used as callables).
+//
+// Precision matches PyDeclaredNames and JSDeclaredNames exactly: bind the
+// parameter NAME, never its type annotation or default value. `def f(cb: Handler)`
+// binds `cb`, never `Handler` — folding the type would mask a genuine hallucinated
+// `Handler()` elsewhere, the false-negative direction the whole guard avoids. A
+// leading `*`/`**` (varargs/kwargs) is stripped; `/` and `*` positional/keyword
+// markers bind nothing.
+//
+// Multi-line `def` signatures are threaded by paren depth so a parameter on its
+// own continuation line (`    watchdog_starter: Callable[[], T] = _start,`) is
+// captured. `lambda` is single-line: its params run from `lambda` to the first
+// top-level `:` (lambda params take no annotations, so the colon is unambiguous).
+func PyParamNames(lines []AddedLine) []string {
+	var out []string
+	// sigDepth > 0 means we are inside a def signature's parens spanning lines;
+	// sig accumulates the stripped parameter-list text across them.
+	sigDepth := 0
+	var sig strings.Builder
+	prevNo := 0
+	first := true
+	scanStripped(LangPython, lines, func(s string, l AddedLine) {
+		// A diff hunk's added lines may be non-contiguous; a signature cannot be
+		// assumed to continue across a gap (mirrors PyDeclaredNames' depth reset).
+		if !first && l.LineNo != prevNo+1 {
+			sigDepth = 0
+			sig.Reset()
+		}
+		first = false
+		prevNo = l.LineNo
+
+		// Continuation of a multi-line def signature already in progress.
+		if sigDepth > 0 {
+			sig.WriteByte(' ')
+			sig.WriteString(s)
+			sigDepth += pyBracketDelta(s)
+			if sigDepth <= 0 {
+				out = append(out, pyParseParamList(sig.String())...)
+				sigDepth = 0
+				sig.Reset()
+			}
+		} else if m := rePyDefParamOpen.FindStringSubmatch(s); m != nil {
+			// A def signature opened on this line. Depth starts at 1 for the paren
+			// the regex consumed, plus the net brackets in the captured tail.
+			rest := m[1]
+			sigDepth = 1 + pyBracketDelta(rest)
+			sig.Reset()
+			sig.WriteString(rest)
+			if sigDepth <= 0 {
+				out = append(out, pyParseParamList(sig.String())...)
+				sigDepth = 0
+				sig.Reset()
+			}
+		}
+
+		// Lambdas are single-line and may appear anywhere on the line, including
+		// inside a call argument — scan the whole line independently of the def
+		// state above (a def default value can itself be a lambda).
+		out = append(out, pyLambdaParams(s)...)
+	})
+	return out
+}
+
+// pyParseParamList extracts the bound parameter names from the text of a def
+// parameter list — everything inside the signature parens, possibly with a
+// trailing `):` and return annotation that pyParseParamList ignores. It splits on
+// top-level commas and takes each segment's leading identifier, stripping a
+// `*`/`**` prefix and stopping at the first `:` (annotation) or `=` (default).
+func pyParseParamList(list string) []string {
+	// Drop everything from the top-level closing paren onward (return annotation,
+	// trailing `:`), so a `-> SomeType:` tail never leaks a type name.
+	depth := 0
+	for i := 0; i < len(list); i++ {
+		switch list[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth == 0 {
+				list = list[:i]
+				i = len(list)
+				continue
+			}
+			depth--
+		}
+	}
+	var out []string
+	for _, seg := range splitTopLevelCommas(list) {
+		if n := pyParamName(seg); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// pyParamName returns the identifier a single parameter segment binds, or "" for
+// a bare positional/keyword marker (`*`, `/`) or an unparseable segment.
+func pyParamName(seg string) string {
+	seg = strings.TrimSpace(seg)
+	seg = strings.TrimPrefix(seg, "**")
+	seg = strings.TrimPrefix(seg, "*")
+	seg = strings.TrimSpace(seg)
+	// Cut at the annotation colon or default `=`, whichever comes first, so only
+	// the name survives.
+	if i := strings.IndexAny(seg, ":="); i >= 0 {
+		seg = strings.TrimSpace(seg[:i])
+	}
+	if reIdent.MatchString(seg) {
+		return seg
+	}
+	return ""
+}
+
+// rePyLambda matches a `lambda` and captures its parameter list up to the first
+// colon on the same stripped line. Lambda params take no annotations, so the
+// first top-level colon is unambiguously the body separator.
+var rePyLambda = regexp.MustCompile(`\blambda\b([^:]*):`)
+
+// pyLambdaParams extracts parameter names from every lambda on one stripped line.
+func pyLambdaParams(s string) []string {
+	var out []string
+	for _, m := range rePyLambda.FindAllStringSubmatch(s, -1) {
+		for _, seg := range strings.Split(m[1], ",") {
+			if n := pyParamName(seg); n != "" {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
 // pyBracketDelta returns the net bracket nesting change across s ((/[/{ minus
 // )/]/}), on already literal-stripped text so brackets in strings don't count.
 func pyBracketDelta(s string) int {

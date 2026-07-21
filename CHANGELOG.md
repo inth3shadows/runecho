@@ -16,6 +16,21 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- The guard no longer false-positives on a Python parameter used as a callable.
+  A `Callable`-typed parameter (`def pump(transform: Callable[[str], Any]): out =
+  transform(line)`) or a lambda argument (`lambda name, fetch: fetch()`) is bound
+  by its signature, so calling it is not a hallucination — but neither the
+  definition extractor (which sees only `def`/`class`) nor the assignment-target
+  fold recognized it. `PyParamNames` now folds parameter names from every `def`,
+  `async def`, and `lambda` signature (multi-line signatures included) into the
+  known set. It binds the parameter NAME only, never its type annotation, so a
+  genuine hallucinated call to a type (`def f(cb: Handler): Handler()` where
+  `Handler` is undefined) is still caught. This was the last surviving Python
+  false-positive class in six weeks of live decision logs; replaying that corpus,
+  the reproducible violation false positives drop from 18 to 0, with the synthetic
+  benchmark's 100%% recall / 0%% false-positive rate unchanged.
+
 ### Changed
 - Positioning aligned across every surface, and scoped honestly. The README lede,
   `docs/runecho-vs-field.html`, and the GitHub description had drifted into three

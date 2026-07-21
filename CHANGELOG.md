@@ -16,6 +16,20 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- The duplicate-symbol guard (E5) no longer fires on Python or JS/TS. Its
+  same-directory rule encodes Go's package==directory model, where two files in
+  one directory sharing a top-level name genuinely collide. Python and JS/TS
+  files are independent module namespaces, so `scripts/a.py` and `scripts/b.py`
+  can both define `main()` with nothing shared between them — which is how a
+  directory of independent entry-point scripts is supposed to look. Every
+  Python and JS duplicate ask in six weeks of live decision logs was this false
+  positive: `main` most of all (20 of 35), plus per-script helpers (`pad`,
+  `parseArgs`, `escapeHtml`) and re-declared TS types. Go is unchanged and still
+  warns. The cost is no longer flagging a genuine Python/JS reimplementation —
+  a style concern with no compile or runtime consequence, in a guard whose job
+  is catching hallucinated symbols.
+
 ## [0.7.1] — 2026-07-21
 
 ### Added

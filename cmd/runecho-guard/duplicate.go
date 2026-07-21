@@ -90,8 +90,32 @@ func addedDefs(lang guard.Lang, oldText, newText string) []string {
 // (DefsOfName vs RefsToName) and the warning shape differ. queryErrs mirrors
 // checkDanglingRefs: per-symbol store queries that failed and were skipped, so
 // zero warnings + queryErrs > 0 must not read as a definitive clean pass.
-func checkDuplicateDefs(dir, filePath string, added []string) (warns []duplicateWarning, queryErrs int) {
+func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string) (warns []duplicateWarning, queryErrs int) {
 	if len(added) == 0 {
+		return nil, 0
+	}
+	// Go only. The whole check rests on duplicateCandidates' same-directory
+	// rule, and that rule is a Go-ism: in Go the package IS the directory, so
+	// two files in one directory defining the same top-level name genuinely
+	// collide — a compile error worth surfacing before it happens.
+	//
+	// Python and JS/TS have no such collision. Each file is its own module
+	// namespace, so `scripts/a.py` and `scripts/b.py` can both define `main`
+	// with nothing shared between them — which is exactly how a scripts/
+	// directory full of independent entry points is supposed to look. Applying
+	// the directory rule there reports a conflict that does not exist.
+	//
+	// The live decision log is unambiguous: every Python and JS duplicate ask on
+	// record is this false positive — `main` most of all (20 of 35), plus the
+	// per-script local helpers (`pad`, `parseArgs`, `escapeHtml`, `printValidation`)
+	// and re-declared TS types (`TrackBStratum`, `TrackBSignalScore`) that sibling
+	// scripts each define for themselves. Zero were real.
+	//
+	// This does give up flagging a genuine Python/JS reimplementation (two copies
+	// of `escapeHtml` in one directory). That is a style concern with no compile
+	// or runtime consequence, and this guard is a hallucination gate rather than
+	// a DRY linter — not worth one true positive per many false ones.
+	if lang != guard.LangGo {
 		return nil, 0
 	}
 	// Test files legitimately reuse symbol names across files (test functions,

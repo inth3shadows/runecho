@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-21
+
 ### Fixed
 - The duplicate-symbol guard (E5) no longer fires on Python or JS/TS. Its
   same-directory rule encodes Go's package==directory model, where two files in

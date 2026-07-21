@@ -28,6 +28,8 @@ install time from `git describe --tags` (see `install.sh`).
   the guard's output makes every "approval" an artifact). Complements
   `guard-stats`, which reports ask volume rather than correctness.
 
+## [0.9.0] — 2026-07-21
+
 ### Fixed
 - The guard no longer false-positives on a Python parameter used as a callable.
   A `Callable`-typed parameter (`def pump(transform: Callable[[str], Any]): out =

@@ -16,6 +16,17 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- Positioning aligned across every surface, and scoped honestly. The README lede,
+  `docs/runecho-vs-field.html`, and the GitHub description had drifted into three
+  different pitches — "code-truth oracle", "prevention, not detection", and a
+  claim to stop agents writing bad symbols outright. All three now lead with the
+  same thing: RunEcho is one cheap layer, not the whole answer, and it catches
+  **4 of 9** real hallucinations in its own N=15 corpus, with the 5 qualified-position
+  misses named rather than buried. A guard that overclaims is a guard people turn
+  off, and a guard that is off protects nothing — so the scope is stated in the
+  lede instead of the appendix.
+
 ## [0.7.1] — 2026-07-21
 
 ### Added

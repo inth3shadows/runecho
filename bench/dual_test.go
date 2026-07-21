@@ -172,14 +172,19 @@ func TestDualEnhancedFrozenIndexAbstainsOnRealDepSymbol(t *testing.T) {
 		t.Error("enhanced flagged http.Get — a real symbol on a resolved package")
 	}
 
-	// Same call, but the package is NOT in the frozen index → Unknown → abstain,
-	// even though the symbol is a hallucination. A miss is correct here; a flag on
-	// an unresolved package would be the dangerous direction.
+	// Same shape, but the CALLED package is not in the frozen index → Unknown →
+	// abstain, even though the symbol is a hallucination. A miss is correct here;
+	// a flag on an unresolved package would be the dangerous direction.
+	//
+	// dep_exports is deliberately NON-empty (it lists net/http, which this file
+	// does not import) so the external-dep check actually RUNS — an empty map would
+	// short-circuit guardFlags before the check and make the assertion vacuous.
+	// The index simply has no entry for the mystery package, so Lookup → Unknown.
 	unresolved := real
 	unresolved.SourceLine = "\tx := mystery.Nope(1)"
 	unresolved.ReferencedSymbol = "Nope"
 	unresolved.Label = "hallucinated"
-	unresolved.DepExports = map[string][]string{} // index resolves nothing
+	unresolved.DepExports = map[string][]string{"net/http": {"Get"}} // resolves net/http, NOT mystery
 	unresolved.FileContext = []string{
 		"package caller", "import \"example.com/external/mystery\"",
 		"func run() { x := mystery.Nope(1); _ = x }",

@@ -937,18 +937,27 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 	return seeds
 }
 
-// blockStartLine returns the 0-based index in fileLines where block's lines first
-// appear as a consecutive run, or -1 if block is empty or not found. Matching is
-// done on lines rather than a byte offset because fileLines is what the hook
-// already read, and its per-line cap (capLine) means a byte-offset search against
-// a reconstructed text could drift. The Edit tools require old_string to be
-// unique in the file, so the first match is the right one; a non-match is the
-// fail-open case the caller treats as "no seed".
+// blockStartLine returns the 0-based index in fileLines where block's lines
+// appear as a consecutive run, or -1 if block is empty, not found, or found in
+// MORE THAN ONE place. Matching is done on lines rather than a byte offset
+// because fileLines is what the hook already read, and its per-line cap (capLine)
+// means a byte-offset search against a reconstructed text could drift.
+//
+// Ambiguity (two+ matches) returns -1 rather than guessing the first. A plain
+// Edit requires old_string to be unique, so a second match cannot arise there —
+// but a `replace_all` edit (which the hook payload does not parse) applies with a
+// NON-unique old_string, and seeding from the wrong occurrence could compute an
+// "open string" state that masks a hallucinated call in the replacement: a false
+// negative, the worst class for this guard. Returning -1 on ambiguity means "no
+// seed", which fails open toward flagging (a possible false positive) instead —
+// the safe direction, and consistent with the uniqueness premise the plain-Edit
+// path already assumes.
 func blockStartLine(fileLines []guard.AddedLine, block string) int {
 	if block == "" {
 		return -1
 	}
 	want := strings.Split(block, "\n")
+	found := -1
 	for i := 0; i+len(want) <= len(fileLines); i++ {
 		hit := true
 		for j, w := range want {
@@ -958,10 +967,13 @@ func blockStartLine(fileLines []guard.AddedLine, block string) int {
 			}
 		}
 		if hit {
-			return i
+			if found != -1 {
+				return -1 // ambiguous: a second match — do not seed
+			}
+			found = i
 		}
 	}
-	return -1
+	return found
 }
 
 // hookOldLines builds the AddedLines of the text being REMOVED, mirroring

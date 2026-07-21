@@ -16,6 +16,26 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- Three guard false negatives found by a retroactive adversarial review of the
+  v0.7.1–v0.9.0 releases, each a missed hallucination and each now regression-tested:
+  - **Lambda default-value arguments leaked into the known set** (v0.9.0). A lambda
+    whose default is a multi-argument call (`lambda cfg=build(a, b): …`) bound the
+    call's arguments (`b`) as if they were parameters, so a later hallucinated
+    `b()` was masked. `pyLambdaParams` now splits the parameter list with the same
+    bracket-aware splitter the `def` path uses.
+  - **A non-unique `old_string` could seed the wrong string state** (v0.7.1). Under
+    a `replace_all` edit (which the hook does not parse) a duplicated full-line
+    block straddling a docstring boundary could seed "open string" state and mask
+    a hallucinated call in the replacement. `blockStartLine` now returns no match
+    when the block appears in more than one place — fail-open toward flagging.
+  Also fixed a related false positive:
+  - **The duplicate-symbol check reported cross-language collisions** (v0.8.0).
+    Editing a Go file that adds `main` warned about a sibling Python `def main` in
+    the same directory, contradicting the check's own premise that Go and Python
+    are separate namespaces. Candidate definitions are now filtered to the same
+    language, not just the same directory.
+
 ## [0.9.1] — 2026-07-21
 
 ### Added

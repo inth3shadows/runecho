@@ -107,6 +107,12 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		var openSeed func(int) string
 		if fd.AbsPath != "" {
 			openSeed = openSeedFor(lang, fd.AbsPath)
+		} else if len(fd.SeedByLine) > 0 {
+			// Hook path: synthetic line numbers, so the seed is precomputed per
+			// block by the caller (see FileDiff.SeedByLine). A block with no entry
+			// reads "" — the same unseeded behavior as before.
+			seeds := fd.SeedByLine
+			openSeed = func(lineNo int) string { return seeds[lineNo] }
 		}
 		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed) {
 			if _, ok := known[ref.Name]; ok {

@@ -88,7 +88,19 @@ Register the MCP server:
 claude mcp add runecho -- ~/.local/bin/runecho-mcp
 ```
 
-Then install the edit-time guard configuration:
+Then install the edit-time guard. The plugin is the supported path — it wires the
+`PreToolUse` hook for you and can be uninstalled cleanly:
+
+```
+/plugin marketplace add inth3shadows/runecho
+/plugin install runecho-guard@runecho
+```
+
+The plugin does not ship the binary, only the wiring, so `install.sh` (or a
+release tarball) still has to have run. A missing binary makes the hook defer
+silently rather than error on every edit.
+
+If plugins are unavailable, print the equivalent snippet and merge it by hand:
 
 ```bash
 bash install.sh --print-hook-config

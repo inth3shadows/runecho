@@ -17,6 +17,16 @@ install time from `git describe --tags` (see `install.sh`).
 ## [Unreleased]
 
 ### Added
+- RunEcho ships as a **Claude Code plugin**. `/plugin marketplace add
+  inth3shadows/runecho` then `/plugin install runecho-guard@runecho` wires the
+  `PreToolUse` guard with no hand-merged JSON, and uninstalls cleanly — the
+  supported alternative to pasting `install.sh --print-hook-config` output into
+  `~/.claude/settings.json`. The repo serves as its own marketplace. The plugin
+  carries wiring only, never the binary: `hooks/guard.sh` resolves
+  `runecho-guard` from `PATH`, `$RUNECHO_BIN_DIR`, then `~/.local/bin`, and
+  defers silently when none match, so enabling the plugin without installing the
+  binary costs nothing instead of erroring on every edit. `--print-hook-config`
+  remains as the fallback where plugins are unavailable.
 - **Releases are cut automatically on merge to `master`.** A merged fix no longer
   waits for someone to remember to tag it. The bump level comes from the commit
   subject's prefix — `guard:`/`parser:` bump minor, `docs:`/`chore:` cut no

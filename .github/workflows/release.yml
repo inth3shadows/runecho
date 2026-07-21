@@ -43,7 +43,14 @@ jobs:
   # GitHub suppresses that to prevent recursion. So `on: push: tags` will not
   # fire for a tag this job creates, and the release has to happen right here or
   # not at all. That same suppression is what keeps the CHANGELOG commit below
-  # from re-triggering this job; the [skip ci] marker is belt-and-braces.
+  # from re-triggering this job; the skip-ci marker is belt-and-braces.
+  #
+  # HAZARD, learned the hard way on this file's own first push: GitHub honours
+  # that skip marker ANYWHERE in a commit message, body included. This repo
+  # squash-merges with squash_merge_commit_message=PR_BODY, so a PR whose body
+  # merely DESCRIBES the marker becomes a master commit message containing it —
+  # and silently suppresses this job. If a release you expected did not happen,
+  # check the merge commit message for the token before suspecting anything here.
   autorelease:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'inth3shadows/runecho'
     runs-on: ubuntu-latest

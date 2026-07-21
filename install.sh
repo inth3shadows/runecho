@@ -11,6 +11,7 @@
 #   bash install.sh --hook     # also install the GIT pre-commit hook in the cwd repo
 #   bash install.sh --hook --force      # overwrite an existing pre-commit hook
 #   bash install.sh --print-hook-config # print the Claude Code PreToolUse snippet
+#                                      # (fallback; the plugin is the preferred wiring)
 #   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
 #                                        # (this repo's own release safety net, #51/#63)
 #
@@ -18,7 +19,13 @@
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
 #   --print-hook-config  emits the Claude Code PreToolUse settings.json snippet
 #                        (--hook-mode; fires on every Edit/Write/MultiEdit). This
-#                        is the primary, edit-time integration the docs describe.
+#                        is the FALLBACK wiring for the primary, edit-time
+#                        integration. The supported path is the plugin in
+#                        plugins/runecho-guard/, installed with:
+#                          /plugin marketplace add inth3shadows/runecho
+#                          /plugin install runecho-guard@runecho
+#                        Both routes must invoke the SAME matcher and flag; see
+#                        plugins/runecho-guard/hooks/guard.sh.
 #
 # --hook-pre-push is unrelated to runecho-guard: it installs THIS repo's own
 # githooks/pre-push (rejects a non-monotonic vX.Y.Z tag push) into the repo you
@@ -66,8 +73,15 @@ esac
 # cmd/runecho-guard/main.go reads and what TECHNICAL.md documents.
 if [ "$PRINT_HOOK_CONFIG" -eq 1 ]; then
   cat <<CFG
-Add this to your Claude Code settings.json (~/.claude/settings.json) to vet every
-assistant edit at write time via the PreToolUse hook:
+PREFERRED: install the plugin instead — it wires this hook for you, uninstalls
+cleanly, and needs no hand-merged JSON:
+
+  /plugin marketplace add inth3shadows/runecho
+  /plugin install runecho-guard@runecho
+
+Otherwise, add this to your Claude Code settings.json (~/.claude/settings.json)
+to vet every assistant edit at write time via the PreToolUse hook. Merge it into
+any existing "hooks" object rather than replacing the file:
 
   {
     "hooks": {
@@ -152,7 +166,7 @@ HOOK
   echo "Git pre-commit hook installed: $HOOK_FILE"
   echo "  NOTE: this is the GIT-COMMIT-TIME variant — it vets the staged diff at"
   echo "  'git commit'. For edit-time vetting inside Claude Code (the primary"
-  echo "  integration), wire the PreToolUse hook: bash install.sh --print-hook-config"
+  echo "  integration), install the plugin: /plugin install runecho-guard@runecho"
   echo "  Bypass any commit with: RUNECHO_GUARD_SKIP=1 git commit ..."
 fi
 
@@ -201,7 +215,9 @@ Install the GIT pre-commit guard in a repo (commit-time):
   # (installs into the repo you invoke it from; use the full path to install.sh)
 
 Wire the Claude Code PreToolUse guard (edit-time — the primary integration):
-  bash install.sh --print-hook-config   # prints the settings.json snippet
+  /plugin marketplace add inth3shadows/runecho   # supported path, no JSON to merge
+  /plugin install runecho-guard@runecho
+  bash install.sh --print-hook-config            # fallback: prints the snippet
 
 (Maintainers/forks only) Guard release tags against non-monotonic pushes:
   bash install.sh --hook-pre-push       # run from the target repo's root

@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-07-21
+
 ### Added
 - `runecho-ir fpreport` — the guard's observed false-positive rate, read from
   `decisions.jsonl`. It joins each ask to its outcome symbol-exactly (not by the

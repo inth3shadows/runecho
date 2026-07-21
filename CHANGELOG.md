@@ -16,6 +16,18 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- `runecho-ir fpreport` — the guard's observed false-positive rate, read from
+  `decisions.jsonl`. It joins each ask to its outcome symbol-exactly (not by the
+  loose file-and-time-window guess) and reports the fraction the agent approved
+  anyway, broken down by check and language, plus the most-approved symbols and
+  loudest repos. `--json` for machines, `--max-rate F` to exit non-zero above a
+  threshold (gated to ≥20 asks) for CI/cron gating. The approval rate is an upper
+  bound on the true FP rate — some approvals are genuine fixes, not dismissals —
+  and is meaningful only while the guard actually prompts (a hook that discards
+  the guard's output makes every "approval" an artifact). Complements
+  `guard-stats`, which reports ask volume rather than correctness.
+
 ### Fixed
 - The guard no longer false-positives on a Python parameter used as a callable.
   A `Callable`-typed parameter (`def pump(transform: Callable[[str], Any]): out =

@@ -320,6 +320,36 @@ The same validation core also powers the Claude Code edit-time hook. See
 [TECHNICAL.md](TECHNICAL.md#the-guard-runecho-guard) for the exact hook
 behavior.
 
+### Measure how often the guard is wrong
+
+Every guard decision is logged to `~/.runecho/decisions.jsonl`. Two commands read
+it back:
+
+```bash
+runecho-ir guard-stats            # ask/defer VOLUME: how loud is the guard, where
+runecho-ir fpreport               # ask APPROVAL RATE: how often was it wrong
+```
+
+`fpreport` joins each ask to its outcome — a symbol-exact match, not a time-window
+guess — and reports the fraction the agent approved anyway, broken down by check
+and language, with the most-approved symbols (your false-positive suspects) and
+the loudest repos:
+
+```bash
+runecho-ir fpreport --days 30            # trailing-30-day report
+runecho-ir fpreport --json               # machine-readable
+runecho-ir fpreport --max-rate 0.15      # exit non-zero if approval rate > 15%
+```
+
+The approval rate is an **upper bound** on the false-positive rate: an approved
+ask is one the guard raised and the user waved through, but some of those
+approvals are the user fixing the flagged symbol rather than dismissing a wrong
+alarm. `--max-rate` (gated to ≥20 asks, so it never fires on noise) makes it a CI
+or cron check — a rising rate means the guard is interrupting more legitimate
+work. Note the number only means anything once the guard actually prompts: if its
+`PreToolUse` output is being discarded (e.g. a `1>/dev/null` in the hook command),
+every edit lands regardless and the "approvals" are an artifact, not judgment.
+
 ## What to Do When Something Breaks
 
 - **`runecho-ir: command not found`** — add `~/.local/bin` to your `PATH`, or

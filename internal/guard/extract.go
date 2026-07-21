@@ -1042,6 +1042,30 @@ func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine
 	}
 }
 
+// OpenStateBefore returns the unterminated multi-line string delimiter in effect
+// at the START of fileLines[idx] — the seed a scanner needs to read a block
+// beginning at that line in the right (masked) state. fileLines must be a whole
+// file's contiguous lines; idx is clamped into range, so an out-of-range index
+// yields the state at the nearest end rather than a panic.
+//
+// This is the hook path's counterpart to openSeedFor (which reads the file and
+// indexes by real new-file line number). The hook has the file's lines already
+// in hand and needs the state at a MATCHED position rather than at a diff line
+// number, so it threads the same masking here instead. See FileDiff.SeedByLine.
+func OpenStateBefore(lang Lang, fileLines []AddedLine, idx int) string {
+	if idx <= 0 || len(fileLines) == 0 {
+		return ""
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	for _, l := range fileLines[:idx] {
+		_, open = stripLiteralsStateful(lang, l.Text, open)
+	}
+	return open
+}
+
 // stripLiteralsStateful blanks string-literal and trailing-comment content on one
 // line, replacing interior characters with spaces so length (and therefore match
 // indices and LineNo) is preserved. This stops identifiers inside strings/comments

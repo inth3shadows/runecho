@@ -27,6 +27,17 @@ install time from `git describe --tags` (see `install.sh`).
   defers silently when none match, so enabling the plugin without installing the
   binary costs nothing instead of erroring on every edit. `--print-hook-config`
   remains as the fallback where plugins are unavailable.
+- **Releases are cut automatically on merge to `master`.** A merged fix no longer
+  waits for someone to remember to tag it. The bump level comes from the commit
+  subject's prefix — `guard:`/`parser:` bump minor, `docs:`/`chore:` cut no
+  release at all, anything else bumps patch — after which `CHANGELOG.md`'s
+  `[Unreleased]` section is renamed to the new version, committed, tagged, and
+  published by goreleaser in one atomic push. The decision logic lives in
+  `scripts/next-release.py` with its own test suite (`scripts/next-release-test.py`,
+  run by the release workflow) rather than inline in YAML, because a workflow that
+  pushes tags is the wrong place to find out a regex was wrong. The tradeoff is
+  deliberate: `guard:` covers both a false-positive fix and a new check, so the
+  resulting semver is mechanically consistent rather than semantically precise.
 
 ### Fixed
 - Guard no longer false-positives on bare calls to locally-bound callables. It

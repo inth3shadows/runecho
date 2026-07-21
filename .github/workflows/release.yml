@@ -3,8 +3,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [master]
   pull_request:
-    paths: [".goreleaser.yaml", ".github/workflows/release.yml"]
+    paths:
+      - ".goreleaser.yaml"
+      - ".github/workflows/release.yml"
+      - "scripts/next-release.py"
+      - "scripts/next-release-test.py"
 
 permissions:
   contents: read
@@ -24,6 +29,66 @@ jobs:
         with: { version: "~> v2", args: "check" }
       - uses: goreleaser/goreleaser-action@v6
         with: { version: "~> v2", args: "build --snapshot --clean" }
+      # The release decision logic is a script precisely so it can be exercised
+      # without pushing a tag. A change to it must fail here, not in production.
+      - name: Self-test the release decision logic
+        run: python3 scripts/next-release-test.py
+
+  # Push to master: decide whether this merge is a release, and if so tag and
+  # publish it. This is what removes "cut a tag" as a thing anyone has to
+  # remember — see scripts/next-release.py for the bump rules.
+  #
+  # WHY THIS JOB PUBLISHES INSTEAD OF LETTING THE `release` JOB BELOW DO IT:
+  # a tag pushed using GITHUB_TOKEN does NOT trigger another workflow run.
+  # GitHub suppresses that to prevent recursion. So `on: push: tags` will not
+  # fire for a tag this job creates, and the release has to happen right here or
+  # not at all. That same suppression is what keeps the CHANGELOG commit below
+  # from re-triggering this job; the [skip ci] marker is belt-and-braces.
+  autorelease:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'inth3shadows/runecho'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        # Full history AND tags: the version is computed from the highest
+        # existing semver tag, which a shallow clone would not have.
+        with: { fetch-depth: 0 }
+
+      - name: Decide the release
+        id: decide
+        run: |
+          subject="$(git log -1 --format=%s)"
+          echo "subject: $subject"
+          python3 scripts/next-release.py --subject "$subject" --apply >> "$GITHUB_OUTPUT"
+
+      - name: Report a skip
+        if: steps.decide.outputs.version == ''
+        run: echo "No release for this merge (${{ steps.decide.outputs.skip }})."
+
+      - uses: actions/setup-go@v6
+        if: steps.decide.outputs.version != ''
+        with: { go-version-file: go.mod }
+
+      - name: Commit the changelog and tag
+        if: steps.decide.outputs.version != ''
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(release): v${VERSION} [skip ci]"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          # Push the commit and the tag as one atomic update: a tag without its
+          # changelog commit, or the reverse, is a state nothing else recovers from.
+          git push --atomic origin HEAD:master "refs/tags/v${VERSION}"
+
+      - uses: goreleaser/goreleaser-action@v6
+        if: steps.decide.outputs.version != ''
+        with: { version: "~> v2", args: "release --clean" }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Tag push: cut the real release with downloadable binaries + checksums.
   release:

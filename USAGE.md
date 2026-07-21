@@ -344,9 +344,22 @@ runecho-ir fpreport --max-rate 0.15      # exit non-zero if approval rate > 15%
 The approval rate is an **upper bound** on the false-positive rate: an approved
 ask is one the guard raised and the user waved through, but some of those
 approvals are the user fixing the flagged symbol rather than dismissing a wrong
-alarm. `--max-rate` (gated to ≥20 asks, so it never fires on noise) makes it a CI
-or cron check — a rising rate means the guard is interrupting more legitimate
-work. Note the number only means anything once the guard actually prompts: if its
+alarm. `--max-rate` makes it a CI or cron check — a rising rate means the guard
+is interrupting more legitimate work. Its exit codes are chosen so CI can act on
+each distinctly:
+
+| exit | meaning | CI action |
+|---|---|---|
+| `0` | passed, or no gate requested | continue |
+| `1` | no decision log yet (fresh checkout) | skip — do **not** fail |
+| `2` | gate tripped, or a bad flag | fail the build |
+
+The gate only evaluates with **≥20 asks** (below that a single approval swings the
+rate too far); when it skips for that reason it says so on stderr rather than
+passing silently. With `--json`, the result is also in a `gate` object, so a
+`| jq` pipeline can read it without relying on the exit status.
+
+Note the number only means anything once the guard actually prompts: if its
 `PreToolUse` output is being discarded (e.g. a `1>/dev/null` in the hook command),
 every edit lands regardless and the "approvals" are an artifact, not judgment.
 

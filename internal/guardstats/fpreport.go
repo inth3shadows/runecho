@@ -77,8 +77,9 @@ func symbolKey(file string, symbols []string) string {
 // since. topN caps the flagged-symbol and loudest-repo rankings.
 //
 // Only hook-mode ask records participate: pre-commit asks block rather than
-// prompt, so they have no approve/deny outcome to join to. Records outside
-// [since, now] are dropped first.
+// prompt, so they have no approve/deny outcome to join to. Records with a
+// timestamp before since are dropped first (there is no upper bound — a
+// future-dated record from clock skew is kept, and moves Until).
 func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	s := FPStats{
 		Since:    since,
@@ -89,6 +90,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	// Index approved outcomes by join key. A file may see the same symbol set
 	// approved more than once over a long window; keep every outcome timestamp so
 	// an ask matches one at or after itself, within the window.
+	//
+	// Only an outcome whose reason is "approved" counts. The guard writes exactly
+	// that today (declog.go), but decisions.jsonl is a user-writable file, so a
+	// hand-edited or future non-approved "outcome" must not silently inflate the
+	// approval rate. A record with no join signal (empty symbol set) is skipped:
+	// symbolKey("",nil) would otherwise collide every symbol-less ask and outcome
+	// on the same/empty file into one false pairing (see UnmatchedOutcomes' note
+	// about pre-symbol-stamping guards).
 	type stamp = time.Time
 	approvedByKey := map[string][]stamp{}
 	var asks []Decision
@@ -104,8 +113,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			if d.Mode != "hook" {
 				continue // pre-commit asks block; no outcome to join
 			}
+			if len(d.Symbols) == 0 {
+				continue // no join signal — would collide with other symbol-less records
+			}
 			asks = append(asks, d)
 		case "outcome":
+			if d.Reason != "approved" || len(d.Symbols) == 0 {
+				continue
+			}
 			k := symbolKey(d.File, d.Symbols)
 			approvedByKey[k] = append(approvedByKey[k], d.TS)
 		}
@@ -115,6 +130,17 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			return approvedByKey[k][i].Before(approvedByKey[k][j])
 		})
 	}
+
+	// Match asks in ASCENDING timestamp order. matchOutcome greedily takes the
+	// earliest unconsumed outcome at or after an ask, which is optimal only when
+	// asks are processed oldest-first. decisions.jsonl is append-ordered in
+	// practice, but concurrent worktree writers or clock skew can interleave it,
+	// and an out-of-order ask could otherwise steal the outcome an earlier ask
+	// needed — undercounting approvals. Sorting removes that dependence on input
+	// order. Stable so equal-timestamp asks keep their log order.
+	sort.SliceStable(asks, func(i, j int) bool {
+		return asks[i].TS.Before(asks[j].TS)
+	})
 
 	// consumed marks an (key,index) outcome already paired, so two asks with the
 	// same file+symbols don't both claim one approval.
@@ -158,12 +184,21 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 
 	s.TopSymbols = topSymbolCounts(approvedSymbolFreq, topN)
 	s.LoudestRepos = topRepoCounts(repoAsks, topN)
+	// No in-window record leaves Until at its zero value, which renders/marshals
+	// as a date before Since (an inverted window). Pin it to Since so an empty
+	// report shows a zero-width window rather than a nonsensical one.
+	if s.Until.Before(since) {
+		s.Until = since
+	}
 	return s
 }
 
 // matchOutcome returns the index of the earliest unconsumed outcome stamp that
-// is at or after askTS and within OutcomeJoinWindow of it, or -1 if none. stamps
-// is sorted ascending.
+// is at or after askTS and STRICTLY within OutcomeJoinWindow of it, or -1 if
+// none. stamps is sorted ascending. The bound is strict (< window, not <=) to
+// mirror the recorder: cmd/runecho-guard writes an outcome only when now-ask <
+// maxOutcomeAge (declog.go's ts.After(cutoff)), so it never emits a record at
+// exactly the window edge, and the join must not admit one either.
 func matchOutcome(stamps []time.Time, used map[int]bool, askTS time.Time) int {
 	for i, ts := range stamps {
 		if used[i] {
@@ -172,7 +207,7 @@ func matchOutcome(stamps []time.Time, used map[int]bool, askTS time.Time) int {
 		if ts.Before(askTS) {
 			continue
 		}
-		if ts.Sub(askTS) > OutcomeJoinWindow {
+		if ts.Sub(askTS) >= OutcomeJoinWindow {
 			break // sorted: no later stamp is closer
 		}
 		return i
@@ -218,7 +253,7 @@ func topRepoCounts(freq map[string]int, topN int) []RepoCount {
 func FormatFP(s FPStats) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Guard false-positive report (%s → %s)\n",
-		s.Since.Format("2006-01-02"), s.Until.Format("2006-01-02"))
+		s.Since.UTC().Format("2006-01-02"), s.Until.UTC().Format("2006-01-02"))
 	fmt.Fprintf(&b, "\nApproval rate = asks the agent approved anyway ÷ asks. An upper bound\n")
 	fmt.Fprintf(&b, "on the false-positive rate (some approvals are genuine fixes, not dismissals).\n\n")
 

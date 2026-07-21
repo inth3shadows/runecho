@@ -132,3 +132,77 @@ func TestFPBucket_Rate(t *testing.T) {
 		t.Error("3/4 should be 0.75")
 	}
 }
+
+// Findings from independent review, pinned as regression tests.
+
+// Join reviewer #1: matching must not depend on input order. Two asks sharing a
+// key, presented out of timestamp order, must both find their outcome.
+func TestFPReport_AsksMatchedInTimeOrderNotInputOrder(t *testing.T) {
+	// Input order puts the LATER ask first. Outcomes at t4 and t7.
+	decs := []Decision{
+		ask("violations", "py", "r", "a.py", 3, "foo"), // askB @ t3 (appears first)
+		ask("violations", "py", "r", "a.py", 0, "foo"), // askA @ t0 (appears second)
+		outcome("a.py", 4, "foo"),
+		outcome("a.py", 7, "foo"),
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	// askA@0→out@4 (within 5), askB@3→out@7 (within 5). Both match.
+	if s.Window.Approved != 2 {
+		t.Fatalf("approved = %d, want 2 (both asks matched after time-sorting)", s.Window.Approved)
+	}
+}
+
+// Join reviewer #2: the window is strict (< 5min), mirroring the recorder which
+// never emits an outcome at exactly the edge.
+func TestFPReport_WindowBoundaryStrict(t *testing.T) {
+	exactly5 := []Decision{
+		ask("violations", "py", "r", "a.py", 0, "foo"),
+		outcome("a.py", 5, "foo"), // exactly 5 min later
+	}
+	if s := FPReport(exactly5, ts(-1000), 10); s.Window.Approved != 0 {
+		t.Errorf("an outcome exactly 5min later must NOT match (strict window), got approved=%d", s.Window.Approved)
+	}
+	justUnder := []Decision{
+		ask("violations", "py", "r", "b.py", 0, "foo"),
+		Decision{TS: ts(0).Add(4*time.Minute + 59*time.Second), Mode: "hook", File: "b.py", Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}},
+	}
+	if s := FPReport(justUnder, ts(-1000), 10); s.Window.Approved != 1 {
+		t.Errorf("an outcome 4m59s later must match, got approved=%d", s.Window.Approved)
+	}
+}
+
+// Adversarial #5: symbol-less records carry no join signal and must not collide.
+func TestFPReport_EmptySymbolRecordsIgnored(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", File: "", Decision: "ask", Reason: "violations", Symbols: nil},
+		{TS: ts(1), Mode: "hook", File: "", Decision: "outcome", Reason: "approved", Symbols: nil},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 0 {
+		t.Errorf("symbol-less ask must be skipped, got asks=%d", s.Window.Asks)
+	}
+	if s.UnmatchedOutcomes != 0 {
+		t.Errorf("symbol-less outcome must not enter the denominator, got unmatched=%d", s.UnmatchedOutcomes)
+	}
+}
+
+// Adversarial #6: only "approved" outcomes count; a non-approved outcome must
+// not inflate the rate (decisions.jsonl is user-writable).
+func TestFPReport_NonApprovedOutcomeIgnored(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "py", "r", "a.py", 0, "foo"),
+		{TS: ts(1), Mode: "hook", File: "a.py", Decision: "outcome", Reason: "rejected", Symbols: []string{"foo"}},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Approved != 0 {
+		t.Errorf("a non-approved outcome must not count, got approved=%d", s.Window.Approved)
+	}
+}
+
+// Adversarial #9: an empty window must not render an inverted [since, until].
+func TestFPReport_EmptyWindowUntilNotInverted(t *testing.T) {
+	s := FPReport(nil, ts(0), 10)
+	if s.Until.Before(s.Since) {
+		t.Errorf("Until (%v) must not precede Since (%v) on empty data", s.Until, s.Since)
+	}
+}

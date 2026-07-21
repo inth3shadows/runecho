@@ -21,8 +21,9 @@ install time from `git describe --tags` (see `install.sh`).
   `decisions.jsonl`. It joins each ask to its outcome symbol-exactly (not by the
   loose file-and-time-window guess) and reports the fraction the agent approved
   anyway, broken down by check and language, plus the most-approved symbols and
-  loudest repos. `--json` for machines, `--max-rate F` to exit non-zero above a
-  threshold (gated to ≥20 asks) for CI/cron gating. The approval rate is an upper
+  loudest repos. `--json` for machines, `--max-rate F` for CI/cron gating (exit 2 = tripped
+  or bad flag, 1 = no log/skip, 0 = pass; gated to ≥20 asks, and the gate result
+  is also in the JSON `gate` object). The approval rate is an upper
   bound on the true FP rate — some approvals are genuine fixes, not dismissals —
   and is meaningful only while the guard actually prompts (a hook that discards
   the guard's output makes every "approval" an artifact). Complements

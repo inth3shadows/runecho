@@ -16,6 +16,17 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- Positioning aligned across every surface, and scoped honestly. The README lede,
+  `docs/runecho-vs-field.html`, and the GitHub description had drifted into three
+  different pitches — "code-truth oracle", "prevention, not detection", and a
+  claim to stop agents writing bad symbols outright. All three now lead with the
+  same thing: RunEcho is one cheap layer, not the whole answer, and it catches
+  **4 of 9** real hallucinations in its own N=15 corpus, with the 5 qualified-position
+  misses named rather than buried. A guard that overclaims is a guard people turn
+  off, and a guard that is off protects nothing — so the scope is stated in the
+  lede instead of the appendix.
+
 ## [0.8.0] — 2026-07-21
 
 ### Fixed
@@ -58,6 +69,14 @@ install time from `git describe --tags` (see `install.sh`).
   resulting semver is mechanically consistent rather than semantically precise.
 
 ### Fixed
+- The edit-time guard no longer scans docstring prose or SQL string contents as
+  code. A Claude Code hook edit whose new text began inside a pre-existing
+  docstring was validated without the string-masking state that sits in the
+  untouched lines above it, so prose words followed by a parenthetical
+  (`candidates (#47)`) and SQL keywords (`VALUES (`) read as calls to undefined
+  symbols. Replaying six weeks of live decisions, this was the single largest
+  false-positive class — 37 of 40 reproducible cases, ~92%. (Shipped in the
+  v0.7.1 binary; this note was added retroactively.)
 - Guard no longer false-positives on bare calls to locally-bound callables. It
   now folds local binding targets into the additive known set — JS/TS
   destructures and `useState` setters (#156), and Python assignment targets

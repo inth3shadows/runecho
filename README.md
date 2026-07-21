@@ -10,13 +10,26 @@
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#quick-start)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#quick-start)
 
-RunEcho is a deterministic **code-truth oracle for AI coding agents**. It gives an
-assistant (Claude Code, Codex, or any MCP client) a ground-truth view of what
-symbols actually exist in a repo and what *structurally* changed between two
-points in time — so the agent can ground its claims instead of guessing.
+RunEcho is **one cheap layer against AI coding mistakes — not the whole answer.**
+It checks every agent edit against an index of the symbols your repo actually
+has, and asks before a write lands on one that doesn't exist.
 
-It is **model-free and vendor-neutral**: no LLM, no API keys, no network. The
-same code produces the same answer. The whole pitch is determinism.
+**The scope, stated up front.** RunEcho reads *unqualified* references — bare
+calls, constant references, and type annotations. Measured against its own
+corpus of real model hallucinations, that catches **4 of 9** (N=15 hand-verified
+cases mined from live session transcripts, each backed by a compiler or runtime
+error as independent ground truth). The other 5 are qualified positions —
+`df.groupby(…)`, `tree.Root()` — which need receiver-type resolution and are out
+of scope by design. The numbers, including the misses, are in
+[bench/FINDINGS.md](bench/FINDINGS.md).
+
+That is the honest shape of the thing: a narrow, fast, certain check that runs
+before the write, not a system that makes your agent correct. Run it the way you
+run a type checker — one layer that removes one class of mistake completely,
+alongside the tests and review that catch the rest.
+
+It is **model-free and vendor-neutral**: no LLM, no API keys, no network, and
+~0 tokens of your context window. The same code produces the same answer.
 
 ## Why RunEcho Exists
 

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "runecho-guard",
+  "description": "Deterministic pre-write hallucination gate. Validates every symbol an assistant edit references against the indexed structure of your repo, and asks before a write lands on a name that does not resolve.",
+  "author": {
+    "name": "Eric Minish",
+    "url": "https://github.com/inth3shadows"
+  },
+  "homepage": "https://github.com/inth3shadows/runecho",
+  "repository": "https://github.com/inth3shadows/runecho",
+  "license": "MIT"
+}

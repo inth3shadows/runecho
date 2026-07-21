@@ -123,13 +123,22 @@ full semantic analysis.
    [mcp_servers.runecho]
    command = "/home/YOUR_USER/.local/bin/runecho-mcp"  # absolute path; TOML does not expand ~
    ```
-5. Install the edit-time guard in Claude Code:
+5. Install the edit-time guard in Claude Code — the primary integration if you
+   want RunEcho to vet assistant edits before they are written:
+   ```
+   /plugin marketplace add inth3shadows/runecho
+   /plugin install runecho-guard@runecho
+   ```
+   The plugin wires the `PreToolUse` hook; it does **not** ship the binary, so
+   step 1 still has to have happened. If the binary is missing the hook defers
+   silently rather than erroring on every edit. Uninstall with
+   `/plugin uninstall runecho-guard@runecho`.
+
+   Without plugin support, print the equivalent `~/.claude/settings.json`
+   snippet and merge it by hand:
    ```bash
    bash install.sh --print-hook-config
    ```
-   That prints the `PreToolUse` snippet for `~/.claude/settings.json`. This is
-   the primary integration if you want RunEcho to vet assistant edits before
-   they are written.
 6. (Optional) Install the commit-time guard in a repo you've enrolled:
    ```bash
    bash install.sh --hook        # run from the target repo's root

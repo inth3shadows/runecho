@@ -256,13 +256,35 @@ bash install.sh                              # build all three binaries → $RUN
 claude mcp add runecho -- ~/.local/bin/runecho-mcp   # register with Claude Code
 # Codex: add [mcp_servers.runecho] command = "/home/YOUR_USER/.local/bin/runecho-mcp" to ~/.codex/config.toml
 #   (absolute path — TOML does not expand ~)
-bash install.sh --print-hook-config          # print the Claude Code PreToolUse snippet
 bash install.sh --hook                       # from a target repo's root: install the pre-commit guard
 ```
 
-Rollback: `claude mcp remove runecho`, delete the Codex block, and remove the
-binaries from `$RUNECHO_BIN_DIR`. The store at `~/.runecho/` is untouched by
-uninstall and can be deleted separately.
+Edit-time guard (Claude Code) — the plugin is the supported wiring; the snippet
+is the fallback where plugins are unavailable:
+
+```
+/plugin marketplace add inth3shadows/runecho     # this repo is its own marketplace
+/plugin install runecho-guard@runecho
+```
+```bash
+bash install.sh --print-hook-config          # fallback: print the settings.json snippet
+```
+
+The plugin ships wiring only, never the binary — `plugins/runecho-guard/hooks/guard.sh`
+resolves `runecho-guard` from `PATH`, `$RUNECHO_BIN_DIR`, then `~/.local/bin`, and
+exits 0 silently if none match. That absence is the one degraded state the guard
+cannot report on its own, and a hook that fires on every edit must not turn it
+into a per-edit error. `plugin.json` carries no `version` field: a git-sourced
+plugin reports its commit SHA, which cannot drift from the release tag.
+
+The matcher (`Edit|Write|MultiEdit`) and `--hook-mode` invocation are one contract
+in three places — `plugins/runecho-guard/hooks/hooks.json`,
+`install.sh --print-hook-config`, and `cmd/runecho-guard/main.go`. Changing one
+without the others silently unwires the guard.
+
+Rollback: `/plugin uninstall runecho-guard@runecho`, `claude mcp remove runecho`,
+delete the Codex block, and remove the binaries from `$RUNECHO_BIN_DIR`. The store
+at `~/.runecho/` is untouched by uninstall and can be deleted separately.
 
 ## Maintenance Commands
 

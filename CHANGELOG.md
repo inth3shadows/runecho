@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-07-21
+
 ### Added
 - RunEcho ships as a **Claude Code plugin**. `/plugin marketplace add
   inth3shadows/runecho` then `/plugin install runecho-guard@runecho` wires the

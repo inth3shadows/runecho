@@ -140,9 +140,12 @@ the error string alone. What each well actually contained:
 - **Dropped-import.** The archetype is real — `ULID` and `TASTING_ROOM_KIND`
   above were caused by dropped imports — but those are already in the corpus, and
   no *new* ones surfaced. 60 edits *looked* like an import removed while its name
-  is still used, but the intersection with an actual runtime `NameError` for that
-  name was empty, and every spot-check (`logging`, `build_report`, `BASE_RATING`)
-  was a **refactor that relocated the symbol to another import line** — it still
+  is still used. Exactly one of those names (`evaluator`) also produced a runtime
+  `NameError`, and on inspection it was a **real module imported lazily inside a
+  function**, used on a path where that import had not run — the same
+  real-symbol-scope class as `render`/`has_terse_marker`, not a dropped-import
+  bug. Every other spot-check (`logging`, `build_report`, `BASE_RATING`) was a
+  **refactor that relocated the symbol to another import line** — it still
   resolves and would not fail. These are exactly the false positives
   `DroppedImportRefs`' own `preBound` guard is built to suppress, not bugs.
 

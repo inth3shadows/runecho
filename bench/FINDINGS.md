@@ -185,3 +185,24 @@ The mining is reproducible (the scripts live outside the repo); re-running it on
 larger or different transcript corpus is the only thing that would move these
 counts, and it should be re-run before anyone concludes the wells are dry
 *in general* rather than *on this machine*.
+
+### Corroborated on a second, independent corpus (2026-07-22)
+
+That re-run has now happened once. The same three miners, run over a **different
+machine's** transcripts — 246 MB, a different developer identity, an entirely
+different set of repositories (business-automation services, not developer
+tooling) — returned the **same result**: zero genuine new cases in any of the
+three positions. The single in-scope candidate it surfaced (`_CLOSED_LOST`, a
+constant referenced across module boundaries) was, on verification against that
+repo, a **real symbol defined in the repo's test module and used from a service
+module without importing it** — the identical real-symbol-scope class as every
+candidate on the first machine. The dropped-import candidates were again refactor
+relocations (the flagged import still present elsewhere in the file).
+
+So the finding is not an artifact of one developer's habits or one set of repos:
+across two independent corpora, real "undefined symbol" errors are import- and
+scope-mistakes on symbols that *exist*, not inventions. The honest scope of the
+claim is now "corroborated across two independent corpora," not "universal" —
+both corpora share an author-adjacent origin, so a genuinely third-party corpus
+would still be the strongest test — but the mine-specific explanation is ruled
+out.

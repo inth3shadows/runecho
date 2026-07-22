@@ -31,10 +31,10 @@ the watch list rather than in the positioning.
 | Tool | What it actually does | Fires | Falsifies the claim? |
 |---|---|---|---|
 | **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. v0.4.1 added an opt-in bughunt gate requiring test/build verification after N edits. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails. |
-| **Cursor hooks** (1.7+) | Hook surface enumerated in the docs: `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` can allow/deny; `afterFileEdit` / `afterTabFileEdit` are observational only. | `beforeReadFile` pre-read; edits **post-write only** | **No — and structurally can't today.** There is no `beforeFileEdit` event, so no Cursor hook of any kind can gate an edit before it lands. (Also relevant to issue #174: the guard cannot be ported to Cursor until such an event exists.) |
-| **pyright-lsp** (official Anthropic Claude Code plugin) | Runs Pyright and surfaces LSP diagnostics into the conversation as `<new-diagnostics>`. New first-party entrant since the last positioning pass. | After the edit | **No.** Advisory, post-write, Python-only, needs a language server — the three things the moat sentence concedes to LSPs anyway. Worth watching: it makes "just use an LSP" cheaper inside Claude Code itself. |
+| **Cursor hooks** | Hook surface enumerated in the docs: `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` can allow/deny; `afterFileEdit` / `afterTabFileEdit` are observational only. | `beforeReadFile` pre-read; native edits **post-write only** | **No — and structurally can't today.** There is no `beforeFileEdit` event, so an edit made with Cursor's *native* edit tool cannot be gated before it lands. (Also relevant to issue #174: a Cursor port could only cover edits routed through shell or an MCP filesystem server, via `beforeShellExecution` / `beforeMCPExecution` — that is partial coverage of the thing agents actually do, not a port.) |
+| **pyright-lsp** (official Anthropic Claude Code plugin) | Runs Pyright and surfaces LSP diagnostics into the conversation as `<new-diagnostics>`. New first-party entrant since the last positioning pass. | After the edit | **No.** Advisory, post-write, Python-only, needs a language server — every one of these is something the moat sentence already concedes to LSPs. Worth watching: it makes "just use an LSP" cheaper inside Claude Code itself. |
 | **Serena** (oraios) | LSP-backed semantic MCP: find-references, rename, symbol-level edits, 40+ languages. | On request, during the loop | **No.** Deeper than RunEcho on every axis except timing and setup; it is a tool the agent *chooses* to call, not a gate that fires whether or not the agent cooperates. |
-| **Aider repo map** | Tree-sitter + PageRank ranking of important symbols, packed into the context budget. No MCP support as of v0.86.x. | Context supply, pre-generation | **No.** Supplies context; validates nothing. |
+| **Aider repo map** | Tree-sitter + PageRank ranking of important symbols, packed into the context budget. | Context supply, pre-generation | **No.** Supplies context; validates nothing. Fails conjuncts 2 and 3 by design — the repo map's job is to make the model *better informed*, never to overrule it. |
 | **Cline / Continue / Cody** | No pre-write symbol-validation gate found this round. | — | **No.** Note the evidence here is weaker than for Cursor: Cursor publishes an exhaustive hook list, so its negative is documented; for these the negative is only "not found". |
 | **Shipmoor** | Described as a local deterministic verification layer producing a binding merge verdict. | Merge time | **No.** Wrong end of the pipeline entirely. *Secondary source only — not primary-verified.* |
 
@@ -46,7 +46,8 @@ host a pre-write edit gate at all.
 
 - **Khati, Rodriguez-Cardenas, Pantzer & Poshyvanyk (William & Mary, 2026)** —
   *Detecting and Correcting Hallucinations in LLM-Generated Code via Deterministic
-  AST Analysis* ([arXiv 2601.19106](https://arxiv.org/html/2601.19106)). The
+  AST Analysis* ([arXiv 2601.19106](https://arxiv.org/abs/2601.19106), submitted
+  27 Jan 2026). The
   closest thing to RunEcho's technique in print: entirely static, non-executing,
   AST + a versioned knowledge base built by library introspection; flags unknown
   APIs and bare critical calls; reports 100% precision / 87.6% recall / 77%
@@ -83,8 +84,21 @@ Quarterly, or immediately if a major harness announces new hook events.
    - Changelogs: GateGuard, Serena, Aider, Cline, Continue.
 2. Score each candidate against the four conjuncts above. Three out of four is a
    watch-list entry, not a falsification.
-3. Update the table, the **Last verified** date at the top of this file, **and**
-   the matching date stamp in `runecho-vs-field.html`. All three move together or
-   the stamp is lying.
+3. Update the table **and every dated string in both files** — there are more of
+   them than is obvious, and a survey date left behind in one place is exactly the
+   silent staleness this file exists to prevent. Find them mechanically rather
+   than from memory:
+
+   ```
+   grep -rn '<previous survey date>' docs/competitive-landscape.md docs/runecho-vs-field.html
+   ```
+
+   That grep should return exactly five hits — no more, no fewer, and if it
+   returns six someone added a date stamp without adding it here. The five are:
+   this file's **Last verified**
+   line (plus its *next due* date), the `## Survey` heading, the **Verdict** line,
+   the `Last verified` stamp in the field doc's moat note, and the
+   **re-surveyed** date in the field doc's footer sourcing. They all move together
+   or the stamps are lying.
 4. If something does satisfy all four: rewrite the positioning honestly in the
    same pass. A stale moat claim costs more credibility than a conceded one.

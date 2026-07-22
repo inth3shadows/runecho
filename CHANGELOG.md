@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-07-22
+
+### Changed
+- bench: let the captured corpus measure the qualified-call checks (#171 Part A) (#186)
+
 ## [0.9.2] — 2026-07-21
 
 ### Fixed

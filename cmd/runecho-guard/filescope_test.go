@@ -22,13 +22,13 @@ func TestFileScopeViolations_FlagGating(t *testing.T) {
 
 	// Flag OFF → no-op regardless of content.
 	t.Setenv("RUNECHO_GUARD_FILESCOPE", "")
-	if v := fileScopeViolations(guard.LangPython, whole, added, repo, "tests/test_r.py"); v != nil {
+	if v := fileScopeViolations(guard.LangPython, whole, guard.FileDiff{AddedLines: added}, repo, "tests/test_r.py"); v != nil {
 		t.Fatalf("flag off must yield no violations, got %+v", v)
 	}
 
 	// Flag ON → the out-of-scope reference is flagged and File is stamped.
 	t.Setenv("RUNECHO_GUARD_FILESCOPE", "1")
-	v := fileScopeViolations(guard.LangPython, whole, added, repo, "tests/test_r.py")
+	v := fileScopeViolations(guard.LangPython, whole, guard.FileDiff{AddedLines: added}, repo, "tests/test_r.py")
 	if len(v) != 1 {
 		t.Fatalf("flag on must flag the out-of-scope reference, got %+v", v)
 	}
@@ -38,7 +38,7 @@ func TestFileScopeViolations_FlagGating(t *testing.T) {
 
 	// Non-Python is a no-op even with the flag on (v1 language scope).
 	for _, lang := range []guard.Lang{guard.LangGo, guard.LangJS} {
-		if v := fileScopeViolations(lang, whole, added, repo, "x.go"); v != nil {
+		if v := fileScopeViolations(lang, whole, guard.FileDiff{AddedLines: added}, repo, "x.go"); v != nil {
 			t.Errorf("lang %v must be a no-op in v1, got %+v", lang, v)
 		}
 	}

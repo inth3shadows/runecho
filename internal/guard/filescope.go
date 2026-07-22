@@ -60,14 +60,23 @@ var pyDynamicBinding = []string{
 	"__import__", "importlib",
 }
 
-// FileScopeViolations returns references in addedLines that resolve in repoKnown
-// but not within the edited file's own binding surface. wholeFile is the file's
-// full pre-edit content (empty disables the check — without it the file's imports
-// and definitions are unknowable, so it must stay silent). Python only in v1.
-func FileScopeViolations(lang Lang, wholeFile, addedLines []AddedLine, repoKnown map[string]struct{}) []Violation {
+// FileScopeViolations returns references in fd's added lines that resolve in
+// repoKnown but not within the edited file's own binding surface. wholeFile is the
+// file's full pre-edit content (empty disables the check — without it the file's
+// imports and definitions are unknowable, so it must stay silent).
+//
+// fd is taken whole rather than as bare lines so the string-state seed travels
+// with it: an edit block beginning inside a pre-existing docstring MUST be masked,
+// or its prose is scanned as code and ordinary words read as calls. That is the
+// guard's largest historical false-positive class (#145, #178), and a check that
+// extracted refs with a nil seed would reintroduce it wholesale.
+//
+// Python only in v1.
+func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnown map[string]struct{}) []Violation {
 	if lang != LangPython {
 		return nil
 	}
+	addedLines := fd.AddedLines
 	// No whole-file context: the imports and defs that bind these names are
 	// invisible, so every reference would look unresolved. Fail silent, matching
 	// the guard's degraded-input posture everywhere else.
@@ -88,9 +97,9 @@ func FileScopeViolations(lang Lang, wholeFile, addedLines []AddedLine, repoKnown
 	var violations []Violation
 	// extractRefs already excludes builtins, skips qualified selectors, masks
 	// string/comment content, and dedupes by name (first occurrence wins) — so the
-	// extraction surface here is IDENTICAL to the additive check's. The only thing
-	// this check changes is which set the name is resolved against.
-	for _, ref := range extractRefs(lang, addedLines, nil) {
+	// extraction surface here is IDENTICAL to the additive check's, seed included.
+	// The only thing this check changes is which set the name is resolved against.
+	for _, ref := range extractRefs(lang, addedLines, seedFunc(lang, fd)) {
 		if _, inRepo := repoKnown[ref.Name]; !inRepo {
 			continue // the firewall: invented symbols belong to the additive check
 		}

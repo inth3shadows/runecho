@@ -119,16 +119,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
-		var openSeed func(int) string
-		if fd.AbsPath != "" {
-			openSeed = openSeedFor(lang, fd.AbsPath)
-		} else if len(fd.SeedByLine) > 0 {
-			// Hook path: synthetic line numbers, so the seed is precomputed per
-			// block by the caller (see FileDiff.SeedByLine). A block with no entry
-			// reads "" — the same unseeded behavior as before.
-			seeds := fd.SeedByLine
-			openSeed = func(lineNo int) string { return seeds[lineNo] }
-		}
+		openSeed := seedFunc(lang, fd)
 		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed) {
 			if _, ok := known[ref.Name]; ok {
 				continue
@@ -152,6 +143,29 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 	return violations
+}
+
+// seedFunc returns the open-string-state seed for a diff, mapping a line number to
+// the unterminated multi-line string delimiter in effect at the START of that line
+// (nil when no seed is available — unseeded scanning, the pre-#145 behavior).
+//
+// Every reference-extracting check must use this, not a nil seed: without it an
+// edit block that begins inside a pre-existing docstring or string literal is
+// scanned as CODE, and prose inside it reads as calls. That was the single
+// largest false-positive source the guard has had (#145 for pre-commit, #178 for
+// the hook path, which carries ~all real traffic).
+func seedFunc(lang Lang, fd FileDiff) func(int) string {
+	if fd.AbsPath != "" {
+		return openSeedFor(lang, fd.AbsPath)
+	}
+	if len(fd.SeedByLine) > 0 {
+		// Hook path: synthetic line numbers, so the seed is precomputed per block
+		// by the caller (see FileDiff.SeedByLine). A block with no entry reads ""
+		// — the same unseeded behavior as before.
+		seeds := fd.SeedByLine
+		return func(lineNo int) string { return seeds[lineNo] }
+	}
+	return nil
 }
 
 // maxSeedFileBytes caps the file read for pre-hunk string-state seeding. Past it,

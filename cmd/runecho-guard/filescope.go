@@ -16,7 +16,9 @@ func fileScopeEnabled() bool { return os.Getenv("RUNECHO_GUARD_FILESCOPE") == "1
 
 // fileScopeViolations runs the file-scope resolution check for one file and
 // stamps each violation's File field. wholeFileLines is the current on-disk file
-// (pre-edit in hook mode) — the check returns nothing without it. repoSymbols
+// (pre-edit in hook mode) — the check returns nothing without it. fd is passed
+// whole so the string-state seed (AbsPath / SeedByLine) travels with it; without
+// that, an edit landing inside a docstring would be scanned as code. repoSymbols
 // MUST be the repo's own indexed symbol set, NOT a set already widened with
 // learned-allow entries: the firewall's meaning is "this name is a real symbol in
 // the repo", and a learned-allow name is one the user taught the guard to accept,
@@ -26,11 +28,11 @@ func fileScopeEnabled() bool { return os.Getenv("RUNECHO_GUARD_FILESCOPE") == "1
 // of the firewall rather than an oversight: the additive check flags only names
 // ABSENT from the known set, while this one fires only on names PRESENT in it. The
 // two are disjoint by construction, so a symbol can never be reported twice.
-func fileScopeViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, repoSymbols map[string]struct{}, path string) []guard.Violation {
+func fileScopeViolations(lang guard.Lang, wholeFileLines []guard.AddedLine, fd guard.FileDiff, repoSymbols map[string]struct{}, path string) []guard.Violation {
 	if !fileScopeEnabled() || lang != guard.LangPython {
 		return nil
 	}
-	vs := guard.FileScopeViolations(lang, wholeFileLines, addedLines, repoSymbols)
+	vs := guard.FileScopeViolations(lang, wholeFileLines, fd, repoSymbols)
 	for i := range vs {
 		vs[i].File = path
 	}

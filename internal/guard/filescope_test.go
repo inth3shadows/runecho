@@ -217,7 +217,7 @@ func TestFileScope_Negatives(t *testing.T) {
 			if tc.wholeFile != nil {
 				whole = linesOf(tc.wholeFile...)
 			}
-			got := FileScopeViolations(LangPython, whole, linesOf(tc.added...), repoKnown(tc.known...))
+			got := FileScopeViolations(LangPython, whole, FileDiff{AddedLines: linesOf(tc.added...)}, repoKnown(tc.known...))
 			if len(got) != 0 {
 				t.Errorf("FALSE POSITIVE: flagged %v — %s", flaggedNames(got), tc.why)
 			}
@@ -230,7 +230,7 @@ func TestFileScope_Negatives(t *testing.T) {
 func TestFileScope_NonPythonIsSilent(t *testing.T) {
 	for _, lang := range []Lang{LangGo, LangJS, LangUnknown} {
 		whole := linesOf("package main", "func go() {}")
-		got := FileScopeViolations(lang, whole, linesOf("\tRender(x)"), repoKnown("Render"))
+		got := FileScopeViolations(lang, whole, FileDiff{AddedLines: linesOf("\tRender(x)")}, repoKnown("Render"))
 		if len(got) != 0 {
 			t.Errorf("lang %v: expected silence in v1, got %v", lang, flaggedNames(got))
 		}
@@ -270,7 +270,7 @@ func TestFileScope_CatchesRealSymbolUsedOutOfScope(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := FileScopeViolations(LangPython, linesOf(tc.wholeFile...),
-				linesOf(tc.added...), repoKnown(tc.known...))
+				FileDiff{AddedLines: linesOf(tc.added...)}, repoKnown(tc.known...))
 			if len(got) != 1 || got[0].Symbol != tc.want {
 				t.Fatalf("want exactly [%s], got %v", tc.want, flaggedNames(got))
 			}
@@ -292,7 +292,7 @@ func TestFileScope_AbstainGatesAreLoadBearing(t *testing.T) {
 	added := linesOf("    injected(1)")
 	known := repoKnown("injected", "pytest")
 
-	if got := FileScopeViolations(LangPython, linesOf(control...), added, known); len(got) != 1 {
+	if got := FileScopeViolations(LangPython, linesOf(control...), FileDiff{AddedLines: added}, known); len(got) != 1 {
 		t.Fatalf("control must flag, else every abstain test below is vacuous; got %v", flaggedNames(got))
 	}
 
@@ -311,7 +311,7 @@ func TestFileScope_AbstainGatesAreLoadBearing(t *testing.T) {
 	for name, line := range gates {
 		t.Run(name, func(t *testing.T) {
 			withGate := append([]string{line}, control...)
-			got := FileScopeViolations(LangPython, linesOf(withGate...), added, known)
+			got := FileScopeViolations(LangPython, linesOf(withGate...), FileDiff{AddedLines: added}, known)
 			if len(got) != 0 {
 				t.Errorf("gate %q did not suppress: got %v", name, flaggedNames(got))
 			}
@@ -320,7 +320,7 @@ func TestFileScope_AbstainGatesAreLoadBearing(t *testing.T) {
 
 	// The firewall is load-bearing too: same input, name NOT in the repo → silent.
 	t.Run("repo firewall", func(t *testing.T) {
-		got := FileScopeViolations(LangPython, linesOf(control...), added, repoKnown("pytest"))
+		got := FileScopeViolations(LangPython, linesOf(control...), FileDiff{AddedLines: added}, repoKnown("pytest"))
 		if len(got) != 0 {
 			t.Errorf("firewall did not suppress an out-of-repo name: got %v", flaggedNames(got))
 		}
@@ -328,7 +328,7 @@ func TestFileScope_AbstainGatesAreLoadBearing(t *testing.T) {
 
 	// And the missing-whole-file gate.
 	t.Run("no whole-file context", func(t *testing.T) {
-		if got := FileScopeViolations(LangPython, nil, added, known); len(got) != 0 {
+		if got := FileScopeViolations(LangPython, nil, FileDiff{AddedLines: added}, known); len(got) != 0 {
 			t.Errorf("missing-context gate did not suppress: got %v", flaggedNames(got))
 		}
 	})
@@ -338,11 +338,43 @@ func TestFileScope_AbstainGatesAreLoadBearing(t *testing.T) {
 func TestFileScope_DedupesByName(t *testing.T) {
 	whole := linesOf("import pytest", "", "def test_it():", "    pass")
 	added := linesOf("    a = render(1)", "    b = render(2)", "    c = render(3)")
-	got := FileScopeViolations(LangPython, whole, added, repoKnown("render"))
+	got := FileScopeViolations(LangPython, whole, FileDiff{AddedLines: added}, repoKnown("render"))
 	if len(got) != 1 {
 		t.Fatalf("want 1 violation, got %d: %v", len(got), flaggedNames(got))
 	}
 	if got[0].Line != 1 {
 		t.Errorf("Line = %d, want first use (1)", got[0].Line)
+	}
+}
+
+// TestFileScope_DocstringSeedIsHonored is the regression for the guard's largest
+// historical false-positive class (#145 pre-commit, #178 hook path): an edit block
+// that BEGINS inside a pre-existing docstring must be masked, not scanned as code.
+// Prose reads as calls otherwise — the symbol below, `structure`, is one of the
+// names that actually false-positived before #178 shipped.
+//
+// The control half proves the seed is load-bearing rather than incidental: the
+// identical block WITHOUT the seed does flag, so this test cannot pass vacuously.
+func TestFileScope_DocstringSeedIsHonored(t *testing.T) {
+	whole := linesOf(
+		`def go():`,
+		`    """`,
+		`    call structure(x) to draw`,
+		`    """`,
+	)
+	block := []AddedLine{{LineNo: 1, Text: `    call structure(x) to draw`}}
+	repo := repoKnown("structure")
+
+	// Hook path: the caller's seed says this block starts inside a `"""` string.
+	seeded := FileDiff{AddedLines: block, SeedByLine: map[int]string{1: `"""`}}
+	if got := FileScopeViolations(LangPython, whole, seeded, repo); len(got) != 0 {
+		t.Errorf("FALSE POSITIVE on docstring prose: %v", flaggedNames(got))
+	}
+
+	// Control: same block, no seed → the extractor cannot know it is inside a
+	// string, so it flags. If this ever stops flagging, the test above is vacuous.
+	unseeded := FileDiff{AddedLines: block}
+	if got := FileScopeViolations(LangPython, whole, unseeded, repo); len(got) != 1 {
+		t.Errorf("control must flag without a seed, else the seeded assertion is vacuous; got %v", flaggedNames(got))
 	}
 }

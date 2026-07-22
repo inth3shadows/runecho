@@ -261,7 +261,7 @@ func runArgs(args []string) int {
 				continue
 			}
 			whole := readFileLines(fd.AbsPath)
-			violations = append(violations, fileScopeViolations(guard.LangPython, whole, fd.AddedLines, symbols, fd.Path)...)
+			violations = append(violations, fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)...)
 		}
 	}
 
@@ -619,7 +619,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// the pre-edit whole file, newLines the proposed text; both are needed so a
 	// binding introduced by this very edit still resolves. repoSymbols is the
 	// pre-fold snapshot taken above.
-	violations = append(violations, fileScopeViolations(lang, fileLines, newLines, repoSymbols, filePath)...)
+	violations = append(violations, fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)...)
 
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for

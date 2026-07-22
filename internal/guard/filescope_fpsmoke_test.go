@@ -67,7 +67,7 @@ func TestFileScopeFPSmoke(t *testing.T) {
 	counts := map[string]int{}
 	for p, lines := range fileLines {
 		total++
-		vs := FileScopeViolations(LangPython, lines, lines, repo)
+		vs := FileScopeViolations(LangPython, lines, FileDiff{AddedLines: lines}, repo)
 		if len(vs) == 0 {
 			continue
 		}

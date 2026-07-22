@@ -251,6 +251,20 @@ func runArgs(args []string) int {
 		}
 	}
 
+	// File-scope resolution check (RUNECHO_GUARD_FILESCOPE=1, default off). Unlike
+	// the hook path, `symbols` here is never folded with in-file defs or
+	// learned-allow entries, so it is already the repo's own set and needs no
+	// snapshot before being used as the firewall.
+	if fileScopeEnabled() {
+		for _, fd := range diffs {
+			if guard.LangFor(fd.Path) != guard.LangPython {
+				continue
+			}
+			whole := readFileLines(fd.AbsPath)
+			violations = append(violations, fileScopeViolations(guard.LangPython, whole, fd.AddedLines, symbols, fd.Path)...)
+		}
+	}
+
 	if len(violations) == 0 {
 		if *verbose {
 			infof("all references resolved")
@@ -531,6 +545,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// Destructure into the locals the rest of the flow already uses.
 	symbols, ignorePath, latest, repoName := res.Symbols, res.IgnorePath, res.Latest, res.RepoName
 
+	// The file-scope check's firewall means "this name is a real symbol in the REPO
+	// index", so it must see the symbol set BEFORE the in-file and learned-allow
+	// folds below widen it in place. Learned-allow especially: those are names the
+	// user taught the guard to accept, and re-raising one as out-of-scope would
+	// undo that. Snapshot only when the check is on, so the default-off path costs
+	// nothing on the hook's latency budget.
+	var repoSymbols map[string]struct{}
+	if fileScopeEnabled() && lang == guard.LangPython {
+		repoSymbols = snapshotSymbols(symbols)
+	}
+
 	// An Edit/MultiEdit hunk sees only the changed region, not the rest of the
 	// file — so a call to a sibling function (or a nested/local def, or a private
 	// `_helper` the IR may not index) elsewhere in the file would falsely read as
@@ -587,6 +612,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			violations = append(violations, goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)...)
 		}
 	}
+
+	// File-scope resolution check (RUNECHO_GUARD_FILESCOPE=1, default off): a name
+	// that resolves repo-wide but not inside THIS file — a helper used without
+	// importing it, a module function called without its qualifier. fileLines is
+	// the pre-edit whole file, newLines the proposed text; both are needed so a
+	// binding introduced by this very edit still resolves. repoSymbols is the
+	// pre-fold snapshot taken above.
+	violations = append(violations, fileScopeViolations(lang, fileLines, newLines, repoSymbols, filePath)...)
 
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for

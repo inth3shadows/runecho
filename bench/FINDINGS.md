@@ -119,8 +119,10 @@ empty is the more useful result than any case it might have added.
 | package-qualified (same-repo internal, external dep) | qualified checks (default-off) | **0** |
 | dropped-import | `DroppedImportRefs` (default-off) | **0** |
 
-Every candidate was hand-verified against the source repo on disk, not taken from
-the error string alone. What each well actually contained:
+Candidates were hand-verified — the stronger ones (`render`, `has_terse_marker`,
+`evaluator`, `logging`, `build_report`, `BASE_RATING`) against the source repo on
+disk, the rest against their transcript context — not taken from the error string
+alone. What each well actually contained:
 
 - **In-scope invented-symbol.** Every fresh `NameError` / `undefined:` / `TS2304`
   hit resolved, on inspection, to a symbol that *exists*: `render` was a real

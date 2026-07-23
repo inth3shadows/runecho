@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-23
+
+### Changed
+- guard: multi-candidate did-you-mean, and the allocation bug behind it (#200) (#222)
+
 ## [0.15.2] — 2026-07-23
 
 ### Changed

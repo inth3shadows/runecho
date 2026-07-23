@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-07-23
+
+### Changed
+- snapshot: single deletion path + orphan invariants (#196)
+
 ## [0.11.0] — 2026-07-23
 
 ### Changed

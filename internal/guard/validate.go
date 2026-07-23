@@ -13,9 +13,11 @@ type Violation struct {
 	Line   int
 	Symbol string
 	Lang   Lang
-	// Suggestion is the closest known symbol by edit distance, if one is near
-	// enough to be a likely typo/hallucination of it ("" if none). Model-free.
-	Suggestion string
+	// Suggestions are the closest known symbols by edit distance, nearest first,
+	// when near enough to be likely typos/hallucinations of Symbol (nil if none).
+	// Model-free; capped at suggestMaxCandidates. Suggestions[0] is the best
+	// match — callers that want just one should take it rather than re-rank.
+	Suggestions []string
 }
 
 // Run validates diffs against the known symbol set and returns any violations.
@@ -132,13 +134,13 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 				continue
 			}
 			seen[key] = struct{}{}
-			suggestion, _ := Suggest(ref.Name, known)
+			suggestions, _ := Suggest(ref.Name, known)
 			violations = append(violations, Violation{
-				File:       fd.Path,
-				Line:       ref.LineNo,
-				Symbol:     ref.Name,
-				Lang:       lang,
-				Suggestion: suggestion,
+				File:        fd.Path,
+				Line:        ref.LineNo,
+				Symbol:      ref.Name,
+				Lang:        lang,
+				Suggestions: suggestions,
 			})
 		}
 	}

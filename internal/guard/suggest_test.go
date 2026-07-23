@@ -5,16 +5,16 @@ import "testing"
 func TestSuggest_CaseSlip(t *testing.T) {
 	known := map[string]struct{}{"GetUserByID": {}, "DeleteUser": {}}
 	got, ok := Suggest("getUserByID", known)
-	if !ok || got != "GetUserByID" {
-		t.Fatalf("Suggest = %q,%v; want GetUserByID,true", got, ok)
+	if !ok || got[0] != "GetUserByID" {
+		t.Fatalf("Suggest = %q,%v; want GetUserByID first,true", got, ok)
 	}
 }
 
 func TestSuggest_OneEdit(t *testing.T) {
 	known := map[string]struct{}{"FetchUser": {}, "FlushCache": {}}
 	got, ok := Suggest("FetchUserr", known) // doubled trailing char, dist 1
-	if !ok || got != "FetchUser" {
-		t.Fatalf("Suggest = %q,%v; want FetchUser,true", got, ok)
+	if !ok || got[0] != "FetchUser" {
+		t.Fatalf("Suggest = %q,%v; want FetchUser first,true", got, ok)
 	}
 }
 
@@ -39,8 +39,8 @@ func TestSuggest_DeterministicTie(t *testing.T) {
 	known := map[string]struct{}{"Abd": {}, "Abc": {}}
 	for i := 0; i < 20; i++ {
 		got, ok := Suggest("Abe", known)
-		if !ok || got != "Abc" {
-			t.Fatalf("Suggest = %q,%v; want Abc,true (deterministic tie)", got, ok)
+		if !ok || got[0] != "Abc" {
+			t.Fatalf("Suggest = %q,%v; want Abc first,true (deterministic tie)", got, ok)
 		}
 	}
 }
@@ -61,8 +61,8 @@ func TestRun_AttachesSuggestion(t *testing.T) {
 	if len(violations) != 1 {
 		t.Fatalf("expected 1 violation, got %v", violations)
 	}
-	if violations[0].Suggestion != "ProcessOrder" {
-		t.Errorf("Suggestion = %q, want ProcessOrder", violations[0].Suggestion)
+	if len(violations[0].Suggestions) == 0 || violations[0].Suggestions[0] != "ProcessOrder" {
+		t.Errorf("Suggestions = %q, want ProcessOrder first", violations[0].Suggestions)
 	}
 }
 
@@ -83,5 +83,60 @@ func TestLevenshtein_KnownDistances(t *testing.T) {
 		if got := levenshtein(c.a, c.b, 100); got != c.want {
 			t.Errorf("levenshtein(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// TestSuggest_MultipleCandidates pins the #200 behaviour: several near names are
+// offered, nearest first, capped — a single suggestion made the agent guess when
+// two names were equally plausible.
+func TestSuggest_MultipleCandidates(t *testing.T) {
+	known := map[string]struct{}{
+		"ProcessOrder": {}, "ProcessOrders": {}, "ProcessOrdur": {},
+		"RenderTemplate": {},
+	}
+	got, ok := Suggest("ProcesOrder", known)
+	if !ok {
+		t.Fatal("expected suggestions")
+	}
+	// ProcessOrder is distance 1; the other two are distance 2 and tie-break
+	// lexicographically. RenderTemplate is far and must not appear.
+	want := []string{"ProcessOrder", "ProcessOrders", "ProcessOrdur"}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q (nearest first, then lexicographic)", got, want)
+		}
+	}
+}
+
+// TestSuggest_CapsCandidates: more than the cap must be truncated, not dumped.
+func TestSuggest_CapsCandidates(t *testing.T) {
+	known := map[string]struct{}{
+		"handlerA": {}, "handlerB": {}, "handlerC": {}, "handlerD": {}, "handlerE": {},
+	}
+	got, _ := Suggest("handlerX", known)
+	if len(got) > suggestMaxCandidates {
+		t.Errorf("got %d suggestions, want at most %d", len(got), suggestMaxCandidates)
+	}
+}
+
+// TestSuggest_ShortNameFloor exercises withinFloor specifically — cases that
+// pass suggestMaxDist and are rejected (or kept) only because of the relative
+// floor. A case that maxDist already rejects proves nothing about the floor.
+func TestSuggest_ShortNameFloor(t *testing.T) {
+	// Distance 2 on a 3-char name: within maxDist, but two edits have changed
+	// most of the name, so it is a different name rather than a typo of this one.
+	if got, ok := Suggest("abc", map[string]struct{}{"xyc": {}}); ok {
+		t.Errorf("distance-2 match on a 3-char name should be rejected, got %q", got)
+	}
+	// Distance 1 on the same 3-char name: a genuine single-edit slip, kept.
+	if got, ok := Suggest("abc", map[string]struct{}{"abd": {}}); !ok || got[0] != "abd" {
+		t.Errorf("abc -> abd = %q,%v; want abd kept", got, ok)
+	}
+	// Distance 2 on a 4-char name is back above the floor and stays.
+	if got, ok := Suggest("abcd", map[string]struct{}{"abxy": {}}); !ok || got[0] != "abxy" {
+		t.Errorf("abcd -> abxy = %q,%v; want kept (floor only bites below 4 chars)", got, ok)
 	}
 }

@@ -110,15 +110,15 @@ func TestGuardCorpus(t *testing.T) {
 					switch {
 					case contains(expect, sym):
 						tl.tp++
-						if want := c.Suggest[sym]; want != "" && v.Suggestion != want {
-							t.Errorf("suggestion for %q = %q, want %q", sym, v.Suggestion, want)
+						if want := c.Suggest[sym]; want != "" && (len(v.Suggestions) == 0 || v.Suggestions[0] != want) {
+							t.Errorf("suggestion for %q = %q, want %q", sym, v.Suggestions, want)
 						}
 					case contains(knownFP, sym):
 						tl.trackedFP++
 					default:
 						tl.unexpectedFP++
 						t.Errorf("unexpected false positive: %q flagged at %s:%d (suggestion %q)",
-							sym, v.File, v.Line, v.Suggestion)
+							sym, v.File, v.Line, v.Suggestions)
 					}
 				}
 				for sym := range expect {

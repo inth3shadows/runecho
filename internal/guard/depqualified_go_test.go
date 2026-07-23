@@ -58,8 +58,8 @@ func TestGoDepQualified_FlagsAbsentSymbol(t *testing.T) {
 	if got[0].Lang != LangGo {
 		t.Errorf("Lang = %q, want %q", got[0].Lang, LangGo)
 	}
-	if got[0].Suggestion != "Get" {
-		t.Errorf("Suggestion = %q, want \"Get\" from the dependency's own names", got[0].Suggestion)
+	if len(got[0].Suggestions) == 0 || got[0].Suggestions[0] != "Get" {
+		t.Errorf("Suggestions = %q, want \"Get\" first from the dependency's own names", got[0].Suggestions)
 	}
 }
 
@@ -185,8 +185,8 @@ func TestGoDepQualified_EndToEndAgainstRealModuleCache(t *testing.T) {
 	if len(got) != 1 || got[0].Symbol != "strings.Containz" {
 		t.Fatalf("violations = %v, want [strings.Containz]", symbolList(got))
 	}
-	if got[0].Suggestion != "Contains" {
-		t.Errorf("Suggestion = %q, want \"Contains\"", got[0].Suggestion)
+	if len(got[0].Suggestions) == 0 || got[0].Suggestions[0] != "Contains" {
+		t.Errorf("Suggestions = %q, want \"Contains\" first", got[0].Suggestions)
 	}
 
 	good := "package main\n\nimport \"strings\"\n\nfunc f() { strings.Contains(\"a\", \"b\") }\n"

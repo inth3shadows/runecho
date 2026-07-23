@@ -221,10 +221,18 @@ func TestWholeFileBoundNames_MissingFileIsSilent(t *testing.T) {
 }
 
 func TestSuggestionSuffix(t *testing.T) {
-	if got := suggestionSuffix(""); got != "" {
-		t.Errorf("empty suggestion should render nothing, got %q", got)
+	if got := suggestionSuffix(nil); got != "" {
+		t.Errorf("no suggestions should render nothing, got %q", got)
 	}
-	if got := suggestionSuffix("RealName"); got != "  (did you mean \"RealName\"?)" {
+	if got := suggestionSuffix([]string{}); got != "" {
+		t.Errorf("empty (non-nil) suggestions should render nothing, got %q", got)
+	}
+	if got := suggestionSuffix([]string{"RealName"}); got != "  (did you mean \"RealName\"?)" {
 		t.Errorf("suffix = %q", got)
+	}
+	// Multiple candidates read as alternatives, not as a list to work through.
+	want := "  (did you mean \"RealName\" or \"RealNome\"?)"
+	if got := suggestionSuffix([]string{"RealName", "RealNome"}); got != want {
+		t.Errorf("suffix = %q, want %q", got, want)
 	}
 }

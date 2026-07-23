@@ -290,12 +290,12 @@ func GoQualifiedViolations(wholeFile, addedLines []AddedLine, known map[string]s
 				continue
 			}
 			seen[key] = struct{}{}
-			suggestion, _ := Suggest(sym, known)
+			suggestions, _ := Suggest(sym, known)
 			violations = append(violations, Violation{
-				Line:       l.LineNo,
-				Symbol:     q + "." + sym,
-				Lang:       LangGo,
-				Suggestion: suggestion,
+				Line:        l.LineNo,
+				Symbol:      q + "." + sym,
+				Lang:        LangGo,
+				Suggestions: suggestions,
 			})
 		}
 	}

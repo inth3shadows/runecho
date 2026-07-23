@@ -1,11 +1,14 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/guard"
 )
 
@@ -90,7 +93,9 @@ func addedDefs(lang guard.Lang, oldText, newText string) []string {
 // (DefsOfName vs RefsToName) and the warning shape differ. queryErrs mirrors
 // checkDanglingRefs: per-symbol store queries that failed and were skipped, so
 // zero warnings + queryErrs > 0 must not read as a definitive clean pass.
-func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string) (warns []duplicateWarning, queryErrs int) {
+// selfConstrained says the edited file is itself under a build constraint; see
+// the goBuildTagged block comment for why that changes which candidates count.
+func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string, selfConstrained bool) (warns []duplicateWarning, queryErrs int) {
 	if len(added) == 0 {
 		return nil, 0
 	}
@@ -138,6 +143,18 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string) (
 	}
 	defer db.Close()
 
+	// Resolve the repo root only when the edited file is constrained — the
+	// common unconstrained edit pays nothing, and a root we cannot resolve
+	// means candidate files cannot be read, so fall back to prior behavior.
+	top := ""
+	if selfConstrained {
+		if t, err := gitutil.TopLevel(dir); err == nil {
+			top = t
+		} else {
+			selfConstrained = false
+		}
+	}
+
 	for _, a := range added {
 		paths, err := db.DefsOfName(snapID, a)
 		if err != nil {
@@ -145,6 +162,9 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string) (
 			continue // fail-open for this symbol, keep checking the rest
 		}
 		others := duplicateCandidates(excludeSelf(paths, self), self)
+		if selfConstrained {
+			others = dropConstrained(top, others)
+		}
 		if len(others) > 0 {
 			if len(others) > maxDuplicateLocations {
 				others = others[:maxDuplicateLocations]
@@ -183,6 +203,126 @@ func duplicateCandidates(others []string, self string) []string {
 		}
 	}
 	return out
+}
+
+// --- build constraints ----------------------------------------------------
+//
+// Two Go files in one package defining the same top-level name only collide if
+// the compiler ever sees both at once. A complementary constraint pair never
+// does: `//go:build unix` / `//go:build !unix`, or the implicit constraint in a
+// `_windows.go` / `_linux.go` filename, compiles exactly one side per
+// GOOS/GOARCH. This is not hypothetical — it is the ONLY live Go
+// duplicate-symbol ask on record (internal/store/lock_unix.go vs lock_other.go,
+// both defining WithFileLock, flagged twice and approved both times), so
+// without this the check's entire observed true-signal budget is a false
+// positive.
+//
+// The rule is deliberately narrow: suppress only when BOTH files are
+// constrained. A constrained file and an unconstrained one DO collide whenever
+// the constraint holds, and two files under the same tag (`//go:build linux`
+// twice) collide too — both stay flagged. Telling "complementary" from
+// "overlapping" needs a real constraint evaluator (go/build/constraint over
+// every GOOS×GOARCH pair); for an ask-posture guard the both-constrained
+// heuristic buys the whole observed win at none of that cost.
+
+// maxBuildHeaderBytes caps how much of a candidate file is read looking for a
+// constraint. Constraints must precede the package clause, so anything past a
+// generous license-header allowance cannot be one.
+const maxBuildHeaderBytes = 8 << 10
+
+// goBuildConstrained reports whether the file being edited is itself under a
+// build constraint. Both sides of the edit are consulted because neither alone
+// is sufficient: an Edit hunk rarely carries the file header, and a newly
+// created file has no pre-edit text to carry it.
+func goBuildConstrained(filePath, oldText, newText string) bool {
+	return goFilenameConstrained(filePath) || goBuildTagged(oldText) || goBuildTagged(newText)
+}
+
+// goBuildTagged reports whether Go source carries an explicit build constraint
+// in its header. The scan stops at the package clause because that is where the
+// go tool stops honoring them — a `//go:build` line further down (inside a test
+// fixture string, or a heredoc-style literal) is not a constraint and must not
+// read as one.
+func goBuildTagged(src string) bool {
+	rest := src
+	for rest != "" {
+		var line string
+		line, rest, _ = strings.Cut(rest, "\n")
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "//go:build"), strings.HasPrefix(t, "// +build"):
+			return true
+		case strings.HasPrefix(t, "package "):
+			return false
+		}
+	}
+	return false
+}
+
+// goFilenameConstrained reports whether a .go filename's trailing underscore
+// field is a GOOS or GOARCH name, which the go tool treats as an implicit build
+// constraint (lock_windows.go builds only on Windows). Mirrors go/build's rule:
+// only the final field is decisive, and a file whose whole name IS the suffix
+// (windows.go) is not constrained.
+func goFilenameConstrained(p string) bool {
+	base := strings.TrimSuffix(path.Base(filepath.ToSlash(p)), ".go")
+	i := strings.LastIndex(base, "_")
+	if i <= 0 {
+		return false
+	}
+	last := base[i+1:]
+	return goosNames[last] || goarchNames[last]
+}
+
+// goosNames / goarchNames are the values the go tool accepts as implicit
+// filename constraints. Kept as literal sets rather than derived at runtime:
+// the guard runs as a hook on the edit path and must not shell out to `go`.
+var goosNames = map[string]bool{
+	"aix": true, "android": true, "darwin": true, "dragonfly": true,
+	"freebsd": true, "hurd": true, "illumos": true, "ios": true, "js": true,
+	"linux": true, "nacl": true, "netbsd": true, "openbsd": true, "plan9": true,
+	"solaris": true, "wasip1": true, "windows": true, "zos": true,
+}
+
+var goarchNames = map[string]bool{
+	"386": true, "amd64": true, "amd64p32": true, "arm": true, "arm64": true,
+	"arm64be": true, "armbe": true, "loong64": true, "mips": true,
+	"mips64": true, "mips64le": true, "mips64p32": true, "mips64p32le": true,
+	"mipsle": true, "ppc": true, "ppc64": true, "ppc64le": true, "riscv": true,
+	"riscv64": true, "s390": true, "s390x": true, "sparc": true,
+	"sparc64": true, "wasm": true,
+}
+
+// dropConstrained removes candidate files that are themselves build-constrained.
+// Only ever called when the edited file is constrained too, so what it removes
+// is exactly the both-constrained pair described above.
+func dropConstrained(top string, others []string) []string {
+	var out []string
+	for _, o := range others {
+		if !goFileConstrained(top, o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// goFileConstrained reports whether the repo-relative Go file at rel is built
+// only under some constraint. An unreadable file counts as constrained: the
+// caller has already established that the edited file is constrained, and on
+// that path "cannot tell" resolves toward silence rather than toward an ask the
+// decision log says is wrong.
+func goFileConstrained(top, rel string) bool {
+	if goFilenameConstrained(rel) {
+		return true
+	}
+	f, err := os.Open(filepath.Join(top, filepath.FromSlash(rel)))
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	head := make([]byte, maxBuildHeaderBytes)
+	n, _ := io.ReadFull(f, head)
+	return goBuildTagged(string(head[:n]))
 }
 
 // isTestFile reports whether a path is a test file for its language — the class

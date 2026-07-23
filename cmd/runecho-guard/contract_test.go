@@ -350,6 +350,92 @@ func TestContract_MergesWithSymbolViolationInOneAsk(t *testing.T) {
 	}
 }
 
+// The activation root is fully resolved (`git rev-parse --show-toplevel`) but
+// the tool call's file_path is whatever the caller had. One symlinked component
+// between them makes filepath.Rel produce a "../" path and the check abstains
+// SILENTLY — indistinguishable from "in scope", on every edit in the repo. The
+// earlier fixtures hid this by resolving their own paths; this one deliberately
+// does not.
+func TestContract_SymlinkedPathStillResolves(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess", inScopeBody)
+	link := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(top, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Ensure the real directory exists, then address the file through the link.
+	contractPayload(t, "sess", filepath.Join(top, "internal", "y.go"), "x\n")
+	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(link, "internal", "y.go"), "x\n"))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("an out-of-scope path reached through a symlink must still ask; got %q\n%s", d.Hook.PermissionDec, raw)
+	}
+	if !strings.Contains(d.Hook.PermissionReason, "internal/y.go") {
+		t.Errorf("reason should name the repo-relative path: %q", d.Hook.PermissionReason)
+	}
+}
+
+// A merged ask asks two different questions and gets ONE answer. Approving it
+// because the out-of-scope edit was legitimate says nothing about whether the
+// symbol resolves, so the hallucinated name must not be offered to learned-allow
+// — otherwise a scope decision permanently blinds the hallucination check to
+// that name. Same rule that excludes dangling/dropped/duplicate approvals.
+func TestContract_MergedAskDoesNotTrainLearnedAllow(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess", inScopeBody)
+	body := "package main\n\nfunc F() { TotallyMadeUpSymbol() }\n"
+	if _, _, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "internal", "y.go"), body)); d.Hook.PermissionDec != "ask" {
+		t.Fatalf("expected an ask; got %q", d.Hook.PermissionDec)
+	}
+	rec := readLastDecisionLog(t)
+	if _, present := rec["learn_symbols"]; present {
+		t.Errorf("a contract-merged ask must not offer symbols to learned-allow: %v", rec["learn_symbols"])
+	}
+	// Control: the same hallucination WITHOUT a contract still trains, so the
+	// assertion above is about the merge and not about learning being broken.
+	if _, _, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "cmd", "runecho-guard", "z.go"), body)); d.Hook.PermissionDec != "ask" {
+		t.Fatalf("control: in-scope hallucination should still ask; got %q", d.Hook.PermissionDec)
+	}
+	if rec := readLastDecisionLog(t); rec["learn_symbols"] == nil {
+		t.Errorf("control: a contract-free hallucination ask must still populate learn_symbols: %v", rec)
+	}
+}
+
+// Every ask must carry the enrolled repo name, including on the paths where the
+// caller has no repo in hand. guardstats drops records with an empty repo from
+// ByRepo, so without this the non-code case — the one the design calls out as
+// where scope drift most often lands — would go uncounted in the dogfood data
+// the un-gating decision reads.
+func TestContract_AsksAreAttributedToTheRepo(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess", inScopeBody)
+	for _, p := range []string{
+		filepath.Join(top, "docs", "README.md"), // unknown language
+		filepath.Join(top, "internal", "y.go"),  // normal path
+	} {
+		if _, _, d := runHook(t, contractPayload(t, "sess", p, "x\n")); d.Hook.PermissionDec != "ask" {
+			t.Fatalf("%s should ask; got %q", p, d.Hook.PermissionDec)
+		}
+		if rec := readLastDecisionLog(t); rec["repo"] != "r" {
+			t.Errorf("%s: ask logged repo %v, want the enrolled name", p, rec["repo"])
+		}
+	}
+}
+
+// The remedy the ask hands the user has to run as printed. A bare
+// `runecho-ir contract deactivate` always fails (--session is required) and the
+// session id is something only the guard knows, having read it from the payload.
+func TestContract_AskPrintsARunnableRemedy(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess-xyz", inScopeBody)
+	_, _, d := runHook(t, contractPayload(t, "sess-xyz", filepath.Join(top, "internal", "y.go"), "x\n"))
+	r := d.Hook.PermissionReason
+	for _, want := range []string{"--session sess-xyz", "--dir " + top, ".runechoguardignore does not apply"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("ask is missing %q:\n%s", want, r)
+		}
+	}
+}
+
 // The contract token must LEAD the joined reason, so a dogfood analysis can
 // separate the one intent check from the fact checks by prefix.
 func TestContractReason(t *testing.T) {

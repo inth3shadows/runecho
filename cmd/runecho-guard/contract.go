@@ -37,10 +37,19 @@ func contractEnabled() bool { return os.Getenv("RUNECHO_GUARD_CONTRACT") == "1" 
 type contractWarning struct {
 	Name          string // contract name, as declared or as its file is named
 	ContractPath  string // absolute path to the contract file
+	RepoRoot      string // repo root the contract's globs are written against
+	SessionID     string // session the contract is bound to, so the ask can print a runnable command
 	RelPath       string // the edited file, relative to the contract's repo root
 	Patterns      int    // pattern count, so the ask can say what it was measured against
 	ActivatedHash string // contract hash at activation time (from the store)
 	CurrentHash   string // contract hash on disk right now
+	// RepoName is the enrolled repo's name, carried so askContractOnly can
+	// attribute the decision record even on the paths where the caller has no
+	// repo in hand (an unknown file extension, an empty-text edit). Without it
+	// those records log an empty repo and guardstats drops them from ByRepo —
+	// silently excluding non-code files, which is where the design says scope
+	// drift most often lands.
+	RepoName string
 }
 
 // drifted reports whether the contract file changed after it was activated.
@@ -52,6 +61,19 @@ func (cw *contractWarning) drifted() bool { return cw.ActivatedHash != cw.Curren
 // section renders the contract part of the ask. It carries its own guidance
 // sentence because the generic one the fact checks share ("new/local/dynamic,
 // or an intended removal") is about symbols and says nothing useful here.
+//
+// Every command it prints is fully qualified and runnable as-is. The first draft
+// suggested a bare `runecho-ir contract deactivate`, which ALWAYS fails —
+// --session is required and the guard is the only party that knows the id, since
+// it read it from the hook payload and never showed it. A remedy the user cannot
+// execute is worse than no remedy: it spends the one moment they are paying
+// attention on a usage error.
+//
+// The ignorefile disclaimer is not padding either. In a merged ask this section
+// sits beside the fact checks' trailer, which offers .runechoguardignore as the
+// way to silence repeats — and that file is read only by guard.Run, never here.
+// A user who reaches for it would watch the symbol half go quiet while the
+// contract half kept asking, and conclude the guard was broken.
 func (cw *contractWarning) section() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[runecho-guard] this edit is outside the scope declared by contract %q:\n", cw.Name)
@@ -61,7 +83,9 @@ func (cw *contractWarning) section() string {
 			cw.ContractPath, shortHash(cw.ActivatedHash), shortHash(cw.CurrentHash))
 	}
 	fmt.Fprintf(&sb, "Approve if the edit is legitimate — an out-of-scope edit often is. "+
-		"Review the scope with `runecho-ir contract show %s`, widen it, or drop the contract with `runecho-ir contract deactivate`.\n", cw.Name)
+		"The scope lives in %s; widen it there, or drop it for this session with:\n", cw.ContractPath)
+	fmt.Fprintf(&sb, "  runecho-ir contract deactivate --dir %s --session %s\n", cw.RepoRoot, cw.SessionID)
+	sb.WriteString("(.runechoguardignore does not apply to a contract — only the contract file controls scope.)\n")
 	return sb.String()
 }
 
@@ -120,7 +144,7 @@ func contractWarningFor(filePath, sessionID string) *contractWarning {
 	if !ok {
 		return nil
 	}
-	return contractWarningWith(db, repo.ID, filePath, sessionID)
+	return contractWarningWith(db, repo.ID, repo.Name, filePath, sessionID)
 }
 
 // contractWarningWith is the half of contractWarningFor that needs an open
@@ -129,7 +153,7 @@ func contractWarningFor(filePath, sessionID string) *contractWarning {
 // gates are repeated rather than assumed: this is reachable from a caller that
 // opened the store for entirely unrelated reasons, and "the flag is off" must
 // still cost nothing there.
-func contractWarningWith(db *snapshot.DB, repoID int64, filePath, sessionID string) *contractWarning {
+func contractWarningWith(db *snapshot.DB, repoID int64, repoName, filePath, sessionID string) *contractWarning {
 	if !contractEnabled() || sessionID == "" || !filepath.IsAbs(filePath) {
 		return nil
 	}
@@ -149,22 +173,64 @@ func contractWarningWith(db *snapshot.DB, repoID int64, filePath, sessionID stri
 	if root == "" {
 		return nil
 	}
-	rel, err := filepath.Rel(root, filepath.Clean(filePath))
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, ok := relWithinRoot(root, filePath)
+	if !ok {
 		return nil
 	}
-	rel = filepath.ToSlash(rel)
 	if c.InScope(rel) {
 		return nil
 	}
 	return &contractWarning{
 		Name:          c.Name,
 		ContractPath:  active.Path,
+		RepoRoot:      root,
+		SessionID:     sessionID,
 		RelPath:       rel,
 		Patterns:      len(c.Patterns),
 		ActivatedHash: active.ContentHash,
 		CurrentHash:   c.Hash,
+		RepoName:      repoName,
 	}
+}
+
+// relWithinRoot returns filePath relative to root in slash form, and whether it
+// is actually inside root.
+//
+// The symlink retry is the point. The stored root came from
+// `git rev-parse --show-toplevel`, which is fully resolved; filePath is whatever
+// the tool call carried, which may not be. One symlinked component between them
+// — /var vs /private/var on macOS, a symlinked home or project directory
+// anywhere — makes Rel produce a "../" path, and the check then abstains SILENTLY
+// on every edit in the repo, which is indistinguishable from "everything is in
+// scope". A test suite cannot catch that by normalising its own fixture, which
+// is exactly what the first version of these tests did.
+//
+// The resolve is deliberately in the retry and not the fast path: it costs a
+// syscall per component, and the overwhelmingly common case (no symlinks) never
+// reaches it.
+func relWithinRoot(root, filePath string) (string, bool) {
+	if rel, err := filepath.Rel(root, filepath.Clean(filePath)); err == nil && !escapes(rel) {
+		return filepath.ToSlash(rel), true
+	}
+	// Resolve the DIRECTORY, not the file. EvalSymlinks requires every component
+	// to exist, and the edited file frequently does not yet — a Write creating a
+	// new file is the whole point of a PreToolUse hook. Resolving the full path
+	// fails there and abstains, which is the same silent miss this retry exists
+	// to close. The parent directory does exist: repo resolution already ran git
+	// inside it to get here.
+	dir, err := filepath.EvalSymlinks(filepath.Dir(filePath))
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, filepath.Join(dir, filepath.Base(filePath)))
+	if err != nil || escapes(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func escapes(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // contractRepoRoot recovers the repo root from a stored contract path by
@@ -192,14 +258,14 @@ func contractRepoRoot(contractPath string) string {
 //
 // Callers must invoke this INSTEAD OF their defer, not before it: the hook emits
 // exactly one decision.
-func askContractOnly(out io.Writer, cw *contractWarning, repoName, filePath string, lang guard.Lang) bool {
+func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {
 	if cw == nil {
 		return false
 	}
 	hookAsk(out, cw.section())
 	logDecision(decisionRecord{
 		Mode:         "hook",
-		Repo:         repoName,
+		Repo:         cw.RepoName,
 		File:         filePath,
 		Lang:         string(lang),
 		Decision:     "ask",
@@ -210,11 +276,19 @@ func askContractOnly(out io.Writer, cw *contractWarning, repoName, filePath stri
 	return true
 }
 
-// contractReason prefixes an ask reason with the contract token. Contracts lead
-// the joined reason because they are the only non-fact check in the set: a
-// dogfood analysis greps decisions.jsonl by reason, and mixing an intent ask
-// into the fact-ask counts would corrupt exactly the false-positive numbers the
-// un-gating decision rests on.
+// contractReason prefixes an ask reason with the contract token, so an intent
+// ask is always distinguishable from the fact asks it may be bundled with.
+//
+// Be honest about what this costs rather than what it buys. `reason` has been a
+// compound key since askReason started joining with "+", and guardstats/fpreport
+// bucket on the EXACT string — so a hallucination ask that previously logged
+// "violations" logs "contract+violations" while a contract is active, and lands
+// in a different bucket. Any per-check rate therefore has to split on "+" and
+// count terms, which is already true of "violations+dangling" and is not a new
+// requirement. What the prefix prevents is the worse alternative: an intent ask
+// silently counted as a fact false positive, which would corrupt the very
+// numbers the un-gating decision rests on. Splitting a bucket is recoverable
+// arithmetic; conflating two check classes is not.
 func contractReason(fired bool, rest string) string {
 	if !fired {
 		return rest

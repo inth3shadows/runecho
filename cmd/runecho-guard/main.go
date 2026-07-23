@@ -511,22 +511,28 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			emptyInput = false
 		}
 	}
-	// Contracts (#12 D2) escape the empty-input bail entirely, for ANY tool and
-	// with no os.Stat. Every gate above turns on the edit's TEXT, because every
-	// check above is about the text; a contract is about the PATH and never reads
-	// a byte of either side. Leaving it behind a text gate produced two silent
-	// misses — a pure-deletion Edit (new_string "") and a Write creating a new
-	// out-of-scope file both sailed through untouched, and both are scope
-	// violations of the most consequential kind. Worse, whether the first one
-	// fired depended on RUNECHO_GUARD_DANGLING happening to be set (it is what
-	// populates removedText), so an unrelated flag silently decided whether this
-	// check ran at all. Cost is bounded: a tool call with no text on either side
-	// does not occur in practice, so this reopens the fast path for essentially
-	// nothing, and only for a session that activated a contract by name.
-	if emptyInput && contractEnabled() && payload.SessionID != "" {
-		emptyInput = false
-	}
 	if filePath == "" || emptyInput {
+		// Contracts (#12 D2) get one last look before the fast return. Every gate
+		// above turns on the edit's TEXT, because every check above is about the
+		// text; a contract is about the PATH and never reads a byte of either
+		// side. Leaving it behind those gates produced two silent misses — a
+		// pure-deletion Edit (new_string "") and a Write creating a new
+		// out-of-scope file — and whether the first one fired depended on
+		// RUNECHO_GUARD_DANGLING happening to be set, since that is what
+		// populates removedText. An unrelated flag deciding whether this check
+		// runs is not a defensible gate.
+		//
+		// Asking HERE rather than clearing emptyInput is what keeps the cost
+		// honest. Clearing it reopened the whole pipeline — store open, snapshot
+		// list, symbol load, file read and parse — and rewrote the logged reason
+		// from "empty-input" to "clean"/"stale-ir" for every session on a machine
+		// that exports the flag globally, including the ones that activated no
+		// contract at all. This path costs a single store open, only for a
+		// session that named a contract, and leaves the log alone when it
+		// abstains.
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath)) {
+			return 0
+		}
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "empty-input"})
 		return 0
@@ -548,7 +554,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// pays for its own store open; every other edit picks it up from
 		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
 		// session explicitly activated a contract AND the path fell outside it.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), "", filePath, lang) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang) {
 			return 0
 		}
 		hookDefer()
@@ -560,12 +566,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	cw := res.Contract
 	if !res.OK {
 		// A contract binding resolves off the repo row alone, so it survives the
-		// states that disable symbol validation (no snapshot yet, a store the
-		// binary is too old to read). Answer it rather than defer: the user
-		// declared a scope this session and the answer does not depend on the
-		// index. cw is nil for res.NoRepo by construction — an unenrolled repo
-		// has no binding to find — so that path stays the silent skip it is.
-		if askContractOnly(out, cw, res.RepoName, filePath, lang) {
+		// one degraded state that still resolves a repo: enrolled but with no
+		// usable snapshot. Answer it rather than defer — the user declared a
+		// scope this session and the answer does not depend on the index.
+		//
+		// It does NOT survive the other two, and neither does anything else:
+		// res.NoRepo means an unenrolled tree, which cannot hold a binding, and
+		// res.Warn (schema-newer) returns before ResolveRepo ever runs because
+		// the binary cannot read the store at all. cw is nil in both by
+		// construction, so those paths keep the behaviour they had.
+		if askContractOnly(out, cw, filePath, lang) {
 			return 0
 		}
 		switch {
@@ -747,7 +757,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// touch is precisely the case this check exists for — so it is answered
 		// here, ahead of the degraded and stale advisories, because an ask is a
 		// stronger signal than either and the hook emits only one decision.
-		if askContractOnly(out, cw, repoName, filePath, lang) {
+		if askContractOnly(out, cw, filePath, lang) {
 			return 0
 		}
 		// Nothing flagged. A degraded deletion-side check means "found nothing"
@@ -793,7 +803,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// relative to the edit hunk — not the file's absolute line number.
 			fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
 			syms = append(syms, v.Symbol)
-			learnSyms = append(learnSyms, v.Symbol)
+			// NOT trained on when a contract also fired. An approval answers the
+			// whole ask, and a merged ask asks two different questions — a user who
+			// approves because the out-of-scope edit was legitimate has said nothing
+			// about whether the symbol resolves. Folding it into learned-allow would
+			// permanently blind the hallucination check to that name on the strength
+			// of a scope decision. Same reasoning that excludes dangling, dropped and
+			// duplicate approvals (see LearnSymbols on decisionRecord); contracts are
+			// a fourth category that comment did not anticipate.
+			if cw == nil {
+				learnSyms = append(learnSyms, v.Symbol)
+			}
 		}
 	}
 	if len(dangling) > 0 {
@@ -1124,9 +1144,11 @@ func suggestionSuffix(suggestion string) string {
 //   - Contract: the edit-scope contract warning (#12 D2), or nil to abstain.
 //     It rides along here rather than resolving separately because it needs
 //     only the repo row this function already has, and a second store open
-//     measured ~9.5 ms on the hook's per-edit budget. It is populated even when
-//     OK is false: a repo with no usable index still has a valid contract
-//     binding, and the intent question does not depend on the symbol index.
+//     measured ~9.5 ms on the hook's per-edit budget. It is populated when OK is
+//     false but the repo still resolved (enrolled, no usable snapshot) — the
+//     intent question does not depend on the symbol index. It is necessarily nil
+//     when resolution itself failed: an unenrolled tree has no binding, and a
+//     schema-newer store cannot be read at all.
 type lookupResult struct {
 	Symbols    map[string]struct{}
 	IgnorePath string
@@ -1194,7 +1216,7 @@ func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 	// Resolved before the snapshot and symbol steps so it survives them: an
 	// index that is missing or unreadable says nothing about whether this edit
 	// is inside the scope the session declared.
-	cw := contractWarningWith(db, repo.ID, filePath, sessionID)
+	cw := contractWarningWith(db, repo.ID, repo.Name, filePath, sessionID)
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {

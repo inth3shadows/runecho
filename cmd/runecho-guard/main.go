@@ -505,16 +505,26 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// content to delete. A cheap os.Stat gates this so a Write that CREATES a new or
 	// already-empty file (nothing to delete) keeps the fast early-return instead of
 	// paying a DB open + two file reads on the ~12ms hook budget.
-	// contractEnabled joins this carve-out for the same reason the deletion-side
-	// checks did: truncating an existing file to nothing is a real, destructive
-	// edit, and "wiped a file the session said it would not touch" is exactly
-	// what a scope contract is for. The os.Stat gate still keeps the fast return
-	// for a Write that creates a new or already-empty file.
 	emptyInput := text == "" && removedText == ""
-	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled() || contractEnabled()) {
+	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
 		if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
 			emptyInput = false
 		}
+	}
+	// Contracts (#12 D2) escape the empty-input bail entirely, for ANY tool and
+	// with no os.Stat. Every gate above turns on the edit's TEXT, because every
+	// check above is about the text; a contract is about the PATH and never reads
+	// a byte of either side. Leaving it behind a text gate produced two silent
+	// misses — a pure-deletion Edit (new_string "") and a Write creating a new
+	// out-of-scope file both sailed through untouched, and both are scope
+	// violations of the most consequential kind. Worse, whether the first one
+	// fired depended on RUNECHO_GUARD_DANGLING happening to be set (it is what
+	// populates removedText), so an unrelated flag silently decided whether this
+	// check ran at all. Cost is bounded: a tool call with no text on either side
+	// does not occur in practice, so this reopens the fast path for essentially
+	// nothing, and only for a session that activated a contract by name.
+	if emptyInput && contractEnabled() && payload.SessionID != "" {
+		emptyInput = false
 	}
 	if filePath == "" || emptyInput {
 		hookDefer()

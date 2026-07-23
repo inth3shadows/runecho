@@ -99,6 +99,11 @@ func TestContract_InScopeSilent_OutOfScopeAsks_OffIsSilent(t *testing.T) {
 	body := "package main\n\nfunc F() { KnownFunc() }\n"
 
 	t.Run("flag off, out of scope", func(t *testing.T) {
+		// Set explicitly rather than assuming the ambient environment. A machine
+		// that dogfoods this feature exports RUNECHO_GUARD_CONTRACT=1 globally, and
+		// a test that reads "off" from the outside world would silently stop
+		// covering the default path on exactly the machine that runs it most.
+		t.Setenv("RUNECHO_GUARD_CONTRACT", "")
 		_, raw, d := runHook(t, contractPayload(t, sess, outOfScope, body))
 		if d.Hook.PermissionDec != "" {
 			t.Fatalf("default-off must not ask; got %q\n%s", d.Hook.PermissionDec, raw)
@@ -165,25 +170,52 @@ func TestContract_OtherSessionUnaffected(t *testing.T) {
 	}
 }
 
-// Truncating an existing out-of-scope file to nothing is the most destructive
-// shape a scope violation takes, and the hook's empty-input fast return would
-// otherwise drop it before any check ran.
-func TestContract_EmptyWriteOverExistingFileStillAsks(t *testing.T) {
+// The hook's empty-input fast return is keyed on the edit's TEXT, and every
+// check but this one is about the text. A contract is about the PATH, so an edit
+// carrying no added text is still an in-scope question. All three shapes below
+// were silently missed while the check sat behind that gate — and the first one
+// only fired at all when RUNECHO_GUARD_DANGLING happened to be set, since that
+// is what populates removedText. An unrelated flag deciding whether this check
+// runs is the bug this test pins.
+func TestContract_TextlessEditsStillAsk(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	// Explicitly OFF: the contract check must not depend on them.
+	t.Setenv("RUNECHO_GUARD_DANGLING", "")
+	t.Setenv("RUNECHO_GUARD_DROPPED_IMPORT", "")
 	top := contractRepo(t, "sess", inScopeBody)
+
 	victim := filepath.Join(top, "internal", "victim.go")
-	body := contractPayload(t, "sess", victim, "") // creates the parent dir
+	wipe := contractPayload(t, "sess", victim, "") // also creates the parent dir
 	if err := os.WriteFile(victim, []byte("package x\n\nfunc Keep() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, d := runHook(t, body); d.Hook.PermissionDec != "ask" {
-		t.Fatalf("wiping an out-of-scope file must ask; got %q", d.Hook.PermissionDec)
+
+	pureDeletion, err := json.Marshal(map[string]any{
+		"session_id": "sess",
+		"tool_name":  "Edit",
+		"tool_input": map[string]any{"file_path": victim, "old_string": "func Keep() {}", "new_string": ""},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Control: the same empty Write to a file that does not exist yet keeps the
-	// fast return — there is nothing being destroyed.
-	absent := filepath.Join(top, "internal", "absent.go")
-	if _, _, d := runHook(t, contractPayload(t, "sess", absent, "")); d.Hook.PermissionDec != "" {
-		t.Fatalf("an empty Write creating a new file should stay on the fast path; got %q", d.Hook.PermissionDec)
+
+	for _, c := range []struct{ name, body string }{
+		{"Write truncating an existing file", wipe},
+		{"Write creating a new out-of-scope file", contractPayload(t, "sess", filepath.Join(top, "internal", "brand_new.go"), "")},
+		{"Edit deleting text with an empty new_string", string(pureDeletion)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, raw, d := runHook(t, c.body); d.Hook.PermissionDec != "ask" {
+				t.Fatalf("out-of-scope %s must ask; got %q\n%s", c.name, d.Hook.PermissionDec, raw)
+			}
+		})
+	}
+
+	// Control: with no contract activated, all three keep the fast return — the
+	// escape hatch above must not widen what an opted-OUT session sees.
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "")
+	if _, _, d := runHook(t, wipe); d.Hook.PermissionDec != "" {
+		t.Fatalf("flag off must stay silent; got %q", d.Hook.PermissionDec)
 	}
 }
 

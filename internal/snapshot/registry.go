@@ -172,6 +172,51 @@ func (db *DB) RemoveRepo(id int64) error {
 	return tx.Commit()
 }
 
+// deleteSnapshotsTx deletes every snapshot matching snapshotWhere along with all
+// of its child rows, child-first (refs → symbols → files → snapshots).
+//
+// This is the ONLY place the child-to-parent deletion order lives. It exists
+// because the schema deliberately has no ON DELETE CASCADE (issue #13): adding
+// one requires a table-rebuild migration, and SQLite ignores
+// `PRAGMA foreign_keys=OFF` inside a transaction — which every migration here
+// runs in — so the rebuild's DROP TABLE would fire the very cascade it was
+// adding and silently empty symbols/refs mid-migration, then commit clean.
+// Trading a silent, unrecoverable data-loss risk on real stores for a
+// constraint that only guards against a future caller is the wrong side of that
+// bet — and the constraint buys less than it looks like. `PRAGMA
+// foreign_keys=ON` is set at Open, and with no ON DELETE action SQLite does not
+// silently orphan rows: it REFUSES the delete. A path that forgets its children
+// fails loudly and rolls back. So integrity is already guaranteed; CASCADE would
+// only be the convenience of deleting children instead of erroring.
+// (Pinned by TestForgettingChildrenFailsLoudlyRatherThanOrphaning — if that
+// pragma ever goes away, that test fails and this reasoning must be revisited.)
+//
+// Funnelling both delete paths through one helper is the cheaper mitigation for
+// the risk CASCADE would have covered — there is no ordering left for a third
+// caller to get wrong. Re-open #13 if a delete path ever appears outside this
+// helper, or if the store stops being rebuildable by reindexing.
+//
+// snapshotWhere is a code-controlled SQL fragment over `snapshots` aliased `s`,
+// never user input; its placeholders are filled from args on every statement.
+func deleteSnapshotsTx(tx *sql.Tx, snapshotWhere string, args ...any) error {
+	stmts := []string{
+		`DELETE FROM refs WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE ` + snapshotWhere + `)`,
+		`DELETE FROM symbols WHERE file_id IN (
+			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE ` + snapshotWhere + `)`,
+		`DELETE FROM files WHERE snapshot_id IN (
+			SELECT s.id FROM snapshots s WHERE ` + snapshotWhere + `)`,
+		`DELETE FROM snapshots WHERE id IN (
+			SELECT s.id FROM snapshots s WHERE ` + snapshotWhere + `)`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // PurgeRepo deletes a repo and its entire snapshot history (symbols, files,
 // snapshots, then the repo row) in one transaction — no orphaned rows.
 func (db *DB) PurgeRepo(id int64) error {
@@ -180,19 +225,11 @@ func (db *DB) PurgeRepo(id int64) error {
 		return fmt.Errorf("begin purge: %w", err)
 	}
 	defer tx.Rollback()
-	stmts := []string{
-		`DELETE FROM refs WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`,
-		`DELETE FROM symbols WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id WHERE s.repo_id = ?)`,
-		`DELETE FROM files WHERE snapshot_id IN (SELECT id FROM snapshots WHERE repo_id = ?)`,
-		`DELETE FROM snapshots WHERE repo_id = ?`,
-		`DELETE FROM repos WHERE id = ?`,
+	if err := deleteSnapshotsTx(tx, `s.repo_id = ?`, id); err != nil {
+		return fmt.Errorf("purge repo %d: %w", id, err)
 	}
-	for _, s := range stmts {
-		if _, err := tx.Exec(s, id); err != nil {
-			return fmt.Errorf("purge repo %d: %w", id, err)
-		}
+	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("purge repo %d: %w", id, err)
 	}
 	return tx.Commit()
 }
@@ -202,8 +239,7 @@ func (db *DB) PurgeRepo(id int64) error {
 // before writing a new "auto" snapshot, so at most one exists per repo at a time:
 // the guard always reads the latest snapshot's symbols, but history is never
 // bloated by a snapshot-per-edit, and manual snapshots (reindex/session-start/…)
-// are never touched. Child rows are deleted explicitly because the schema has no
-// ON DELETE CASCADE yet.
+// are never touched.
 func (db *DB) DeleteAutoSnapshots(repoID int64) error {
 	tx, err := db.conn.Begin()
 	if err != nil {
@@ -218,24 +254,12 @@ func (db *DB) DeleteAutoSnapshots(repoID int64) error {
 
 // deleteAutoSnapshotsTx removes the repo's "auto" snapshots and their child rows
 // using the provided transaction. Shared by DeleteAutoSnapshots and the atomic
-// RollAutoSnapshot (which deletes + inserts in one tx). Child rows are deleted
-// explicitly because the schema has no ON DELETE CASCADE yet.
+// RollAutoSnapshot (which deletes + inserts in one tx). The deletion order lives
+// in deleteSnapshotsTx, not here — see its comment for why the schema carries no
+// ON DELETE CASCADE.
 func deleteAutoSnapshotsTx(tx *sql.Tx, repoID int64) error {
-	stmts := []string{
-		`DELETE FROM refs WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id
-			WHERE s.repo_id = ? AND s.label = 'auto')`,
-		`DELETE FROM symbols WHERE file_id IN (
-			SELECT f.id FROM files f JOIN snapshots s ON f.snapshot_id = s.id
-			WHERE s.repo_id = ? AND s.label = 'auto')`,
-		`DELETE FROM files WHERE snapshot_id IN (
-			SELECT id FROM snapshots WHERE repo_id = ? AND label = 'auto')`,
-		`DELETE FROM snapshots WHERE repo_id = ? AND label = 'auto'`,
-	}
-	for _, s := range stmts {
-		if _, err := tx.Exec(s, repoID); err != nil {
-			return fmt.Errorf("delete auto snapshots for repo %d: %w", repoID, err)
-		}
+	if err := deleteSnapshotsTx(tx, `s.repo_id = ? AND s.label = 'auto'`, repoID); err != nil {
+		return fmt.Errorf("delete auto snapshots for repo %d: %w", repoID, err)
 	}
 	return nil
 }

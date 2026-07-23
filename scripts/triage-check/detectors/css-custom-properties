@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Detector: undeclared CSS custom properties — var(--x) with --x declared nowhere.
+# Fronts stylelint's built-in no-unknown-custom-properties. This is the exact
+# check triaged for #204; kept as the reference detector because its result
+# (0 genuine / 14 findings) is a known-good calibration of the harness.
+#
+# Contract (shared by every triage detector): argv[1] is a repo path; print a
+# JSON list of {"file","line","symbol"} to stdout. Exit 0 clean, 1 with findings,
+# anything else = the detector itself failed.
+#
+# referenceFiles = the repo's whole CSS tree is load-bearing: without it a token
+# declared in theme.css and used in button.css reads as undeclared, manufacturing
+# the false positives the triage exists to measure.
+set -uo pipefail
+
+repo="${1:?usage: css-custom-properties <repo-path>}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# stylelint must resolve from an install. Prefer one already on PATH; otherwise
+# tell the operator how to get one rather than silently emitting "no findings",
+# which would read as a clean repo (a false negative the harness must never fake).
+if ! command -v stylelint >/dev/null 2>&1 && ! npx --no-install stylelint --version >/dev/null 2>&1; then
+  echo "css-custom-properties: stylelint not found. Install it once:" >&2
+  echo "  npm install -g stylelint  (or run from a dir with it in node_modules)" >&2
+  exit 2
+fi
+sl() { if command -v stylelint >/dev/null 2>&1; then stylelint "$@"; else npx --no-install stylelint "$@"; fi; }
+
+cat > "$work/.stylelintrc.json" <<CFG
+{ "rules": { "no-unknown-custom-properties": [true, { "referenceFiles": ["$repo/**/*.css"] }] } }
+CFG
+
+# --output-file, not stdout capture: stylelint's json formatter writes progress
+# to stdout on some versions, which would corrupt a piped parse (learned in #204).
+sl "$repo/**/*.css" --config "$work/.stylelintrc.json" \
+   --formatter json --output-file "$work/raw.json" >/dev/null 2>&1 || true
+
+python3 - "$work/raw.json" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError):
+    print("[]"); raise SystemExit
+out = []
+for f in data:
+    for w in f.get("warnings", []):
+        # text: 'Unexpected unknown custom property "--foo" (...)'
+        sym = w["text"].split('"')[1] if '"' in w["text"] else w["text"]
+        out.append({"file": f["source"], "line": w["line"], "symbol": sym})
+json.dump(out, sys.stdout)
+PY

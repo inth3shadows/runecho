@@ -98,7 +98,7 @@ is fully finished.
 
 | Path | Role | Depends on |
 |---|---|---|
-| `internal/parser/{go,js,python}.go` | Extract top-level structure per language via the `Parser` interface | — (leaf) |
+| `internal/parser/{go,js,python,shell,rust,ruby}.go` | Extract top-level structure per language via the `Parser` interface | — (leaf) |
 | `internal/ir/generator.go` | Walk a tree, parse files, build IR; `Generate` (full) and `Update` (incremental, hash-gated) | `parser` |
 | `internal/ir/hasher.go` | `HashFile`, `HashBytes`, `ComputeRootHash` (sorted `path:hash` pairs → SHA-256) | — |
 | `internal/ir/storage.go` | Canonical JSON marshal (sorted) + `Save`/`Load` of `.ai/ir.json` | — |
@@ -113,12 +113,25 @@ is fully finished.
 | `internal/guard/extract.go` | Per-language definition/reference/import extraction + builtin sets | — |
 | `internal/guard/validate.go` | Two-pass validation: collect new defs, then flag unresolved refs | — |
 | `internal/guard/suggest.go` | Deterministic "did you mean" via Levenshtein (distance ≤ 2) | — |
+| `internal/guard/filescope.go` | File-scope resolution: a name real repo-wide but unresolvable in *this* file | — |
+| `internal/guard/dropped_import.go` | An import removed by an edit that is still used below it | — |
+| `internal/guard/depqualified_go.go` | Go external/stdlib package export sets, for qualified-call validation | `depindex` |
+| `internal/depindex/` | Memoized export sets for Go module-cache dependencies (`$RUNECHO_HOME/depcache`) | — |
+| `internal/contract/contract.go` | Edit-scope contract format + parsing (#12 D1) | — |
+| `internal/guardstats/` | `guard-stats` aggregation and `fpreport` approval-rate analysis over `decisions.jsonl` | — |
 | `internal/claims/claims.go` | Extract code-symbol references from prose for `validate-claims` and `truth-trail --text` | — |
 | `internal/gitutil/gitutil.go` | Canonical git-common-dir resolution — the V4 repo-lookup key | — |
 | `internal/store/dir.go` | Single source of truth for `$RUNECHO_HOME` / `~/.runecho` | — |
+| `internal/store/atomicwrite.go`, `lock.go` | Temp-file-then-rename writes; cross-process advisory `flock` | — |
 | `cmd/runecho-ir/main.go` | CLI entrypoint and subcommand dispatch | `ir`, `snapshot` |
+| `cmd/runecho-ir/contract.go` | `contract list\|show\|activate\|deactivate\|check` | `contract`, `snapshot` |
+| `cmd/runecho-ir/fpreport.go` | `fpreport` — observed guard false-positive (approval) rate | `guardstats` |
+| `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
+| `cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (all default OFF — see Configuration) | `guard` |
+| `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) | — |
+| `cmd/runecho-guard/learnedallow.go` | C3 learned-allow store with count threshold + TTL decay | `store` |
 
 ## The MCP Oracle Tools
 
@@ -127,7 +140,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 
 | Tool | Args | Returns |
 |---|---|---|
-| `structure` | `repo` | Files + symbols of the live IR, with counts; per-file `refs` list the bare call sites within that file |
+| `structure` | `repo`, optional `paths` (globs, `**` crosses directories) + `detail` (`tree`\|`symbols`\|`full`) | Files + symbols of the live IR, with counts; per-file `refs` list the bare call sites within that file. Scope with `paths` and drop to `detail: "tree"` to keep responses small on a large repo |
 | `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
@@ -168,11 +181,45 @@ root). Three reference shapes are checked, all unqualified — `Foo(`, never
 - **SCREAMING_SNAKE constant references** (Python) — uses of module-level
   `UPPER_CASE` names
 
+### Opt-in checks (all default OFF)
+
+The hallucination check above is the guard's always-on core. Seven further
+checks ship behind env flags, each gated so it can be dogfooded before it
+becomes default behaviour. All use the same ask-posture and fail-open rules; a
+single ask can carry several at once, and the decision log joins their names
+with `+` (`violations+dangling`).
+
+| Check | Flag | Asks when |
+|---|---|---|
+| E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |
+| Dropped import | `RUNECHO_GUARD_DROPPED_IMPORT` | The edit removes an import that is still used below it |
+| E5 duplicate symbol | `RUNECHO_GUARD_DUPLICATE` | The edit defines a name already defined in another file of the same language |
+| Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
+| Dependency qualified | `RUNECHO_GUARD_DEPS_GO` | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
+| File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
+| Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
+
+C3 **learned-allow** (`RUNECHO_GUARD_LEARN`) is not a check but a suppressor:
+after a symbol is approved `RUNECHO_GUARD_LEARN_N` times (default 2) it stops
+being asked about, and the entry decays if not re-approved within
+`RUNECHO_GUARD_LEARN_TTL_DAYS` (default 14) — a sliding window rather than a
+one-way ratchet, so a symbol approved once and later deleted does not stay
+allowed forever. Only *hallucination-origin* approvals train it: approving a
+dangling or duplicate ask says the edit was fine, never that the name resolves.
+
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
-error, or a hung git subprocess (3s cap) all degrade to silence — the guard
-blocks hallucinations; it must never block work. Repo resolution is three-tier:
-git-common-dir key (O(1), schema V4) → enrolled-path lookup → worktree-list
-scan, backfilling `common_dir` on a hit so the next fire takes the fast path.
+error, or a hung git subprocess (2s cap, `gitutil.Timeout`) all degrade to
+silence — the guard blocks hallucinations; it must never block work. Repo
+resolution is three-tier: git-common-dir key (O(1), schema V4) → enrolled-path
+lookup → worktree-list scan, backfilling `common_dir` on a hit so the next fire
+takes the fast path.
+
+A **panic** is covered by the same rule: because a Go panic exits status 2 and
+Claude Code reads a PreToolUse exit of 2 as *block this tool call*, both stdio
+hook modes run under `deferOnPanic`, which buffers the response, discards it on
+panic, warns on stderr, and exits 0. Repo-derived file paths reaching the agent
+(dangling referrers, duplicate locations, the pre-commit report) pass through
+`sanitizeReasonPath` first — see [SECURITY.md](SECURITY.md) for why.
 
 Residual false positives are intrinsic to shallow static analysis
 (dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
@@ -198,6 +245,21 @@ transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
   noise to structural diffs. Extraction is shared with the guard
   (`guard.ExtractRefs`), so index-time facts and edit-time validation can
   never disagree about what counts as a call.
+- `contracts(...)` — the active edit-scope binding per session (V9, #12 D1).
+
+Schema history (`internal/snapshot/db.go`, `SchemaVersion = len(migrations)`):
+
+| V | Adds |
+|---|---|
+| 1 | baseline `snapshots`/`files`/`symbols` |
+| 2 | central-store `repos` registry + `snapshots.repo_id` |
+| 3 | split `repos.path` (lookup key) from `source_root` |
+| 4 | `common_dir` — the stable cross-worktree lookup key |
+| 5 | `supported_seen` — honest coverage denominator |
+| 6 | `refs` table |
+| 7 | `refs` uniqueness `(file_id, name)` enforced by schema |
+| 8 | `symbols.sig_hash` — per-symbol body hash for modified-symbol diff |
+| 9 | `contracts` table |
 
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
@@ -213,6 +275,24 @@ newer-than-supported database.
 | `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
 | `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are always skipped silently regardless of this flag. |
+| `RUNECHO_GENERATE_TIMEOUT` | `30s` | CLI-only override of the IR-generation wall-clock bound. A Go duration (`5m`), or `off`/`none`/`0` to disable. The MCP server keeps the fixed 30s budget |
+| `RUNECHO_DEBUG` | — | Set to `1` to trace the E6 auto-refresh branch into `decisions.jsonl` (`mode:"e6"`). Off by default so the hot path writes nothing extra |
+
+Opt-in guard checks — all default OFF, each a dogfood gate. See
+[Opt-in checks](#opt-in-checks-all-default-off) for what each one asks about.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RUNECHO_GUARD_DANGLING` | — | `1` enables E1 dangling-refs |
+| `RUNECHO_GUARD_DROPPED_IMPORT` | — | `1` enables the dropped-import check |
+| `RUNECHO_GUARD_DUPLICATE` | — | `1` enables E5 duplicate-symbol |
+| `RUNECHO_GUARD_QUALIFIED` | — | `1` enables same-repo internal-package qualified calls (Go) |
+| `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
+| `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
+| `RUNECHO_GUARD_CONTRACT` | — | `1` enables the edit-scope contract check |
+| `RUNECHO_GUARD_LEARN` | — | `1` enables C3 learned-allow suppression |
+| `RUNECHO_GUARD_LEARN_N` | `2` | Approvals before a symbol is trusted |
+| `RUNECHO_GUARD_LEARN_TTL_DAYS` | `14` | Days an entry survives without re-approval |
 
 ### Decision log
 
@@ -220,16 +300,27 @@ Every guard decision (both modes) appends one JSON line to
 `$RUNECHO_HOME/decisions.jsonl`:
 
 ```json
-{"v":1,"ts":"2026-06-06T22:53:49Z","mode":"hook","repo":"runecho-master","file":"…","lang":"go","decision":"ask","reason":"violations","symbols":["FakeFn"]}
+{"v":1,"gv":"v0.14.0","ts":"2026-06-06T22:53:49Z","mode":"hook","repo":"runecho-master","file":"…","lang":"go","decision":"ask","reason":"violations","symbols":["FakeFn"]}
 ```
 
-`decision` is `ask` or `defer`; `reason` classifies why (`clean`, `violations`,
-`stale-ir`, `no-repo`, `store-degraded`, `check-degraded`, `schema-newer`, `unknown-lang`,
-`bad-path`, `empty-input`, `parse-fail`). The write happens after the decision
-is emitted and all logging errors are discarded — the log can never alter a
-decision or slow the hook. It exists to measure the guard's real-world
-ask/defer behaviour (and to feed future learned-allow analysis); delete the
-file freely if you don't want the history.
+`v` is the record **schema** version (always 1). `gv` is the guard **binary**
+version that wrote the record — distinct and load-bearing: without it, any
+window longer than the gap between two installs silently pools the behaviour of
+different programs. Measured on the real log, a 30-day window reported a 70%
+approval rate while the trailing 2 days reported 19%, because the installed
+binary was six releases stale (#207). Records predating the field report as
+`unknown` rather than being attributed to whatever is installed now.
+
+`decision` is `ask`, `defer`, or `outcome`; `reason` classifies why. Defer
+reasons: `clean`, `stale-ir`, `no-repo`, `store-degraded`, `check-degraded`,
+`schema-newer`, `unknown-lang`, `bad-path`, `empty-input`, `parse-fail`. Ask
+reasons name the checks that fired, joined with `+` when several do:
+`violations`, `dangling`, `dropped-import`, `duplicate-symbol` (and `contract`
+for an edit-scope ask). The write happens after the decision is emitted and all
+logging errors are discarded — the log can never alter a decision or slow the
+hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
+reports the approval rate (an upper bound on the true false-positive rate).
+Delete the file freely if you don't want the history.
 
 ## Exit Code Contract
 
@@ -289,17 +380,31 @@ at `~/.runecho/` is untouched by uninstall and can be deleted separately.
 ## Maintenance Commands
 
 ```bash
-go build ./... && go vet ./... && go test ./...   # full verification
+go build ./... && go vet ./... && go test ./... -race -cover   # full verification (what CI runs)
 go test -race ./internal/snapshot/                # concurrency safety
 go test -run=x -fuzz=FuzzJSParser ./internal/parser   # parser fuzzing
+govulncheck ./...                                 # reachable-CVE scan
 runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
 runecho-ir repo list                              # enrolled repos + index state
+runecho-ir guard-stats                            # guard ask volume from decisions.jsonl
+runecho-ir fpreport --gv <version>                # approval rate, scoped to one guard build
 ```
+
+Fuzz targets: `FuzzGoParser`, `FuzzJSParser`, `FuzzPythonParser`,
+`FuzzShellParse`, `FuzzRustParser`, `FuzzRubyParser`, `FuzzNormalizePath`,
+`FuzzGuardDiff`, `FuzzStripLiteralsStateful`, `FuzzPyParamNames`, `FuzzClaims`,
+`FuzzLoadReader`.
+
+**gofmt version.** CI resolves Go from `go-version-file: go.mod`, so the Format
+gate runs the toolchain pinned there (1.25.0), not whatever is newest locally. A
+newer local gofmt can report phantom failures; match CI with
+`$(GOTOOLCHAIN=go1.25.0 go env GOROOT)/bin/gofmt -l .`.
 
 ## Parser Capability Matrix
 
 One parser per language family. All are AST-based and CGO-free: Go uses the
-stdlib `go/parser`/`go/ast`; Python and JS/TS use a pure-Go tree-sitter runtime.
+stdlib `go/parser`/`go/ast`; Python, JS/TS, Rust, and Ruby use a pure-Go
+tree-sitter runtime; shell uses a masking scan (see its row for why).
 Every parser emits per-symbol start lines and function body hashes — the data
 behind `map`/`locate` (`file:line`) and modified-symbol diff (`~ modified`).
 Imports/exports for the tree-sitter languages stay regex (line-oriented). The
@@ -311,6 +416,22 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 | **JS/TS/JSX/TSX** | `.js`, `.mjs`, `.cjs`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via AST, regex fallback when the grammar is unavailable | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
 | **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 | **Shell** | `.sh`, `.bash` | Top-level function definitions (`name() { … }` and `function name { … }`) → Functions, body-hashed (name through the matching brace) so a body edit shows as `modified`; no imports (`source` binds no named symbols), no classes/exports | None (shell has no methods) | Function defs found + bodies delimited on a masked view — strings, `$(…)`/`` `…` ``, `${…}`, comments, and heredoc bodies (incl. quoted/`<<-`/stacked delimiters) are blanked so a brace/def inside them never counts | masking scan (regex + state) |
+| **Rust** | `.rs` | `fn`, `struct`, `enum`, `trait`, `type`, `const`/`static` | Qualified by `impl` type: `Parser.parse` | Top-level items + `impl`/`trait` methods | tree-sitter (subset grammar) |
+| **Ruby** | `.rb` | `def` methods, `class`/`module` declarations | Qualified by enclosing class/module | Nested class/module scopes | tree-sitter (subset grammar) |
+
+Rust and Ruby use a real grammar rather than the shell parser's masking scan
+because both have constructs a length-preserving masker cannot disambiguate: in
+Rust `'a` is a lifetime in `fn f<'a>(x: &'a str)` but a char literal in
+`let c = 'a';`, and block comments nest (`/* /* */ */`); in Ruby `/re/` is a
+regex or a division depending on what precedes it. The masker approach is
+correct for shell and wrong for these two, so the choice is per-language rather
+than a house style.
+
+> The grammars are gated behind build tags (`GRAMMAR_TAGS` in `install.sh`,
+> mirrored in `.goreleaser.yaml`). A parser can pass its whole test suite and
+> still be **inert in the shipped binary** if its tag is missing — that was a
+> real defect for Rust and Ruby, fixed in v0.12.2 (#199) and now pinned by
+> `internal/parser/grammar_subset_test.go`.
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
 consistent across parsers. Functions/methods are body-hashed over their full
@@ -350,12 +471,15 @@ which member changed.
 
 ## Known Limitations
 
-- **Languages:** Go, JS/TS/JSX/TSX/GAS (`.gs`), Python, and shell (`.sh`/`.bash`) only.
+- **Languages:** Go, JS/TS/JSX/TSX/GAS (`.gs`), Python, shell (`.sh`/`.bash`),
+  Rust (`.rs`), and Ruby (`.rb`) only.
   Parsers are AST-based (a masking scan for shell) but scoped to definitions
   (functions, classes, methods) — not full semantic resolution (no type inference,
   call-graph, or cross-file binding). Shell is parser-only: it feeds the index but
   the edit-time guard deliberately does not validate shell (a bare command is
-  indistinguishable from an external binary).
+  indistinguishable from an external binary). Rust and Ruby are likewise
+  index-only today — they populate `structure`/`locate`/`diff`, but the guard's
+  reference checks are implemented for Go, JS/TS, and Python.
 - **File cap is enforced.** `repo add --cap N` stops indexing after N files (the
   walk continues counting supported files, so the coverage denominator stays
   honest). The root hash reflects only the capped file set — truncation changes

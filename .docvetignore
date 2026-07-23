@@ -1,0 +1,26 @@
+# Tokens docvet's heuristics flag that are correct as written. One per line.
+# Everything here was triaged by hand — if a token belongs in this file, the
+# reason it is a false positive belongs next to it, or the list rots into a
+# blanket mute and the tool stops being worth running.
+
+# Brace-expansion shorthand for a set of sibling files. Every expansion exists;
+# docvet resolves the literal string, which never will.
+internal/parser/{go,js,python,shell,rust,ruby}.go
+cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go
+
+# Placeholder paths in copy-paste examples. Deliberately not real.
+/path/to/your/repo
+/path/to/worktree
+/path/to/source
+YOUR_USER
+
+# Claude Code slash commands, not URL routes.
+/plugin
+
+# Directory references in prose, read as routes by the URL heuristic.
+/internal/snapshot/
+/internal/parser
+
+# direnv's config file, named in a troubleshooting note. Not a code symbol,
+# and this repo does not use direnv itself.
+.envrc

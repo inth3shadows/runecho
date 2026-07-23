@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-23
+
 ### Added
 - guard: every `decisions.jsonl` record now carries `gv`, the guard binary version
   that wrote it. `fpreport` groups by it, warns loudly when a window spans more

@@ -291,7 +291,7 @@ func runArgs(args []string) int {
 	// Report violations.
 	fmt.Fprintf(os.Stderr, "[runecho-guard] %d unresolved symbol(s):\n", len(violations))
 	for _, v := range violations {
-		fmt.Fprintf(os.Stderr, "  %s:%d: %s%s\n", sanitizeReasonPath(v.File), v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
+		fmt.Fprintf(os.Stderr, "  %s:%d: %s%s\n", sanitizeReasonPath(v.File), v.Line, v.Symbol, suggestionSuffix(v.Suggestions))
 	}
 	fmt.Fprintf(os.Stderr, "\nNote: only bare calls are checked (method calls x.Foo() are skipped).\n")
 	fmt.Fprintf(os.Stderr, "Add false positives to .runechoguardignore, or bypass with RUNECHO_GUARD_SKIP=1.\n")
@@ -809,7 +809,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// "snippet line N" is honest: in hook mode the guard scans the
 			// new_string/content snippet, not the whole file, so the number is
 			// relative to the edit hunk — not the file's absolute line number.
-			fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestion))
+			fmt.Fprintf(&sb, "  snippet line %d: %s%s\n", v.Line, v.Symbol, suggestionSuffix(v.Suggestions))
 			syms = append(syms, v.Symbol)
 			// NOT trained on when a contract also fired. An approval answers the
 			// whole ask, and a merged ask asks two different questions — a user who
@@ -1122,11 +1122,15 @@ func hookOldLines(toolName, oldString string, edits []editOp, singleBlock string
 }
 
 // suggestionSuffix renders the model-free "did you mean" hint, or "" if none.
-func suggestionSuffix(suggestion string) string {
-	if suggestion == "" {
+func suggestionSuffix(suggestions []string) string {
+	if len(suggestions) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("  (did you mean %q?)", suggestion)
+	quoted := make([]string, len(suggestions))
+	for i, s := range suggestions {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	return fmt.Sprintf("  (did you mean %s?)", strings.Join(quoted, " or "))
 }
 
 // lookupSymbolsFor loads the symbol set for the repo containing dir, plus the

@@ -176,12 +176,12 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 				continue
 			}
 			seen[key] = struct{}{}
-			suggestion, _ := Suggest(sym, pkg.Exports)
+			suggestions, _ := Suggest(sym, pkg.Exports)
 			violations = append(violations, Violation{
-				Line:       l.LineNo,
-				Symbol:     q + "." + sym,
-				Lang:       LangGo,
-				Suggestion: suggestion,
+				Line:        l.LineNo,
+				Symbol:      q + "." + sym,
+				Lang:        LangGo,
+				Suggestions: suggestions,
 			})
 		}
 	}

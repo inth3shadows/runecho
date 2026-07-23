@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-23
+
+### Changed
+- parser: fix two logic bugs in the Rust and Ruby parsers, add fuzz + invariants (#197)
+
 ## [0.11.1] — 2026-07-23
 
 ### Changed

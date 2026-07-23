@@ -337,9 +337,26 @@ the loudest repos:
 
 ```bash
 runecho-ir fpreport --days 30            # trailing-30-day report
+runecho-ir fpreport --gv v0.12.2         # only decisions written by one guard build
 runecho-ir fpreport --json               # machine-readable
 runecho-ir fpreport --max-rate 0.15      # exit non-zero if approval rate > 15%
 ```
+
+**Read the guard-version breakdown before you read anything else.** Each decision
+records the guard binary that wrote it, and a window wide enough to span two
+installs pools their behaviour into one number that describes neither. That is not
+hypothetical: measured on a real log, a 30-day window reported a **70%** approval
+rate while the trailing 2 days reported **19%**, because the installed binary had
+been six releases stale. The report says so out loud when it happens:
+
+```
+!! MIXED GUARD VERSIONS — the rate above pools 2 different builds.
+```
+
+Use `--gv <version>` to scope the report to a single build (`--gv unknown` selects
+records written before version stamping existed). For the same reason, `--max-rate`
+**refuses to evaluate** a mixed-version window and says so on stderr rather than
+passing or failing on a pooled average.
 
 The approval rate is an **upper bound** on the false-positive rate: an approved
 ask is one the guard raised and the user waved through, but some of those

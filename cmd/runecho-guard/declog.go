@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/version"
 )
 
 // decisionRecord is one JSONL line appended to decisions.jsonl.
@@ -24,8 +26,18 @@ import (
 // legitimately resolves," so training the hallucination check on it would blind
 // the guard to a later genuine hallucination of that same name. Only violations
 // carry that "name resolves" meaning, so only they populate this field.
+//
+// GV is the guard BINARY version that wrote the record — distinct from V, which
+// is the record SCHEMA version and has always been 1. Without it, an aggregate
+// over any window longer than the gap between two installs silently pools the
+// behaviour of different programs: measured on the real log, a 30-day window
+// reported a 70% approval rate while the trailing 2 days reported 19%, because
+// the installed binary had been six releases stale (#207). Records written
+// before this field existed carry no version and are reported as "unknown"
+// rather than being attributed to whatever is installed now.
 type decisionRecord struct {
 	V            int      `json:"v"`
+	GV           string   `json:"gv,omitempty"`
 	TS           string   `json:"ts"`
 	Mode         string   `json:"mode"`
 	Repo         string   `json:"repo,omitempty"`
@@ -61,6 +73,9 @@ func logDecision(rec decisionRecord) {
 		return
 	}
 	rec.V = 1
+	// Always overwrite: the writing binary's own version is the only value that
+	// can be true here, so a caller-supplied GV would only ever be wrong.
+	rec.GV = version.Version
 	if rec.TS == "" {
 		rec.TS = time.Now().UTC().Format(time.RFC3339)
 	}

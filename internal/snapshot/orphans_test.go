@@ -140,3 +140,31 @@ func TestForgettingChildrenFailsLoudlyRatherThanOrphaning(t *testing.T) {
 		t.Errorf("rejected delete damaged the snapshot: DefsOfName = %q, want 1 path", paths)
 	}
 }
+
+// The "the DB already refuses" argument on #13 is only as broad as the FKs that
+// actually exist, so pin the top of the chain too: snapshots.repo_id REFERENCES
+// repos(id) (migrateV2). RemoveRepo's own count check gives a friendlier error,
+// but the schema must refuse independently — otherwise deleting a repo could
+// strand its whole snapshot history and the decision on #13 would not hold for
+// that level.
+//
+// Chain covered: repos -> snapshots -> files -> symbols/refs.
+func TestRepoDeleteIsRefusedWhileSnapshotsExist(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/tmp/r", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSnapshot(id, "sess", "reindex", "/tmp/r", makeIR("h1", "Alpha")); err != nil {
+		t.Fatal(err)
+	}
+	// Bypass RemoveRepo's count guard and go straight at the schema.
+	if _, err := db.conn.Exec(`DELETE FROM repos WHERE id = ?`, id); err == nil {
+		t.Fatal("deleting a repo with live snapshots succeeded; the repos->snapshots " +
+			"foreign key is not enforced and #13's reasoning does not cover this level")
+	}
+	assertNoOrphans(t, db, "a rejected repo delete")
+	if got := countLabel(t, db, id, "reindex"); got != 1 {
+		t.Errorf("rejected repo delete damaged history: %d snapshots, want 1", got)
+	}
+}

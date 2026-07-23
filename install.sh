@@ -57,6 +57,22 @@ done
 
 # Install target: ~/.local/bin (XDG default; on PATH for most setups).
 BIN_DIR="${RUNECHO_BIN_DIR:-$HOME/.local/bin}"
+
+# BIN_DIR is interpolated into a generated pre-commit hook below, so it has to be
+# safe to embed in a shell script. cmd/runecho-ir/install.go single-quotes the
+# equivalent path (shellQuote) for exactly this reason; rejecting the input here
+# keeps the two installers on the same rule instead of letting one quietly drop
+# it. Not an attack path — the operator sets their own install dir — but a path
+# containing $, a backtick, or a quote would otherwise produce a silently broken
+# hook that only shows up as a mysteriously absent guard.
+case "$BIN_DIR" in
+  *[\$\`\"\'\\]*|*$'\n'*)
+    echo "install.sh: ERROR: RUNECHO_BIN_DIR contains a shell metacharacter: $BIN_DIR" >&2
+    echo "  The generated git hook embeds this path; choose a directory without \$ \` \" ' \\ or newlines." >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "$BIN_DIR"
 
 # Windows (Git Bash) needs an explicit .exe for native process spawners.
@@ -104,7 +120,7 @@ CFG
   exit 0
 fi
 
-command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.24+)." >&2; exit 1; }
+command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
 
 # The Python and JS/TS symbol parsers use a pure-Go (CGO-free) tree-sitter
 # runtime. Its grammar package can embed all ~206 grammars (~20MB); these build

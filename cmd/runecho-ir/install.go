@@ -119,22 +119,52 @@ func installHookFile(hooksDir, name, content string, force bool) (installed bool
 	return true, nil
 }
 
+// reindexLogPath returns the file the periodic reindex job writes its output to,
+// creating the parent directory 0700.
+//
+// It deliberately does NOT use /tmp. A fixed, world-predictable path in a shared
+// directory is a symlink target: another local user pre-creates
+// /tmp/runecho-reindex.log as a link to the operator's ~/.bashrc, and the hourly
+// job's append-redirect then writes through it. The output embeds file paths from
+// indexed repos — partially attacker-chosen text — so that chains toward planting
+// shell in a startup file. Linux's fs.protected_symlinks blocks the trick by
+// default; macOS, where the launchd variant below is the one in use, does not.
+//
+// $RUNECHO_HOME (default ~/.runecho) is already the owner-only 0700 home for
+// every other thing runecho writes, so the log belongs there and inherits the
+// same protection.
+func reindexLogPath() (string, error) {
+	dir, err := runechoDir()
+	if err != nil {
+		return "", err
+	}
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		return "", fmt.Errorf("create log dir: %w", err)
+	}
+	return filepath.Join(logDir, "reindex.log"), nil
+}
+
 // installPeriodic installs an hourly reindex job via launchd (macOS) or cron (Linux).
 func installPeriodic() error {
 	irBin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve binary path: %w", err)
 	}
+	logPath, err := reindexLogPath()
+	if err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return installLaunchd(irBin)
+		return installLaunchd(irBin, logPath)
 	default:
-		return installCron(irBin)
+		return installCron(irBin, logPath)
 	}
 }
 
 // installLaunchd writes a launchd plist and loads it (macOS).
-func installLaunchd(irBin string) error {
+func installLaunchd(irBin, logPath string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home dir: %w", err)
@@ -160,12 +190,12 @@ func installLaunchd(irBin string) error {
 	<key>StartInterval</key>
 	<integer>3600</integer>
 	<key>StandardOutPath</key>
-	<string>/tmp/runecho-reindex.log</string>
+	<string>%s</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/runecho-reindex.log</string>
+	<string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(irBin))
+`, xmlEscape(irBin), xmlEscape(logPath), xmlEscape(logPath))
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -209,9 +239,20 @@ func cronQuote(s string) string {
 	return strings.ReplaceAll(shellQuote(s), "%", `\%`)
 }
 
+// cronEntry builds the hourly crontab line. Split out from installCron so the
+// quoting can be asserted without shelling out to `crontab`.
+//
+// logPath goes through cronQuote for the same reason irBin does: it is a
+// filesystem path that may contain shell metacharacters — or a `%`, which cron
+// itself converts to a newline before the shell ever parses the line, splitting
+// the command and feeding the remainder as stdin.
+func cronEntry(irBin, logPath string) string {
+	return fmt.Sprintf("0 * * * * %s repo reindex --all >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(logPath))
+}
+
 // installCron adds an hourly crontab entry on Linux/other.
-func installCron(irBin string) error {
-	entry := fmt.Sprintf("0 * * * * %s repo reindex --all >>/tmp/runecho-reindex.log 2>&1 # runecho", cronQuote(irBin))
+func installCron(irBin, logPath string) error {
+	entry := cronEntry(irBin, logPath)
 	// Read existing crontab, strip any prior runecho entry, append new one.
 	existing, _ := exec.Command("crontab", "-l").Output()
 	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")

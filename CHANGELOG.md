@@ -22,13 +22,51 @@ install time from `git describe --tags` (see `install.sh`).
   than one build, and takes `--gv <version>` to scope a report to a single one
   (#207).
 
+### Security
+
+- **Reachable DoS in `golang.org/x/text` (GO-2026-5970).** `ir.normalizePath`
+  NFC-normalizes the relative path of every indexed file, so a crafted file
+  name could spin forever inside `x/text`. The walk only checks for
+  cancellation *between* files, so the hang bypassed `DefaultGenerateTimeout`
+  entirely — and the same function is on the auto-refresh path the PreToolUse
+  guard uses. Bumped `x/text` to v0.39.0 and `x/sys` to v0.44.0
+  (GO-2026-5024, Windows, unreachable). `govulncheck ./...` is now clean.
+- **A panic in `runecho-guard --hook-mode` blocked the edit instead of
+  deferring it.** A Go panic exits status 2, which Claude Code reads as "block
+  this tool call" — the inverse of the guard's fail-open contract. Hook modes
+  now run under `deferOnPanic`, which buffers the response, discards it on
+  panic, warns on stderr, and exits 0.
+- **Repo-controlled file paths reached the agent unsanitized.** The
+  dangling-refs and duplicate-symbol warnings joined repo-relative paths into
+  `permissionDecisionReason`. Symbol names are identifier-constrained; POSIX
+  file names are not, so a file named with embedded newlines and prose could
+  plant text in the string the agent reads at a permission decision point. All
+  repo-derived paths now pass through `sanitizeReasonPath`.
+- **Periodic reindex log moved out of `/tmp`.** `--periodic` wrote to the
+  fixed path `/tmp/runecho-reindex.log`, a symlink target on a shared host.
+  It now writes to `$RUNECHO_HOME/logs/reindex.log` (0700). The dependency
+  export cache is likewise 0700/0600 rather than 0755/0644.
+- **Supply chain.** All GitHub Actions pinned to commit SHAs (the release jobs
+  hold `contents: write`), Dependabot added for `github-actions` and `gomod`,
+  and release archives now carry Sigstore build provenance — verify with
+  `gh attestation verify <archive> -R inth3shadows/runecho`.
+
 ### Changed
+
 - `fpreport --max-rate` no longer evaluates a mixed-version window. It skips with
   a stderr note naming `--gv`, the same way it already skips below the minimum ask
   count — gating on an average across two different programs is worse than not
   gating. Measured motivation: the same log reported a 70% approval rate over 30
   days and 19% over the trailing 2, because the installed binary had been six
   releases stale.
+- **Minimum Go for source builds is now 1.25** (was 1.24). Forced, not chosen:
+  both `x/text@v0.39.0` and `x/sys@v0.44.0` declare `go 1.25.0`, and no lower
+  `x/text` carries the GO-2026-5970 fix.
+- `SECURITY.md` documented store permissions as `0755`/`0644`; the code has
+  used `0700`/`0600` for some time. Corrected, and the guard's panic posture
+  and path-sanitization are now documented there.
+- `install.sh` rejects a `RUNECHO_BIN_DIR` containing shell metacharacters,
+  matching the quoting rule `cmd/runecho-ir/install.go` already applied.
 
 ## [0.12.3] — 2026-07-23
 

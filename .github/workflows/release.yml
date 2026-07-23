@@ -21,13 +21,13 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with: { fetch-depth: 0 }
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with: { go-version-file: go.mod }
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with: { version: "~> v2", args: "check" }
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with: { version: "~> v2", args: "build --snapshot --clean" }
       # The release decision logic is a script precisely so it can be exercised
       # without pushing a tag. A change to it must fail here, not in production.
@@ -56,8 +56,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Both required by attest-build-provenance: id-token to mint the OIDC
+      # token Sigstore signs against, attestations to store the result.
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         # Full history AND tags: the version is computed from the highest
         # existing semver tag, which a shallow clone would not have.
         with: { fetch-depth: 0 }
@@ -73,7 +77,7 @@ jobs:
         if: steps.decide.outputs.version == ''
         run: echo "No release for this merge (${{ steps.decide.outputs.skip }})."
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         if: steps.decide.outputs.version != ''
         with: { go-version-file: go.mod }
 
@@ -91,11 +95,24 @@ jobs:
           # changelog commit, or the reverse, is a state nothing else recovers from.
           git push --atomic origin HEAD:master "refs/tags/v${VERSION}"
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         if: steps.decide.outputs.version != ''
         with: { version: "~> v2", args: "release --clean" }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # checksums.txt proves the archives weren't corrupted in transit; it does
+      # NOT prove who built them, because anyone who can replace an archive can
+      # replace the checksum file sitting next to it. Provenance closes that:
+      # a signed, Sigstore-backed statement of which workflow, at which commit,
+      # produced these exact bytes. Verify with:
+      #   gh attestation verify runecho_<ver>_<os>_<arch>.tar.gz -R inth3shadows/runecho
+      # Keyless (OIDC) — nothing to rotate, no secret to leak.
+      - name: Attest build provenance
+        if: steps.decide.outputs.version != ''
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.zip,dist/checksums.txt"
 
   # Tag push: cut the real release with downloadable binaries + checksums.
   release:
@@ -103,12 +120,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with: { fetch-depth: 0 }
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with: { go-version-file: go.mod }
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with: { version: "~> v2", args: "release --clean" }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Same provenance attestation as the autorelease job above — both paths
+      # publish downloadable binaries, so both must be verifiable.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.zip,dist/checksums.txt"

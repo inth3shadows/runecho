@@ -92,7 +92,7 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 
 - **Nothing** to run a tagged release — the [prebuilt binaries](#quick-start) are
   self-contained (no runtime, no API keys).
-- **Go 1.24+** only if you build from source (`bash install.sh`).
+- **Go 1.25+** only if you build from source (`bash install.sh`).
 - A POSIX or Windows shell. Storage lives under `~/.runecho/` by default.
 - No external services, no API keys.
 
@@ -112,7 +112,7 @@ full semantic analysis.
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
-   …or **build from source** (needs Go 1.24+), which also installs the guard hooks:
+   …or **build from source** (needs Go 1.25+), which also installs the guard hooks:
    ```bash
    bash install.sh
    ```

@@ -173,7 +173,11 @@ func writeCachedExports(key string, exports map[string]struct{}) {
 	if dir == "" || key == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700/0600 below: match the owner-only discipline the rest of the store uses
+	// (history.db, decisions.jsonl, ir.json). The parent $RUNECHO_HOME is already
+	// 0700, so this is defense-in-depth for the case where RUNECHO_HOME is
+	// repointed somewhere more permissive rather than a live exposure.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
 	if len(exports) == 0 {
@@ -194,7 +198,7 @@ func writeCachedExports(key string, exports map[string]struct{}) {
 		return
 	}
 	tmp := filepath.Join(dir, "."+key+"."+strconv.Itoa(os.Getpid())+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, key+".json")); err != nil {

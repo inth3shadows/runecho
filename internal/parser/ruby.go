@@ -29,7 +29,9 @@ import (
 //     symbol name, so both land under the enclosing scope. Collapsing them is
 //     lossy only when a class defines an instance and a class method with the
 //     same name, which is rare and still resolves to a real symbol.
-//   - `class` / `module` → Classes, nested-qualified.
+//   - `class` / `module` → Classes, nested-qualified. The compact `module A::B`
+//     form is normalized to the same name the nested form produces ("A.B"), so
+//     one logical module does not get two symbol names depending on spelling.
 //   - `attr_accessor` / `attr_reader` / `attr_writer` → Functions. These generate
 //     real, callable methods; omitting them would make the index claim a Rails-
 //     style model has almost no callable surface. Writers are recorded with

@@ -29,7 +29,10 @@ import (
 //     type ("Reader.fetch"), matching the Go parser's receiver qualification, so
 //     identical method names on different types never collide. Inside an
 //     `impl Trait for Type`, still qualified by the *type* — that is where the
-//     callable actually lives.
+//     callable actually lives. A target with no plain-identifier name (`&str`,
+//     a tuple) is qualified by its normalized type text instead, never by the
+//     enclosing scope, which would make the method indistinguishable from a
+//     real top-level fn.
 //   - Trait method signatures → Functions, qualified by the trait
 //     ("Fetch.get"), parity with the Go parser's interface-method handling.
 //   - `struct` / `enum` / `trait` / `union` / `type` items → Classes. Rust has no
@@ -237,21 +240,21 @@ func rustSymbolsFromAST(source string) (imports, functions, classes, exports []s
 			case "impl_item":
 				// Qualify by the implementing TYPE, not the trait: `impl Fetch for
 				// Reader { fn get }` puts a callable at Reader.get, and that is what
-				// a caller writes. An impl with no resolvable type name falls back
-				// to the enclosing prefix rather than inventing one.
+				// a caller writes.
 				//
-				// When the target does not reduce to a plain identifier (`&str`,
-				// a tuple, a slice), fall back to its NORMALIZED TYPE TEXT as the
-				// prefix — never to the enclosing prefix. Falling back to the
-				// enclosing prefix emits the method under its bare name at file
-				// scope, where it is indistinguishable from a real top-level fn:
-				// `impl MyTrait for &str { fn helper }` alongside `fn helper()`
-				// collapsed into one symbol, and because recordHash COMBINES on
-				// collision, editing the impl method flipped the top-level
-				// function's hash — reporting an unedited symbol as modified.
-				implPrefix := rustTypeName(rustFieldText(c, "type", lang, src))
+				// When the target does not reduce to a plain identifier (`&str`, a
+				// tuple, a slice), fall back to its NORMALIZED TYPE TEXT — never to
+				// the enclosing prefix. Falling back to the enclosing prefix emitted
+				// the method under its bare name at file scope, where it is
+				// indistinguishable from a real top-level fn: `impl MyTrait for &str
+				// { fn helper }` alongside `fn helper()` collapsed into one symbol,
+				// and because recordHash COMBINES on collision, editing the impl
+				// method flipped the top-level function's hash — reporting an
+				// unedited symbol as modified.
+				implType := rustFieldText(c, "type", lang, src)
+				implPrefix := rustTypeName(implType)
 				if implPrefix == "" {
-					implPrefix = rustTypeText(rustFieldText(c, "type", lang, src))
+					implPrefix = rustTypeText(implType)
 				}
 				walk(c, qualify(prefix, implPrefix), depth+1)
 

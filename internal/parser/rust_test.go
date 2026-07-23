@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -281,5 +282,40 @@ impl MyTrait for (A, B) { fn tuple_method(&self) {} }
 	}
 	if after.SymbolHashes["function:&str.helper"] == got.SymbolHashes["function:&str.helper"] {
 		t.Error("editing the impl method did not change its own hash")
+	}
+}
+
+// The type-text fallback produces prefixes that are not Rust identifiers
+// ("&str", "[u8; 4]", "fn(u8) -> u8"). That is intentional — it is what makes
+// them collision-proof — but it means those names travel through the IR's
+// "kind:name" key construction and JSON encoding, so pin that they survive
+// intact and each still carries its own span.
+func TestRustParser_TypeTextPrefixesSurviveTheIRRoundTrip(t *testing.T) {
+	src := `impl Trait for &str { fn a(&self) {} }
+impl Trait for [u8; 4] { fn b(&self) {} }
+impl Trait for fn(u8) -> u8 { fn c(&self) {} }
+`
+	got, _ := NewRustParser().Parse(src)
+	for _, want := range []string{"&str.a", "[u8; 4].b", "fn(u8) -> u8.c"} {
+		if !contains(got.Functions, want) {
+			t.Errorf("missing %q; got %q", want, got.Functions)
+		}
+		if got.SymbolHashes["function:"+want] == "" {
+			t.Errorf("no hash under key %q", "function:"+want)
+		}
+		if got.SymbolLines["function:"+want] == 0 {
+			t.Errorf("no line under key %q", "function:"+want)
+		}
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back FileStructure
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.Functions, back.Functions) {
+		t.Errorf("JSON round-trip changed names: %q -> %q", got.Functions, back.Functions)
 	}
 }

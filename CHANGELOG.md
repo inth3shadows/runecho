@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-23
+
+### Changed
+- parser: add Rust (.rs) support (#194)
+
 ## [0.9.3] — 2026-07-22
 
 ### Changed

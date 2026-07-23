@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-07-23
+
+### Changed
+- guard: close a reachable DoS, a fail-closed panic path, and a prompt-injection surface (#212)
+
 ## [0.13.0] — 2026-07-23
 
 ### Added

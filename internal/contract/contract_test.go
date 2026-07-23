@@ -1,7 +1,10 @@
 package contract
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -140,5 +143,44 @@ func TestInScope_WildcardFileSegment(t *testing.T) {
 		if got := c.InScope(p); got != want {
 			t.Errorf("InScope(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+// TestLoad_RejectsOversizedContract pins #210. D2 moved this read onto the
+// PreToolUse hot path, where every other read is bounded; an unbounded one here
+// was the only asymmetry left.
+func TestLoad_RejectsOversizedContract(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big.contract")
+	// One valid line, then padding past the cap, so a truncating implementation
+	// would "succeed" with a usable-looking contract and this test would miss it.
+	body := "scope: internal/**\n" + strings.Repeat("# padding\n", (MaxContractBytes/10)+64)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := Load(p); err == nil {
+		t.Fatal("Load accepted an over-cap contract; the guard would then parse an unbounded file on every edit")
+	}
+}
+
+// TestLoad_AcceptsRealisticContract is the other half: the cap must be nowhere
+// near a contract anyone would actually write, or the fix becomes an outage.
+func TestLoad_AcceptsRealisticContract(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ok.contract")
+	// `name:`/`description:` are headers (splitHeader), not patterns — only the
+	// three bare globs below count.
+	body := "name: guard-fp\ninternal/guard/**\ncmd/runecho-guard/**\n!**/testdata/**\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load rejected a normal contract: %v", err)
+	}
+	if len(c.Patterns) != 3 {
+		t.Errorf("parsed %d patterns, want 3", len(c.Patterns))
 	}
 }

@@ -36,6 +36,17 @@ but a reminder that "front the incumbent" (rubric Gate 3) is an ideal some
 classes can't satisfy, and the shipping check (if the class ever cleared Gate 4)
 should still front a configured tool.
 
+**Gate-4 run (2026-07-23):** `i18n-keys` over excalidraw + outline + mattermost
+(~5.6k catalog keys). First pass: 26 findings — **all** the detector's own bugs
+(apostrophe-truncated keys, `/* */` doc blocks, undecoded escapes, unmodelled
+plural suffixes). Fixing each: 26 → 4 → **2**, and the final two were one genuine
+missing key (`t("a user")` in outline, absent from its 1833-key catalog). Verdict
+**DECLINE** (below the ≥3-genuine / ≥2-repo bar), and — the point — the residual
+FP causes were every one of them i18next *framework semantics* the config-free
+detector had to reimplement, which is exactly why Gate 3 says to front the
+configured incumbent. The self-extraction detector is now correct enough to
+measure with, and the fixes it needed are the evidence for that gate.
+
 Known rough edges (deliberately not polished — see the spike's pivot note):
 - Hand-classification is a JSON edit (`genuine: null → true/false`) or the
   `--genuine N` shortcut; no interactive classifier.

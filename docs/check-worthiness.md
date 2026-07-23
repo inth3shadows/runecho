@@ -89,6 +89,20 @@ repos and hand-classify every finding. The harness for this is
 A run that finds nothing is a **success**: it costs hours and buys the answer
 #175 spent a whole feature learning.
 
+### Verify the instrument before you trust the number
+
+Hand-classifying **every** finding is not busywork — it is what catches a broken
+detector before it produces a false verdict. The i18n Gate-4 run is the cautionary
+tale: the first pass reported **26 findings**, which naively read as "this defect
+is everywhere, build it." Classifying each one showed all 26 were the detector's
+own bugs — a regex that truncated `"You don't…"` at the apostrophe, `/* */` doc
+blocks read as live code, undecoded `–` escapes, unmodelled i18next plural
+suffixes. Fixing the instrument moved 26 → 4 → **2**, and the two survivors were a
+single genuine missing key. Same verdict (decline) both times, but the first was
+right by accident. A number you did not trace to real code is not evidence — it is
+the detector's opinion of itself. (This is `gotcha-corpus-shares-assumptions`
+applied to the measurement tool, not the corpus.)
+
 ### The corpus trap — why an empty `bench/` result is not evidence
 
 `bench/captured/corpus.json` is mined from transcripts where **the toolchain
@@ -117,6 +131,7 @@ reason to decline rather than reach.
 |---|---|---|---|---|---|
 | **#204 tokens (value lookup)** | ✗ `13px` has no truth value | — | — | — | Declined at G1 |
 | **#204 tokens (existence)** | ✓ | timing only | stylelint/eslint/design-lint cover it | probe: 0 genuine / 14 findings, 100% FP | Declined at G4 |
+| **i18n keys** | ✓ | timing only | i18next-cli/i18nGuard, but all need config | 3 real repos (~5.6k keys): **2 genuine / 2 findings in 1 repo**, 0% FP after fixing the detector | Declined at G4 (below the ≥3 / ≥2-repo bar) |
 | **#175 dep index** | ✓ | ✓ | — | 0 corpus movement | Reverted (evidence gathered too late) |
 
 The pattern in the failures is the same both times: the *argument* was sound and

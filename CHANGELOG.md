@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-07-23
+
+### Changed
+- triage-check: i18n-keys detector — the plugin contract holds (#220)
+
 ## [0.15.0] — 2026-07-23
 
 ### Changed

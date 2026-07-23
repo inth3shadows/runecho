@@ -10,9 +10,15 @@
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#quick-start)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#quick-start)
 
-RunEcho is **one cheap layer against AI coding mistakes — not the whole answer.**
-It checks every agent edit against an index of the symbols your repo actually
-has, and asks before a write lands on one that doesn't exist.
+RunEcho stops an agent from writing a call to a function your repo doesn't have —
+**before the write lands**, not after the build fails. It runs as a `PreToolUse`
+hook inside the agent loop: every `Edit`/`Write` is checked against the symbols
+your code actually declares, and a reference to one that doesn't exist stops the
+write and asks you first. ~12 ms, no build, no language server.
+
+It is **model-free and vendor-neutral**: no LLM, no API keys, no network, no
+build, no language server, and ~0 tokens of your context window.
+**The same code produces the same answer.**
 
 **The scope, stated up front.** RunEcho reads *unqualified* references — bare
 calls, constant references, and type annotations. Measured against its own
@@ -23,13 +29,11 @@ error as independent ground truth). The other 5 are qualified positions —
 of scope by design. The numbers, including the misses, are in
 [bench/FINDINGS.md](bench/FINDINGS.md).
 
-That is the honest shape of the thing: a narrow, fast, certain check that runs
-before the write, not a system that makes your agent correct. Run it the way you
-run a type checker — one layer that removes one class of mistake completely,
-alongside the tests and review that catch the rest.
-
-It is **model-free and vendor-neutral**: no LLM, no API keys, no network, and
-~0 tokens of your context window. The same code produces the same answer.
+That is the honest shape of the thing: **one cheap layer against AI coding
+mistakes — not the whole answer.** A narrow, fast, certain check that runs before
+the write, not a system that makes your agent correct. Run it the way you run a
+type checker — one layer that removes one class of mistake completely, alongside
+the tests and review that catch the rest.
 
 ## Why RunEcho Exists
 
@@ -93,7 +97,7 @@ source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.ru
 - No external services, no API keys.
 
 Languages parsed today: **Go, JavaScript, TypeScript, JSX, TSX, Google Apps
-Script (`.gs`), Python, and shell (`.sh`/`.bash`)**.
+Script (`.gs`), Python, shell (`.sh`/`.bash`), Rust (`.rs`), and Ruby (`.rb`)**.
 Extraction is intentionally shallow and deterministic: top-level structure, not
 full semantic analysis.
 

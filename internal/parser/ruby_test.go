@@ -284,3 +284,27 @@ end
 		t.Errorf("private leaked across bodies; got %q", got.Exports)
 	}
 }
+
+// Logic-bug regression: `module A::B` and the nested `module A; module B` form
+// are the same logical module and must produce the same symbol name. Emitting
+// "A::B" for one and "A.B" for the other made the index answer differently for
+// identical code, so a reference could resolve against only one spelling.
+func TestRubyParser_CompactAndNestedModulesAgree(t *testing.T) {
+	compact, _ := NewRubyParser().Parse("module A::B\n  def x; end\nend\n")
+	nested, _ := NewRubyParser().Parse("module A\n  module B\n    def x; end\n  end\nend\n")
+
+	if !contains(compact.Classes, "A.B") {
+		t.Errorf("compact form: want class A.B, got %q", compact.Classes)
+	}
+	if !contains(compact.Functions, "A.B.x") {
+		t.Errorf("compact form: want function A.B.x, got %q", compact.Functions)
+	}
+	if !contains(nested.Functions, "A.B.x") {
+		t.Errorf("nested form: want function A.B.x, got %q", nested.Functions)
+	}
+	for _, n := range append(append([]string{}, compact.Classes...), compact.Functions...) {
+		if strings.Contains(n, "::") {
+			t.Errorf("symbol %q kept Ruby's :: separator; qualification uses .", n)
+		}
+	}
+}

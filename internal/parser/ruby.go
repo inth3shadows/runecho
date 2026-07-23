@@ -230,7 +230,12 @@ func rubySymbolsFromAST(source string) (imports, functions, classes, exports []s
 					walk(c, prefix, depth+1)
 					continue
 				}
-				full := qualify(prefix, name)
+				// Normalize the compact form `module A::B` to the same name the
+				// nested form `module A; module B` produces. Without this, one
+				// logical module yields "A::B" or "A.B" depending purely on how it
+				// was written, so the index answers differently for identical code
+				// and a reference resolves against only one spelling.
+				full := qualify(prefix, strings.ReplaceAll(name, "::", "."))
 				classes = append(classes, full)
 				recordHash("class:"+full, span)
 				recordLine("class:"+full, line)

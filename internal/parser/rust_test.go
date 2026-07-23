@@ -250,3 +250,36 @@ mod a { mod b { pub fn deep() {} } }
 		t.Errorf("non-pub const must still be recorded; got %q", got.Exports)
 	}
 }
+
+// Logic-bug regression: an impl target with no plain-identifier name must NOT
+// fall back to the enclosing prefix. Doing so emitted the method under its bare
+// name at file scope, where it is indistinguishable from a real top-level fn —
+// and because recordHash combines on collision, editing the impl method flipped
+// the top-level function's hash, reporting an unedited symbol as modified.
+func TestRustParser_UnnameableImplTargetDoesNotCollide(t *testing.T) {
+	src := `pub fn helper() -> u8 { 1 }
+impl MyTrait for &str { fn helper(&self) -> u8 { 2 } }
+impl MyTrait for (A, B) { fn tuple_method(&self) {} }
+`
+	got, _ := NewRustParser().Parse(src)
+	if !contains(got.Functions, "helper") {
+		t.Errorf("real top-level fn lost; got %q", got.Functions)
+	}
+	if !contains(got.Functions, "&str.helper") {
+		t.Errorf("impl method must keep a non-colliding prefix; got %q", got.Functions)
+	}
+	if !contains(got.Functions, "(A, B).tuple_method") {
+		t.Errorf("tuple impl target must qualify by its type text; got %q", got.Functions)
+	}
+
+	// The decisive check: editing the impl method must not disturb the real
+	// top-level function's hash.
+	edited := strings.Replace(src, "fn helper(&self) -> u8 { 2 }", "fn helper(&self) -> u8 { 99 }", 1)
+	after, _ := NewRustParser().Parse(edited)
+	if after.SymbolHashes["function:helper"] != got.SymbolHashes["function:helper"] {
+		t.Error("editing an impl method changed an unrelated top-level function's hash")
+	}
+	if after.SymbolHashes["function:&str.helper"] == got.SymbolHashes["function:&str.helper"] {
+		t.Error("editing the impl method did not change its own hash")
+	}
+}

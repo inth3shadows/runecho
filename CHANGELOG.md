@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-07-23
+
+### Changed
+- bench: measure context-token cost of every surface, and correct the README (#201) (#223)
+
 ## [0.16.0] — 2026-07-23
 
 ### Changed

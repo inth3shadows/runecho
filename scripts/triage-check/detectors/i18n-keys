@@ -36,14 +36,61 @@ GENERATED = ("/node_modules/", "/dist/", "/build/", "/.next/", "/out/",
 CODE_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue")
 LOCALE_DIR = re.compile(r"/(locales?|i18n|lang|messages|translations?)/", re.I)
 
-# Reference forms. Each captures the key string. Template-literal args (backtick)
-# are intentionally NOT matched: a dynamic key is unresolvable, and flagging it
-# would be a guaranteed false positive.
+# Reference forms. The string body is (['"])((?:\\.|(?!\1).)*)\1 — capture the
+# OPENING delimiter in group 1, then read until the SAME delimiter, allowing the
+# other quote inside. A naive [^'"]+ truncates "You don't..." to "You don" at the
+# apostrophe, and English UI copy used as natural-language keys is full of
+# apostrophes — that one bug produced 20 of 26 false positives on the first real
+# corpus. Template literals (backtick) are still unmatched on purpose: a dynamic
+# key is unresolvable and flagging it would be a guaranteed false positive.
+_STR = r"""(['"])((?:\\.|(?!\1).)*)\1"""
 REF_PATTERNS = [
-    re.compile(r"""\bt\(\s*['"]([^'"]+)['"]"""),        # t('a.b') / t("a.b")
-    re.compile(r"""\$t\(\s*['"]([^'"]+)['"]"""),        # Vue $t('a.b')
-    re.compile(r"""\bi18nKey\s*=\s*['"]([^'"]+)['"]"""),  # <Trans i18nKey="a.b">
+    re.compile(r"\bt\(\s*" + _STR),          # t('a.b') / t("a.b")
+    re.compile(r"\$t\(\s*" + _STR),          # Vue $t('a.b')
+    re.compile(r"\bi18nKey\s*=\s*" + _STR),  # <Trans i18nKey="a.b">
 ]
+# The key is capture group 2 (group 1 is the delimiter).
+_KEY_GROUP = 2
+
+
+def strip_comments(src: str) -> str:
+    """Blank // and /* */ comments while preserving string contents.
+
+    Comment-blanking, not removal: replace comment characters with spaces so line
+    numbers and column positions are unchanged (findings must point at the real
+    line). String bodies are kept verbatim — they hold the keys — so a // or /*
+    inside a string is NOT treated as a comment. Without this, excalidraw's
+    /*-doc block listing i18nKey="example1".. and outline's //-config examples
+    read as live references (6 of 26 false positives on the first real corpus).
+    """
+    out = []
+    i, n = 0, len(src)
+    quote = ""          # current string delimiter, or "" outside a string
+    while i < n:
+        c = src[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and i + 1 < n:      # escape: copy the next char whole
+                out.append(src[i + 1]); i += 2; continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        # not in a string
+        if c in "'\"`":
+            quote = c; out.append(c); i += 1; continue
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":  # line comment → spaces to EOL
+                out.append(" "); i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                out.append("\n" if src[i] == "\n" else " "); i += 1
+            if i < n:
+                out.append("  "); i += 2      # blank the closing */
+            continue
+        out.append(c); i += 1
+    return "".join(out)
 
 
 def _is_generated(path: str) -> bool:
@@ -103,34 +150,79 @@ def collect_declared(repo: str):
 
 
 def extract_refs(repo: str):
-    """Yield (file, line, key) for every static i18n key reference in code."""
+    """Yield (file, line, key) for every static i18n key reference in code.
+
+    Comments are blanked file-wide first (a /* */ block spans lines), then each
+    line is scanned. strip_comments preserves line breaks, so a per-line index
+    after it still points at the true source line.
+    """
     for path in _walk(repo):
         if not path.endswith(CODE_EXT):
             continue
         try:
             with open(path, encoding="utf-8") as fh:
-                lines = fh.readlines()
+                src = fh.read()
         except (OSError, UnicodeDecodeError):
             continue
-        for lineno, line in enumerate(lines, 1):
+        for lineno, line in enumerate(strip_comments(src).splitlines(), 1):
             for pat in REF_PATTERNS:
                 for m in pat.finditer(line):
-                    key = m.group(1)
-                    # A bare interpolation slipped past the literal patterns
-                    # (shouldn't, but be safe) — skip anything with a brace.
-                    if "{" in key or "}" in key:
-                        continue
-                    yield path, lineno, key
+                    key = m.group(_KEY_GROUP)
+                    # Interpolation inside the literal ("Hi {{name}}") — the
+                    # catalog key includes the placeholder verbatim, so keep it;
+                    # only a truly empty capture is dropped.
+                    if key:
+                        yield path, lineno, key
+
+
+# i18next plural/context suffixes. A reference t("x", {count}) resolves against
+# x_one / x_other / … in the catalog, never a bare "x" — so a plural key looks
+# "missing" unless the suffixed forms are checked. This modelled 1 of the 4
+# residual false positives on the real corpus; leaving it out means the detector
+# flags every pluralized string, which is most user-facing counts.
+_PLURAL_SUFFIXES = ("_zero", "_one", "_two", "_few", "_many", "_other", "_plural")
+
+_ESCAPE = re.compile(r"\\u\{([0-9A-Fa-f]+)\}|\\u([0-9A-Fa-f]{4})|\\x([0-9A-Fa-f]{2})")
+_SIMPLE_ESCAPE = {"\\n": "\n", "\\t": "\t", "\\r": "\r", "\\\\": "\\",
+                  "\\'": "'", '\\"': '"', "\\`": "`", "\\/": "/"}
+
+
+def decode_js_escapes(s: str) -> str:
+    """Decode the JS string escapes that survive into a captured key.
+
+    The KEY is the string's RUNTIME value; i18next-parser writes the decoded form
+    into the catalog. Source that writes "… \\u2013 …" (a literal backslash-u) is
+    the en-dash at runtime and in the catalog, so an undecoded capture never
+    matches (1 of the 4 residual FPs on the real corpus). Targeted, not a blanket
+    unicode_escape decode, which would corrupt keys that already contain real
+    UTF-8 characters.
+    """
+    def sub(m):
+        h = m.group(1) or m.group(2) or m.group(3)
+        try:
+            return chr(int(h, 16))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    s = _ESCAPE.sub(sub, s)
+    for k, v in _SIMPLE_ESCAPE.items():
+        s = s.replace(k, v)
+    return s
 
 
 def resolves(key: str, declared: set, namespaces: set) -> bool:
+    key = decode_js_escapes(key)
     if key in declared:
+        return True
+    if any(f"{key}{suf}" in declared for suf in _PLURAL_SUFFIXES):
         return True
     # 'ns:rest' — declared already holds 'ns:rest' forms, but also accept a bare
     # 'rest' matching when the ns is a known file, for catalogs that don't nest.
     if ":" in key:
         ns, _, rest = key.partition(":")
-        if ns in namespaces and (rest in declared or key in declared):
+        if ns in namespaces and (
+            rest in declared or key in declared
+            or any(f"{rest}{suf}" in declared for suf in _PLURAL_SUFFIXES)
+        ):
             return True
     return False
 

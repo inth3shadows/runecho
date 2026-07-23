@@ -29,7 +29,9 @@ import (
 //     symbol name, so both land under the enclosing scope. Collapsing them is
 //     lossy only when a class defines an instance and a class method with the
 //     same name, which is rare and still resolves to a real symbol.
-//   - `class` / `module` → Classes, nested-qualified.
+//   - `class` / `module` → Classes, nested-qualified. The compact `module A::B`
+//     form is normalized to the same name the nested form produces ("A.B"), so
+//     one logical module does not get two symbol names depending on spelling.
 //   - `attr_accessor` / `attr_reader` / `attr_writer` → Functions. These generate
 //     real, callable methods; omitting them would make the index claim a Rails-
 //     style model has almost no callable surface. Writers are recorded with
@@ -230,7 +232,12 @@ func rubySymbolsFromAST(source string) (imports, functions, classes, exports []s
 					walk(c, prefix, depth+1)
 					continue
 				}
-				full := qualify(prefix, name)
+				// Normalize the compact form `module A::B` to the same name the
+				// nested form `module A; module B` produces. Without this, one
+				// logical module yields "A::B" or "A.B" depending purely on how it
+				// was written, so the index answers differently for identical code
+				// and a reference resolves against only one spelling.
+				full := qualify(prefix, strings.ReplaceAll(name, "::", "."))
 				classes = append(classes, full)
 				recordHash("class:"+full, span)
 				recordLine("class:"+full, line)

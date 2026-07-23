@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -248,5 +249,73 @@ mod a { mod b { pub fn deep() {} } }
 	// IR entirely rather than just from the public surface.
 	if !contains(got.Exports, "Reader.CAP") {
 		t.Errorf("non-pub const must still be recorded; got %q", got.Exports)
+	}
+}
+
+// Logic-bug regression: an impl target with no plain-identifier name must NOT
+// fall back to the enclosing prefix. Doing so emitted the method under its bare
+// name at file scope, where it is indistinguishable from a real top-level fn —
+// and because recordHash combines on collision, editing the impl method flipped
+// the top-level function's hash, reporting an unedited symbol as modified.
+func TestRustParser_UnnameableImplTargetDoesNotCollide(t *testing.T) {
+	src := `pub fn helper() -> u8 { 1 }
+impl MyTrait for &str { fn helper(&self) -> u8 { 2 } }
+impl MyTrait for (A, B) { fn tuple_method(&self) {} }
+`
+	got, _ := NewRustParser().Parse(src)
+	if !contains(got.Functions, "helper") {
+		t.Errorf("real top-level fn lost; got %q", got.Functions)
+	}
+	if !contains(got.Functions, "&str.helper") {
+		t.Errorf("impl method must keep a non-colliding prefix; got %q", got.Functions)
+	}
+	if !contains(got.Functions, "(A, B).tuple_method") {
+		t.Errorf("tuple impl target must qualify by its type text; got %q", got.Functions)
+	}
+
+	// The decisive check: editing the impl method must not disturb the real
+	// top-level function's hash.
+	edited := strings.Replace(src, "fn helper(&self) -> u8 { 2 }", "fn helper(&self) -> u8 { 99 }", 1)
+	after, _ := NewRustParser().Parse(edited)
+	if after.SymbolHashes["function:helper"] != got.SymbolHashes["function:helper"] {
+		t.Error("editing an impl method changed an unrelated top-level function's hash")
+	}
+	if after.SymbolHashes["function:&str.helper"] == got.SymbolHashes["function:&str.helper"] {
+		t.Error("editing the impl method did not change its own hash")
+	}
+}
+
+// The type-text fallback produces prefixes that are not Rust identifiers
+// ("&str", "[u8; 4]", "fn(u8) -> u8"). That is intentional — it is what makes
+// them collision-proof — but it means those names travel through the IR's
+// "kind:name" key construction and JSON encoding, so pin that they survive
+// intact and each still carries its own span.
+func TestRustParser_TypeTextPrefixesSurviveTheIRRoundTrip(t *testing.T) {
+	src := `impl Trait for &str { fn a(&self) {} }
+impl Trait for [u8; 4] { fn b(&self) {} }
+impl Trait for fn(u8) -> u8 { fn c(&self) {} }
+`
+	got, _ := NewRustParser().Parse(src)
+	for _, want := range []string{"&str.a", "[u8; 4].b", "fn(u8) -> u8.c"} {
+		if !contains(got.Functions, want) {
+			t.Errorf("missing %q; got %q", want, got.Functions)
+		}
+		if got.SymbolHashes["function:"+want] == "" {
+			t.Errorf("no hash under key %q", "function:"+want)
+		}
+		if got.SymbolLines["function:"+want] == 0 {
+			t.Errorf("no line under key %q", "function:"+want)
+		}
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back FileStructure
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.Functions, back.Functions) {
+		t.Errorf("JSON round-trip changed names: %q -> %q", got.Functions, back.Functions)
 	}
 }

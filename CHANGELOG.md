@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.12.3] — 2026-07-23
+
+### Changed
+- contract: the edit-scope guard dimension (#12 D2) (#206)
+
 ## [0.12.2] — 2026-07-23
 
 ### Changed

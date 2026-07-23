@@ -1,6 +1,11 @@
 # Competitive landscape — keeping the moat claim defensible
 
-**Last verified 2026-07-23.** Next re-verification due: 2026-10-23 (quarterly).
+**Last verified 2026-07-23.** Next re-verification due: 2026-10-22 (quarterly).
+
+> The due date tracks the **22nd** of Jan/Apr/Jul/Oct because that is when the
+> scheduled job actually fires (local cron, `~/.local/bin/runecho-moat-reverify`).
+> Set it to the 22nd, not to "three months from today" — a due date that disagrees
+> with the schedule is its own small lie.
 
 This file exists to stop one sentence in [`runecho-vs-field.html`](./runecho-vs-field.html)
 from silently going stale:
@@ -74,6 +79,15 @@ Hallucinated *dependencies* (slopsquatting — e.g. the `react-codeshift` packag
 invented by a model and propagated into hundreds of repos in early 2026) are a
 different lane: package-registry existence, not in-repo symbol existence. Tools in
 that lane are not rivals and should not be listed as if they were.
+
+**Considered and rejected** — record these so a later pass does not re-adjudicate
+them from scratch:
+
+- **Alterion Draco** (surfaced in the July 2026 pass — deliberately written
+  without a full date so it does not inflate the five-stamp grep) — enterprise agent-governance and
+  runtime threat detection (prompt injection, data exfiltration, OWASP Agentic
+  Top 10). Governs what an agent is *allowed* to do; has no notion of whether a
+  symbol exists. Fails conjunct 3 outright and is not even adjacent.
 
 ## Re-verification procedure
 

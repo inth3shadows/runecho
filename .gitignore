@@ -55,3 +55,6 @@ coverage.html
 
 # Python bytecode from scripts/ (release-decision helpers)
 __pycache__/
+
+# triage-check default report output (maintainer tool)
+triage-report.json

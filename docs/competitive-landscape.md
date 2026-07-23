@@ -108,6 +108,15 @@ surface, which is the exact profile of the most likely rival.
   PreToolUse decision would satisfy all four conjuncts for one language at a time,
   at the cost of the setup and staleness RunEcho trades away.
 
+## Deciding what to add
+
+The four conjuncts above also gate *inbound* feature requests, not just rival
+surveys: "can RunEcho also catch X?" is answered by the same test, plus a
+decidability check, a prior-art check, and a measured evidence bar. That rubric
+lives in [check-worthiness.md](check-worthiness.md) — it is what stops the next
+"add a check for X" from being re-argued from intuition (the failure mode behind
+#175 and #204).
+
 ## Adjacent, deliberately out of scope
 
 Hallucinated *dependencies* (slopsquatting — e.g. the `react-codeshift` package

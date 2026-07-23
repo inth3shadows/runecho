@@ -108,7 +108,7 @@ full semantic analysis.
    ```bash
    # example: macOS arm64 — adjust the asset name for your platform.
    # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
-   TAG=v0.6.0; NUM=0.6.0
+   TAG=v0.14.0; NUM=0.14.0
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
@@ -177,9 +177,16 @@ RunEcho is strongest when you want **deterministic structure and guardrails**,
 not general-purpose code intelligence.
 
 - It tracks top-level symbols and imports/exports, not full type information.
-- All parsers are intentionally shallow (line-regex, not AST). Each language has
-  known gaps — see the [Parser Capability Matrix](TECHNICAL.md#parser-capability-matrix)
+- Parsers are AST-based but intentionally shallow — they extract *definitions*
+  (functions, classes, methods), not semantics: no type inference, call graph,
+  or cross-file binding. Go uses the stdlib `go/ast`; Python, JS/TS, Rust, and
+  Ruby use a pure-Go tree-sitter runtime; shell uses a masking scan. Imports and
+  exports for the tree-sitter languages are still regex. Each language has known
+  gaps — see the [Parser Capability Matrix](TECHNICAL.md#parser-capability-matrix)
   for the per-language honest accounting.
+- **Indexing covers more languages than the guard checks.** Shell, Rust, and
+  Ruby feed the index (`structure`, `locate`, `diff`) but are not validated at
+  edit time — the guard's reference checks exist for Go, JS/TS, and Python only.
 - The guard validates **unqualified** references: bare **calls** (`foo(...)`),
   bare **type annotations** (`x: SomeType`), and SCREAMING_SNAKE **constant**
   references. It does **not** flag **qualified** references (`obj.method(...)`,
@@ -198,14 +205,17 @@ not general-purpose code intelligence.
 
 | Path | Purpose |
 |---|---|
-| `cmd/runecho-ir/` | The CLI: index, snapshot, diff, log, churn, verify, truth-trail, validate-claims, repo, backup |
+| `cmd/runecho-ir/` | The CLI: index, snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, repo, backup, install |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
-| `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode |
-| `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell) |
+| `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode, plus the opt-in checks |
+| `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell/Rust/Ruby) |
 | `internal/ir/` | IR build, deterministic hashing, JSON storage |
-| `internal/snapshot/` | Central store: migrations, registry, diff, churn, backup |
+| `internal/snapshot/` | Central store: migrations, registry, diff, churn, contracts, backup |
 | `internal/mcp/` | Minimal MCP plumbing + the oracle tools |
 | `internal/guard/` | Diff parsing, symbol extraction, validation, did-you-mean |
+| `internal/contract/` | Edit-scope contract format and parsing |
+| `internal/depindex/` | Memoized export sets for Go dependencies (qualified-call checks) |
+| `internal/guardstats/` | `guard-stats` and `fpreport` analysis over `decisions.jsonl` |
 | `internal/claims/` | Symbol-reference extraction from prose (`validate-claims`, `truth-trail --text`) |
 | `internal/gitutil/` | Canonical git-common-dir resolution (worktree identity) |
 | `install.sh` | Builds all three binaries; `--hook` installs the pre-commit guard |

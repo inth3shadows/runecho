@@ -50,6 +50,13 @@ accuracy is a separate claim and is held constant here.
   number against an **observed LLM error distribution** comes from the
   captured-LLM corpus (Phase 2), not this scaffold.
 
+## Related measurement
+
+[TOKEN-COST.md](TOKEN-COST.md) measures a different axis: not whether the guard
+CATCHES a hallucination, but what each surface COSTS in context tokens. Same
+posture — it corrected a README overclaim and reports RunEcho's most expensive
+call rather than only its cheapest.
+
 ## Caveats (stated, not buried)
 
 - Synthetic perturbations approximate, but are not, a real model error

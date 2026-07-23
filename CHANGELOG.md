@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.15.2] — 2026-07-23
+
+### Changed
+- triage-check: real i18n Gate-4 run (DECLINE) + the detector fixes it forced (#221)
+
 ## [0.15.1] — 2026-07-23
 
 ### Changed

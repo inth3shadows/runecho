@@ -35,6 +35,16 @@ type decisionRecord struct {
 	Reason       string   `json:"reason"`
 	Symbols      []string `json:"symbols,omitempty"`
 	LearnSymbols []string `json:"learn_symbols,omitempty"`
+	// contract/contractHash are set only on an edit-scope contract ask (#12 D2).
+	// The hash is the contract's content hash AT ACTIVATION, not its hash now:
+	// that is what makes an ask replayable against the exact text that produced
+	// it, and a contract edited mid-session would otherwise leave a log entry
+	// nothing can be checked against. Deliberately NOT carried onto the outcome
+	// record by logOutcomeForFile — approving an out-of-scope edit says the edit
+	// was fine, never that the scope should widen, and there is no learned-allow
+	// analogue here on purpose (a scope that trains itself wider is not a scope).
+	Contract     string `json:"contract,omitempty"`
+	ContractHash string `json:"contract_hash,omitempty"`
 }
 
 // logDecision appends one JSONL line to <storeDir>/decisions.jsonl.

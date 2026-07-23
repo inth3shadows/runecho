@@ -33,6 +33,14 @@
 //	                            Abstains under go.work, behind a replace directive,
 //	                            or when a package is not in the module cache.
 //	                            Default OFF (dogfood gate).
+//	RUNECHO_GUARD_CONTRACT=1   enable #12 D2 edit-scope contracts: ask when an edit
+//	                            lands on a path outside the scope declared by the
+//	                            contract this session activated (runecho-ir
+//	                            contract activate). Abstains entirely with no
+//	                            active contract — which is the default for every
+//	                            session, so this costs one getenv unless opted in.
+//	                            Hook mode only (pre-commit has no session);
+//	                            language-agnostic; ask-posture, fail-open.
 //	RUNECHO_GUARD_DUPLICATE=1  enable E5 duplicate-symbol guard: ask when an edit
 //	                            introduces a symbol definition whose name is
 //	                            already defined in a different file (per the
@@ -456,6 +464,9 @@ func refreshIRForFile(filePath string) (outcome string) {
 // testable without a subprocess; main() passes the real streams.
 func runHookMode(in io.Reader, out io.Writer) int {
 	var payload struct {
+		// SessionID binds an edit to the contract activated for this session
+		// (#12 D2). It is read for no other purpose and is never logged in full.
+		SessionID string `json:"session_id"`
 		ToolName  string `json:"tool_name"`
 		ToolInput struct {
 			FilePath  string   `json:"file_path"`
@@ -494,8 +505,13 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// content to delete. A cheap os.Stat gates this so a Write that CREATES a new or
 	// already-empty file (nothing to delete) keeps the fast early-return instead of
 	// paying a DB open + two file reads on the ~12ms hook budget.
+	// contractEnabled joins this carve-out for the same reason the deletion-side
+	// checks did: truncating an existing file to nothing is a real, destructive
+	// edit, and "wiped a file the session said it would not touch" is exactly
+	// what a scope contract is for. The os.Stat gate still keeps the fast return
+	// for a Write that creates a new or already-empty file.
 	emptyInput := text == "" && removedText == ""
-	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
+	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled() || contractEnabled()) {
 		if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
 			emptyInput = false
 		}
@@ -514,13 +530,34 @@ func runHookMode(in io.Reader, out io.Writer) int {
 
 	lang := guard.LangFor(filePath)
 	if lang == guard.LangUnknown {
+		// Edit-scope contracts (RUNECHO_GUARD_CONTRACT=1, default off; #12 D2)
+		// are the one check that is not about code: they ask whether this file
+		// should be touched at all, which is as answerable for a Markdown doc or
+		// a CI YAML as for a .go file — and scope drift lands in those at least
+		// as often as it lands in source. So this is the single place the check
+		// pays for its own store open; every other edit picks it up from
+		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
+		// session explicitly activated a contract AND the path fell outside it.
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), "", filePath, lang) {
+			return 0
+		}
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", File: filePath, Decision: "defer", Reason: "unknown-lang"})
 		return 0
 	}
 
-	res := lookupSymbolsFor(filepath.Dir(filePath))
+	res := lookupSymbolsFor(filepath.Dir(filePath), filePath, payload.SessionID)
+	cw := res.Contract
 	if !res.OK {
+		// A contract binding resolves off the repo row alone, so it survives the
+		// states that disable symbol validation (no snapshot yet, a store the
+		// binary is too old to read). Answer it rather than defer: the user
+		// declared a scope this session and the answer does not depend on the
+		// index. cw is nil for res.NoRepo by construction — an unenrolled repo
+		// has no binding to find — so that path stays the silent skip it is.
+		if askContractOnly(out, cw, res.RepoName, filePath, lang) {
+			return 0
+		}
 		switch {
 		case res.Warn != "":
 			// Schema-newer: already loud regardless of strict — surfaced always.
@@ -695,6 +732,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 
 	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 {
+		// Every FACT check passed. The contract question is independent of all of
+		// them — a perfectly correct edit to a file the session said it would not
+		// touch is precisely the case this check exists for — so it is answered
+		// here, ahead of the degraded and stale advisories, because an ask is a
+		// stronger signal than either and the hook emits only one decision.
+		if askContractOnly(out, cw, repoName, filePath, lang) {
+			return 0
+		}
 		// Nothing flagged. A degraded deletion-side check means "found nothing"
 		// is not the same as "checked everything" — under strict, say so via
 		// additionalContext (the same posture strict already applies to other
@@ -724,6 +769,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// decisionRecord for why the other categories must be excluded.
 	var syms []string
 	var learnSyms []string
+	// Contract first: "should you be editing this file at all" precedes "do these
+	// names resolve", and reading it the other way round invites fixing the
+	// symbol and re-submitting the same out-of-scope edit.
+	if cw != nil {
+		sb.WriteString(cw.section())
+	}
 	if len(violations) > 0 {
 		fmt.Fprintf(&sb, "[runecho-guard] %d symbol reference(s) not found in the indexed code — possible hallucination:\n", len(violations))
 		for _, v := range violations {
@@ -758,7 +809,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0), Symbols: syms, LearnSymbols: learnSyms})
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0)), Symbols: syms, LearnSymbols: learnSyms}
+	if cw != nil {
+		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
+	}
+	logDecision(rec)
 	return 0
 }
 
@@ -1056,12 +1111,19 @@ func suggestionSuffix(suggestion string) string {
 //     a degraded state, so callers suppress the strict-mode advisory.
 //   - RepoName: set whenever the repo resolved (even if a later step degraded),
 //     so the decision log can attribute the record per-repo.
+//   - Contract: the edit-scope contract warning (#12 D2), or nil to abstain.
+//     It rides along here rather than resolving separately because it needs
+//     only the repo row this function already has, and a second store open
+//     measured ~9.5 ms on the hook's per-edit budget. It is populated even when
+//     OK is false: a repo with no usable index still has a valid contract
+//     binding, and the intent question does not depend on the symbol index.
 type lookupResult struct {
 	Symbols    map[string]struct{}
 	IgnorePath string
 	Latest     time.Time
 	RepoName   string
 	Warn       string
+	Contract   *contractWarning
 	NoRepo     bool
 	OK         bool
 }
@@ -1089,7 +1151,10 @@ func fileExists(p string) bool {
 	return err == nil && !fi.IsDir()
 }
 
-func lookupSymbolsFor(dir string) lookupResult {
+// filePath and sessionID are used only to resolve the edit-scope contract on
+// this function's store open (see lookupResult.Contract); neither affects the
+// symbol lookup, and both are inert unless RUNECHO_GUARD_CONTRACT=1.
+func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 	storeDir, err := runechoDir()
 	if err != nil {
 		return lookupResult{}
@@ -1111,18 +1176,24 @@ func lookupSymbolsFor(dir string) lookupResult {
 
 	repo, repoRoot, resolved := db.ResolveRepo(dir)
 	if !resolved {
-		// Not enrolled — silent skip, not a degraded state.
+		// Not enrolled — silent skip, not a degraded state. No contract either:
+		// a binding is stored per repo, so an unenrolled tree cannot have one.
 		return lookupResult{NoRepo: true}
 	}
 
+	// Resolved before the snapshot and symbol steps so it survives them: an
+	// index that is missing or unreadable says nothing about whether this edit
+	// is inside the scope the session declared.
+	cw := contractWarningWith(db, repo.ID, filePath, sessionID)
+
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return lookupResult{RepoName: repo.Name}
+		return lookupResult{RepoName: repo.Name, Contract: cw}
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return lookupResult{RepoName: repo.Name}
+		return lookupResult{RepoName: repo.Name, Contract: cw}
 	}
 
 	return lookupResult{
@@ -1130,6 +1201,7 @@ func lookupSymbolsFor(dir string) lookupResult {
 		IgnorePath: ignorePathFor(dir, repoRoot),
 		Latest:     snaps[0].Timestamp,
 		RepoName:   repo.Name,
+		Contract:   cw,
 		OK:         true,
 	}
 }

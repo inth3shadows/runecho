@@ -1,0 +1,27 @@
+# Scope for issue #12 D2: the guard dimension.
+#
+# D1 shipped the format, the V9 binding, and the CLI. D2 adds exactly one
+# thing — the PreToolUse check — so the diff should stay inside the guard
+# command. If it reaches internal/, the design drifted: this check is
+# deliberately built out of pieces D1 already provides (contract.InScope,
+# snapshot.GetActiveContract) rather than new library surface.
+name: contracts-d2
+description: #12 D2 — the edit-scope guard dimension (RUNECHO_GUARD_CONTRACT)
+
+cmd/runecho-guard/contract.go
+cmd/runecho-guard/contract_test.go
+
+# The wiring points. A new hook check cannot exist without touching the hook
+# and the record it logs, so these are in scope by necessity, not by drift —
+# and naming them is the point: the reviewer sees exactly which shared files
+# this work was allowed to reach, and any OTHER file in cmd/runecho-guard/
+# still asks.
+cmd/runecho-guard/main.go
+cmd/runecho-guard/declog.go
+
+# The contract declares its own file, otherwise every check reports itself.
+# CHANGELOG.md is deliberately absent: release automation writes it from commit
+# subjects, so a hand-edit here would be drift, not documentation. The flag
+# itself is documented where every other experimental flag is — the package doc
+# in cmd/runecho-guard/main.go.
+.runecho/contracts/**

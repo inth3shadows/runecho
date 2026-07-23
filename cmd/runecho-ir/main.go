@@ -31,6 +31,7 @@ const (
 //	runecho-ir fpreport [--days=30] [--top=15] [--json] [--max-rate=F]
 //	runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]
 //	runecho-ir validate-claims --text=<file> [--ir=<path>]
+//	runecho-ir contract list|show|activate|deactivate|check
 func main() {
 	os.Exit(run())
 }
@@ -120,4 +121,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir contract list | show <name> | activate --session=<id> <name> | deactivate --session=<id>")
+	fmt.Fprintln(os.Stderr, "       runecho-ir contract check [--contract=<name>|--session=<id>] [--base=<ref>] [--dir=<p>]")
 }

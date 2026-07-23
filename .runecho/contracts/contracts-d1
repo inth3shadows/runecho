@@ -5,7 +5,7 @@ name: contracts-d1
 description: #12 D1 — contract format, V9 storage, and the contract CLI
 
 internal/contract/**
-internal/snapshot/contracts.go
+internal/snapshot/contracts*.go
 cmd/runecho-ir/contract.go
 
 # Registration points. A new subcommand cannot be added without touching the

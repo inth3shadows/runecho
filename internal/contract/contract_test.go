@@ -124,3 +124,21 @@ func TestHashTracksExactBytes(t *testing.T) {
 		t.Error("a comment-only edit must change the hash")
 	}
 }
+
+// A glob with a wildcard in the FILE segment must still match only that
+// directory level — `internal/snapshot/contracts*.go` covers contracts.go and
+// contracts_test.go but not a nested file.
+func TestInScope_WildcardFileSegment(t *testing.T) {
+	c := Parse([]byte("internal/snapshot/contracts*.go\n"), "x", "f")
+	cases := map[string]bool{
+		"internal/snapshot/contracts.go":      true,
+		"internal/snapshot/contracts_test.go": true,
+		"internal/snapshot/db.go":             false,
+		"internal/snapshot/sub/contracts.go":  false,
+	}
+	for p, want := range cases {
+		if got := c.InScope(p); got != want {
+			t.Errorf("InScope(%q) = %v, want %v", p, got, want)
+		}
+	}
+}

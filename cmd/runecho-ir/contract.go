@@ -126,7 +126,7 @@ func runContractShow(args []string) int {
 		fmt.Printf("description: %s\n", c.Description)
 	}
 	fmt.Printf("path:        %s\n", c.Path)
-	fmt.Printf("hash:        %s\n", c.Hash[:12])
+	fmt.Printf("hash:        %s\n", shortHashDisplay(c.Hash))
 	fmt.Println("patterns:")
 	for _, p := range c.Patterns {
 		prefix := "  + "
@@ -190,7 +190,7 @@ func runContractActivate(args []string) int {
 		return printErr(err)
 	}
 	fmt.Printf("Activated contract %q for session %s (%d pattern(s), hash %s)\n",
-		c.Name, *session, len(c.Patterns), c.Hash[:12])
+		c.Name, *session, len(c.Patterns), shortHashDisplay(c.Hash))
 	return ExitOK
 }
 
@@ -313,7 +313,7 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	if c.Hash != active.ContentHash {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s changed since activation (%s → %s); checking against the CURRENT file.\n",
-			active.Path, active.ContentHash[:12], c.Hash[:12])
+			active.Path, shortHashDisplay(active.ContentHash), shortHashDisplay(c.Hash))
 	}
 	return c, ExitOK
 }
@@ -334,11 +334,17 @@ func changedPaths(root, base string) ([]string, error) {
 		}
 	}
 	if base != "" {
-		raw, err := gitOutput(root, "diff", "--name-only", base)
+		// Three-dot: compare against the MERGE-BASE of base and HEAD, not base's
+		// tip. Two-dot reports every file that landed on the base branch since
+		// this one was cut as though the current work had touched it — on a
+		// branch a day behind master that is pure noise, and it is noise of
+		// exactly the kind that trains a person to ignore the tool.
+		raw, err := gitOutput(root, "diff", "--name-only", base+"...HEAD")
 		if err != nil {
 			return nil, err
 		}
 		add(raw)
+		sort.Strings(out)
 		return out, nil
 	}
 	// Working tree: tracked modifications, staged changes, and untracked files.
@@ -355,6 +361,17 @@ func changedPaths(root, base string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// shortHashDisplay truncates a hash for display. It does not assume a length:
+// the activation hash is read back from the database, and a hand-edited or
+// truncated row would otherwise panic on a slice bound in the one command whose
+// job is to explain what is happening.
+func shortHashDisplay(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
 }
 
 func gitOutput(dir string, args ...string) ([]byte, error) {

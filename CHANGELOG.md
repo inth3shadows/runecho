@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-23
+
+### Changed
+- parser: add Ruby (.rb) support (#195)
+
 ## [0.10.0] — 2026-07-23
 
 ### Changed

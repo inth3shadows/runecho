@@ -17,8 +17,15 @@ your code actually declares, and a reference to one that doesn't exist stops the
 write and asks you first. ~12 ms, no build, no language server.
 
 It is **model-free and vendor-neutral**: no LLM, no API keys, no network, no
-build, no language server, and ~0 tokens of your context window.
-**The same code produces the same answer.**
+build, no language server. **The same code produces the same answer.**
+
+**The guard costs zero context tokens** — measured, not asserted: a clean check
+writes nothing at all, and only an edit it actually stops costs anything (~100
+tokens). It is a `PreToolUse` hook, so the agent never spends context deciding
+whether to call it. The oracle MCP server is a separate surface and is *not*
+free — its tool schemas cost ~919 tokens at session start, and `structure`
+unscoped is expensive enough to be worth scoping. Every number, including the
+unflattering ones, is in [bench/TOKEN-COST.md](bench/TOKEN-COST.md).
 
 **The scope, stated up front.** RunEcho reads *unqualified* references — bare
 calls, constant references, and type annotations. Measured against its own
@@ -108,7 +115,7 @@ full semantic analysis.
    ```bash
    # example: macOS arm64 — adjust the asset name for your platform.
    # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
-   TAG=v0.14.0; NUM=0.14.0
+   TAG=v0.16.0; NUM=0.16.0
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
@@ -224,6 +231,7 @@ not general-purpose code intelligence.
 
 - [Technical Reference](TECHNICAL.md) — architecture, storage schema, the IR, the MCP tools, maintenance
 - [Usage Guide](USAGE.md) — day-to-day operations: enrolling repos, integrations, reading drift, troubleshooting
+- [Token cost](bench/TOKEN-COST.md) — measured context cost of every surface, including where RunEcho is expensive
 - [Changelog](CHANGELOG.md) — notable changes per release; versioning policy
 
 ## License

@@ -1,0 +1,19 @@
+# Scope for issue #12 D1: the contract format, storage, and CLI.
+# The guard is deliberately NOT touched in D1 — if a diff reaches
+# cmd/runecho-guard/, this contract should flag it.
+name: contracts-d1
+description: #12 D1 — contract format, V9 storage, and the contract CLI
+
+internal/contract/**
+internal/snapshot/contracts*.go
+cmd/runecho-ir/contract.go
+
+# Registration points. A new subcommand cannot be added without touching the
+# dispatcher, and a migration cannot be added without touching the list — so
+# these are in scope by necessity, not by drift. Writing them down is the point:
+# the reviewer sees exactly which shared files this work was allowed to reach.
+cmd/runecho-ir/main.go
+internal/snapshot/db.go
+
+# The contract declares its own file, otherwise every check reports itself.
+.runecho/contracts/**

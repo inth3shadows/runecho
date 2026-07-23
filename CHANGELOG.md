@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-07-23
+
+### Changed
+- contract: edit-scope contracts — format, V9 storage, CLI (#12 D1)
+
 ## [0.12.0] — 2026-07-23
 
 ### Changed

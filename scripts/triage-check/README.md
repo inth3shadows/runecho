@@ -11,16 +11,37 @@ names — is answered the same way, against the same bar, instead of re-argued.
 
 ## Status: prototype
 
-Spiked from the #204 scratchpad probe. It works end-to-end for the one detector
-that ships (`css-custom-properties`) and reproduces #204's result exactly. It is
-a **maintainer tool** — not built, not shipped in the release binaries, no Go
-dependency.
+Spiked from the #204 scratchpad probe. A **maintainer tool** — not built, not
+shipped in the release binaries, no Go dependency.
 
-Known rough edges (deliberately not polished yet — see the spike's pivot note):
+Two detectors ship:
+
+| Detector | Fronts | Class |
+|---|---|---|
+| `css-custom-properties` | stylelint `no-unknown-custom-properties` | `var(--x)` with no declaration. Reproduces #204 exactly (2 findings, both FPs). |
+| `i18n-keys` | nothing (see below) | `t('a.b')` / `i18nKey="a.b"` with no key in any locale catalog. |
+
+**The contract held.** `i18n-keys` is shaped nothing like the CSS detector — a
+JS/TS surface instead of CSS, JSON catalogs instead of CSS declarations,
+dotted-key symbols instead of `--custom-props` — and it plugged into `triage.py`
+with **zero changes** (verified by hash). That was the open question the spike
+named; the plugin boundary (repo path in, `{file,line,symbol}` out, exit codes)
+carried a second, differently-shaped check without special-casing.
+
+**One nuance it surfaced, worth Gate 3's attention:** `i18n-keys` fronts no
+incumbent. The tools that detect this (`i18next-cli`, i18nGuard, i18n-cleaner)
+all need per-project i18n config, so none runs as a config-free sweep. The
+detector therefore does minimal extraction itself — acceptable for *measurement*,
+but a reminder that "front the incumbent" (rubric Gate 3) is an ideal some
+classes can't satisfy, and the shipping check (if the class ever cleared Gate 4)
+should still front a configured tool.
+
+Known rough edges (deliberately not polished — see the spike's pivot note):
 - Hand-classification is a JSON edit (`genuine: null → true/false`) or the
   `--genuine N` shortcut; no interactive classifier.
-- One detector. A second one (e.g. an i18n-key checker) is the real test of
-  whether the plugin contract holds without per-check special-casing.
+- `i18n-keys` is config-free extraction, so it is FP-prone by construction
+  (namespaces, plural suffixes, framework variants) — fine for a measurement
+  detector whose whole job is to surface candidates for hand-classification.
 
 ## Use
 

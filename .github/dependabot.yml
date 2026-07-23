@@ -1,0 +1,27 @@
+# Pinned action SHAs (see .github/workflows/*.yml) are the security fix; this
+# file is what stops them rotting into a permanently stale set. Dependabot
+# rewrites the SHA and the trailing version comment together, so the pins stay
+# both current and readable without anyone hand-resolving refs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      # One PR a month rather than four: these move together and each costs a
+      # full CI run.
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"
+
+  # Go modules are the other half. This audit found a reachable x/text CVE
+  # (GO-2026-5970) that had been fixed upstream for six minor versions; nothing
+  # was watching for it.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"

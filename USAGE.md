@@ -384,7 +384,7 @@ every edit lands regardless and the "approvals" are an artifact, not judgment.
 
 - **`runecho-ir: command not found`** — add `~/.local/bin` to your `PATH`, or
   set `RUNECHO_BIN_DIR` before running `bash install.sh`.
-- **`install.sh: ERROR: Go toolchain not found`** — install Go 1.24+ first, then
+- **`install.sh: ERROR: Go toolchain not found`** — install Go 1.25+ first, then
   rerun `bash install.sh`.
 - **"repo … is not enrolled"** — run `runecho-ir repo add <path>` first, then
   `repo reindex <name>`.

@@ -312,3 +312,55 @@ func TestCache_RelativeHomeIsAbsolutized(t *testing.T) {
 		t.Fatalf("cacheDir() = %q, want an absolute path", dir)
 	}
 }
+
+// TestCache_EntriesAreOwnerOnly pins the memo to the same 0700/0600 discipline as
+// the rest of the store (history.db, decisions.jsonl, ir.json). The parent
+// $RUNECHO_HOME is already 0700, so this is defense-in-depth for a RUNECHO_HOME
+// repointed somewhere more permissive — the case where the old 0755/0644 would
+// have exposed which third-party packages a machine indexes.
+func TestCache_EntriesAreOwnerOnly(t *testing.T) {
+	cache := t.TempDir()
+	writeFile(t, filepath.Join(cache, "example.com", "dep@v1.0.0", "a.go"),
+		"package dep\n\nfunc Alpha() {}\n")
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "go.mod"),
+		"module example.com/app\n\ngo 1.24\n\nrequire example.com/dep v1.0.0\n")
+	t.Setenv("GOMODCACHE", cache)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	if ps := NewGoIndex(repo).Lookup("example.com/dep"); ps.Res != Resolved {
+		t.Fatalf("Res = %v, want Resolved", ps.Res)
+	}
+
+	dir := filepath.Join(home, "depcache")
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat depcache: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("depcache dir mode = %04o, want 0700", perm)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read depcache: %v", err)
+	}
+	var checked int
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatalf("stat %s: %v", e.Name(), err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600", e.Name(), perm)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no memo entry was written; the permission assertion proved nothing")
+	}
+}

@@ -23,11 +23,18 @@ no remote service to compromise.
 
 The central store (`~/.runecho/history.db`, override via `RUNECHO_HOME`) holds,
 per enrolled repo: absolute file paths, SHA-256 content hashes, and symbol
-names/kinds. It does **not** store raw source code or file contents. The
-directory is created `0755` and the guard's decision log
-(`cmd/runecho-guard/declog.go`) is created `0644` — protection is standard Unix
-file permissions on your home directory, not encryption. On a shared/multi-user
-machine, other local users can read (not write) this data by default.
+names/kinds. It does **not** store raw source code or file contents. The store
+directory is created `0700` and its contents `0600` — `history.db` and its
+WAL/SHM sidecars (`internal/snapshot/db.go`), the guard's decision log
+(`cmd/runecho-guard/declog.go`), the learned-allow store, the dependency-export
+cache, and the periodic-reindex log. Protection is standard Unix file
+permissions on your home directory, not encryption: other local users are kept
+out by mode bits, and anything running **as you** has full access.
+
+Opening the store also re-tightens it (`tightenStorePerms`, best-effort), so a
+directory created before these modes existed — or one you made yourself with a
+loose umask — is corrected rather than left as-is. The repo-local `.ai/ir.json`
+working copy is likewise `0700`/`0600`.
 
 ### Execution model — no sandboxing, no privilege separation
 
@@ -58,6 +65,23 @@ parsing are wrapped in `recover()` (`internal/parser/js.go`,
 symbols" instead of crashing the indexer or the long-lived MCP server. RunEcho
 never executes the code it parses — all extraction is static (AST/regex), no
 `eval`, no shelling out to the target language's runtime.
+
+`runecho-guard`'s stdio hook modes are wrapped the same way (`deferOnPanic`,
+`cmd/runecho-guard/main.go`). That wrapper is load-bearing rather than tidy: a
+Go panic exits status 2, which Claude Code reads as *block this tool call* — so
+without it an unexpected panic would flip the guard from fail-open to
+fail-closed and obstruct every subsequent edit. A recovered panic emits nothing
+(the defer response), warns on stderr, and exits 0.
+
+### Repo-controlled text reaching the agent
+
+The guard's `permissionDecisionReason` is read by the agent at a permission
+decision point, so anything interpolated into it is a potential prompt-injection
+vector. Symbol names are constrained to identifiers by the extractor's regexes.
+File **paths** are not — a POSIX file name may contain newlines and arbitrary
+prose — so every repo-derived path is passed through `sanitizeReasonPath`
+(control characters neutralized, length capped) before it reaches that string or
+the pre-commit stderr report.
 
 ### Out of scope
 

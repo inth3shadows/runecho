@@ -36,6 +36,7 @@ the watch list rather than in the positioning.
 | Tool | What it actually does | Fires | Falsifies the claim? |
 |---|---|---|---|
 | **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. Now at v0.5.0 (PyPI, released 2026-04-24; up from v0.4.1) — adds condensed fact-force denials for long sessions on top of the earlier opt-in bughunt gate. Behavior re-confirmed this pass directly from the PyPI project page: it still demands evidence-gathering (importers, schemas, instruction quotes via grep/read), never symbol existence. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails, unchanged by the version bump. |
+| **Anti-Hallucination-MCP** (`Akunimal`) | The nearest neighbour on *substance* — and the first tool found that checks the same thing RunEcho checks. Deterministic, model-free symbol existence: AST extraction via `@ast-grep/napi` for JS/TS/TSX, regex fallback for ~15 more languages, symbols persisted to `.wisdom/symbols.json`, confidence-scored with fuzzy typo matching. Ships a Claude Code hook that its own setup script installs. Also bundles command-output compression (dedup/grouping) — so one repo overlaps both RunEcho *and* terse. | **Post-write** — the installed hook is `PostToolUse` on `Write`/`Edit`; it "warns after every edit", writing to stderr *after* the write has landed | **No — but it is the closest miss on record.** Satisfies conjuncts 3 (symbol existence) and 4 (deterministic, no LLM) outright. Fails 1 and 2: the edit is already on disk when it fires, so it advises rather than denies. Two further concessions RunEcho does not make: a persisted registry that *can* go stale (mitigated by an opt-in `watch_project` watcher, not by re-parsing), and an `ANTIHALL_AUTOFIX=1` mode that rewrites the identifier in place — a repair posture, not a gate. **Its falsification path is one line of JSON** (see watch list). |
 | **Cursor hooks** | Hook surface enumerated in the docs: `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` can allow/deny; `afterFileEdit` / `afterTabFileEdit` are observational only. Re-checked this pass against <https://cursor.com/docs/hooks.md> directly: still no `beforeFileEdit` or equivalent pre-edit-for-native-edits event. | `beforeReadFile` pre-read; native edits **post-write only** | **No — and structurally can't today.** There is no `beforeFileEdit` event, so an edit made with Cursor's *native* edit tool cannot be gated before it lands. (Also relevant to issue #174: a Cursor port could only cover edits routed through shell or an MCP filesystem server, via `beforeShellExecution` / `beforeMCPExecution` — that is partial coverage of the thing agents actually do, not a port.) |
 | **pyright-lsp** (official Anthropic Claude Code plugin) | Runs Pyright and surfaces LSP diagnostics into the conversation as `<new-diagnostics>`. New first-party entrant since the last positioning pass. | After the edit | **No.** Advisory, post-write, Python-only, needs a language server — every one of these is something the moat sentence already concedes to LSPs. Worth watching: it makes "just use an LSP" cheaper inside Claude Code itself. |
 | **Serena** (oraios) | LSP-backed semantic MCP: find-references, rename, symbol-level edits, 40+ languages. | On request, during the loop | **No.** Deeper than RunEcho on every axis except timing and setup; it is a tool the agent *chooses* to call, not a gate that fires whether or not the agent cooperates. |
@@ -43,13 +44,47 @@ the watch list rather than in the positioning.
 | **Cline / Continue / Cody** | No pre-write symbol-validation gate found this round. | — | **No.** Note the evidence here is weaker than for Cursor: Cursor publishes an exhaustive hook list, so its negative is documented; for these the negative is only "not found". |
 | **Shipmoor** | Described as a local deterministic verification layer producing a binding merge verdict. | Merge time | **No.** Wrong end of the pipeline entirely. *Secondary source only — not primary-verified.* |
 
-**Verdict 2026-07-23: the claim holds.** No surveyed tool satisfies all four
-conjuncts, and no new entrant since the last pass does either. Cursor's hook
-surface still cannot host a pre-write edit gate for native edits; GateGuard's
-version bump (0.4.1 → 0.5.0) changed session ergonomics, not what it checks.
+**Verdict 2026-07-23: the claim holds — but by a narrower margin than the last
+pass, and the shape of the field has changed.** No surveyed tool satisfies all
+four conjuncts. Cursor's hook surface still cannot host a pre-write edit gate for
+native edits; GateGuard's version bump (0.4.1 → 0.5.0) changed session
+ergonomics, not what it checks.
+
+What *did* change is that the empty square now has two different tools sitting on
+two different edges of it:
+
+- **GateGuard is the nearest neighbour on timing** — pre-write and blocking
+  (conjuncts 1 and 2), but it never asks whether a symbol exists.
+- **Anti-Hallucination-MCP is the nearest neighbour on substance** —
+  deterministic symbol-existence checking (conjuncts 3 and 4), but only after the
+  write has landed.
+
+Each holds exactly the half of the claim the other is missing. That is a more
+fragile position than "nobody is nearby", and it should be stated that way rather
+than smoothed over: the moat is now the *conjunction*, not the idea. Anyone who
+merges those two halves has a rival, and neither half is hard to build.
+
+Note also that the survey found Anti-Hallucination-MCP only via a GitHub
+code-search for `hallucination symbol claude-code`, which returns exactly two
+repositories: it and RunEcho. Prior passes searched product docs, changelogs and
+the web, which is why a repo that has existed since 2026-05-31 and was pushed to
+three days before this survey was missed. **Add a raw GitHub repo-search to the
+procedure** — the previous method could not see a competitor with no marketing
+surface, which is the exact profile of the most likely rival.
 
 ## Watch list — the credible paths to falsification
 
+- **Anti-Hallucination-MCP moving its hook from `PostToolUse` to `PreToolUse`.**
+  This is now the cheapest path to falsification on the board, and it is not
+  close: the analysis is already deterministic and already symbol-existence-based,
+  so the remaining work is changing the event name in the settings block its
+  setup script writes, and returning a deny decision instead of a stderr warning.
+  Everything the four-conjunct test asks for would then be satisfied. Weigh that
+  against the two things it would still concede — a persisted registry that can
+  lag the working tree, and JS/TS-only AST fidelity with regex elsewhere — but
+  do not mistake those for a moat. **Check this repo's hook wiring every pass,
+  not just its changelog**; it is a 0-star project with no release notes habit,
+  so the change would ship silently.
 - **Khati, Rodriguez-Cardenas, Pantzer & Poshyvanyk (William & Mary, 2026)** —
   *Detecting and Correcting Hallucinations in LLM-Generated Code via Deterministic
   AST Analysis* ([arXiv 2601.19106](https://arxiv.org/abs/2601.19106), submitted
@@ -101,6 +136,25 @@ Quarterly, or immediately if a major harness announces new hook events.
    - `deterministic AST hallucination detection LLM code` — track whether the
      arXiv line of work has shipped a hook
    - Changelogs: GateGuard, Serena, Aider, Cline, Continue.
+   - **Raw GitHub repo search, not just product docs and the web** — the
+     pass that added this bullet missed Anti-Hallucination-MCP for two months
+     because it has no marketing surface to search. (No date here on purpose —
+     this is a permanent procedural note, so it must not move with the survey
+     stamps.) A competitor with 0 stars and no blog post is still a competitor,
+     and is in fact the likeliest profile:
+
+     ```
+     gh api "search/repositories?q=hallucination+symbol+claude-code&sort=updated" \
+       --jq '.items[] | "\(.stargazers_count)★ \(.full_name) pushed=\(.pushed_at[0:10]) — \(.description)"'
+     ```
+
+     As of this pass that query returns exactly two repositories: RunEcho and
+     Anti-Hallucination-MCP. A third appearing is the signal to re-run the full
+     four-conjunct test.
+   - For every candidate that checks symbol existence, **read the hook wiring
+     itself** (`PreToolUse` vs `PostToolUse`, deny vs stderr) rather than the
+     README's adjectives. "Guard", "blocks", and "prevents" are used loosely in
+     this space; the event name is not.
 2. Score each candidate against the four conjuncts above. Three out of four is a
    watch-list entry, not a falsification.
 3. Update the table **and every dated string in both files** — there are more of

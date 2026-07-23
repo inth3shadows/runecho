@@ -197,3 +197,56 @@ func TestRustTypeName(t *testing.T) {
 		}
 	}
 }
+
+// Edge cases found while reviewing the parser. Each line pins a behavior that a
+// plausible alternative implementation would get wrong.
+func TestRustParser_Edges(t *testing.T) {
+	src := `pub fn outer() { fn inner_nested() {} }
+#[cfg(test)]
+mod tests { fn t1() {} }
+extern "C" { fn c_func(); }
+impl Reader { const CAP: u32 = 4; type Out = u8; }
+impl<T> Wrap<T> { pub fn get(&self) -> T { todo!() } }
+impl std::fmt::Display for Reader { fn fmt(&self) -> u8 { 0 } }
+pub(crate) fn crate_vis() {}
+mod a { mod b { pub fn deep() {} } }
+`
+	got, _ := NewRustParser().Parse(src)
+
+	// A fn nested inside another fn's body is not referenceable from outside it;
+	// extracting it as a top-level symbol would let the guard resolve a call to
+	// it from anywhere — a false negative. Function bodies are not walked.
+	if contains(got.Functions, "inner_nested") || contains(got.Functions, "outer.inner_nested") {
+		t.Errorf("fn nested in a body must not be extracted; got %q", got.Functions)
+	}
+	// Generic impl target reduces to its base name.
+	if !contains(got.Functions, "Wrap.get") {
+		t.Errorf("want Wrap.get from impl<T> Wrap<T>; got %q", got.Functions)
+	}
+	// A path-qualified trait impl still keys on the bare type name.
+	if !contains(got.Functions, "Reader.fmt") {
+		t.Errorf("want Reader.fmt from impl std::fmt::Display for Reader; got %q", got.Functions)
+	}
+	// mod nesting composes.
+	if !contains(got.Functions, "a.b.deep") {
+		t.Errorf("want a.b.deep; got %q", got.Functions)
+	}
+	// pub(crate) counts as exported.
+	if !contains(got.Exports, "crate_vis") {
+		t.Errorf("pub(crate) must be exported; got %q", got.Exports)
+	}
+	// An extern "C" signature is a real callable.
+	if !contains(got.Functions, "c_func") {
+		t.Errorf("want c_func from an extern block; got %q", got.Functions)
+	}
+	// Associated items inside an impl are qualified by the impl type.
+	if !contains(got.Classes, "Reader.Out") {
+		t.Errorf("want Reader.Out; got %q", got.Classes)
+	}
+	// const/static land in Exports even without `pub` — Exports is the only
+	// bucket for value symbols, so gating it would drop private consts from the
+	// IR entirely rather than just from the public surface.
+	if !contains(got.Exports, "Reader.CAP") {
+		t.Errorf("non-pub const must still be recorded; got %q", got.Exports)
+	}
+}

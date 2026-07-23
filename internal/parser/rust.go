@@ -35,7 +35,14 @@ import (
 //   - `struct` / `enum` / `trait` / `union` / `type` items → Classes. Rust has no
 //     single "class" concept; these are its named type-defining items, which is
 //     what Classes means in the IR's cross-language vocabulary.
-//   - `const` / `static` items → Exports (located, not hashed — no body).
+//   - `const` / `static` items → Exports (located, not hashed — no body), and
+//     unlike every other item kind, REGARDLESS of `pub`. Exports is the only
+//     bucket FileStructure has for value symbols — there is no Variables list —
+//     so for Rust it doubles as "value symbols", and gating it on `pub` would
+//     drop private consts from the IR entirely rather than merely from the
+//     public surface. That is the exact guard false-negative the
+//     extract-everything rule below exists to prevent, so the cross-language
+//     meaning of Exports is what bends here, not the visibility rule.
 //   - `macro_rules!` definitions → Functions. A macro invocation is written and
 //     read as a call, so a reference to one resolves where a caller expects.
 //
@@ -43,7 +50,8 @@ import (
 // file may define the same name without collapsing.
 //
 // Visibility: unlike the Go parser (which extracts only capitalized names), this
-// extracts ALL items and additionally lists `pub` ones in Exports. Go's
+// extracts ALL items and additionally lists `pub` ones in Exports (except
+// const/static — see above). Go's
 // convention makes unexported names unreferenceable outside the package, so
 // skipping them loses nothing; Rust's does not — a same-crate reference to a
 // private `fn` is ordinary and must still resolve. Dropping non-`pub` items

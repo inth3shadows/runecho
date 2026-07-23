@@ -170,6 +170,7 @@ var migrations = []migration{
 	migrateV6, // 5 → 6: refs table — bare call sites per snapshot file
 	migrateV7, // 6 → 7: refs uniqueness — (file_id, name) enforced by the schema
 	migrateV8, // 7 → 8: symbols.sig_hash — per-symbol body hash for modified-symbol diff
+	migrateV9, // 8 → 9: contracts table — the active edit-scope binding per session
 }
 
 // SchemaVersion is the latest schema version this binary understands.

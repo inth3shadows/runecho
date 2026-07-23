@@ -84,6 +84,8 @@ func run() int {
 			return runTruthTrail(os.Args[2:])
 		case "validate-claims":
 			return runValidateClaims(os.Args[2:])
+		case "contract":
+			return runContract(os.Args[2:])
 		case "--help", "-h", "help":
 			printUsage()
 			return 0

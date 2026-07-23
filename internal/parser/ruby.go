@@ -152,6 +152,12 @@ func rubySymbolsFromAST(source string) (imports, functions, classes, exports []s
 	// very different claims, and conflating them is the direction that hurts:
 	// a consumer would conclude the symbols don't exist. Warn so the gap is
 	// visible, then continue best-effort — a partial tree is still worth walking.
+	//
+	// The warning carries no file path because Parser.Parse does not receive one
+	// — the same limitation the Python and Rust parsers' panic and nest-depth
+	// warnings have. Threading a path through the interface for a warning is not
+	// worth the churn; the generator already prefixes its own per-file warnings
+	// with the path, so this line reads as an unattributed detail next to them.
 	if tree.RootNode().Type(lang) == "ERROR" {
 		fmt.Fprintf(os.Stderr, "runecho: Ruby file did not parse (grammar returned ERROR at root); its symbols are missing, not absent\n")
 	}

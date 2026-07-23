@@ -216,3 +216,71 @@ func TestRubyParser_UnparseableFileDegradesNotPanics(t *testing.T) {
 		t.Error("unparseable input must yield empty slices, not nil")
 	}
 }
+
+// Edge cases found while reviewing the parser. Each pins a behavior a plausible
+// alternative implementation would get wrong.
+func TestRubyParser_Edges(t *testing.T) {
+	src := `class C
+  class << self
+    def meta; end
+  end
+
+  def pub1; end
+  private
+  def priv1; end
+  public
+  def pub2; end
+
+  def outer
+    def nested_runtime; end
+  end
+end
+
+class C
+  def reopened; end
+end
+
+module M
+  private
+end
+class AfterPrivateModule
+  def should_be_public; end
+end
+`
+	got, _ := NewRubyParser().Parse(src)
+
+	// `class << self` is an anonymous singleton class: its defs belong to the
+	// enclosing class, so they must not be dropped or given an invented prefix.
+	if !contains(got.Functions, "C.meta") {
+		t.Errorf("want C.meta from `class << self`; got %q", got.Functions)
+	}
+	// `public` flips visibility back on.
+	if !contains(got.Exports, "C.pub2") {
+		t.Errorf("`public` must re-export following defs; got %q", got.Exports)
+	}
+	if contains(got.Exports, "C.priv1") {
+		t.Errorf("def after `private` must not be exported; got %q", got.Exports)
+	}
+	// A def inside another def's body defines a method at runtime, not statically;
+	// extracting it would let a reference resolve from anywhere.
+	if contains(got.Functions, "C.nested_runtime") || contains(got.Functions, "nested_runtime") {
+		t.Errorf("runtime-nested def must not be extracted; got %q", got.Functions)
+	}
+	// Reopening a class must not duplicate it, and must still pick up new methods.
+	if !contains(got.Functions, "C.reopened") {
+		t.Errorf("want C.reopened from the reopened class; got %q", got.Functions)
+	}
+	seen := 0
+	for _, c := range got.Classes {
+		if c == "C" {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("reopened class C appears %d times, want 1: %q", seen, got.Classes)
+	}
+	// A `private` in one body must not leak into a later sibling body.
+	if !contains(got.Exports, "AfterPrivateModule.should_be_public") {
+		t.Errorf("private leaked across bodies; got %q", got.Exports)
+	}
+}

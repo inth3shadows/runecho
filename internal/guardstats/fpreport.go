@@ -30,6 +30,38 @@ func (b FPBucket) Rate() float64 {
 	return float64(b.Approved) / float64(b.Asks)
 }
 
+// UnknownVersion labels asks from a guard that predates the gv stamp (#207).
+// It is deliberately not inferred from the timestamp: guessing which binary
+// wrote a record and presenting the guess as data is the failure this whole
+// breakdown exists to prevent.
+const UnknownVersion = "unknown"
+
+// FilterVersion returns only the decisions written by guard version gv.
+// UnknownVersion selects records with no version stamp. An empty gv is a no-op
+// (returns decisions unchanged), so callers can pass a flag value straight
+// through without branching.
+//
+// Both asks and outcomes are filtered. An ask and its outcome are written by the
+// same process in the same session, so they always carry the same version and no
+// join is broken by this; the only exception is a binary swapped mid-session,
+// where dropping the orphaned half is the correct conservative result.
+func FilterVersion(decisions []Decision, gv string) []Decision {
+	if gv == "" {
+		return decisions
+	}
+	want := gv
+	if want == UnknownVersion {
+		want = ""
+	}
+	out := make([]Decision, 0, len(decisions))
+	for _, d := range decisions {
+		if d.GV == want {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // RepoCount is one entry in the loudest-repos ranking.
 type RepoCount struct {
 	Repo string `json:"repo"`
@@ -47,11 +79,16 @@ type RepoCount struct {
 // The complement (asks with no approved outcome) mixes true positives the user
 // rejected with asks whose session simply ended before an outcome was recorded.
 type FPStats struct {
-	Since        time.Time
-	Until        time.Time
-	Window       FPBucket
-	ByReason     map[string]FPBucket
-	ByLang       map[string]FPBucket
+	Since    time.Time
+	Until    time.Time
+	Window   FPBucket
+	ByReason map[string]FPBucket
+	ByLang   map[string]FPBucket
+	// ByVersion buckets asks by the guard binary that wrote them (UnknownVersion
+	// for records predating the gv stamp). More than one key means the headline
+	// rate above pools the behaviour of different programs and must not be read
+	// as a measurement of the current guard — see MixedVersions.
+	ByVersion    map[string]FPBucket
 	TopSymbols   []SymbolCount // symbols on APPROVED asks (the FP suspects), ranked
 	LoudestRepos []RepoCount
 	// UnmatchedOutcomes counts "approved" outcome records with no ask they could
@@ -60,6 +97,13 @@ type FPStats struct {
 	// rates above, surfaced rather than hidden.
 	UnmatchedOutcomes int
 }
+
+// MixedVersions reports whether the window's asks came from more than one guard
+// binary. When true, every pooled figure in the report — the headline rate, the
+// by-check and by-language tables, and the most-approved-symbols ranking — is an
+// average across different programs, and a fix shipped partway through the window
+// is invisible in it.
+func (s FPStats) MixedVersions() bool { return len(s.ByVersion) > 1 }
 
 // symbolKey is the join key: the file plus the ask's symbol set, order-
 // independent. The outcome recorder copies the ask's symbols forward verbatim,
@@ -82,9 +126,10 @@ func symbolKey(file string, symbols []string) string {
 // future-dated record from clock skew is kept, and moves Until).
 func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	s := FPStats{
-		Since:    since,
-		ByReason: map[string]FPBucket{},
-		ByLang:   map[string]FPBucket{},
+		Since:     since,
+		ByReason:  map[string]FPBucket{},
+		ByLang:    map[string]FPBucket{},
+		ByVersion: map[string]FPBucket{},
 	}
 
 	// Index approved outcomes by join key. A file may see the same symbol set
@@ -155,6 +200,12 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		reasonBucket.Asks++
 		langBucket := s.ByLang[a.Lang]
 		langBucket.Asks++
+		gv := a.GV
+		if gv == "" {
+			gv = UnknownVersion
+		}
+		verBucket := s.ByVersion[gv]
+		verBucket.Asks++
 		repoAsks[a.Repo]++
 
 		k := symbolKey(a.File, a.Symbols)
@@ -167,12 +218,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			s.Window.Approved++
 			reasonBucket.Approved++
 			langBucket.Approved++
+			verBucket.Approved++
 			for _, sym := range a.Symbols {
 				approvedSymbolFreq[sym]++
 			}
 		}
 		s.ByReason[a.Reason] = reasonBucket
 		s.ByLang[a.Lang] = langBucket
+		s.ByVersion[gv] = verBucket
 	}
 
 	// Any approved outcome not consumed by an ask had no in-window ask to pair to.
@@ -265,6 +318,21 @@ func FormatFP(s FPStats) string {
 		return b.String()
 	}
 
+	// Placed immediately under the headline, before any breakdown: a reader who
+	// stops after the first number must still see that the number is pooled.
+	if s.MixedVersions() {
+		fmt.Fprintf(&b, "\n!! MIXED GUARD VERSIONS — the rate above pools %d different builds.\n", len(s.ByVersion))
+		fmt.Fprintf(&b, "   Every table below is an average across them, so a fix shipped mid-window\n")
+		fmt.Fprintf(&b, "   is invisible here. Re-run with --gv=<version> before acting on any of it.\n")
+	}
+
+	fmt.Fprintf(&b, "\nBy guard version:\n")
+	for _, gv := range sortedFPKeys(s.ByVersion) {
+		bkt := s.ByVersion[gv]
+		fmt.Fprintf(&b, "  %-14s %4d ask  %4d approved  %5.0f%%\n",
+			gv, bkt.Asks, bkt.Approved, 100*bkt.Rate())
+	}
+
 	fmt.Fprintf(&b, "\nBy check (reason):\n")
 	for _, reason := range sortedFPKeys(s.ByReason) {
 		bkt := s.ByReason[reason]
@@ -335,6 +403,13 @@ func PayloadFP(s FPStats) map[string]any {
 			"lang": l, "asks": b.Asks, "approved": b.Approved, "rate": b.Rate(),
 		})
 	}
+	versions := make([]map[string]any, 0, len(s.ByVersion))
+	for _, v := range sortedFPKeys(s.ByVersion) {
+		b := s.ByVersion[v]
+		versions = append(versions, map[string]any{
+			"gv": v, "asks": b.Asks, "approved": b.Approved, "rate": b.Rate(),
+		})
+	}
 	topSymbols := s.TopSymbols
 	if topSymbols == nil {
 		topSymbols = []SymbolCount{}
@@ -349,6 +424,8 @@ func PayloadFP(s FPStats) map[string]any {
 		"overall":            map[string]any{"asks": s.Window.Asks, "approved": s.Window.Approved, "rate": s.Window.Rate()},
 		"by_reason":          reasons,
 		"by_lang":            langs,
+		"by_version":         versions,
+		"mixed_versions":     s.MixedVersions(),
 		"top_symbols":        topSymbols,
 		"loudest_repos":      loudest,
 		"unmatched_outcomes": s.UnmatchedOutcomes,

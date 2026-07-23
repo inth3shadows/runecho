@@ -16,6 +16,20 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- guard: every `decisions.jsonl` record now carries `gv`, the guard binary version
+  that wrote it. `fpreport` groups by it, warns loudly when a window spans more
+  than one build, and takes `--gv <version>` to scope a report to a single one
+  (#207).
+
+### Changed
+- `fpreport --max-rate` no longer evaluates a mixed-version window. It skips with
+  a stderr note naming `--gv`, the same way it already skips below the minimum ask
+  count — gating on an average across two different programs is worse than not
+  gating. Measured motivation: the same log reported a 70% approval rate over 30
+  days and 19% over the trailing 2, because the installed binary had been six
+  releases stale.
+
 ## [0.12.3] — 2026-07-23
 
 ### Changed

@@ -39,7 +39,8 @@ func runFPReport(args []string) int {
 	days := fs.Int("days", 30, "report window in days (1..36500)")
 	top := fs.Int("top", 15, "number of top symbols / repos to show (must be >= 1)")
 	asJSON := fs.Bool("json", false, "machine-readable JSON")
-	maxRate := fs.Float64("max-rate", -1, "FAIL (exit 2) if approval rate exceeds this fraction 0..1; needs >=20 asks; -1 disables")
+	maxRate := fs.Float64("max-rate", -1, "FAIL (exit 2) if approval rate exceeds this fraction 0..1; needs >=20 asks and a single guard version; -1 disables")
+	gv := fs.String("gv", "", "only count decisions written by this guard version (\"unknown\" = records predating version stamping)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
 	}
@@ -75,10 +76,14 @@ func runFPReport(args []string) int {
 	}
 
 	since := time.Now().Add(-time.Duration(*days) * 24 * time.Hour)
-	stats := guardstats.FPReport(decisions, since, *top)
+	stats := guardstats.FPReport(guardstats.FilterVersion(decisions, *gv), since, *top)
 
+	// The gate refuses to evaluate a mixed-version window for the same reason it
+	// refuses a low-volume one: the number it would gate on is not a measurement
+	// of any single program. Skipping loudly beats failing or passing on a pooled
+	// average — CI is told its gate did not run rather than believing it passed.
 	gateOn := *maxRate >= 0
-	gateEligible := gateOn && stats.Window.Asks >= gateMinAsks
+	gateEligible := gateOn && stats.Window.Asks >= gateMinAsks && !stats.MixedVersions()
 	tripped := gateEligible && stats.Window.Rate() > *maxRate
 
 	if *asJSON {
@@ -106,9 +111,16 @@ func runFPReport(args []string) int {
 	// so a --json stdout stays clean for a `| jq` pipeline (which also reads the
 	// gate result from the "gate" object above, not just the exit code).
 	if gateOn && !gateEligible {
-		fmt.Fprintf(os.Stderr,
-			"\nfpreport: gate skipped — %d ask(s), need %d to evaluate --max-rate\n",
-			stats.Window.Asks, gateMinAsks)
+		switch {
+		case stats.MixedVersions():
+			fmt.Fprintf(os.Stderr,
+				"\nfpreport: gate skipped — window spans %d guard versions; pass --gv=<version> to gate one build\n",
+				len(stats.ByVersion))
+		default:
+			fmt.Fprintf(os.Stderr,
+				"\nfpreport: gate skipped — %d ask(s), need %d to evaluate --max-rate\n",
+				stats.Window.Asks, gateMinAsks)
+		}
 	}
 	if tripped {
 		fmt.Fprintf(os.Stderr, "\nFAIL: approval rate %.1f%% exceeds --max-rate %.1f%% (%d asks)\n",

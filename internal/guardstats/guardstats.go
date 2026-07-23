@@ -25,6 +25,7 @@ import (
 // parsed into a time.Time for filtering/sorting.
 type Decision struct {
 	TS       time.Time
+	GV       string // guard binary version that wrote the record; "" for pre-#207 records
 	Mode     string
 	Repo     string
 	File     string
@@ -38,6 +39,7 @@ type Decision struct {
 // import — see package doc). Keep in sync with declog.go's decisionRecord.
 type rawDecision struct {
 	V        int      `json:"v"`
+	GV       string   `json:"gv,omitempty"`
 	TS       string   `json:"ts"`
 	Mode     string   `json:"mode"`
 	Repo     string   `json:"repo,omitempty"`
@@ -71,6 +73,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 				if ts, err := time.Parse(time.RFC3339, raw.TS); err == nil {
 					out = append(out, Decision{
 						TS:       ts,
+						GV:       raw.GV,
 						Mode:     raw.Mode,
 						Repo:     raw.Repo,
 						File:     raw.File,

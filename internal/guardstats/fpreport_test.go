@@ -206,3 +206,76 @@ func TestFPReport_EmptyWindowUntilNotInverted(t *testing.T) {
 		t.Errorf("Until (%v) must not precede Since (%v) on empty data", s.Until, s.Since)
 	}
 }
+
+// TestFPReport_ByCheckSplitsCompoundReasons pins the #209 gate's instrument.
+// askReason joins co-firing checks with "+", and contractReason prefixes
+// "contract+", so ByReason alone spreads one check's rate across several
+// buckets — and the decision on #209 needs the contract check's rate alone.
+func TestFPReport_ByCheckSplitsCompoundReasons(t *testing.T) {
+	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	mk := func(off int, reason, file string, syms []string, dec string) Decision {
+		return Decision{
+			TS: base.Add(time.Duration(off) * time.Second), Mode: "hook",
+			Decision: dec, Reason: reason, File: file, Symbols: syms, Lang: "go",
+		}
+	}
+	decisions := []Decision{
+		// A compound ask, approved: must count once for EACH of its two checks.
+		mk(0, "contract+violations", "a.go", []string{"Alpha"}, "ask"),
+		mk(1, "approved", "a.go", []string{"Alpha"}, "outcome"),
+		// A contract-only ask, not approved.
+		mk(10, "contract", "b.go", []string{"Beta"}, "ask"),
+		// A violations-only ask, not approved.
+		mk(20, "violations", "c.go", []string{"Gamma"}, "ask"),
+	}
+
+	s := FPReport(decisions, base.Add(-time.Hour), 5)
+
+	// ByReason keeps the compound key intact — that co-firing signal is why both
+	// maps exist.
+	if got := s.ByReason["contract+violations"].Asks; got != 1 {
+		t.Errorf("ByReason[contract+violations].Asks = %d, want 1", got)
+	}
+	if _, split := s.ByReason["contract"]; !split {
+		t.Error("ByReason lost the contract-only bucket")
+	}
+
+	// ByCheck is the per-check view: contract fired twice (compound + solo),
+	// violations twice (compound + solo), each with one approval from the
+	// compound ask.
+	for _, tc := range []struct {
+		check          string
+		asks, approved int
+	}{
+		{"contract", 2, 1},
+		{"violations", 2, 1},
+	} {
+		b := s.ByCheck[tc.check]
+		if b.Asks != tc.asks || b.Approved != tc.approved {
+			t.Errorf("ByCheck[%s] = %d ask/%d approved, want %d/%d",
+				tc.check, b.Asks, b.Approved, tc.asks, tc.approved)
+		}
+	}
+
+	// The window total must stay 3: double-counting a compound ask into ByCheck
+	// must not leak into the headline rate.
+	if s.Window.Asks != 3 {
+		t.Errorf("Window.Asks = %d, want 3 — ByCheck must not inflate the total", s.Window.Asks)
+	}
+}
+
+// TestSplitChecks_DropsEmptyTerms: decisions.jsonl is user-writable, so a
+// malformed reason must lose a term rather than invent a nameless check in a
+// report someone is about to make a decision from.
+func TestSplitChecks_DropsEmptyTerms(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"", 0}, {"violations", 1}, {"a+b+c", 3}, {"+violations+", 1}, {"a++b", 2},
+	} {
+		if got := len(splitChecks(tc.in)); got != tc.want {
+			t.Errorf("splitChecks(%q) gave %d terms, want %d", tc.in, got, tc.want)
+		}
+	}
+}

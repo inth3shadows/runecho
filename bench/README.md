@@ -56,3 +56,18 @@ accuracy is a separate claim and is held constant here.
   distribution.
 - Only call-position references are in scope (the guard's own scope).
 - Known-set is declared; end-to-end IR-sourced scoring is a later mode.
+- **The captured corpus can only contain defects the toolchain reports.** Every
+  label in `captured/corpus.json` is grounded in a compiler or runtime error —
+  Go diagnostics, Python `NameError`/`AttributeError`, `tsc TS2304`/`TS2339`.
+  That is what makes the labels trustworthy, and it is also a blind spot: a
+  defect class that **fails silently** can never appear here, no matter how
+  often it occurs. A hallucinated CSS custom property, Tailwind class, i18n
+  key, feature-flag name or env-var name throws nothing — the page just renders
+  wrong.
+
+  So "we searched the corpus and found none" is **not** evidence of absence for
+  those classes; the query was guaranteed to come back empty before it was run.
+  Answering "does RunEcho need to check X?" for a silent-failure X needs a
+  different instrument (run an existing linter over real repos and hand-classify
+  its findings), not this corpus. Recorded because #204 set exactly that query as
+  its decision gate and the null would have read as a finding.

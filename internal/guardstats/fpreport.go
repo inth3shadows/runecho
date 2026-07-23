@@ -83,7 +83,25 @@ type FPStats struct {
 	Until    time.Time
 	Window   FPBucket
 	ByReason map[string]FPBucket
-	ByLang   map[string]FPBucket
+	// ByCheck is ByReason with compound reasons split on "+" and each term
+	// tallied separately, so it answers "what is THIS check's approve-anyway
+	// rate" — which ByReason cannot.
+	//
+	// ByReason buckets the exact logged string, so one ask that fired two checks
+	// lands in its own bucket: "violations", "violations+dangling" and
+	// "contract+violations" are three keys, and the hallucination check's real
+	// rate is spread across all three. contractReason's own doc note says the
+	// arithmetic "has to split on '+' and count terms" — nothing did, and a
+	// gating decision (#209) now depends on the contract check's rate in
+	// isolation. Deriving it by hand across buckets is exactly the kind of step
+	// that gets skipped or done wrong.
+	//
+	// Both are kept: ByReason shows which checks CO-FIRE (a real signal about
+	// noise), ByCheck shows per-check rates. Their ask totals deliberately
+	// disagree — a compound ask counts once per term here — so ByCheck must
+	// never be summed to a window total.
+	ByCheck map[string]FPBucket
+	ByLang  map[string]FPBucket
 	// ByVersion buckets asks by the guard binary that wrote them (UnknownVersion
 	// for records predating the gv stamp). More than one key means the headline
 	// rate above pools the behaviour of different programs and must not be read
@@ -128,6 +146,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	s := FPStats{
 		Since:     since,
 		ByReason:  map[string]FPBucket{},
+		ByCheck:   map[string]FPBucket{},
 		ByLang:    map[string]FPBucket{},
 		ByVersion: map[string]FPBucket{},
 	}
@@ -198,6 +217,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		s.Window.Asks++
 		reasonBucket := s.ByReason[a.Reason]
 		reasonBucket.Asks++
+		// One ask can fire several checks; askReason joins them with "+".
+		// Tally each term so a per-check rate exists without hand arithmetic.
+		checks := splitChecks(a.Reason)
+		for _, c := range checks {
+			bkt := s.ByCheck[c]
+			bkt.Asks++
+			s.ByCheck[c] = bkt
+		}
 		langBucket := s.ByLang[a.Lang]
 		langBucket.Asks++
 		gv := a.GV
@@ -217,6 +244,11 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			usedOutcomes++
 			s.Window.Approved++
 			reasonBucket.Approved++
+			for _, c := range checks {
+				bkt := s.ByCheck[c]
+				bkt.Approved++
+				s.ByCheck[c] = bkt
+			}
 			langBucket.Approved++
 			verBucket.Approved++
 			for _, sym := range a.Symbols {
@@ -340,6 +372,13 @@ func FormatFP(s FPStats) string {
 			reason, bkt.Asks, bkt.Approved, 100*bkt.Rate())
 	}
 
+	fmt.Fprintf(&b, "\nBy check (split, one ask counted once per check it fired):\n")
+	for _, c := range sortedFPKeys(s.ByCheck) {
+		bkt := s.ByCheck[c]
+		fmt.Fprintf(&b, "  %-28s %4d ask  %4d approved  %5.0f%%\n",
+			c, bkt.Asks, bkt.Approved, 100*bkt.Rate())
+	}
+
 	fmt.Fprintf(&b, "\nBy language:\n")
 	for _, lang := range sortedFPKeys(s.ByLang) {
 		bkt := s.ByLang[lang]
@@ -396,6 +435,13 @@ func PayloadFP(s FPStats) map[string]any {
 			"reason": r, "asks": b.Asks, "approved": b.Approved, "rate": b.Rate(),
 		})
 	}
+	checks := make([]map[string]any, 0, len(s.ByCheck))
+	for _, c := range sortedFPKeys(s.ByCheck) {
+		b := s.ByCheck[c]
+		checks = append(checks, map[string]any{
+			"check": c, "asks": b.Asks, "approved": b.Approved, "rate": b.Rate(),
+		})
+	}
 	langs := make([]map[string]any, 0, len(s.ByLang))
 	for _, l := range sortedFPKeys(s.ByLang) {
 		b := s.ByLang[l]
@@ -423,6 +469,7 @@ func PayloadFP(s FPStats) map[string]any {
 		"until":              s.Until,
 		"overall":            map[string]any{"asks": s.Window.Asks, "approved": s.Window.Approved, "rate": s.Window.Rate()},
 		"by_reason":          reasons,
+		"by_check":           checks,
 		"by_lang":            langs,
 		"by_version":         versions,
 		"mixed_versions":     s.MixedVersions(),
@@ -430,4 +477,26 @@ func PayloadFP(s FPStats) map[string]any {
 		"loudest_repos":      loudest,
 		"unmatched_outcomes": s.UnmatchedOutcomes,
 	}
+}
+
+// splitChecks breaks a logged ask reason into the individual checks that fired.
+// askReason (cmd/runecho-guard/dangling.go) joins them with "+", and
+// contractReason prefixes "contract+", so "contract+violations+dangling" is
+// three checks, not one exotic one.
+//
+// Empty terms are dropped rather than becoming a "" bucket: a malformed reason
+// should lose a term, never invent a nameless check that shows up in a report
+// someone is about to make a decision from.
+func splitChecks(reason string) []string {
+	if reason == "" {
+		return nil
+	}
+	parts := strings.Split(reason, "+")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

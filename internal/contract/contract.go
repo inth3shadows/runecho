@@ -117,8 +117,33 @@ func splitHeader(line string) (string, string, bool) {
 	return k, strings.TrimSpace(line[i+1:]), true
 }
 
-// Load reads a contract file from disk.
+// MaxContractBytes caps the contract file Load will read. A scope declaration is
+// a handful of glob lines — a few hundred bytes — so 64 KiB is already two orders
+// of magnitude of headroom, and anything past it is not a contract someone wrote
+// by hand.
+//
+// The cap exists because D2 (#206) moved this read onto the PreToolUse hot path:
+// in D1 Load ran once per CLI invocation, where an unbounded read costs nothing
+// anyone notices. It now runs on EVERY edit for a session with an active
+// contract, and every other read on that path is already bounded (readFileLines
+// at 2 MiB, wholeFileText at its own limit). The asymmetry, not the file, is the
+// defect (#210).
+const MaxContractBytes = 64 << 10
+
+// Load reads a contract file from disk. A file larger than MaxContractBytes is
+// an error rather than a truncated parse: the guard's caller treats any Load
+// error as abstain, so over-cap degrades to "no contract" — the same fail-open
+// posture as a missing file or a degraded store. Truncating instead would be
+// worse than abstaining, because a half-read contract silently narrows scope and
+// would flag in-scope edits as violations.
 func Load(p string) (Contract, error) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return Contract{}, fmt.Errorf("stat contract %s: %w", p, err)
+	}
+	if fi.Size() > MaxContractBytes {
+		return Contract{}, fmt.Errorf("contract %s is %d bytes, over the %d-byte cap", p, fi.Size(), MaxContractBytes)
+	}
 	src, err := os.ReadFile(p)
 	if err != nil {
 		return Contract{}, fmt.Errorf("read contract %s: %w", p, err)

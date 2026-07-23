@@ -62,7 +62,16 @@ Known incumbents by segment (extend as found):
 | CSS custom properties (`var(--x)` undeclared) | stylelint `no-unknown-custom-properties` (+ `referenceFiles`) |
 | Tailwind utility classes | `eslint-plugin-tailwindcss` → `no-custom-classname` |
 | Design tokens in JS/TS theme objects | `@lapidist/design-lint` |
+| i18n keys (`t('a.b')` with no catalog entry) | `i18next-cli --ci` / i18nGuard / i18n-cleaner — **all require per-project config**, so none is a config-free sweep |
 | Package existence (slopsquatting) | out of scope — package registry, not in-repo (see competitive map) |
+
+**Not every class has a config-free incumbent.** The i18n row above is the
+example: the detectors all need to be told where the locales live and which
+framework is in use. When that is true, `scripts/triage-check/` may front a
+minimal self-extraction detector for the *measurement* (that is what its
+`i18n-keys` detector does), but the check RunEcho would *ship* should still front
+a configured incumbent — self-extraction has a higher FP floor than a tool that
+knows the project's i18n layout.
 
 ## Gate 4 — Evidence, measured (the bar that #175 and #204 failed)
 

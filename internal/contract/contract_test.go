@@ -67,6 +67,25 @@ func TestInScope_EmptyContractAllowsNothing(t *testing.T) {
 	}
 }
 
+// HasPositive distinguishes a contract that can enforce from one that is inert.
+// A negation-only contract parses to a non-empty Patterns slice but still puts
+// nothing in scope, so len(Patterns) is the wrong test for "should abstain"
+// (#234): HasPositive is.
+func TestHasPositive(t *testing.T) {
+	cases := map[string]bool{
+		"name: empty\n":                         false, // no patterns
+		"!internal/**\n":                        false, // negation only
+		"!internal/**\n!cmd/**\n":               false, // several negations, still no positive
+		"internal/**\n":                         true,
+		"internal/**\n!internal/**/*_test.go\n": true, // positive + negation carve-out
+	}
+	for body, want := range cases {
+		if got := Parse([]byte(body), "x", "f").HasPositive(); got != want {
+			t.Errorf("HasPositive(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
+
 // A glob containing a colon must not be swallowed as a `key: value` header, and
 // a header appearing after globs is treated as a glob (headers are prefix-only).
 func TestParse_ColonGlobIsNotAHeader(t *testing.T) {

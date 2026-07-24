@@ -103,13 +103,14 @@ func (cw *contractWarning) section() string {
 //     nudge. A user who did not activate a contract must never see this check;
 //  5. the contract file is gone or unreadable — fail-open. A deleted contract
 //     must not start asking about every edit;
-//  6. the contract declares no patterns. This DIVERGES from
-//     contract.InScope, which treats an empty contract as "nothing is in scope"
-//     so `runecho-ir contract check` reports the unfinished declaration loudly.
+//  6. the contract has no POSITIVE pattern — empty, or negation-only like
+//     `!internal/**` (see Contract.HasPositive). Either way it puts nothing in
+//     scope for any path. This DIVERGES from contract.InScope, which reports the
+//     unfinished declaration loudly so `runecho-ir contract check` surfaces it.
 //     That is right for a command you ran on purpose and read once; in the hook
 //     the same rule would ask on every edit for the rest of the session, which
 //     is exactly how a guard earns being switched off. The CLI is where an
-//     unfinished contract gets surfaced;
+//     unfinished contract gets surfaced (#234);
 //  7. the edited path is not absolute, or sits outside the repo root the
 //     contract was authored against (a different worktree, a different repo) —
 //     the globs say nothing about it, so neither does this check.
@@ -166,7 +167,12 @@ func contractWarningWith(db *snapshot.DB, repoID int64, repoName, filePath, sess
 		return nil
 	}
 	c, err := contract.Load(active.Path)
-	if err != nil || len(c.Patterns) == 0 {
+	// HasPositive subsumes the empty-contract case: a contract with no positive
+	// pattern (empty, or negation-only like `!internal/**`) puts nothing in scope
+	// for any path, so InScope would fire on EVERY edit for the whole session.
+	// That is the "noise that trains a person to switch the tool off" the abstain
+	// exists to prevent, so it abstains the same way an empty contract does (#234).
+	if err != nil || !c.HasPositive() {
 		return nil
 	}
 	root := contractRepoRoot(active.Path)

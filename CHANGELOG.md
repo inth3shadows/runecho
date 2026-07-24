@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.5] — 2026-07-24
+
+### Changed
+- fix: fold guard-freshness auto-reinstall into installHooks (#228) (#232)
+
 ## [0.17.4] — 2026-07-24
 
 ### Changed

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.6] — 2026-07-24
+
+### Changed
+- fix: canonicalize guard version stamp so one release is one bucket (#233) (#237)
+
 ## [0.17.5] — 2026-07-24
 
 ### Changed

@@ -56,6 +56,14 @@ func TestInstallShipsEveryGrammarTag(t *testing.T) {
 		}
 	}
 
+	// No THIRD copy. install.sh is canonical and .goreleaser.yaml is a checked
+	// mirror (YAML cannot compute one). Anything else that builds a binary must
+	// DERIVE the list, not restate it — scripts/agent-eval/audit.sh carried its
+	// own stale five-grammar copy, so any eval it ran over Rust or Ruby measured
+	// a parser that indexed those languages to nothing and reported it as a
+	// result. A test that only compares the two known copies cannot see a third.
+	assertDerivesTags(t, filepath.Join("..", "..", "scripts", "agent-eval", "audit.sh"))
+
 	// The two channels must also agree with EACH OTHER. A tag present in one and
 	// absent from the other means two builds of the same version behave
 	// differently, which is worse than both being wrong: it is unreproducible.
@@ -152,5 +160,19 @@ func TestASTGrammarsLoad(t *testing.T) {
 	}
 	if pythonLanguage() == nil {
 		t.Error("python grammar is nil under these build tags — .py files index to nothing")
+	}
+}
+
+// assertDerivesTags fails if a build script restates the grammar tag list
+// literally instead of reading it from install.sh.
+func assertDerivesTags(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v — this check must not skip quietly", path, err)
+	}
+	if regexp.MustCompile(`GRAMMAR_TAGS="grammar_subset`).Match(raw) {
+		t.Errorf("%s hardcodes its own grammar tag list; derive it from install.sh instead "+
+			"(a third copy is a third thing to forget when a parser is added)", path)
 	}
 }

@@ -160,3 +160,51 @@ func TestDuplicate_ConstrainedVsUnconstrainedStillAsks(t *testing.T) {
 		t.Errorf("reason should name the colliding symbol:\n%s", d.Hook.PermissionReason)
 	}
 }
+
+// An unreadable candidate must not masquerade as a definite "constrained".
+// The candidate path comes from the snapshot index, so it can name a file that
+// has since been deleted; silently treating that as a complementary build pair
+// would swallow a real duplicate warning with no trace. dropConstrained reports
+// it, and checkDuplicateDefs folds it into queryErrs so the hook's degraded
+// accounting sees it (#138: a suppressed check must never be indistinguishable
+// from a clean pass).
+func TestGoFileConstrained_UnreadableIsUnknownNotConstrained(t *testing.T) {
+	top := t.TempDir()
+
+	// Present and unconstrained.
+	plain := filepath.Join(top, "lock.go")
+	if err := os.WriteFile(plain, []byte("package store\n\nfunc F() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if constrained, known := goFileConstrained(top, "lock.go"); constrained || !known {
+		t.Errorf("readable unconstrained file = (%v, %v), want (false, true)", constrained, known)
+	}
+
+	// Present and constrained by header.
+	if err := os.WriteFile(filepath.Join(top, "lock_other.go"),
+		[]byte("//go:build !unix\n\npackage store\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if constrained, known := goFileConstrained(top, "lock_other.go"); !constrained || !known {
+		t.Errorf("tagged file = (%v, %v), want (true, true)", constrained, known)
+	}
+
+	// Absent: unknown, NOT constrained.
+	if constrained, known := goFileConstrained(top, "vanished.go"); constrained || known {
+		t.Errorf("missing file = (%v, %v), want (false, false)", constrained, known)
+	}
+
+	// A filename constraint needs no read at all, so it stays knowable even when
+	// the file is gone — that is what keeps the common _windows.go case free.
+	if constrained, known := goFileConstrained(top, "lock_windows.go"); !constrained || !known {
+		t.Errorf("missing but name-constrained = (%v, %v), want (true, true)", constrained, known)
+	}
+
+	kept, unknown := dropConstrained(top, []string{"lock.go", "lock_other.go", "vanished.go"})
+	if len(kept) != 1 || kept[0] != "lock.go" {
+		t.Errorf("kept = %v, want [lock.go]", kept)
+	}
+	if unknown != 1 {
+		t.Errorf("unknown = %d, want 1 — an unreadable candidate must be counted, not silently dropped", unknown)
+	}
+}

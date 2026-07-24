@@ -144,8 +144,14 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string, s
 	defer db.Close()
 
 	// Resolve the repo root only when the edited file is constrained — the
-	// common unconstrained edit pays nothing, and a root we cannot resolve
-	// means candidate files cannot be read, so fall back to prior behavior.
+	// common unconstrained edit pays nothing.
+	//
+	// A root we cannot resolve disables the suppression entirely rather than
+	// suppressing everything: the two "cannot tell" paths in this function
+	// deliberately resolve in OPPOSITE directions. Failing to resolve the root
+	// affects every candidate at once, so defaulting it to silence could mute the
+	// check wholesale; failing to read ONE candidate affects only that candidate,
+	// and is counted (see dropConstrained) rather than passed off as clean.
 	top := ""
 	if selfConstrained {
 		if t, err := gitutil.TopLevel(dir); err == nil {
@@ -163,7 +169,9 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string, s
 		}
 		others := duplicateCandidates(excludeSelf(paths, self), self)
 		if selfConstrained {
-			others = dropConstrained(top, others)
+			var unknown int
+			others, unknown = dropConstrained(top, others)
+			queryErrs += unknown
 		}
 		if len(others) > 0 {
 			if len(others) > maxDuplicateLocations {
@@ -296,33 +304,46 @@ var goarchNames = map[string]bool{
 // dropConstrained removes candidate files that are themselves build-constrained.
 // Only ever called when the edited file is constrained too, so what it removes
 // is exactly the both-constrained pair described above.
-func dropConstrained(top string, others []string) []string {
-	var out []string
+//
+// unknown counts candidates whose constraint could not be determined because the
+// file could not be read. Those are dropped — on this path "cannot tell" resolves
+// toward silence rather than toward an ask the decision log says is wrong — but
+// dropping one is a suppressed warning, and this file's own discipline (#138) is
+// that a suppressed check must never be indistinguishable from a clean pass. The
+// caller folds unknown into queryErrs so it surfaces as degraded.
+func dropConstrained(top string, others []string) (kept []string, unknown int) {
 	for _, o := range others {
-		if !goFileConstrained(top, o) {
-			out = append(out, o)
+		constrained, known := goFileConstrained(top, o)
+		switch {
+		case !known:
+			unknown++
+		case !constrained:
+			kept = append(kept, o)
 		}
 	}
-	return out
+	return kept, unknown
 }
 
 // goFileConstrained reports whether the repo-relative Go file at rel is built
-// only under some constraint. An unreadable file counts as constrained: the
-// caller has already established that the edited file is constrained, and on
-// that path "cannot tell" resolves toward silence rather than toward an ask the
-// decision log says is wrong.
-func goFileConstrained(top, rel string) bool {
+// only under some constraint, and whether that could be determined at all.
+//
+// known is false when the file cannot be opened. That is not merely theoretical:
+// the candidate path comes from the snapshot index, so it may have been deleted
+// since indexing, and a repo whose enrolled source root differs from its git
+// top-level would resolve it against the wrong base. Reporting it as a definite
+// "constrained" would silently swallow a real duplicate warning.
+func goFileConstrained(top, rel string) (constrained, known bool) {
 	if goFilenameConstrained(rel) {
-		return true
+		return true, true
 	}
 	f, err := os.Open(filepath.Join(top, filepath.FromSlash(rel)))
 	if err != nil {
-		return true
+		return false, false
 	}
 	defer f.Close()
 	head := make([]byte, maxBuildHeaderBytes)
 	n, _ := io.ReadFull(f, head)
-	return goBuildTagged(string(head[:n]))
+	return goBuildTagged(string(head[:n])), true
 }
 
 // isTestFile reports whether a path is a test file for its language — the class

@@ -25,12 +25,6 @@ install time from `git describe --tags` (see `install.sh`).
   default call must now pass `detail=hashes`**, a new tier returning the previous
   shape exactly. No files, symbols, kinds, lines or refs changed (#224).
 
-### Added
-- `install.sh --hook-auto-install` installs `githooks/post-merge` as both
-  `post-merge` and `post-checkout`, rebuilding `$BIN_DIR` when the source moves to
-  a newer release tag. Opt out with `RUNECHO_NO_AUTO_INSTALL=1`; pair with
-  `--no-build` to install hooks without a Go toolchain.
-
 ## [0.17.0] — 2026-07-24
 
 ### Changed

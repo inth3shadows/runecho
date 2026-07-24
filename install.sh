@@ -14,10 +14,6 @@
 #                                      # (fallback; the plugin is the preferred wiring)
 #   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
 #                                        # (this repo's own release safety net, #51/#63)
-#   bash install.sh --hook-auto-install # keep the INSTALLED binaries in step with
-#                                        # the source on merge/checkout
-#   bash install.sh --hook-auto-install --no-build   # install the hook only; needs
-#                                        # no Go toolchain and skips the build
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
@@ -35,12 +31,6 @@
 # githooks/pre-push (rejects a non-monotonic vX.Y.Z tag push) into the repo you
 # invoke it from. Relevant to runecho maintainers/forks cutting tags, not to
 # consumers of the oracle.
-#
-# --hook-auto-install is likewise a maintainer hook: it installs githooks/post-merge
-# as both post-merge and post-checkout, so the binaries in $BIN_DIR are rebuilt
-# whenever the source moves to a newer release tag. Without it the guard silently
-# runs an old build while a newer one ships, which is how three of one session's
-# quality readings turned out to be fossils.
 
 set -euo pipefail
 
@@ -55,16 +45,12 @@ INSTALL_HOOK=0
 FORCE_HOOK=0
 PRINT_HOOK_CONFIG=0
 INSTALL_PRE_PUSH=0
-INSTALL_AUTO=0
-SKIP_BUILD=0
 for arg in "$@"; do
   case "$arg" in
     --hook)  INSTALL_HOOK=1 ;;
     --force) FORCE_HOOK=1 ;;
     --print-hook-config) PRINT_HOOK_CONFIG=1 ;;
     --hook-pre-push) INSTALL_PRE_PUSH=1 ;;
-    --hook-auto-install) INSTALL_AUTO=1 ;;
-    --no-build) SKIP_BUILD=1 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -134,12 +120,7 @@ CFG
   exit 0
 fi
 
-# --no-build installs hooks only. Like --print-hook-config above, that needs no
-# Go toolchain and no compile — and it keeps the hook-collision tests from
-# rebuilding three binaries just to reach a filesystem check.
-if [ "$SKIP_BUILD" -eq 0 ]; then
-  command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
-fi
+command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
 
 # The Python and JS/TS symbol parsers use a pure-Go (CGO-free) tree-sitter
 # runtime. Its grammar package can embed all ~206 grammars (~20MB); these build
@@ -158,18 +139,14 @@ GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript gra
 RUNECHO_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 VERSION_LDFLAGS="-X github.com/inth3shadows/runecho/internal/version.Version=$RUNECHO_VERSION"
 
-if [ "$SKIP_BUILD" -eq 1 ]; then
-  echo "Skipping the build (--no-build); installing hooks only."
-else
-  for cmd in runecho-ir runecho-mcp runecho-guard; do
-    echo "Building $cmd..."
-    go build -tags "$GRAMMAR_TAGS" -ldflags "$VERSION_LDFLAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
-    echo "  Built: $BIN_DIR/$cmd$EXE"
-  done
+for cmd in runecho-ir runecho-mcp runecho-guard; do
+  echo "Building $cmd..."
+  go build -tags "$GRAMMAR_TAGS" -ldflags "$VERSION_LDFLAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
+  echo "  Built: $BIN_DIR/$cmd$EXE"
+done
 
-  echo ""
-  echo "RunEcho install complete. Central store lives at ~/.runecho/history.db."
-fi
+echo ""
+echo "RunEcho install complete. Central store lives at ~/.runecho/history.db."
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -240,64 +217,6 @@ if [ "$INSTALL_PRE_PUSH" -eq 1 ]; then
   echo "Pre-push tag-monotonicity hook installed: $PP_HOOK_FILE"
   echo "  Rejects a vX.Y.Z tag push that isn't semver-greater than the highest"
   echo "  existing tag (see issue #51). Only relevant if you cut releases here."
-fi
-
-# --hook-auto-install: rebuild the installed binaries whenever the source moves
-# to a newer release tag. Installed as BOTH post-merge and post-checkout from one
-# tracked script — those are the two moments a worktree picks up a newer master,
-# and post-checkout additionally covers `git worktree add`. Same git-common-dir
-# reasoning as --hook-pre-push: one install covers every worktree of the repo.
-if [ "$INSTALL_AUTO" -eq 1 ]; then
-  echo ""
-  COMMON_DIR="$(git -C "$INVOKE_DIR" rev-parse --git-common-dir 2>/dev/null)" || {
-    echo "install.sh: ERROR: --hook-auto-install requires a git repository in the directory you ran it from." >&2
-    exit 1
-  }
-  case "$COMMON_DIR" in
-    /*) ;;
-    *) COMMON_DIR="$INVOKE_DIR/$COMMON_DIR" ;;
-  esac
-  AI_HOOK_DIR="$COMMON_DIR/hooks"
-  mkdir -p "$AI_HOOK_DIR"
-
-  # Validate BOTH targets before copying EITHER. Interleaving the checks with the
-  # copies would install post-merge and then abort on a foreign post-checkout,
-  # leaving half a hook behind an error message that reads as "nothing happened".
-  for name in post-merge post-checkout; do
-    target="$AI_HOOK_DIR/$name"
-    if [ -f "$target" ] && [ "$FORCE_HOOK" -eq 0 ]; then
-      # The marker is the tracked script's own opt-out variable, so an already
-      # installed copy is recognised regardless of which hook name it landed as.
-      if ! grep -q "RUNECHO_NO_AUTO_INSTALL" "$target" 2>/dev/null; then
-        echo "install.sh: ERROR: $target already exists and is not this repo's auto-install hook." >&2
-        echo "  Use --force to overwrite, or inspect and integrate manually." >&2
-        echo "  No auto-install hook was written." >&2
-        exit 1
-      fi
-    fi
-  done
-  for name in post-merge post-checkout; do
-    target="$AI_HOOK_DIR/$name"
-    # Bake the install-time BIN_DIR into the copy. BIN_DIR was already rejected
-    # above if it contains a shell metacharacter, so single-quoting it here is
-    # safe — the same rule --hook relies on for the pre-commit hook it generates.
-    sed "s|^BIN_DIR_DEFAULT=.*|BIN_DIR_DEFAULT='$BIN_DIR'|" \
-      "$SCRIPT_DIR/githooks/post-merge" > "$target"
-    chmod +x "$target"
-    echo "Auto-install hook installed: $target"
-  done
-  # git only runs hooks from core.hooksPath when that is set, so writing to the
-  # common dir would install a hook that can never fire. husky, lefthook and
-  # pre-commit all set it. Say so rather than printing a success the operator
-  # would reasonably read as "staleness is handled now".
-  configured_hooks_path="$(git -C "$INVOKE_DIR" config --get core.hooksPath 2>/dev/null || true)"
-  if [ -n "$configured_hooks_path" ]; then
-    echo "install.sh: WARNING: this repo sets core.hooksPath=$configured_hooks_path," >&2
-    echo "  so git will NOT run the hooks just written to $AI_HOOK_DIR." >&2
-    echo "  Copy them into $configured_hooks_path, or chain them from the hooks there." >&2
-  fi
-  echo "  Rebuilds \$BIN_DIR binaries when the source moves to a newer release tag."
-  echo "  No-op otherwise; never fails the git operation. Opt out: RUNECHO_NO_AUTO_INSTALL=1"
 fi
 
 cat <<EOF

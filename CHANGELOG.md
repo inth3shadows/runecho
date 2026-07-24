@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.8] — 2026-07-24
+
+### Changed
+- contract: abstain on a negation-only contract instead of asking on every edit (#234) (#239)
+
 ## [0.17.7] — 2026-07-24
 
 ### Changed

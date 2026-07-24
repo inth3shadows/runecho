@@ -46,6 +46,10 @@ func hookFixture(t *testing.T, tag, installedVer string) (repo, marker string) {
 	// marker is what distinguishes "reinstalled" from "no-op" in every case below.
 	write(t, filepath.Join(repo, "install.sh"), "#!/usr/bin/env bash\ntouch '"+marker+"'\n")
 	write(t, filepath.Join(repo, "README.md"), "fixture\n")
+	// The hook identifies the runecho tree by module path before it will run that
+	// tree's install.sh, so the fixture must look like one. TestAutoInstall
+	// Hook_RefusesForeignRepo overwrites this to prove the check bites.
+	write(t, filepath.Join(repo, "go.mod"), "module github.com/inth3shadows/runecho\n\ngo 1.25\n")
 
 	run("git", "init", "-q")
 	run("git", "add", "-A")
@@ -84,7 +88,13 @@ func runHookScript(t *testing.T, repo string, env []string, args ...string) stri
 	}
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Dir = repo
-	cmd.Env = append(append(os.Environ(), "RUNECHO_BIN_DIR="+filepath.Join(repo, "bin")), env...)
+	// RUNECHO_NO_AUTO_INSTALL is the documented opt-out, so a maintainer may well
+	// have it exported in their shell profile. Inheriting it would make every
+	// positive case below pass vacuously — the hook would exit before doing
+	// anything. Clear it in the base env; a case that wants it passes it in env.
+	cmd.Env = append(append(os.Environ(),
+		"RUNECHO_BIN_DIR="+filepath.Join(repo, "bin"),
+		"RUNECHO_NO_AUTO_INSTALL="), env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("hook exited non-zero (%v) — it must never fail the git operation:\n%s", err, out)
@@ -238,7 +248,10 @@ func TestInstallScript_CollisionInstallsNothing(t *testing.T) {
 			}
 			write(t, filepath.Join(hooks, foreign), "#!/bin/sh\necho someone-elses-hook\n")
 
-			cmd := exec.Command("bash", installer, "--hook-auto-install")
+			// --no-build: this test only exercises the hook-collision check, and
+			// without it install.sh compiles all three binaries first — 2.5s per
+			// invocation, and a Go toolchain requirement for a filesystem test.
+			cmd := exec.Command("bash", installer, "--hook-auto-install", "--no-build")
 			cmd.Dir = repo
 			// install.sh always builds the binaries before touching hooks, and it
 			// defaults to $HOME/.local/bin. Without this the test would overwrite
@@ -262,5 +275,89 @@ func TestInstallScript_CollisionInstallsNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The hook installs into whatever repo `install.sh` was invoked from — the README
+// tells users to run --hook and --hook-pre-push from the TARGET repo's root — so
+// it can land in a tree that is not runecho and whose install.sh belongs to some
+// other project. Running that on every merge would be both wrong and unbounded:
+// a foreign installer never moves runecho's version, so the behind-check stays
+// true and it re-executes forever. The module path is the identity check.
+func TestAutoInstallHook_RefusesForeignRepo(t *testing.T) {
+	repo, marker := hookFixture(t, "v0.17.0", "v0.16.1")
+	// Same shape as a real runecho tree except the module path.
+	write(t, filepath.Join(repo, "go.mod"), "module example.com/not-runecho\n\ngo 1.25\n")
+	if out := runHookScript(t, repo, nil); didInstall(t, marker) {
+		t.Fatalf("hook ran a foreign repo's install.sh — unbounded and wrong:\n%s", out)
+	}
+}
+
+// And it must still fire in a tree that IS runecho.
+func TestAutoInstallHook_RunsInRunechoTree(t *testing.T) {
+	repo, marker := hookFixture(t, "v0.17.0", "v0.16.1")
+	write(t, filepath.Join(repo, "go.mod"), "module github.com/inth3shadows/runecho\n\ngo 1.25\n")
+	if out := runHookScript(t, repo, nil); !didInstall(t, marker) {
+		t.Fatalf("the real module path must still be accepted:\n%s", out)
+	}
+}
+
+// A build can exit 0 without moving the version (tags not fetched, a stamping
+// change, the wrong tree). Announcing "now <version>" from the exit status alone
+// would report a still-stale binary as a success and silently re-fire on every
+// future checkout — a fossil, which is the outcome this hook exists to prevent.
+func TestAutoInstallHook_WarnsWhenVersionDidNotAdvance(t *testing.T) {
+	repo, _ := hookFixture(t, "v0.17.0", "v0.16.1")
+	// Installer succeeds but leaves the fake guard reporting the old version.
+	write(t, filepath.Join(repo, "install.sh"), "#!/usr/bin/env bash\nexit 0\n")
+	out := runHookScript(t, repo, nil)
+	if !strings.Contains(out, "still says") {
+		t.Errorf("a no-op reinstall must not be reported as success:\n%s", out)
+	}
+}
+
+// Windows installs carry a .exe suffix (install.sh appends one on msys/cygwin/
+// WINDIR). Probing only the bare name would make the hook a permanent silent
+// no-op on a platform install.sh explicitly supports.
+func TestAutoInstallHook_FindsExeSuffixedBinary(t *testing.T) {
+	repo, marker := hookFixture(t, "v0.17.0", "") // no bare-named guard
+	exe := filepath.Join(repo, "bin", "runecho-guard.exe")
+	write(t, exe, "#!/usr/bin/env bash\necho v0.16.1\n")
+	if err := os.Chmod(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := runHookScript(t, repo, nil); !didInstall(t, marker) {
+		t.Fatalf("a .exe-suffixed install must be found:\n%s", out)
+	}
+}
+
+// install.sh bakes its $BIN_DIR into the copied hook, so an install made with a
+// custom RUNECHO_BIN_DIR keeps working in a shell that never exported it. Without
+// this the hook looks in ~/.local/bin forever and silently does nothing.
+func TestAutoInstallHook_BakedBinDirSurvivesUnsetEnv(t *testing.T) {
+	repo, marker := hookFixture(t, "v0.17.0", "v0.16.1")
+	installed := filepath.Join(repo, "hook-copy")
+	raw, err := os.ReadFile(filepath.Join("..", "..", "githooks", "post-merge"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mirror the substitution install.sh performs.
+	baked := strings.Replace(string(raw), "BIN_DIR_DEFAULT=''",
+		"BIN_DIR_DEFAULT='"+filepath.Join(repo, "bin")+"'", 1)
+	if baked == string(raw) {
+		t.Fatal("githooks/post-merge no longer has the BIN_DIR_DEFAULT line install.sh rewrites")
+	}
+	write(t, installed, baked)
+
+	cmd := exec.Command("bash", installed)
+	cmd.Dir = repo
+	// Deliberately NO RUNECHO_BIN_DIR: the baked value is the only way to find it.
+	cmd.Env = append(os.Environ(), "RUNECHO_BIN_DIR=", "RUNECHO_NO_AUTO_INSTALL=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("hook exited non-zero: %v\n%s", err, out)
+	}
+	if !didInstall(t, marker) {
+		t.Fatalf("baked BIN_DIR was not honoured with RUNECHO_BIN_DIR unset:\n%s", out)
 	}
 }

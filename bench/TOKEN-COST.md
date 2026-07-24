@@ -7,8 +7,12 @@ RunEcho's README claimed "~0 tokens of your context window." This measures that
 claim rather than asserting it — and the result required correcting the README.
 
 Reproduce: `./bench/tokencost/measure.py <enrolled-repo-name>`
-Measured 2026-07-23 on `runecho` itself (177 files), guard/oracle **v0.16.0**,
-tokenizer `cl100k_base`.
+Measured 2026-07-23 on `runecho` itself (**179** files), tokenizer `cl100k_base`.
+The whole table is one run against a single build, on a freshly reindexed store
+so `diff` reports a clean tree. Re-measure a build under test with
+`RUNECHO_BIN_DIR=/path/to/bin ./bench/tokencost/measure.py <repo>` — measuring
+whatever binary happened to be installed is how three of this project's own
+published numbers became fossils.
 
 ## Results
 
@@ -16,15 +20,16 @@ tokenizer `cl100k_base`.
 |---|---:|---:|
 | **guard — clean edit** | **0** | **0** |
 | guard — ask (only when it blocks) | 398 | 100 |
-| mcp — `tools/list` (**always-on**) | 3,696 | 919 |
-| mcp — `diff` | 118 | 37 |
+| mcp — `tools/list` (**always-on**) | 3,875 | 968 |
+| mcp — `diff` (clean tree) | 118 | 37 |
 | mcp — `health` | 117 | 36 |
-| mcp — `hash` | 137 | 61 |
+| mcp — `hash` | 137 | 63 |
 | mcp — `locate` (one symbol) | 216 | 69 |
-| mcp — `status` | 360 | 135 |
-| mcp — `structure` `detail=tree` | 22,541 | 9,534 |
-| mcp — `structure` scoped by `paths` | 35,899 | 13,740 |
-| mcp — `structure` (**default**) | 199,683 | **75,205** |
+| mcp — `status` | 357 | 135 |
+| mcp — `structure` `detail=tree` | 22,677 | 9,588 |
+| mcp — `structure` scoped by `paths` | 21,395 | 6,034 |
+| mcp — `structure` (**default**) | 128,465 | **36,724** |
+| mcp — `structure` `detail=hashes` | 202,538 | 76,278 |
 
 For scale, on the same repo: `codegraph query` = 237 tokens, `codegraph explore`
 = 4,865 tokens.
@@ -38,13 +43,15 @@ tokens on the edits it actually stops, which is the entire bill. Nothing else
 measured here is free at rest.
 
 **2. The MCP server is not free, and the README used to imply it was.**
-`tools/list` is 919 tokens injected at session start whether or not a single tool
+`tools/list` is 968 tokens injected at session start whether or not a single tool
 is ever called — the standing tax every MCP server charges. The README listed
 "~0 tokens" among RunEcho's general properties; that was only ever true of the
 guard. Corrected in the same change as this file.
 
-**3. `structure` at its default is the most expensive thing here, by far.**
-75,205 tokens is ~37% of a 200k window for one call, and 15× `codegraph explore`.
+**3. `structure` is still the most expensive thing here — and it used to be far
+worse.** Its default is 36,724 tokens, ~18% of a 200k window for one call and 7.5×
+`codegraph explore`. Before #224 it was **76,278** (the `detail=hashes` row, which
+is the old default's exact shape): ~37% of a window, and 15× `codegraph explore`.
 That is precisely the failure mode the linked benchmark diagnoses in other tools:
 hand back everything and the thing you pay for never drops. **RunEcho is not
 exempt from it — only its guard is.** The tool description already tells agents to
@@ -52,29 +59,32 @@ scope with `paths` and `detail`, and this quantifies why it matters:
 
 | instead of | use | tokens | saving |
 |---|---|---:|---|
-| `structure` (default) | — | 75,205 | — |
-| | `detail=tree` | 9,534 | 87% |
-| | `paths=["internal/guard/**"]` | 13,740 | 82% |
-| "where is symbol X?" | `locate` | 69 | **99.9%** |
+| `structure` (default) | — | 36,724 | — |
+| | `detail=tree` | 9,588 | 74% |
+| | `paths=["internal/guard/**"]` | 6,034 | 84% |
+| "where is symbol X?" | `locate` | 69 | **99.8%** |
 
 `locate` answering "where is X" in 69 tokens against `codegraph explore`'s 4,865
 is a genuine 70× advantage — but it is an advantage of *`locate`*, not of RunEcho
 generally, and saying otherwise would be the same overclaim as #2.
 
 **Resolved (#224).** `structure`'s default was the worst-value setting measured,
-and a field-level split found why: of the default's 75,641 tokens, the symbols
-block was 74,702 — and stripping just the **per-symbol content hash** took that
-to **29,432**. Sixty percent of the response was 1,864 unique 64-character
-SHA-256 strings that no agent reads. The default now omits them; `detail=hashes`
-returns the original shape. Every file, symbol, kind and line is unchanged — this
-is a cheaper encoding of the same facts, not less data. The `tree`-by-default
-option was rejected: it forces a two-hop for the symbol-level data most callers
-actually want.
+and a field-level split found why: of its 75,641 tokens, the symbols block was
+74,702 — and stripping just the **per-symbol content hash** took that block to
+29,432. Roughly 60% of the response was 1,864 unique 64-character SHA-256 strings
+that no agent reads, and only 990 symbols even carried one (`export`/`import`
+never did), so it cost ~40 tokens per hashed symbol.
+
+Whole-response effect, both rows measured above: **76,278 → 36,724, a 52% cut.**
+`detail=hashes` returns the old shape exactly, so nothing was deleted — only
+re-defaulted. Every file, symbol, kind, line and `refs` list is unchanged; this is
+a cheaper encoding of the same facts, not less data. `tree`-by-default was
+rejected: it forces a two-hop for the symbol-level data most callers want.
 
 **A note on compression proxies.** Some clients wrap an MCP server in a lossless
-compression proxy. Measured through one on 2026-07-23, `structure`'s pre-#224
-default went 75,641 → **71,763 tokens — a 5% saving**, not the ~48% such a proxy
-achieves on ordinary tool output. The reason is the same one above: 1,864
+compression proxy. Measured through one on 2026-07-23, the pre-#224 default went
+75,641 → **71,763 tokens — a 5% saving**, not the ~48% such a proxy achieves on
+ordinary tool output. The reason is the same one above: 1,864
 *unique*, high-entropy hex strings are exactly what a legend/dedup codec cannot
 compress. Every measurement in the table above is the bare server, so the numbers
 a wrapped client sees are within a few percent of these — but do not assume a
@@ -94,7 +104,7 @@ they are the honest thing to publish.
 
 Other limits, stated rather than buried:
 
-- **One repo.** 177 files. `structure` scales with repo size, so its number is
+- **One repo.** 179 files. `structure` scales with repo size, so its number is
   specific to this codebase; the guard's zero is not (it is structural).
 - **stdout only.** The guard writes diagnostics to stderr, which never reaches the
   model, so stderr is not counted. That is the correct boundary, but it means the

@@ -16,6 +16,8 @@
 #                                        # (this repo's own release safety net, #51/#63)
 #   bash install.sh --hook-auto-install # keep the INSTALLED binaries in step with
 #                                        # the source on merge/checkout
+#   bash install.sh --hook-auto-install --no-build   # install the hook only; needs
+#                                        # no Go toolchain and skips the build
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
@@ -54,6 +56,7 @@ FORCE_HOOK=0
 PRINT_HOOK_CONFIG=0
 INSTALL_PRE_PUSH=0
 INSTALL_AUTO=0
+SKIP_BUILD=0
 for arg in "$@"; do
   case "$arg" in
     --hook)  INSTALL_HOOK=1 ;;
@@ -61,6 +64,7 @@ for arg in "$@"; do
     --print-hook-config) PRINT_HOOK_CONFIG=1 ;;
     --hook-pre-push) INSTALL_PRE_PUSH=1 ;;
     --hook-auto-install) INSTALL_AUTO=1 ;;
+    --no-build) SKIP_BUILD=1 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -130,7 +134,12 @@ CFG
   exit 0
 fi
 
-command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
+# --no-build installs hooks only. Like --print-hook-config above, that needs no
+# Go toolchain and no compile — and it keeps the hook-collision tests from
+# rebuilding three binaries just to reach a filesystem check.
+if [ "$SKIP_BUILD" -eq 0 ]; then
+  command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
+fi
 
 # The Python and JS/TS symbol parsers use a pure-Go (CGO-free) tree-sitter
 # runtime. Its grammar package can embed all ~206 grammars (~20MB); these build
@@ -149,14 +158,18 @@ GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript gra
 RUNECHO_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 VERSION_LDFLAGS="-X github.com/inth3shadows/runecho/internal/version.Version=$RUNECHO_VERSION"
 
-for cmd in runecho-ir runecho-mcp runecho-guard; do
-  echo "Building $cmd..."
-  go build -tags "$GRAMMAR_TAGS" -ldflags "$VERSION_LDFLAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
-  echo "  Built: $BIN_DIR/$cmd$EXE"
-done
+if [ "$SKIP_BUILD" -eq 1 ]; then
+  echo "Skipping the build (--no-build); installing hooks only."
+else
+  for cmd in runecho-ir runecho-mcp runecho-guard; do
+    echo "Building $cmd..."
+    go build -tags "$GRAMMAR_TAGS" -ldflags "$VERSION_LDFLAGS" -o "$BIN_DIR/$cmd$EXE" "./cmd/$cmd"
+    echo "  Built: $BIN_DIR/$cmd$EXE"
+  done
 
-echo ""
-echo "RunEcho install complete. Central store lives at ~/.runecho/history.db."
+  echo ""
+  echo "RunEcho install complete. Central store lives at ~/.runecho/history.db."
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -265,10 +278,24 @@ if [ "$INSTALL_AUTO" -eq 1 ]; then
   done
   for name in post-merge post-checkout; do
     target="$AI_HOOK_DIR/$name"
-    cp "$SCRIPT_DIR/githooks/post-merge" "$target"
+    # Bake the install-time BIN_DIR into the copy. BIN_DIR was already rejected
+    # above if it contains a shell metacharacter, so single-quoting it here is
+    # safe — the same rule --hook relies on for the pre-commit hook it generates.
+    sed "s|^BIN_DIR_DEFAULT=.*|BIN_DIR_DEFAULT='$BIN_DIR'|" \
+      "$SCRIPT_DIR/githooks/post-merge" > "$target"
     chmod +x "$target"
     echo "Auto-install hook installed: $target"
   done
+  # git only runs hooks from core.hooksPath when that is set, so writing to the
+  # common dir would install a hook that can never fire. husky, lefthook and
+  # pre-commit all set it. Say so rather than printing a success the operator
+  # would reasonably read as "staleness is handled now".
+  configured_hooks_path="$(git -C "$INVOKE_DIR" config --get core.hooksPath 2>/dev/null || true)"
+  if [ -n "$configured_hooks_path" ]; then
+    echo "install.sh: WARNING: this repo sets core.hooksPath=$configured_hooks_path," >&2
+    echo "  so git will NOT run the hooks just written to $AI_HOOK_DIR." >&2
+    echo "  Copy them into $configured_hooks_path, or chain them from the hooks there." >&2
+  fi
   echo "  Rebuilds \$BIN_DIR binaries when the source moves to a newer release tag."
   echo "  No-op otherwise; never fails the git operation. Opt out: RUNECHO_NO_AUTO_INSTALL=1"
 fi

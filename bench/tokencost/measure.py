@@ -29,6 +29,7 @@ session start whether or not any tool is used. Conflating the two would be
 exactly the overclaim this benchmark exists to prevent.
 
 Usage:  ./measure.py <enrolled-repo-name>
+        RUNECHO_BIN_DIR=/path/to/bin ./measure.py <enrolled-repo-name>
 """
 
 import json
@@ -38,7 +39,10 @@ import sys
 
 import tiktoken
 
-BIN = os.path.expanduser("~/.local/bin")
+# Honour RUNECHO_BIN_DIR the way install.sh does, so this can measure a build
+# under test rather than only whatever happens to be installed. Measuring the
+# wrong binary is how three of this project's published numbers became fossils.
+BIN = os.path.expanduser(os.environ.get("RUNECHO_BIN_DIR") or "~/.local/bin")
 ENC = tiktoken.get_encoding("cl100k_base")
 
 
@@ -85,6 +89,9 @@ def mcp_costs(repo: str) -> list[tuple[str, str]]:
         ("mcp: structure paths-scoped", "structure",
          {"repo": repo, "detail": "symbols", "paths": ["internal/guard/**"]}),
         ("mcp: structure (DEFAULT)", "structure", {"repo": repo, "detail": "symbols"}),
+        # The pre-#224 default shape. Kept measured, not just described, so the
+        # claim that per-symbol hashes dominate the payload stays falsifiable.
+        ("mcp: structure detail=hashes", "structure", {"repo": repo, "detail": "hashes"}),
     ]
     lines = [json.dumps({"jsonrpc": "2.0", "id": 0, "method": "initialize",
                          "params": {"protocolVersion": "2024-11-05", "capabilities": {},

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.9] — 2026-07-24
+
+### Changed
+- triage-check: reject an out-of-range --genuine instead of printing a negative FP rate (#236) (#241)
+
 ## [0.17.8] — 2026-07-24
 
 ### Changed

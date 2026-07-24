@@ -20,12 +20,15 @@ matters: a change that overwrites one silently disables the other's feature.
 |---|---|---|
 | `pre-commit` | `runecho-ir install` → `installHooks` (`cmd/runecho-ir/install.go`) | runs `runecho-guard` at commit time |
 | `post-commit` | same | background `runecho-ir repo reindex .` |
-| `post-merge` | same | background `runecho-ir repo reindex .` |
-| `post-checkout` | same, on branch switches only (`$3 == 1`) | background `runecho-ir repo reindex .` |
+| `post-merge` | same | `version-check --reinstall` (freshness), then background `runecho-ir repo reindex .` |
+| `post-checkout` | same, on branch switches only (`$3 == 1`) | `version-check --reinstall` (freshness), then background `runecho-ir repo reindex .` |
 | `pre-push` | `bash install.sh --hook-pre-push` (`githooks/pre-push`) | rejects a non-monotonic `vX.Y.Z` tag push |
 
 The three reindex hooks are the E6 auto-fresh-IR feature (#20/#21). They keep the
 IR index current, and **every guard answer is computed from that index** — so
 anything that overwrites `post-merge` or `post-checkout` degrades the guard
-silently rather than loudly. A proposal to add an auto-reinstall hook at those
-same two names was split out of #226 for exactly this reason; see #228.
+silently rather than loudly. The #228 freshness check (auto-reinstall when the
+installed binary is behind the newest reachable tag) is folded into these SAME
+two hooks — never a separate installer, which is what collided in #226 — so both
+features share one hook body: freshness runs first, then the background reindex
+picks up the just-rebuilt binary.

@@ -34,6 +34,14 @@ type hookCase struct {
 	New        string              `json:"new"`    // content being written
 	ExpectAsk  bool                `json:"expect_ask"`
 	ExpectSyms []string            `json:"expect_symbols,omitempty"`
+	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
+	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
+	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
+	// reachable (count >= 1) so its silence is a real rule drop, not a typo'd path
+	// or Kind that enrolled nothing; the not-defined-elsewhere TN pins count 0 so
+	// its silence is a genuine absence, not a global enrollment failure. Without
+	// this, a TN can pass "for the wrong reason" — exactly the #227 hazard.
+	EnrolledDefs map[string]int `json:"enrolled_defs,omitempty"`
 }
 
 func TestHookCorpus(t *testing.T) {
@@ -82,6 +90,17 @@ func runHookCase(t *testing.T, c hookCase) {
 	setFlags := flagController(t, c.Flags)
 	body := payload(t, "Write", edited, "", c.New, nil)
 
+	// Structural anti-vacuous probe: resolve each pinned symbol through the guard's
+	// OWN store path (openLatestSnapshot → DefsOfName), the exact lookup the check
+	// uses. This is what proves a silent true-negative is silent for its INTENDED
+	// reason (a rule dropped a reachable candidate) rather than because enrollment
+	// quietly resolved nothing.
+	for sym, want := range c.EnrolledDefs {
+		if got := probeDefsCount(t, edited, sym); got != want {
+			t.Fatalf("enrollment probe: DefsOfName(%q) resolved %d file(s), want %d — the fixture's ask/silence would be for the wrong reason", sym, got, want)
+		}
+	}
+
 	if c.ExpectAsk {
 		// Anti-vacuous proof (#227's central hazard): with the gating flag OFF the
 		// ask must NOT appear. If it does, the fixture is not isolating this check —
@@ -109,6 +128,24 @@ func runHookCase(t *testing.T, c hookCase) {
 			t.Errorf("expected no ask, got:\n%s", d.Hook.PermissionReason)
 		}
 	}
+}
+
+// probeDefsCount resolves how many snapshot files define sym, through the guard's
+// production store path (openLatestSnapshot → DefsOfName) — the same resolution
+// the checks use. A store that won't resolve at all is a hard failure: it means
+// the fixture enrolled nothing, so any downstream silence would be vacuous.
+func probeDefsCount(t *testing.T, editedAbs, sym string) int {
+	t.Helper()
+	db, snapID, _, ok, _ := openLatestSnapshot(filepath.Dir(editedAbs), editedAbs)
+	if !ok {
+		t.Fatalf("probe: store/snapshot not resolvable for %s — enrollment did not take", editedAbs)
+	}
+	defer db.Close()
+	paths, err := db.DefsOfName(snapID, sym)
+	if err != nil {
+		t.Fatalf("probe DefsOfName(%q): %v", sym, err)
+	}
+	return len(paths)
 }
 
 // flagController captures each gating env var's original value once, restores it

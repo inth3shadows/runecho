@@ -173,6 +173,15 @@ func runContractActivate(args []string) int {
 	if code != ExitOK {
 		return code
 	}
+	// A contract with no positive pattern (empty, or negation-only) can never put
+	// any path in scope, so the guard abstains on it entirely — activating it does
+	// nothing. Say so, or the author reads the silence as "everything is allowed"
+	// when the contract is simply inert (#234).
+	if !c.HasPositive() {
+		fmt.Fprintf(os.Stderr,
+			"Warning: contract %q has no positive pattern, so nothing is ever in scope; the guard will abstain. Add a pattern like `internal/**` to make it enforce.\n",
+			c.Name)
+	}
 	db, code := mustOpenDB()
 	if code != ExitOK {
 		return code

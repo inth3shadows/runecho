@@ -244,6 +244,20 @@ func TestContract_EmptyContractAbstainsInHook(t *testing.T) {
 	}
 }
 
+// A negation-only contract (`!internal/**`) parses to a non-empty pattern set
+// but puts NOTHING in scope for any path — indistinguishable from an empty one,
+// just less obviously. The empty-contract abstain keys on len(Patterns)==0 and
+// misses it, so without HasPositive the hook would ask on every edit for the
+// whole session. It must abstain the same way an empty contract does (#234).
+func TestContract_NegationOnlyContractAbstainsInHook(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess", "name: neg\n!internal/**\n")
+	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "internal", "y.go"), "package main\n"))
+	if d.Hook.PermissionDec != "" {
+		t.Fatalf("a negation-only contract must abstain, not ask-everything; got %q\n%s", d.Hook.PermissionDec, raw)
+	}
+}
+
 // A contract deleted or renamed after activation must fail open, not start
 // asking about every edit because "nothing matches".
 func TestContract_MissingFileFailsOpen(t *testing.T) {

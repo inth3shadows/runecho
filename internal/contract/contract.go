@@ -151,13 +151,30 @@ func Load(p string) (Contract, error) {
 	return Parse(src, p, path.Base(p)), nil
 }
 
+// HasPositive reports whether the contract has at least one non-negated pattern.
+//
+// InScope starts every path out of scope and only a non-negated match can bring
+// it in, so a contract with no positive pattern puts NOTHING in scope for ANY
+// path — a negation-only contract like `!internal/**` is exactly as inert as an
+// empty one, just less obviously so. Callers that abstain on an empty contract
+// (to avoid asking on every edit for a whole session) must abstain on this case
+// too; `len(Patterns) == 0` alone does not catch it (#234).
+func (c Contract) HasPositive() bool {
+	for _, p := range c.Patterns {
+		if !p.Negated {
+			return true
+		}
+	}
+	return false
+}
+
 // InScope reports whether relPath (a repo-relative, slash-separated path) is
 // allowed by the contract. The LAST matching pattern wins, so a later `!` line
 // carves an exception out of an earlier broad match.
 //
-// A contract with no patterns puts nothing in scope. That is intentional: an
-// empty contract is a declaration the author did not finish, and treating it as
-// "everything is allowed" would silently disable the check they asked for.
+// A contract with no positive pattern puts nothing in scope — see HasPositive.
+// That is intentional for an unfinished contract, but a caller on a hot path
+// should abstain rather than treat every path as a violation.
 func (c Contract) InScope(relPath string) bool {
 	in := false
 	for _, p := range c.Patterns {

@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/version"
 )
 
 // OutcomeJoinWindow is how long after an ask an "approved" outcome may arrive
@@ -49,13 +51,15 @@ func FilterVersion(decisions []Decision, gv string) []Decision {
 	if gv == "" {
 		return decisions
 	}
-	want := gv
-	if want == UnknownVersion {
+	want := version.Canonical(gv)
+	if gv == UnknownVersion {
 		want = ""
 	}
 	out := make([]Decision, 0, len(decisions))
 	for _, d := range decisions {
-		if d.GV == want {
+		// Normalize both sides so a --gv in either stamp form matches records
+		// written in either form (#233): --gv=0.17.4 selects v0.17.4 records too.
+		if version.Canonical(d.GV) == want {
 			out = append(out, d)
 		}
 	}
@@ -227,7 +231,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		}
 		langBucket := s.ByLang[a.Lang]
 		langBucket.Asks++
-		gv := a.GV
+		gv := version.Canonical(a.GV)
 		if gv == "" {
 			gv = UnknownVersion
 		}

@@ -36,7 +36,7 @@ func TestCheckDuplicateDefs_SkipsNonGoLanguages(t *testing.T) {
 		// A TS type re-declared by a sibling script for its own use.
 		{guard.LangJS, "/repo/src/lib/brief.ts", "TrackBStratum"},
 	} {
-		warns, qErrs := checkDuplicateDefs(tc.lang, noStore, tc.file, []string{tc.sym})
+		warns, qErrs := checkDuplicateDefs(tc.lang, noStore, tc.file, []string{tc.sym}, false)
 		if warns != nil || qErrs != 0 {
 			t.Errorf("lang=%v sym=%q: want no warning and no store access, got (%v, %d)",
 				tc.lang, tc.sym, warns, qErrs)

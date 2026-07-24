@@ -481,7 +481,7 @@ func TestOpenLatestSnapshot_StoreError_CountsDegraded(t *testing.T) {
 	if warns, qErrs := checkDanglingRefs(filepath.Dir(file), file, []string{"DoThing"}); qErrs != 1 || warns != nil {
 		t.Errorf("checkDanglingRefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
 	}
-	if warns, qErrs := checkDuplicateDefs(guard.LangGo, filepath.Dir(file), file, []string{"DoThing"}); qErrs != 1 || warns != nil {
+	if warns, qErrs := checkDuplicateDefs(guard.LangGo, filepath.Dir(file), file, []string{"DoThing"}, false); qErrs != 1 || warns != nil {
 		t.Errorf("checkDuplicateDefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
 	}
 }

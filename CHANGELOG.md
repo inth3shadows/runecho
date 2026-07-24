@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-07-24
+
 ### Changed
 - **`structure`'s default response no longer carries per-symbol content hashes.**
   `detail=symbols` (the default) returns each symbol's `name`/`kind`/`line` and

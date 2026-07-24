@@ -20,18 +20,25 @@ import (
 // catch-rate it reports describes one check of six (#227). This harness closes
 // that gap by replaying such cases as data through runHookMode.
 //
-// Phase 1 (this file) covers duplicate-symbol; dangling/file-scope/contract are
-// tracked follow-ups on #227, each adding its own enrollment shape (a refs index,
-// file-scoped symbols, an activated contract) to Enroll.
+// Phase 1 covered duplicate-symbol; this file now also covers dangling-refs,
+// which enrolls a refs index (Refs) so a deleted def with a live cross-file
+// referrer can be detected. file-scope and contract remain tracked follow-ups on
+// #227, each adding its own enrollment shape (file-scoped symbols, an activated
+// contract) to Enroll.
 type hookCase struct {
-	Name       string              `json:"name"`
-	Desc       string              `json:"desc,omitempty"`
-	Check      string              `json:"check"`  // gated check under test, e.g. "duplicate"
-	Flags      []string            `json:"flags"`  // env "K=V" that gate the check
-	Enroll     map[string][]string `json:"enroll"` // snapshot symbols: repo-relative file -> names
-	File       string              `json:"file"`   // edited file, repo-relative
-	Old        string              `json:"old"`    // on-disk content BEFORE the edit
-	New        string              `json:"new"`    // content being written
+	Name   string              `json:"name"`
+	Desc   string              `json:"desc,omitempty"`
+	Check  string              `json:"check"`  // gated check under test, e.g. "duplicate"
+	Flags  []string            `json:"flags"`  // env "K=V" that gate the check
+	Enroll map[string][]string `json:"enroll"` // snapshot symbols: repo-relative file -> names
+	// Refs is the snapshot's refs index: repo-relative file -> the bare call
+	// targets that file references. dangling-refs resolves "who still references
+	// the deleted def" through it (RefsToName), so a fixture proving a live
+	// cross-file referrer must enroll that referrer's Refs, not just its Symbols.
+	Refs       map[string][]string `json:"refs,omitempty"`
+	File       string              `json:"file"` // edited file, repo-relative
+	Old        string              `json:"old"`  // on-disk content BEFORE the edit
+	New        string              `json:"new"`  // content being written
 	ExpectAsk  bool                `json:"expect_ask"`
 	ExpectSyms []string            `json:"expect_symbols,omitempty"`
 	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
@@ -42,6 +49,13 @@ type hookCase struct {
 	// its silence is a genuine absence, not a global enrollment failure. Without
 	// this, a TN can pass "for the wrong reason" — exactly the #227 hazard.
 	EnrolledDefs map[string]int `json:"enrolled_defs,omitempty"`
+	// EnrolledRefs is the dangling-refs analog of EnrolledDefs: it pins how many
+	// snapshot files reference a symbol via the guard's own RefsToName path. A
+	// self-only-referrer TN stays silent because self-exclusion drops the sole
+	// referrer, NOT because the refs index is empty — pinning count 1 proves the
+	// referrer was actually enrolled. A referenced-nowhere TN pins count 0 so its
+	// silence is a genuine absence rather than a global enrollment failure.
+	EnrolledRefs map[string]int `json:"enrolled_refs,omitempty"`
 }
 
 func TestHookCorpus(t *testing.T) {
@@ -86,7 +100,7 @@ func runHookCase(t *testing.T, c hookCase) {
 		t.Fatal(err)
 	}
 
-	enrollSnapshot(t, root, c.Enroll)
+	enrollSnapshot(t, root, c.Enroll, c.Refs)
 	setFlags := flagController(t, c.Flags)
 	body := payload(t, "Write", edited, "", c.New, nil)
 
@@ -98,6 +112,11 @@ func runHookCase(t *testing.T, c hookCase) {
 	for sym, want := range c.EnrolledDefs {
 		if got := probeDefsCount(t, edited, sym); got != want {
 			t.Fatalf("enrollment probe: DefsOfName(%q) resolved %d file(s), want %d — the fixture's ask/silence would be for the wrong reason", sym, got, want)
+		}
+	}
+	for sym, want := range c.EnrolledRefs {
+		if got := probeRefsCount(t, edited, sym); got != want {
+			t.Fatalf("enrollment probe: RefsToName(%q) resolved %d file(s), want %d — the fixture's ask/silence would be for the wrong reason", sym, got, want)
 		}
 	}
 
@@ -148,6 +167,25 @@ func probeDefsCount(t *testing.T, editedAbs, sym string) int {
 	return len(paths)
 }
 
+// probeRefsCount resolves how many snapshot files reference sym, through the
+// guard's production store path (openLatestSnapshot → RefsToName) — the exact
+// lookup checkDanglingRefs uses. It is the refs-index analog of probeDefsCount:
+// a store that won't resolve at all is a hard failure, since any downstream
+// silence would then be vacuous.
+func probeRefsCount(t *testing.T, editedAbs, sym string) int {
+	t.Helper()
+	db, snapID, _, ok, _ := openLatestSnapshot(filepath.Dir(editedAbs), editedAbs)
+	if !ok {
+		t.Fatalf("probe: store/snapshot not resolvable for %s — enrollment did not take", editedAbs)
+	}
+	defer db.Close()
+	paths, err := db.RefsToName(snapID, sym)
+	if err != nil {
+		t.Fatalf("probe RefsToName(%q): %v", sym, err)
+	}
+	return len(paths)
+}
+
 // flagController captures each gating env var's original value once, restores it
 // on cleanup, and returns a setter that toggles all of them on/off — so a single
 // fixture can be replayed with the check off (isolation proof) then on.
@@ -187,11 +225,14 @@ func flagController(t *testing.T, flags []string) func(on bool) {
 }
 
 // enrollSnapshot stands up a temp central store ($RUNECHO_HOME) and saves one
-// snapshot whose per-file symbol sets are `files` (repo-relative path -> names).
-// It generalizes enrolledStore (single hardcoded file) to the multi-file layout
-// the hook-only checks need — duplicate-symbol resolves candidates by DefsOfName,
-// which is keyed on the enrolled file paths.
-func enrollSnapshot(t *testing.T, root string, files map[string][]string) string {
+// snapshot whose per-file symbol sets are `files` (repo-relative path -> names)
+// and whose per-file refs index is `refs` (repo-relative path -> referenced
+// names). It generalizes enrolledStore (single hardcoded file) to the multi-file
+// layout the hook-only checks need — duplicate-symbol resolves candidates by
+// DefsOfName (the Symbols side), dangling-refs by RefsToName (the Refs side),
+// both keyed on the enrolled file paths. A file may appear in `files`, in `refs`,
+// or in both; the union of their keys is enrolled.
+func enrollSnapshot(t *testing.T, root string, files, refs map[string][]string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
@@ -214,9 +255,20 @@ func enrollSnapshot(t *testing.T, root string, files map[string][]string) string
 		_ = db.SetRepoCommonDir(id, cd)
 	}
 
-	fileIR := make(map[string]ir.FileIR, len(files))
+	fileIR := make(map[string]ir.FileIR, len(files)+len(refs))
 	for path, syms := range files {
-		fileIR[path] = ir.FileIR{Hash: "h_" + path, Symbols: funcsToSymbols(syms)}
+		f := fileIR[path]
+		f.Hash = "h_" + path
+		f.Symbols = funcsToSymbols(syms)
+		fileIR[path] = f
+	}
+	for path, rs := range refs {
+		f := fileIR[path]
+		if f.Hash == "" {
+			f.Hash = "h_" + path
+		}
+		f.Refs = rs
+		fileIR[path] = f
 	}
 	irData := &ir.IR{Version: ir.IRVersion, Files: fileIR}
 	if _, err := db.SaveSnapshot(id, "sess", "test", top, irData); err != nil {

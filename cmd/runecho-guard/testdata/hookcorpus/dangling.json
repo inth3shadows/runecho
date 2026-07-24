@@ -1,0 +1,50 @@
+[
+  {
+    "name": "go-dangling-cross-file-referrer-asks",
+    "desc": "removing a def that ANOTHER file still references (per the refs index) is the real 'you'll break callers' signal → ask",
+    "check": "dangling",
+    "flags": ["RUNECHO_GUARD_DANGLING=1"],
+    "refs": { "pkg/a.go": ["ProcessOrder"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "new": "package pkg\n",
+    "expect_ask": true,
+    "expect_symbols": ["ProcessOrder"],
+    "enrolled_refs": { "ProcessOrder": 1 }
+  },
+  {
+    "name": "go-dangling-self-only-referrer-clean",
+    "desc": "removing a def whose ONLY referrer is the edited file itself is legitimate — self-exclusion drops the sole referrer → no ask. enrolled_refs pins that the referrer WAS enrolled, so the silence is self-exclusion, not an empty index",
+    "check": "dangling",
+    "flags": ["RUNECHO_GUARD_DANGLING=1"],
+    "refs": { "pkg/b.go": ["ProcessOrder"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "new": "package pkg\n",
+    "expect_ask": false,
+    "enrolled_refs": { "ProcessOrder": 1 }
+  },
+  {
+    "name": "go-dangling-referenced-nowhere-clean",
+    "desc": "removing a def that no file references is a clean deletion → no ask. enrolled_refs pins count 0 (a genuine absence, reached through a store that DID resolve — probeRefsCount fatals if it did not)",
+    "check": "dangling",
+    "flags": ["RUNECHO_GUARD_DANGLING=1"],
+    "refs": { "pkg/a.go": ["SomethingElse"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "new": "package pkg\n",
+    "expect_ask": false,
+    "enrolled_refs": { "ProcessOrder": 0 }
+  },
+  {
+    "name": "go-dangling-no-deletion-clean",
+    "desc": "an edit that only ADDS a def deletes nothing, so the deletion-side check short-circuits before touching the store → no ask even with a cross-file referrer enrolled",
+    "check": "dangling",
+    "flags": ["RUNECHO_GUARD_DANGLING=1"],
+    "refs": { "pkg/a.go": ["NewThing"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc NewThing() {}\n",
+    "expect_ask": false
+  }
+]

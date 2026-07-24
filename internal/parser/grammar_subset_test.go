@@ -9,11 +9,20 @@ import (
 	"testing"
 )
 
-// Every tree-sitter grammar this package uses must actually be present in the
-// binary install.sh ships. The test suite builds with the FULL grammar set, so a
-// parser can pass every test and still be inert in production: install.sh builds
-// with `grammar_subset` tags, and a grammar whose tag is missing loads as nil,
-// which the parsers degrade on silently by design.
+// Every tree-sitter grammar this package uses must actually be present in EVERY
+// binary this project ships. The test suite builds with the FULL grammar set, so
+// a parser can pass every test and still be inert in production: the shipping
+// builds use `grammar_subset` tags, and a grammar whose tag is missing loads as
+// nil, which the parsers degrade on silently by design.
+//
+// There are TWO shipping channels and they are built by different files:
+// `install.sh` (what you get building from source) and `.goreleaser.yaml` (what
+// you get downloading a release). Checking only one is not enough — this test
+// originally did, and .goreleaser.yaml silently lacked grammar_subset_rust and
+// grammar_subset_ruby, so every downloaded release binary indexed Rust and Ruby
+// to nothing while the locally built one worked and every test passed. Its own
+// header comment claimed the flags "mirror install.sh exactly". Both files are
+// parsed here now, and they must agree with each other as well as with the code.
 //
 // That is exactly what happened when Rust and Ruby shipped — both indexed to
 // nothing in the installed binary while 22 unit tests, two fuzz targets, a
@@ -31,24 +40,61 @@ func TestInstallShipsEveryGrammarTag(t *testing.T) {
 	}
 	t.Logf("grammars used by internal/parser: %s", strings.Join(used, " "))
 
-	raw, err := os.ReadFile(filepath.Join("..", "..", "install.sh"))
-	if err != nil {
-		t.Fatalf("cannot read install.sh (%v) — this check must not be skipped quietly, "+
-			"it is the only thing standing between a new parser and shipping inert", err)
+	channels := map[string]string{
+		"install.sh":       shipTags(t, "install.sh", `GRAMMAR_TAGS="([^"]*)"`),
+		".goreleaser.yaml": shipTags(t, ".goreleaser.yaml", `"-tags=([^"]*)"`),
 	}
-	m := regexp.MustCompile(`GRAMMAR_TAGS="([^"]*)"`).FindSubmatch(raw)
-	if m == nil {
-		t.Fatal("could not find GRAMMAR_TAGS in install.sh")
-	}
-	tags := " " + strings.Join(strings.Fields(string(m[1])), " ") + " "
 
-	for _, lang := range used {
-		want := "grammar_subset_" + lang
-		if !strings.Contains(tags, " "+want+" ") {
-			t.Errorf("install.sh GRAMMAR_TAGS is missing %q — files for that language would "+
-				"index to NOTHING in the installed binary even though every test here passes", want)
+	for channel, tags := range channels {
+		for _, lang := range used {
+			want := "grammar_subset_" + lang
+			if !strings.Contains(" "+tags+" ", " "+want+" ") {
+				t.Errorf("%s is missing build tag %q — files for that language would index to "+
+					"NOTHING in the binary that channel ships, even though every test here passes",
+					channel, want)
+			}
 		}
 	}
+
+	// The two channels must also agree with EACH OTHER. A tag present in one and
+	// absent from the other means two builds of the same version behave
+	// differently, which is worse than both being wrong: it is unreproducible.
+	if a, b := channels["install.sh"], channels[".goreleaser.yaml"]; a != b {
+		t.Errorf("shipping channels disagree.\n  install.sh:       %s\n  .goreleaser.yaml: %s", a, b)
+	}
+}
+
+// shipTags extracts and normalises the build-tag list a shipping channel uses.
+// Normalising (fields joined by single spaces, sorted) is what lets the two
+// channels be compared for equality rather than merely for coverage — a
+// difference in ORDER is not a bug, a difference in CONTENT is.
+func shipTags(t *testing.T, name, pattern string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", name))
+	if err != nil {
+		t.Fatalf("cannot read %s (%v) — this check must not be skipped quietly, "+
+			"it is the only thing standing between a new parser and shipping inert", name, err)
+	}
+	// A file may declare the tags more than once (.goreleaser.yaml has one build
+	// block per binary). Every occurrence must match, or one binary ships with a
+	// grammar the others lack.
+	ms := regexp.MustCompile(pattern).FindAllSubmatch(raw, -1)
+	if len(ms) == 0 {
+		t.Fatalf("could not find a build-tag list in %s (pattern %s)", name, pattern)
+	}
+	var first string
+	for i, m := range ms {
+		fields := strings.Fields(string(m[1]))
+		sort.Strings(fields)
+		got := strings.Join(fields, " ")
+		if i == 0 {
+			first = got
+		} else if got != first {
+			t.Errorf("%s declares differing build-tag lists across its build blocks:\n  %s\n  %s",
+				name, first, got)
+		}
+	}
+	return first
 }
 
 // grammarsUsedByThisPackage scans the package's non-test sources for

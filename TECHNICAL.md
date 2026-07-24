@@ -193,7 +193,7 @@ with `+` (`violations+dangling`).
 |---|---|---|
 | E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |
 | Dropped import | `RUNECHO_GUARD_DROPPED_IMPORT` | The edit removes an import that is still used below it |
-| E5 duplicate symbol | `RUNECHO_GUARD_DUPLICATE` | The edit defines a name already defined in another file of the same language |
+| E5 duplicate symbol | `RUNECHO_GUARD_DUPLICATE` | **Go only.** The edit defines a name already defined by another non-test Go file in the *same directory* (= the same package, so a real compile collision). Cross-directory and non-Go matches are not collisions and are skipped. Suppressed when both files carry a build constraint — `//go:build unix` / `!unix`, or a GOOS/GOARCH filename suffix — since the compiler never sees both (#225) |
 | Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
 | Dependency qualified | `RUNECHO_GUARD_DEPS_GO` | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |

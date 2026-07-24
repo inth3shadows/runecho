@@ -333,12 +333,15 @@ func symbolFile(f ir.FileIR, syms []ir.Symbol) map[string]any {
 // drops the field at the JSON boundary.
 //
 // This is the single most expensive field RunEcho ships. Measured 2026-07-23 on
-// this repo (179 files, 1,864 symbols): the default `symbols` response was
-// 75,641 tokens, of which 74,702 was the symbols block — and stripping just the
-// per-symbol hash took that to 29,432. Sixty percent of the payload was 1,864
-// 64-character SHA-256 strings. They are also incompressible by the lossless
-// proxy some clients wrap the server in (measured saving: 5%), precisely because
-// each one is unique high-entropy text.
+// this repo (179 files, ~1,864 symbols): the response carrying these hashes is
+// 76,278 tokens, the one without them 36,724 — a 52% cut, because roughly 60% of
+// the payload was 1,864 unique 64-character SHA-256 strings. They are also
+// incompressible by the lossless proxy some clients wrap the server in (measured
+// saving: 5%), precisely because each one is unique high-entropy text.
+//
+// bench/TOKEN-COST.md holds the canonical figures. Keep this comment in step with
+// that table rather than quoting a separately-taken measurement — doing exactly
+// that is how the two ended up disagreeing.
 //
 // Nothing an agent reads is lost — every file, symbol, kind and line is
 // unchanged. The hash answers "did this symbol's body change", which `hash`,

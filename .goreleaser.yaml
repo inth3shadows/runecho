@@ -2,14 +2,21 @@ version: 2
 project_name: runecho
 
 # Build flags mirror install.sh exactly: CGO-free, the grammar_subset tags that
-# embed only the Python + JS/TS/TSX tree-sitter grammars (without them JS/TS
-# degrades to regex — names only, no spans), and the same version stamp path.
+# embed only the grammars runecho parses via AST (without them a language
+# degrades to regex, or to nothing at all), and the same version stamp path.
+#
+# "Mirror install.sh exactly" is now enforced, not asserted:
+# internal/parser/grammar_subset_test.go parses BOTH files and fails if they
+# disagree. It previously checked only install.sh, and this file silently lacked
+# grammar_subset_rust and grammar_subset_ruby — so every downloaded release
+# binary indexed Rust and Ruby to nothing while the locally installed one was
+# fine, and every test passed. Keep the two lists identical.
 builds:
   - id: runecho-ir
     main: ./cmd/runecho-ir
     binary: runecho-ir
     env: [CGO_ENABLED=0]
-    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx grammar_subset_rust grammar_subset_ruby"]
     ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
@@ -19,7 +26,7 @@ builds:
     main: ./cmd/runecho-mcp
     binary: runecho-mcp
     env: [CGO_ENABLED=0]
-    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx grammar_subset_rust grammar_subset_ruby"]
     ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
@@ -29,7 +36,7 @@ builds:
     main: ./cmd/runecho-guard
     binary: runecho-guard
     env: [CGO_ENABLED=0]
-    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"]
+    flags: ["-tags=grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx grammar_subset_rust grammar_subset_ruby"]
     ldflags: ["-s -w -X github.com/inth3shadows/runecho/internal/version.Version={{ .Version }}"]
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]

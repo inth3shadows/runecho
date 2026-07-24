@@ -18,7 +18,7 @@ Two detectors ship:
 
 | Detector | Fronts | Class |
 |---|---|---|
-| `css-custom-properties` | stylelint `no-unknown-custom-properties` | `var(--x)` with no declaration. Reproduces #204 exactly (2 findings, both FPs). |
+| `css-custom-properties` | stylelint `no-unknown-custom-properties` | `var(--x)` with no declaration. Reproduces #204 exactly (14 findings, 0 genuine). |
 | `i18n-keys` | nothing (see below) | `t('a.b')` / `i18nKey="a.b"` with no key in any locale catalog. |
 
 **The contract held.** `i18n-keys` is shaped nothing like the CSS detector — a

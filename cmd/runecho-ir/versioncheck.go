@@ -41,12 +41,20 @@ const installTimeout = 5 * time.Minute
 
 const runechoModuleLine = "module github.com/inth3shadows/runecho"
 
-// semverCoreRE matches the leading vX.Y.Z of a version string, dropping any
+// semverCoreRE matches the X.Y.Z core of a version string, dropping any
 // `-N-gsha`/`-dirty` build suffix. A post-tag build reports v0.16.1-3-gabc1234,
 // and comparing full describe strings with sort -V orders such suffixes
 // inconsistently — comparing only the core makes "ahead of the tag" read as
 // "not behind".
-var semverCoreRE = regexp.MustCompile(`v[0-9]+\.[0-9]+\.[0-9]+`)
+//
+// The leading `v` is OPTIONAL because the two build channels stamp differently:
+// install.sh uses `git describe --tags` → "v0.17.4", but goreleaser stamps
+// `{{ .Version }}` → "0.17.4" (goreleaser strips the v). Requiring the v made
+// version-check silently inert for a goreleaser binary. Inputs are always our own
+// stamp or `--version` output, never free text, so the optional v cannot match a
+// stray "goX.Y.Z"-style substring in practice. parseSemver strips any v, so a
+// mixed-format comparison (v0.16.0 vs 0.17.0) still works.
+var semverCoreRE = regexp.MustCompile(`v?[0-9]+\.[0-9]+\.[0-9]+`)
 
 // semverCore extracts the first vX.Y.Z occurrence from s, or "" if none.
 func semverCore(s string) string {

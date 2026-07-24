@@ -15,6 +15,9 @@ func TestSemverCore(t *testing.T) {
 		"v0.16.1-3-gabc1234": "v0.16.1", // post-tag build suffix stripped
 		"v0.16.1-dirty":      "v0.16.1",
 		"runecho-ir v1.2.3":  "v1.2.3",
+		"0.17.4":             "0.17.4", // goreleaser stamp (no leading v) still parses
+		"runecho-ir 0.17.4":  "0.17.4", // goreleaser --version output
+		"0.17.4-3-gabc1234":  "0.17.4", // goreleaser post-tag build
 		"dev":                "",
 		"":                   "",
 	}
@@ -36,6 +39,8 @@ func TestVersionBehind(t *testing.T) {
 		{"v0.16.1", "v0.16.1", false}, // equal
 		{"v0.17.0", "v0.16.1", false}, // ahead (older branch) never downgrades
 		{"v0.9.0", "v0.10.0", true},   // numeric, not lexical: 9 < 10
+		{"0.16.0", "v0.17.0", true},   // mixed stamp formats (goreleaser vs install.sh)
+		{"0.17.0", "0.17.0", false},   // both goreleaser-stamped, equal
 		{"", "v0.16.1", false},        // unreadable installed → no rebuild
 		{"v0.16.1", "", false},        // unreadable newest → no rebuild
 		{"garbage", "v0.16.1", false},

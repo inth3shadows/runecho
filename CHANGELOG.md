@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.7] — 2026-07-24
+
+### Changed
+- test: replayable hook-fixture harness + duplicate-symbol cases (#227, phase 1) (#238)
+
 ## [0.17.6] — 2026-07-24
 
 ### Changed

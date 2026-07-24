@@ -51,7 +51,7 @@ guard. Corrected in the same change as this file.
 **3. `structure` is still the most expensive thing here — and it used to be far
 worse.** Its default is 36,724 tokens, ~18% of a 200k window for one call and 7.5×
 `codegraph explore`. Before #224 it was **76,278** (the `detail=hashes` row, which
-is the old default's exact shape): ~37% of a window, and 15× `codegraph explore`.
+is the old default's exact shape): ~38% of a window, and 15× `codegraph explore`.
 That is precisely the failure mode the linked benchmark diagnoses in other tools:
 hand back everything and the thing you pay for never drops. **RunEcho is not
 exempt from it — only its guard is.** The tool description already tells agents to
@@ -69,21 +69,24 @@ is a genuine 70× advantage — but it is an advantage of *`locate`*, not of Run
 generally, and saying otherwise would be the same overclaim as #2.
 
 **Resolved (#224).** `structure`'s default was the worst-value setting measured,
-and a field-level split found why: of its 75,641 tokens, the symbols block was
-74,702 — and stripping just the **per-symbol content hash** took that block to
-29,432. Roughly 60% of the response was 1,864 unique 64-character SHA-256 strings
-that no agent reads, and only 990 symbols even carried one (`export`/`import`
-never did), so it cost ~40 tokens per hashed symbol.
+and a field-level split found why: the symbols block is ~99% of the response, and
+roughly **60% of that was 1,864 unique 64-character SHA-256 strings** no agent
+reads. Only 990 symbols even carry one (`export`/`import`/`import_name` never
+did), so it cost ~40 tokens per hashed symbol.
 
 Whole-response effect, both rows measured above: **76,278 → 36,724, a 52% cut.**
+Those two are the only absolute figures for this surface in this file, on purpose:
+an earlier revision also quoted 75,641 — a separate measurement taken at a
+different working-tree state — and the document contradicted itself.
 `detail=hashes` returns the old shape exactly, so nothing was deleted — only
 re-defaulted. Every file, symbol, kind, line and `refs` list is unchanged; this is
 a cheaper encoding of the same facts, not less data. `tree`-by-default was
 rejected: it forces a two-hop for the symbol-level data most callers want.
 
 **A note on compression proxies.** Some clients wrap an MCP server in a lossless
-compression proxy. Measured through one on 2026-07-23, the pre-#224 default went
-75,641 → **71,763 tokens — a 5% saving**, not the ~48% such a proxy achieves on
+compression proxy. Measured through one on 2026-07-23 — at the earlier tree state
+noted above, hence the different absolute — the pre-#224 default went
+75,641 → **71,763 tokens, a 5% saving**, not the ~48% such a proxy achieves on
 ordinary tool output. The reason is the same one above: 1,864
 *unique*, high-entropy hex strings are exactly what a legend/dedup codec cannot
 compress. Every measurement in the table above is the bare server, so the numbers

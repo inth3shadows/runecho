@@ -23,7 +23,7 @@ build, no language server. **The same code produces the same answer.**
 writes nothing at all, and only an edit it actually stops costs anything (~100
 tokens). It is a `PreToolUse` hook, so the agent never spends context deciding
 whether to call it. The oracle MCP server is a separate surface and is *not*
-free — its tool schemas cost ~919 tokens at session start, and `structure`
+free — its tool schemas cost ~968 tokens at session start, and `structure`
 unscoped is expensive enough to be worth scoping. Every number, including the
 unflattering ones, is in [bench/TOKEN-COST.md](bench/TOKEN-COST.md).
 
@@ -115,7 +115,7 @@ full semantic analysis.
    ```bash
    # example: macOS arm64 — adjust the asset name for your platform.
    # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
-   TAG=v0.16.0; NUM=0.16.0
+   TAG=v0.17.1; NUM=0.17.1
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
@@ -212,7 +212,7 @@ not general-purpose code intelligence.
 
 | Path | Purpose |
 |---|---|
-| `cmd/runecho-ir/` | The CLI: index, snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, repo, backup, install |
+| `cmd/runecho-ir/` | The CLI: snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, repo, backup, install — plus indexing, which is the no-subcommand default (`runecho-ir <path>`), not an `index` subcommand |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
 | `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode, plus the opt-in checks |
 | `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell/Rust/Ruby) |

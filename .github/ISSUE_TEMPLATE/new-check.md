@@ -26,6 +26,21 @@ with no appeal to intent, taste, or whether a value is *correct*?
 - [ ] No — it's a value/judgement, like `padding: 13px`. (If so, this is a search
       feature competing with ripgrep, not a guard check — say why RunEcho anyway.)
 
+## Gate 2 — The four conjuncts
+
+RunEcho's position is the *conjunction*. Check each one this candidate plausibly
+satisfies **in RunEcho specifically**:
+
+- [ ] **Pre-write** — it fires before the edit lands, inside the agent loop.
+- [ ] **Blocking** — it can deny, not merely advise.
+- [ ] **Existence-aware** — it decides on whether the symbol exists.
+- [ ] **Deterministic** — parsing, not a second model.
+
+<!-- All four, or it is a linter's job. If the only value over an existing
+ecosystem tool is conjuncts 1-2 (timing), say so plainly: the pitch is then
+"block pre-write what a linter already catches post-write", which Gate 4 has to
+justify on its own. -->
+
 ## Gate 3 — Prior art
 
 Does a mature linter already detect this? Name it, or say you searched and found

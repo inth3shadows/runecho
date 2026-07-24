@@ -102,6 +102,32 @@ func AbsGitDir(dir string) (string, error) {
 	return CommonDir(dir)
 }
 
+// DescribeTag returns the nearest tag reachable from HEAD in the repo containing
+// dir (equivalent to `git describe --tags --abbrev=0`). It reads only tags that
+// already exist locally — it never fetches — so it answers "what release is this
+// checkout at", not "what is the newest release on the remote". Returns an error
+// when no tag is reachable (a shallow clone, or a repo with no tags).
+func DescribeTag(dir string) (string, error) {
+	out, err := runGit(dir, "describe", "--tags", "--abbrev=0")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// HooksPath returns the configured core.hooksPath for the repo containing dir, or
+// "" when it is unset. A set hooksPath means git runs hooks from THERE, not from
+// the common-dir's hooks/ — so a hook written to the common-dir would be silently
+// ignored. `git config --get` exits non-zero when the key is absent; that is the
+// expected unset case, reported as "" with no error.
+func HooksPath(dir string) string {
+	out, err := runGit(dir, "config", "--get", "core.hooksPath")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // WorktreePaths returns all working-tree paths registered for the git repo
 // containing dir, parsed from `git worktree list --porcelain`. Returns nil on
 // any error (non-git dir, git not available).

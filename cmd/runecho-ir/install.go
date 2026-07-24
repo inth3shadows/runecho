@@ -53,8 +53,9 @@ func runInstall(args []string) int {
 	return 0
 }
 
-// installHooks installs pre-commit (guard) and post-commit/post-merge/post-checkout
-// (background reindex) hooks into the git repo containing root.
+// installHooks installs pre-commit (guard), post-commit (background reindex), and
+// post-merge/post-checkout (freshness auto-reinstall + background reindex) hooks
+// into the git repo containing root.
 func installHooks(root string, force bool) (installed int, err error) {
 	gitDir, err := gitutil.AbsGitDir(root)
 	if err != nil {
@@ -73,14 +74,31 @@ func installHooks(root string, force bool) (installed int, err error) {
 
 	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %s \"$@\"\n", shellQuote(guardBin))
 	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
-	// post-checkout: only reindex on branch switches ($3 == 1), not file checkouts.
-	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] && %s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
+	// freshness: on the two moments a worktree picks up newer master (a merge, a
+	// branch switch), rebuild the installed binaries if they're behind the tag,
+	// THEN reindex — so the background reindex runs the just-built binary. The
+	// version-check exits 0 on every path (it must never fail the git op); `|| true`
+	// is belt-and-braces against a shell that treats its output oddly. It only ever
+	// acts inside the runecho source tree and honours RUNECHO_NO_AUTO_INSTALL=1.
+	// This folds #228 into the hooks installHooks already owns rather than adding a
+	// third installer that would collide with these reindex hooks.
+	freshen := fmt.Sprintf("%s version-check --reinstall --quiet || true", shellQuote(irBin))
+	postMerge := fmt.Sprintf("#!/usr/bin/env bash\n%s\n%s repo reindex . >/dev/null 2>&1 &\n", freshen, shellQuote(irBin))
+	// post-checkout: only act on branch switches ($3 == 1), not file checkouts.
+	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] || exit 0\n%s\n%s repo reindex . >/dev/null 2>&1 &\n", freshen, shellQuote(irBin))
 
 	hooks := map[string]string{
 		"pre-commit":    preCommit,
 		"post-commit":   reindex,
-		"post-merge":    reindex,
+		"post-merge":    postMerge,
 		"post-checkout": postCheckout,
+	}
+
+	// core.hooksPath redirects git to run hooks from THERE, not the common-dir we
+	// just wrote to — so a "success" message would be a lie. Warn instead. Empty
+	// (the common case) means git reads hooks from the dir we installed into.
+	if hp := gitutil.HooksPath(root); hp != "" {
+		fmt.Fprintf(os.Stderr, "  Warning: core.hooksPath is set to %q — git will NOT run the hooks just installed in %s.\n", hp, hooksDir)
 	}
 	for name, content := range hooks {
 		ok, hErr := installHookFile(hooksDir, name, content, force)

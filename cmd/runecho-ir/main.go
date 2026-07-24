@@ -81,6 +81,8 @@ func run() int {
 			return runBackup(os.Args[2:])
 		case "install":
 			return runInstall(os.Args[2:])
+		case "version-check":
+			return runVersionCheck(os.Args[2:])
 		case "truth-trail":
 			return runTruthTrail(os.Args[2:])
 		case "validate-claims":
@@ -118,6 +120,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic] [--force] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir version-check [--reinstall] [--quiet] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")

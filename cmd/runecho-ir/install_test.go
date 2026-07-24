@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/xml"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +68,55 @@ func TestXMLEscape_RoundTrips(t *testing.T) {
 		if v.Text != in {
 			t.Errorf("round-trip mismatch: in=%q out=%q (doc=%q)", in, v.Text, doc)
 		}
+	}
+}
+
+// installHooks must fold the #228 freshness check into the SAME post-merge/
+// post-checkout hooks it already owns for the E6 reindex — never as a separate
+// installer, and never at the cost of the reindex line (dropping the reindex is
+// the worse staleness the feature exists to prevent). PR #226 shipped a third
+// installer that collided here; this pins the merged design.
+func TestInstallHooks_FreshnessFoldedIn(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	if _, err := installHooks(repo, true); err != nil {
+		t.Fatalf("installHooks: %v", err)
+	}
+	hooksDir := filepath.Join(repo, ".git", "hooks")
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+
+	for _, name := range []string{"post-merge", "post-checkout"} {
+		body := read(name)
+		if !strings.Contains(body, "version-check --reinstall --quiet") {
+			t.Errorf("%s missing the freshness check:\n%s", name, body)
+		}
+		if !strings.Contains(body, "repo reindex") {
+			t.Errorf("%s lost the E6 reindex line:\n%s", name, body)
+		}
+	}
+	// post-checkout must gate on a real branch switch ($3 == 1) so a file checkout
+	// neither reindexes nor rebuilds.
+	if body := read("post-checkout"); !strings.Contains(body, `"$3" = "1"`) {
+		t.Errorf("post-checkout not gated on the branch-switch flag:\n%s", body)
+	}
+	// post-commit stays reindex-only: a local commit never advances past a tag
+	// (releases are tagged server-side by CI), so a freshness check there is noise.
+	if body := read("post-commit"); strings.Contains(body, "version-check") {
+		t.Errorf("post-commit should not run the freshness check:\n%s", body)
+	}
+	if body := read("pre-commit"); !strings.Contains(body, "runecho-guard") {
+		t.Errorf("pre-commit is not the guard hook:\n%s", body)
 	}
 }

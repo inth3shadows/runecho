@@ -28,7 +28,13 @@ echo
 
 # 1. Build throwaway runecho-mcp + runecho-ir (never touches ~/.local/bin, so
 #    the user's live daily-driver install/other sessions are undisturbed).
-GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx"
+# Derived from install.sh, never hardcoded. A third copy of this list is a third
+# thing to forget: .goreleaser.yaml already shipped without the Rust and Ruby
+# grammars because it carried its own copy, and this file had the same stale
+# five. A harness that builds a binary with a grammar missing measures a parser
+# that indexes that language to NOTHING and reports it as a real result.
+GRAMMAR_TAGS="$(grep -oP '(?<=^GRAMMAR_TAGS=").*(?=")' "$REPO_ROOT/install.sh")"
+[ -n "$GRAMMAR_TAGS" ] || { echo "audit.sh: could not read GRAMMAR_TAGS from install.sh" >&2; exit 1; }
 RUNECHO_VERSION="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
 LDFLAGS="-X github.com/inth3shadows/runecho/internal/version.Version=$RUNECHO_VERSION"
 mkdir -p "$BUILD"

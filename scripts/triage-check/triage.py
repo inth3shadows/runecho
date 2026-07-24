@@ -161,6 +161,14 @@ def cmd_verdict(args) -> int:
         genuine = args.genuine
 
     total_src = sum(len(r["source_findings"]) for r in report["repos"])
+    # A hand-tallied --genuine count that is negative or exceeds the source
+    # findings makes fp = total_src - genuine go negative, printing an absurd
+    # "false-positive rate: -67% (-2/3)". That is a counting error, not a
+    # measurable rate, so reject it rather than clamp — clamping would dress the
+    # mistake up as a plausible 0%.
+    if args.genuine is not None and not (0 <= genuine <= total_src):
+        sys.exit(f"triage: --genuine {genuine} is out of range for {total_src} "
+                 f"source finding(s); expected 0..{total_src}")
     fp = classified - genuine if args.genuine is None else total_src - genuine
     fp_rate = (fp / total_src) if total_src else 0.0
 

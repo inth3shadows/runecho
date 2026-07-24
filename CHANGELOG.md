@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-07-24
+
+### Changed
+- fix: release binaries shipped without the Rust and Ruby grammars (#229)
+
 ## [0.17.1] — 2026-07-24
 
 ### Changed

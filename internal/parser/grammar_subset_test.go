@@ -161,6 +161,16 @@ func TestASTGrammarsLoad(t *testing.T) {
 	if pythonLanguage() == nil {
 		t.Error("python grammar is nil under these build tags — .py files index to nothing")
 	}
+	// JS/TS/TSX were absent from this check, so three of the six AST grammars
+	// could have gone nil under a runtime upgrade without any test noticing —
+	// and unlike Rust/Ruby, JS degrades to a REGEX path rather than to nothing,
+	// which still returns names and so looks like it works.
+	for _, ext := range []string{".js", ".ts", ".tsx"} {
+		if jsLanguageFor(ext) == nil {
+			t.Errorf("%s grammar is nil under these build tags — those files fall back to "+
+				"the regex path (names only, no spans) while still appearing to parse", ext)
+		}
+	}
 }
 
 // assertDerivesTags fails if a build script restates the grammar tag list

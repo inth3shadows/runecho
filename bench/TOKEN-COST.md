@@ -61,10 +61,24 @@ scope with `paths` and `detail`, and this quantifies why it matters:
 is a genuine 70× advantage — but it is an advantage of *`locate`*, not of RunEcho
 generally, and saying otherwise would be the same overclaim as #2.
 
-**Open question this raises:** `structure`'s default of `detail=symbols` is the
-worst-value setting measured. Whether the default should be `tree` is a real
-question this benchmark can now inform — tracked separately rather than changed
-here, because it is a behaviour change to a shipped tool.
+**Resolved (#224).** `structure`'s default was the worst-value setting measured,
+and a field-level split found why: of the default's 75,641 tokens, the symbols
+block was 74,702 — and stripping just the **per-symbol content hash** took that
+to **29,432**. Sixty percent of the response was 1,864 unique 64-character
+SHA-256 strings that no agent reads. The default now omits them; `detail=hashes`
+returns the original shape. Every file, symbol, kind and line is unchanged — this
+is a cheaper encoding of the same facts, not less data. The `tree`-by-default
+option was rejected: it forces a two-hop for the symbol-level data most callers
+actually want.
+
+**A note on compression proxies.** Some clients wrap an MCP server in a lossless
+compression proxy. Measured through one on 2026-07-23, `structure`'s pre-#224
+default went 75,641 → **71,763 tokens — a 5% saving**, not the ~48% such a proxy
+achieves on ordinary tool output. The reason is the same one above: 1,864
+*unique*, high-entropy hex strings are exactly what a legend/dedup codec cannot
+compress. Every measurement in the table above is the bare server, so the numbers
+a wrapped client sees are within a few percent of these — but do not assume a
+proxy rescues a payload made of hashes.
 
 ## Method, and what it deliberately does not do
 

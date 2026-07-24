@@ -14,6 +14,8 @@
 #                                      # (fallback; the plugin is the preferred wiring)
 #   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
 #                                        # (this repo's own release safety net, #51/#63)
+#   bash install.sh --hook-auto-install # keep the INSTALLED binaries in step with
+#                                        # the source on merge/checkout
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
@@ -31,6 +33,12 @@
 # githooks/pre-push (rejects a non-monotonic vX.Y.Z tag push) into the repo you
 # invoke it from. Relevant to runecho maintainers/forks cutting tags, not to
 # consumers of the oracle.
+#
+# --hook-auto-install is likewise a maintainer hook: it installs githooks/post-merge
+# as both post-merge and post-checkout, so the binaries in $BIN_DIR are rebuilt
+# whenever the source moves to a newer release tag. Without it the guard silently
+# runs an old build while a newer one ships, which is how three of one session's
+# quality readings turned out to be fossils.
 
 set -euo pipefail
 
@@ -45,12 +53,14 @@ INSTALL_HOOK=0
 FORCE_HOOK=0
 PRINT_HOOK_CONFIG=0
 INSTALL_PRE_PUSH=0
+INSTALL_AUTO=0
 for arg in "$@"; do
   case "$arg" in
     --hook)  INSTALL_HOOK=1 ;;
     --force) FORCE_HOOK=1 ;;
     --print-hook-config) PRINT_HOOK_CONFIG=1 ;;
     --hook-pre-push) INSTALL_PRE_PUSH=1 ;;
+    --hook-auto-install) INSTALL_AUTO=1 ;;
     *) echo "install.sh: unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
@@ -217,6 +227,43 @@ if [ "$INSTALL_PRE_PUSH" -eq 1 ]; then
   echo "Pre-push tag-monotonicity hook installed: $PP_HOOK_FILE"
   echo "  Rejects a vX.Y.Z tag push that isn't semver-greater than the highest"
   echo "  existing tag (see issue #51). Only relevant if you cut releases here."
+fi
+
+# --hook-auto-install: rebuild the installed binaries whenever the source moves
+# to a newer release tag. Installed as BOTH post-merge and post-checkout from one
+# tracked script — those are the two moments a worktree picks up a newer master,
+# and post-checkout additionally covers `git worktree add`. Same git-common-dir
+# reasoning as --hook-pre-push: one install covers every worktree of the repo.
+if [ "$INSTALL_AUTO" -eq 1 ]; then
+  echo ""
+  COMMON_DIR="$(git -C "$INVOKE_DIR" rev-parse --git-common-dir 2>/dev/null)" || {
+    echo "install.sh: ERROR: --hook-auto-install requires a git repository in the directory you ran it from." >&2
+    exit 1
+  }
+  case "$COMMON_DIR" in
+    /*) ;;
+    *) COMMON_DIR="$INVOKE_DIR/$COMMON_DIR" ;;
+  esac
+  AI_HOOK_DIR="$COMMON_DIR/hooks"
+  mkdir -p "$AI_HOOK_DIR"
+
+  for name in post-merge post-checkout; do
+    target="$AI_HOOK_DIR/$name"
+    if [ -f "$target" ] && [ "$FORCE_HOOK" -eq 0 ]; then
+      # The marker is the tracked script's own opt-out variable, so an already
+      # installed copy is recognised regardless of which hook name it landed as.
+      if ! grep -q "RUNECHO_NO_AUTO_INSTALL" "$target" 2>/dev/null; then
+        echo "install.sh: ERROR: $target already exists and is not this repo's auto-install hook." >&2
+        echo "  Use --force to overwrite, or inspect and integrate manually." >&2
+        exit 1
+      fi
+    fi
+    cp "$SCRIPT_DIR/githooks/post-merge" "$target"
+    chmod +x "$target"
+    echo "Auto-install hook installed: $target"
+  done
+  echo "  Rebuilds \$BIN_DIR binaries when the source moves to a newer release tag."
+  echo "  No-op otherwise; never fails the git operation. Opt out: RUNECHO_NO_AUTO_INSTALL=1"
 fi
 
 cat <<EOF

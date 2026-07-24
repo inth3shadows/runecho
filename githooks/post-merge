@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Keep the INSTALLED runecho binaries in step with the checked-out source.
+#
+# Why this exists: on 2026-07-23 the installed guard went stale three separate
+# times in one session while newer versions shipped, and two of that session's
+# published quality numbers turned out to be fossils written by an old binary
+# (a check reported at a 91% false-positive rate had been fixed six releases
+# earlier). "Remember to reinstall after every merge" is not a fix — that habit
+# had already failed three times in one sitting. So this is automatic.
+#
+# Installed as BOTH post-merge and post-checkout: those are the two moments a
+# worktree picks up a newer master in the bare-repo/worktree flow. post-checkout
+# also covers `git worktree add`, which is how each session's tree is created.
+#
+# Deliberately does NOT fetch. A hook that touches the network taxes every pull,
+# and both triggers already follow a fetch by construction.
+#
+# Self-limiting: it rebuilds only when the newest tag reachable from HEAD is
+# semver-GREATER than the installed binary's version. Checking out an older
+# branch therefore never downgrades what is installed, and the overwhelmingly
+# common case is a no-op that costs two subprocesses.
+#
+# Never fails the git operation it hooks — every exit path is 0.
+#
+# Opt out with RUNECHO_NO_AUTO_INSTALL=1.
+
+set -u
+
+# post-checkout passes: $1 prev-HEAD, $2 new-HEAD, $3 branch-flag (1 = branch
+# switch, 0 = file checkout). A file checkout cannot change the source version,
+# so skip it. post-merge passes a single squash-merge flag and never matches.
+if [ "$#" -eq 3 ] && [ "$3" = "0" ]; then
+  exit 0
+fi
+
+[ "${RUNECHO_NO_AUTO_INSTALL:-}" = "1" ] && exit 0
+command -v go >/dev/null 2>&1 || exit 0
+
+BIN="${RUNECHO_BIN_DIR:-$HOME/.local/bin}/runecho-guard"
+# Only refresh an install that already exists. Installing uninvited into the
+# PATH of someone who merely cloned the repo would be a surprise, not a service.
+[ -x "$BIN" ] || exit 0
+
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -n "$top" ] && [ -f "$top/install.sh" ] || exit 0
+
+# Compare only the vX.Y.Z core. A binary built off a non-tag commit reports
+# `v0.16.1-3-gabc1234`, and `sort -V` orders such suffixes inconsistently enough
+# that comparing them would occasionally trigger a pointless rebuild. Comparing
+# cores means "ahead of the tag" correctly reads as "not behind".
+core() { printf '%s' "${1:-}" | grep -oE '^v[0-9]+\.[0-9]+\.[0-9]+' || true; }
+
+installed="$(core "$("$BIN" --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1)")"
+newest="$(core "$(git describe --tags --abbrev=0 2>/dev/null)")"
+[ -n "$installed" ] && [ -n "$newest" ] || exit 0
+[ "$installed" = "$newest" ] && exit 0
+[ "$(printf '%s\n%s\n' "$installed" "$newest" | sort -V | tail -1)" = "$newest" ] || exit 0
+
+echo "runecho: installed $installed is behind $newest — reinstalling..."
+if bash "$top/install.sh" >/dev/null 2>&1; then
+  echo "runecho: now $("$BIN" --version 2>/dev/null | head -1)"
+else
+  echo "runecho: reinstall FAILED — run 'bash install.sh' from $top" >&2
+fi
+exit 0

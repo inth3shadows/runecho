@@ -31,6 +31,11 @@ install time from `git describe --tags` (see `install.sh`).
   a newer release tag. Opt out with `RUNECHO_NO_AUTO_INSTALL=1`; pair with
   `--no-build` to install hooks without a Go toolchain.
 
+## [0.17.0] — 2026-07-24
+
+### Changed
+- guard: complementary build constraints are not a duplicate (#225)
+
 ## [0.16.1] — 2026-07-23
 
 ### Changed

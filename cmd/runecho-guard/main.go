@@ -753,7 +753,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		if duplicateEnabled() && wholeDefinitive {
 			if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
 				var qErrs int
-				duplicates, qErrs = checkDuplicateDefs(lang, filepath.Dir(filePath), filePath, added)
+				duplicates, qErrs = checkDuplicateDefs(lang, filepath.Dir(filePath), filePath, added,
+					goBuildConstrained(filePath, wholeOld, text))
 				degraded += qErrs
 			}
 		}

@@ -1,0 +1,58 @@
+[
+  {
+    "name": "go-duplicate-same-dir-asks",
+    "desc": "a new Go def whose name already exists in another file of the SAME package (dir) is a real collision → ask",
+    "check": "duplicate",
+    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
+    "enroll": { "pkg/a.go": ["ProcessOrder"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": true,
+    "expect_symbols": ["ProcessOrder"]
+  },
+  {
+    "name": "go-duplicate-not-defined-elsewhere-clean",
+    "desc": "a new def whose name exists nowhere else in the snapshot is not a duplicate → no ask",
+    "check": "duplicate",
+    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
+    "enroll": { "pkg/a.go": ["SomethingElse"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "go-duplicate-different-dir-clean",
+    "desc": "same name in a DIFFERENT directory is an unrelated package symbol the compiler keeps distinct → no ask",
+    "check": "duplicate",
+    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
+    "enroll": { "other/a.go": ["ProcessOrder"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "go-duplicate-test-file-skipped",
+    "desc": "test files legitimately reuse symbol names across files → the check skips an edited _test.go",
+    "check": "duplicate",
+    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
+    "enroll": { "pkg/a.go": ["ProcessOrder"] },
+    "file": "pkg/helper_test.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "go-duplicate-cross-language-clean",
+    "desc": "a Go def sharing a name with a Python sibling is not a collision (separate namespaces) → no ask",
+    "check": "duplicate",
+    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
+    "enroll": { "pkg/a.py": ["ProcessOrder"] },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": false
+  }
+]

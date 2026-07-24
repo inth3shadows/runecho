@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-24
+
+### Changed
+- guard: complementary build constraints are not a duplicate (#225)
+
 ## [0.16.1] — 2026-07-23
 
 ### Changed

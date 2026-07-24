@@ -22,9 +22,10 @@ import (
 //
 // Phase 1 covered duplicate-symbol; this file now also covers dangling-refs,
 // which enrolls a refs index (Refs) so a deleted def with a live cross-file
-// referrer can be detected. file-scope and contract remain tracked follow-ups on
-// #227, each adding its own enrollment shape (file-scoped symbols, an activated
-// contract) to Enroll.
+// referrer can be detected. Three checks remain tracked follow-ups on #227:
+// dropped-import (pure old-vs-new text, no store), file-scope (file-scoped
+// symbols), and contract (an activated contract) — each adding its own
+// enrollment shape as needed.
 type hookCase struct {
 	Name   string              `json:"name"`
 	Desc   string              `json:"desc,omitempty"`

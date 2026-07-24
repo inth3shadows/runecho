@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.3] — 2026-07-24
+
+### Changed
+- review fix: a third copy of the grammar tag list, in the eval harness (#230)
+
 ## [0.17.2] — 2026-07-24
 
 ### Changed

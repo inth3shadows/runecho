@@ -247,6 +247,9 @@ if [ "$INSTALL_AUTO" -eq 1 ]; then
   AI_HOOK_DIR="$COMMON_DIR/hooks"
   mkdir -p "$AI_HOOK_DIR"
 
+  # Validate BOTH targets before copying EITHER. Interleaving the checks with the
+  # copies would install post-merge and then abort on a foreign post-checkout,
+  # leaving half a hook behind an error message that reads as "nothing happened".
   for name in post-merge post-checkout; do
     target="$AI_HOOK_DIR/$name"
     if [ -f "$target" ] && [ "$FORCE_HOOK" -eq 0 ]; then
@@ -255,9 +258,13 @@ if [ "$INSTALL_AUTO" -eq 1 ]; then
       if ! grep -q "RUNECHO_NO_AUTO_INSTALL" "$target" 2>/dev/null; then
         echo "install.sh: ERROR: $target already exists and is not this repo's auto-install hook." >&2
         echo "  Use --force to overwrite, or inspect and integrate manually." >&2
+        echo "  No auto-install hook was written." >&2
         exit 1
       fi
     fi
+  done
+  for name in post-merge post-checkout; do
+    target="$AI_HOOK_DIR/$name"
     cp "$SCRIPT_DIR/githooks/post-merge" "$target"
     chmod +x "$target"
     echo "Auto-install hook installed: $target"

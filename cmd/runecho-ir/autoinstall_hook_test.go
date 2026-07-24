@@ -196,3 +196,71 @@ func TestInstallScript_WiresAutoInstallHook(t *testing.T) {
 		}
 	}
 }
+
+// A foreign hook at EITHER name must abort the whole install, not just the one
+// it collided with. The first version of this installer validated and copied in
+// one pass, so a foreign post-checkout left post-merge installed behind an error
+// that reads as "nothing happened" — half a hook, silently live.
+func TestInstallScript_CollisionInstallsNothing(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	installer, err := filepath.Abs(filepath.Join("..", "..", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Collide on each name in turn: the abort must be total either way, so the
+	// second case also proves the fix is not just "check post-checkout first".
+	for _, foreign := range []string{"post-checkout", "post-merge"} {
+		t.Run("foreign "+foreign, func(t *testing.T) {
+			repo := t.TempDir()
+			gitRun := func(args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = repo
+				cmd.Env = append(os.Environ(),
+					"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+					"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			gitRun("init", "-q")
+			gitRun("commit", "-q", "--allow-empty", "-m", "x")
+
+			hooks := filepath.Join(repo, ".git", "hooks")
+			if err := os.MkdirAll(hooks, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(hooks, foreign), "#!/bin/sh\necho someone-elses-hook\n")
+
+			cmd := exec.Command("bash", installer, "--hook-auto-install")
+			cmd.Dir = repo
+			// install.sh always builds the binaries before touching hooks, and it
+			// defaults to $HOME/.local/bin. Without this the test would overwrite
+			// the developer's real, released install with an unreleased build off
+			// the test branch — and that build would then stamp its version into
+			// every decision-log record it wrote. Redirect it into the temp repo.
+			cmd.Env = append(os.Environ(), "RUNECHO_BIN_DIR="+filepath.Join(repo, "bin"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected a non-zero exit on collision, got success:\n%s", out)
+			}
+
+			for _, name := range []string{"post-merge", "post-checkout"} {
+				body, readErr := os.ReadFile(filepath.Join(hooks, name))
+				if readErr != nil {
+					continue // absent is fine — nothing was written
+				}
+				if strings.Contains(string(body), "RUNECHO_NO_AUTO_INSTALL") {
+					t.Errorf("collision on %s still installed %s — partial install:\n%s",
+						foreign, name, out)
+				}
+			}
+		})
+	}
+}

@@ -12,8 +12,18 @@
 # worktree picks up a newer master in the bare-repo/worktree flow. post-checkout
 # also covers `git worktree add`, which is how each session's tree is created.
 #
-# Deliberately does NOT fetch. A hook that touches the network taxes every pull,
-# and both triggers already follow a fetch by construction.
+# Deliberately does NOT fetch: a hook that touches the network would tax every
+# pull and every worktree creation. The consequence is stated rather than hidden
+# — this compares against tags ALREADY PRESENT locally, so it guarantees
+# source/install parity, not freshness against the remote:
+#
+#   * `git fetch && git merge` (the path that produced the stale-binary
+#     incidents) works, because the merge is preceded by a fetch by construction.
+#   * `git worktree add <branch> <base>` does NOT fetch, and branches off whatever
+#     local base ref exists. If that base is behind the remote, both the new
+#     worktree's source AND the installed binary are stale together, and this
+#     hook correctly reports nothing to do. Fetch before creating the worktree if
+#     that matters.
 #
 # Self-limiting: it rebuilds only when the newest tag reachable from HEAD is
 # semver-GREATER than the installed binary's version. Checking out an older

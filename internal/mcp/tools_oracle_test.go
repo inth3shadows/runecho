@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
@@ -153,6 +154,30 @@ func TestOracleStructureProjection(t *testing.T) {
 	// detail=full: legacy functions[] present (back-compat shape).
 	if _, ok := fileOf(call(t, o.structure, `{"repo":"`+name+`","detail":"full"}`))["functions"]; !ok {
 		t.Error("full detail: expected legacy functions[]")
+	}
+
+	// The default drops the per-symbol content hash — 60% of the response's
+	// tokens on a real repo — while `hashes` still returns it. Everything else
+	// about the two responses must be identical: this is a cheaper encoding of
+	// the same facts, not a reduction in which files or symbols come back.
+	defSyms := f["symbols"].([]any)
+	hashSyms := fileOf(call(t, o.structure, `{"repo":"`+name+`","detail":"hashes"}`))["symbols"].([]any)
+	if len(defSyms) != len(hashSyms) || len(defSyms) == 0 {
+		t.Fatalf("symbols/hashes must return the same symbols: %d vs %d", len(defSyms), len(hashSyms))
+	}
+	for i := range defSyms {
+		d, h := defSyms[i].(map[string]any), hashSyms[i].(map[string]any)
+		if _, ok := d["hash"]; ok {
+			t.Errorf("symbols detail: symbol %v should carry no hash", d["name"])
+		}
+		if h["hash"] == nil || h["hash"] == "" {
+			t.Errorf("hashes detail: symbol %v should carry a hash", h["name"])
+		}
+		for _, k := range []string{"name", "kind", "line"} {
+			if d[k] != h[k] {
+				t.Errorf("symbol %d field %q differs between details: %v vs %v", i, k, d[k], h[k])
+			}
+		}
 	}
 
 	// Unknown detail is rejected, not silently coerced.
@@ -576,5 +601,29 @@ func TestMatchGlob_GlobstarFinalComponent(t *testing.T) {
 		if got := matchGlob(c.pattern, c.p); got != c.want {
 			t.Errorf("matchGlob(%q,%q)=%v want %v", c.pattern, c.p, got, c.want)
 		}
+	}
+}
+
+// withoutSymbolHashes must not touch its input. The slice it receives belongs to
+// the live IR, which the same request's symbol_count and any concurrent caller
+// also read — clearing hashes in place would silently strip them from `hashes`
+// and `full` responses too, which is the exact silent-data-loss shape #224 was
+// careful to avoid.
+func TestWithoutSymbolHashes_DoesNotMutateInput(t *testing.T) {
+	in := []ir.Symbol{{Name: "A", Kind: "function", Line: 1, Hash: "aaa"}}
+	out := withoutSymbolHashes(in)
+	if in[0].Hash != "aaa" {
+		t.Errorf("input was mutated: hash = %q, want %q", in[0].Hash, "aaa")
+	}
+	if out[0].Hash != "" {
+		t.Errorf("output hash = %q, want empty", out[0].Hash)
+	}
+	if out[0].Name != in[0].Name || out[0].Kind != in[0].Kind || out[0].Line != in[0].Line {
+		t.Errorf("name/kind/line must survive: %+v vs %+v", out[0], in[0])
+	}
+	// Empty and nil inputs are the common no-symbol file; they must not allocate
+	// a spurious non-nil slice that would change the emitted JSON shape.
+	if got := withoutSymbolHashes(nil); got != nil {
+		t.Errorf("nil input should return nil, got %v", got)
 	}
 }

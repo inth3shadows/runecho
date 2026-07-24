@@ -16,6 +16,15 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- **`structure`'s default response no longer carries per-symbol content hashes.**
+  `detail=symbols` (the default) returns each symbol's `name`/`kind`/`line` and
+  the per-file `hash` and `refs` as before, but omits `symbols[].hash`. On this
+  repo that is 76,278 → 36,724 tokens, a 52% cut; ~60% of the old payload was
+  1,864 unique SHA-256 strings. **A client reading `symbols[i].hash` from a
+  default call must now pass `detail=hashes`**, a new tier returning the previous
+  shape exactly. No files, symbols, kinds, lines or refs changed (#224).
+
 ## [0.17.0] — 2026-07-24
 
 ### Changed

@@ -98,8 +98,8 @@ func structureSchema() map[string]any {
 		"properties": map[string]any{
 			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo (see `health`/registry)"},
 			"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional glob filters; return only matching files (e.g. \"internal/mcp/**\" or \"*.go\"). `**` matches across directories. Omit for the whole repo."},
-			"detail": map[string]any{"type": "string", "enum": []string{"tree", "symbols", "full"},
-				"description": "tree = file paths + symbol counts only; symbols (default) = per-file symbols[] (name/kind/line/hash) + refs; full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
+			"detail": map[string]any{"type": "string", "enum": []string{"tree", "symbols", "hashes", "full"},
+				"description": "tree = file paths + symbol counts only (cheapest); symbols (default) = per-file symbols[] (name/kind/line) + refs; hashes = symbols plus each symbol's content hash (~2.5x the tokens; only needed to detect body-level drift, which `hash`/`diff`/`status` answer far more cheaply); full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
 		},
 		"required": []string{"repo"},
 	}
@@ -266,8 +266,10 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	if detail == "" {
 		detail = "symbols"
 	}
-	if detail != "tree" && detail != "symbols" && detail != "full" {
-		return "", fmt.Errorf("bad detail %q: want tree|symbols|full", detail)
+	switch detail {
+	case "tree", "symbols", "hashes", "full":
+	default:
+		return "", fmt.Errorf("bad detail %q: want tree|symbols|hashes|full", detail)
 	}
 	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 	if err != nil {
@@ -296,15 +298,9 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 		case "tree":
 			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(f.Symbols)}
 		case "symbols":
-			syms := f.Symbols
-			if syms == nil {
-				syms = []ir.Symbol{} // emit [] not null, matching the full-shape normalization
-			}
-			fv := map[string]any{"hash": f.Hash, "symbols": syms}
-			if len(f.Refs) > 0 {
-				fv["refs"] = f.Refs
-			}
-			files[p] = fv
+			files[p] = symbolFile(f, withoutSymbolHashes(f.Symbols))
+		case "hashes":
+			files[p] = symbolFile(f, f.Symbols)
 		case "full":
 			files[p] = f // FileIR.MarshalJSON -> legacy arrays + symbols
 		}
@@ -317,6 +313,48 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 		"detail":       detail,
 		"files":        files,
 	})
+}
+
+// symbolFile is the per-file shape shared by `symbols` and `hashes`: they differ
+// only in whether each symbol carries its content hash, never in which files or
+// symbols are returned.
+func symbolFile(f ir.FileIR, syms []ir.Symbol) map[string]any {
+	if syms == nil {
+		syms = []ir.Symbol{} // emit [] not null, matching the full-shape normalization
+	}
+	fv := map[string]any{"hash": f.Hash, "symbols": syms}
+	if len(f.Refs) > 0 {
+		fv["refs"] = f.Refs
+	}
+	return fv
+}
+
+// withoutSymbolHashes returns syms with each Symbol.Hash cleared, so `omitempty`
+// drops the field at the JSON boundary.
+//
+// This is the single most expensive field RunEcho ships. Measured 2026-07-23 on
+// this repo (179 files, 1,864 symbols): the default `symbols` response was
+// 75,641 tokens, of which 74,702 was the symbols block — and stripping just the
+// per-symbol hash took that to 29,432. Sixty percent of the payload was 1,864
+// 64-character SHA-256 strings. They are also incompressible by the lossless
+// proxy some clients wrap the server in (measured saving: 5%), precisely because
+// each one is unique high-entropy text.
+//
+// Nothing an agent reads is lost — every file, symbol, kind and line is
+// unchanged. The hash answers "did this symbol's body change", which `hash`,
+// `diff` and `status` already answer for 37-135 tokens, and which
+// `detail=hashes` still answers here in the original shape. The input slice is
+// never mutated: it belongs to the live IR, which other callers share.
+func withoutSymbolHashes(syms []ir.Symbol) []ir.Symbol {
+	if len(syms) == 0 {
+		return syms
+	}
+	out := make([]ir.Symbol, len(syms))
+	copy(out, syms)
+	for i := range out {
+		out[i].Hash = ""
+	}
+	return out
 }
 
 func (o *Oracle) hash(args json.RawMessage) (string, error) {

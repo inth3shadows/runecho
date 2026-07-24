@@ -140,7 +140,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 
 | Tool | Args | Returns |
 |---|---|---|
-| `structure` | `repo`, optional `paths` (globs, `**` crosses directories) + `detail` (`tree`\|`symbols`\|`full`) | Files + symbols of the live IR, with counts; per-file `refs` list the bare call sites within that file. Scope with `paths` and drop to `detail: "tree"` to keep responses small on a large repo |
+| `structure` | `repo`, optional `paths` (globs, `**` crosses directories) + `detail` (`tree`\|`symbols`\|`hashes`\|`full`) | Files + symbols of the live IR, with counts; per-file `refs` list the bare call sites within that file. Scope with `paths` and drop to `detail: "tree"` to keep responses small on a large repo. `symbols` (default) omits each symbol's content hash — 60% of the payload and unread by agents (#224); `hashes` restores it for drift work, though `hash`/`diff`/`status` answer that far more cheaply |
 | `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |

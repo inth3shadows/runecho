@@ -60,6 +60,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/guard"
@@ -1270,9 +1271,15 @@ const maxReasonPathLen = 200
 // injection into the one surface whose entire value is being trustworthy at a
 // permission decision point.
 //
-// C0 control characters and DEL become "?", and the result is truncated. A normal
-// path passes through unchanged, so this costs nothing in the common case; a
-// hostile one can neither break out of its line nor pad the message.
+// Any control character (unicode.IsControl: C0, DEL, and the C1 range 0x80–0x9f
+// which includes NEL U+0085) plus the Unicode line/paragraph separators U+2028 /
+// U+2029 become "?", and the result is truncated. The two separators and NEL sit
+// at or above 0x20, so a `r < 0x20 || r == 0x7f` test let them through — harmless
+// once JSON-escaped in permissionDecisionReason, but the SAME string also feeds
+// the plain-text pre-commit stderr report, where a terminal renders them as a
+// line break: the exact line-splitting this sanitizer exists to block (#235). A
+// normal path passes through unchanged, so this costs nothing in the common case;
+// a hostile one can neither break out of its line nor pad the message.
 func sanitizeReasonPath(p string) string {
 	var b strings.Builder
 	b.Grow(len(p))
@@ -1282,7 +1289,7 @@ func sanitizeReasonPath(p string) string {
 			b.WriteString("…(truncated)")
 			break
 		}
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			b.WriteRune('?')
 		} else {
 			b.WriteRune(r)

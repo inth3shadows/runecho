@@ -18,6 +18,41 @@ func outcomeGV(gv, file string, mins int, syms ...string) Decision {
 	return d
 }
 
+// #233: the two build channels stamp one release differently — install.sh
+// (git describe) → "v0.17.4", goreleaser ({{ .Version }}) → "0.17.4". They must
+// bucket as ONE version, else MixedVersions() trips and silently skips the
+// fpreport --max-rate gate for a single logical release.
+func TestFPReport_MixedStampsBucketAsOne(t *testing.T) {
+	decs := []Decision{
+		askGV("v0.17.4", "violations", "go", "r1", "a.go", 0, "foo"), // install.sh stamp
+		askGV("0.17.4", "violations", "go", "r1", "b.go", 1, "bar"),  // goreleaser stamp
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.MixedVersions() {
+		t.Errorf("MixedVersions() = true for one release stamped two ways; ByVersion = %v", s.ByVersion)
+	}
+	if len(s.ByVersion) != 1 {
+		t.Fatalf("ByVersion has %d keys, want 1: %v", len(s.ByVersion), s.ByVersion)
+	}
+	if b := s.ByVersion["v0.17.4"]; b.Asks != 2 {
+		t.Errorf("canonical bucket v0.17.4 = %+v, want 2 asks", b)
+	}
+}
+
+// #233: a --gv in either stamp form selects records written in either form.
+func TestFilterVersion_NormalizesStamp(t *testing.T) {
+	decs := []Decision{
+		askGV("v0.17.4", "violations", "go", "r1", "a.go", 0, "foo"),
+		askGV("0.17.4", "violations", "go", "r1", "b.go", 1, "bar"),
+		askGV("v0.16.0", "violations", "go", "r1", "c.go", 2, "baz"), // different release — must NOT match
+	}
+	for _, want := range []string{"v0.17.4", "0.17.4"} {
+		if got := FilterVersion(decs, want); len(got) != 2 {
+			t.Errorf("FilterVersion(--gv=%q) matched %d records, want 2 (both stamp forms of v0.17.4)", want, len(got))
+		}
+	}
+}
+
 // The regression this whole feature exists for: two builds in one window, each
 // with a very different approval rate, pooled into a single headline number that
 // describes neither. Measured on the real log at 70% vs 19% (#207).

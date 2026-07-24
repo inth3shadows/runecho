@@ -12,3 +12,21 @@ package version
 
 // Version is the RunEcho version string. "dev" unless stamped at build time.
 var Version = "dev"
+
+// Canonical normalizes a version string to the `vX.Y.Z[...]` form. It exists
+// because the two build channels stamp Version differently: install.sh uses
+// `git describe --tags` → "v0.17.4", but goreleaser stamps `{{ .Version }}` →
+// "0.17.4" (goreleaser strips the leading v). Left unnormalized, the same
+// release is recorded under two labels, which splits guardstats' per-version
+// bucketing and silently suppresses the fpreport release gate (#233).
+//
+// The rule is minimal on purpose: a value beginning with a digit is a bare
+// semver core missing its v, so prepend one. Everything else — an already
+// v-prefixed string, "dev", an empty stamp — is returned unchanged, so this
+// never invents a version for an unstamped build.
+func Canonical(s string) string {
+	if len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
+		return "v" + s
+	}
+	return s
+}

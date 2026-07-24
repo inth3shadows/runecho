@@ -75,7 +75,9 @@ func logDecision(rec decisionRecord) {
 	rec.V = 1
 	// Always overwrite: the writing binary's own version is the only value that
 	// can be true here, so a caller-supplied GV would only ever be wrong.
-	rec.GV = version.Version
+	// Canonical so an install.sh build (v0.17.4) and a goreleaser build (0.17.4)
+	// of the SAME release stamp one label, not two (#233).
+	rec.GV = version.Canonical(version.Version)
 	if rec.TS == "" {
 		rec.TS = time.Now().UTC().Format(time.RFC3339)
 	}

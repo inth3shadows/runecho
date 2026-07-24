@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.4] — 2026-07-24
+
+### Changed
+- deps: gotreesitter 0.20.2 → 0.47.0, verified by parsing all six languages (supersedes #213) (#231)
+
 ## [0.17.3] — 2026-07-24
 
 ### Changed

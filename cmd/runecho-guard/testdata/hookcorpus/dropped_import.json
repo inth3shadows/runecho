@@ -1,0 +1,44 @@
+[
+  {
+    "name": "python-dropped-import-still-called-asks",
+    "desc": "removing `from ulid import ULID` while the new text still calls ULID() is the obs-py-002 pattern → ask. The additive check stays silent here because addInFileDefs folds the OLD on-disk file's import into the known set — proving this ask comes from dropped-import, not the additive check",
+    "check": "dropped-import",
+    "flags": ["RUNECHO_GUARD_DROPPED_IMPORT=1"],
+    "file": "pkg/make_id.py",
+    "old": "from ulid import ULID\n\ndef make():\n    return str(ULID())\n",
+    "new": "\ndef make():\n    return str(ULID())\n",
+    "expect_ask": true,
+    "expect_symbols": ["ULID"]
+  },
+  {
+    "name": "python-dropped-import-removed-and-unused-clean",
+    "desc": "the import AND every use are gone — a legitimate cleanup, stays silent",
+    "check": "dropped-import",
+    "flags": ["RUNECHO_GUARD_DROPPED_IMPORT=1"],
+    "file": "pkg/cleanup.py",
+    "old": "from ulid import ULID\nx = 1\n",
+    "new": "x = 1\n",
+    "expect_ask": false
+  },
+  {
+    "name": "js-dropped-import-still-used-asks",
+    "desc": "a removed named JS import still called below → ask",
+    "check": "dropped-import",
+    "flags": ["RUNECHO_GUARD_DROPPED_IMPORT=1"],
+    "file": "pkg/user.js",
+    "old": "import { fetchUser } from './api';\nconst u = fetchUser(id);\n",
+    "new": "const u = fetchUser(id);\n",
+    "expect_ask": true,
+    "expect_symbols": ["fetchUser"]
+  },
+  {
+    "name": "go-dropped-import-excluded-clean",
+    "desc": "Go is excluded by design (imports are used package-qualified, so a dropped Go import surfaces as a qualified reference handled elsewhere) — proves the language gate is wired through the hook, not just the pure function",
+    "check": "dropped-import",
+    "flags": ["RUNECHO_GUARD_DROPPED_IMPORT=1"],
+    "file": "pkg/env.go",
+    "old": "package pkg\n\nimport \"os\"\n\nfunc f() string {\n\treturn os.Getenv(\"X\")\n}\n",
+    "new": "package pkg\n\nfunc f() string {\n\treturn os.Getenv(\"X\")\n}\n",
+    "expect_ask": false
+  }
+]

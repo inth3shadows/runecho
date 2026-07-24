@@ -76,7 +76,9 @@ mirror of the E1 dangling-refs check and complements the additive check, which a
 edit time still sees the old import on disk and stays silent. Gated OFF by default
 (`RUNECHO_GUARD_DROPPED_IMPORT=1`) for dogfood-first rollout, same as E1. Note: it
 is a hook-level check (operates on edit old-vs-new text), so it is not exercised by
-this benchmark's `guard.Run` path — its validation is the unit suite.
+this benchmark's `guard.Run` path — its wiring is validated by the replayable
+`cmd/runecho-guard` hookcorpus fixtures (#227 phase 3), its extraction logic by
+the `internal/guard` unit suite.
 
 ## Honest caveats (read before quoting the captured catch-rate — 4/9 post-#56; the 1/9 below is the pre-#56 first measurement)
 

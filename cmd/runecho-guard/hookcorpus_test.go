@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/inth3shadows/runecho/internal/contract"
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
@@ -34,9 +35,12 @@ import (
 // fixture can replay a HUNK-scoped Edit rather than a whole-file Write: that is
 // what lets the abstain true-negatives (star import, dynamic binding) put their
 // marker OUTSIDE the edited hunk and thereby pin the pre-edit file read, each
-// paired with an identical-hunk control that does ask. One check remains a
-// tracked follow-up on #227: contract (an activated contract), which adds its
-// own enrollment shape.
+// paired with an identical-hunk control that does ask. Phase 5 completes the set
+// with contract, whose enrollment lives in two places at once — a file in the
+// worktree AND an activation row keyed to a session — so Contract/Session/
+// ActivateSession exist to express "activated, but for a different session",
+// which is the leak that would make every concurrent agent in a shared store
+// answer for a scope it never accepted. All six checks now have fixtures.
 //
 // # Every fixture here earns its place by mutation, not by argument
 //
@@ -49,10 +53,17 @@ import (
 // firewall) became the three that replaced them. Adding a fixture here without
 // naming the change it would catch is how the set silts back up.
 //
-// One thing the scoring says the corpus does NOT cover: the Python-only
-// restriction. The pure function and the hook wrapper each gate on it, so
-// removing either alone changes nothing observable, and removing both is caught
-// by no fixture. It is covered by the internal/guard unit suite instead.
+// Two things the scoring says the corpus does NOT cover, stated here rather than
+// implied away. First, file-scope's Python-only restriction: the pure function
+// and the hook wrapper each gate on it, so removing either alone changes nothing
+// observable and removing both is caught by no fixture — the internal/guard unit
+// suite covers it instead. Second, the contract section of a MERGED ask (a
+// contract firing alongside symbol violations in one message). Every ask a
+// fixture can produce today takes the contract-only early exit, and the merged
+// shape is inexpressible: its flag-off state is an ask (from the always-on
+// check) whose text legitimately CHANGES when the gate opens, which is neither
+// probe mode. A third mode would be needed, and that is a follow-up, not a
+// silent omission.
 type hookCase struct {
 	Name   string              `json:"name"`
 	Desc   string              `json:"desc,omitempty"`
@@ -99,6 +110,19 @@ type hookCase struct {
 	// Only that second shape exercises the bail, so a fixture claiming to pin it
 	// must use this rather than `"old": ""`.
 	NoPreEditFile bool `json:"no_pre_edit_file,omitempty"`
+	// Contract is a contract file's body, written to .runecho/contracts/<its name>
+	// and ACTIVATED for ActivateSession. It is the enrollment shape the contract
+	// check needs, and unlike every other check's it lives in two places at once:
+	// a file in the worktree and a row in the store. Activation is what makes it
+	// live — a contract file that is merely present governs nothing.
+	Contract string `json:"contract,omitempty"`
+	// Session is the session_id the edit is attributed to; ActivateSession is the
+	// session the contract was activated for (defaults to Session). They are
+	// separate fields so a fixture can prove a contract governs ONLY its own
+	// session — a contract leaking across sessions would make every concurrent
+	// agent in the same repo answer for a scope it never accepted.
+	Session         string `json:"session,omitempty"`
+	ActivateSession string `json:"activate_session,omitempty"`
 	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
 	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
 	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
@@ -150,6 +174,12 @@ func runHookCase(t *testing.T, c hookCase) {
 	// write lands).
 	root := t.TempDir()
 	gitInit(t, root)
+	// Resolve symlinks (macOS /var -> /private/var) before anything derives a path
+	// from root: repo resolution keys on the git common dir, and enrolling one
+	// spelling while looking up another abstains every check silently.
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
 	edited := filepath.Join(root, filepath.FromSlash(c.File))
 	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
 		t.Fatal(err)
@@ -162,7 +192,10 @@ func runHookCase(t *testing.T, c hookCase) {
 		t.Fatal(err)
 	}
 
-	enrollSnapshot(t, root, c.Enroll, c.Refs)
+	top := enrollSnapshot(t, root, c.Enroll, c.Refs)
+	if c.Contract != "" {
+		activateContract(t, top, c)
+	}
 	setFlags := flagController(t, c.Flags)
 	body := hookBody(t, c, edited)
 
@@ -222,6 +255,48 @@ func runHookCase(t *testing.T, c hookCase) {
 	}
 }
 
+// activateContract writes the fixture's contract into the worktree and activates
+// it for the session, against the snapshot store enrollSnapshot already stood up.
+// Both halves are required and they are separate failures: a contract file that
+// is present but not activated governs nothing (that is the "no active contract"
+// abstain), and an activation naming a session the edit does not carry governs
+// nothing either. The activation records the file's hash, which is what lets the
+// ask disclose drift when the file changes underneath it.
+func activateContract(t *testing.T, top string, c hookCase) {
+	t.Helper()
+	cdir := filepath.Join(top, contract.Dir)
+	if err := os.MkdirAll(cdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cpath := filepath.Join(cdir, "scope")
+	if err := os.WriteFile(cpath, []byte(c.Contract), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := contract.Load(cpath)
+	if err != nil {
+		t.Fatalf("%s: contract body does not load: %v", c.Name, err)
+	}
+	db, err := snapshot.Open(filepath.Join(os.Getenv("RUNECHO_HOME"), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	repo, _, ok := db.ResolveRepo(top)
+	if !ok {
+		t.Fatalf("%s: enrolled repo did not resolve — the contract would govern nothing", c.Name)
+	}
+	sess := c.ActivateSession
+	if sess == "" {
+		sess = c.Session
+	}
+	if sess == "" {
+		t.Fatalf("%s: a contract fixture needs a session to activate for", c.Name)
+	}
+	if err := db.ActivateContract(repo.ID, sess, parsed.Name, parsed.Path, parsed.Hash); err != nil {
+		t.Fatalf("%s: ActivateContract: %v", c.Name, err)
+	}
+}
+
 // hookBody renders the PreToolUse payload for a fixture. Write is the default and
 // sends the whole New content; Edit sends a hunk (EditOld/EditNew), which is what
 // separates "the check read the pre-edit file on disk" from "the check read the
@@ -229,6 +304,33 @@ func runHookCase(t *testing.T, c hookCase) {
 // untestable. New is rejected on an Edit fixture because it would be silently
 // ignored, and a fixture author who set it would believe it was being replayed.
 func hookBody(t *testing.T, c hookCase, editedAbs string) string {
+	t.Helper()
+	return withSession(t, c.Session, rawHookBody(t, c, editedAbs))
+}
+
+// withSession splices session_id into a rendered payload. The contract check is
+// the only one that reads it — a contract is activated per session, so an edit
+// carrying no session id, or a different one, is governed by nothing. Done here
+// rather than in payload()/payloadOld() so the shared helpers stay as the rest
+// of the suite already uses them.
+func withSession(t *testing.T, session, body string) string {
+	t.Helper()
+	if session == "" {
+		return body
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["session_id"] = session
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func rawHookBody(t *testing.T, c hookCase, editedAbs string) string {
 	t.Helper()
 	switch c.Tool {
 	case "", "Write":

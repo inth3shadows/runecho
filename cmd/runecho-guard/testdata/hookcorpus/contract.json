@@ -1,0 +1,104 @@
+[
+  {
+    "name": "contract-out-of-scope-edit-asks",
+    "desc": "the core of the check: a contract declaring `cmd/runecho-guard/**` is active for this session, and the edit lands in internal/ — outside it → ask. 'Should you be editing this file at all' is a question no other check asks; every other one assumes the file is fair game and only inspects its contents",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "scope"
+    ]
+  },
+  {
+    "name": "contract-in-scope-edit-clean",
+    "desc": "the same contract, the same session, an edit INSIDE the declared scope → silent. Pins that the check actually matches paths rather than asking about every edit once a contract is active — a contract that fires on its own scope would be worse than no contract, since the agent learns to approve reflexively",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "cmd/runecho-guard/helper.go",
+    "old": "package main\n",
+    "new": "package main\n\nfunc added() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "contract-other-session-clean",
+    "desc": "the contract is activated for sess-a; the edit carries sess-b and lands out of scope → silent. A contract's lifetime is one task in one session, so it must govern only its own. If activation leaked across sessions, every concurrent agent in the repo would answer for a scope it never accepted — and the store is shared across worktrees, so this is the realistic case, not a corner one",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-b",
+    "activate_session": "sess-a",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "contract-negation-only-abstains-clean",
+    "desc": "a contract whose body is nothing but exclusions declares no positive scope, so every path in the repo is 'outside' it and the check would ask on every edit. It abstains instead (#234). This is the difference between a guard and a nag — a check that asks about everything is one the user turns off",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: everything except vendor\n\n!vendor/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "contract-non-code-file-asks",
+    "desc": "an out-of-scope Markdown edit asks. Every other hook check is language-gated and would be silent here — there is no parser for prose — so this pins that the contract check keys on the PATH alone. Docs, configs and lockfiles are exactly where an agent's scope creep tends to land",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "docs/README.md",
+    "old": "# hi\n",
+    "new": "# hi\n\nmore\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "scope"
+    ]
+  }
+]

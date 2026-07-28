@@ -61,5 +61,33 @@
     "enrolled_refs": {
       "ProcessOrder": 1
     }
+  },
+  {
+    "name": "go-dangling-lists-every-referrer-asks",
+    "desc": "a deleted def with TWO live cross-file referrers: the ask must name both. Pins the referrer list itself, not just the fact that an ask happened — expect_symbols carries the referrer paths, so truncating the list (the maxDanglingReferrers cap firing early) fails this fixture. The cap is what keeps a hostile or generated repo from padding a permission prompt with hundreds of paths, and it sat unpinned through two rounds of scoring because every other fixture asserts only the deleted symbol's name",
+    "check": "dangling",
+    "flags": [
+      "RUNECHO_GUARD_DANGLING=1"
+    ],
+    "refs": {
+      "pkg/a.go": [
+        "ProcessOrder"
+      ],
+      "pkg/c.go": [
+        "ProcessOrder"
+      ]
+    },
+    "file": "pkg/b.go",
+    "old": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "new": "package pkg\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "ProcessOrder",
+      "pkg/a.go",
+      "pkg/c.go"
+    ],
+    "enrolled_refs": {
+      "ProcessOrder": 2
+    }
   }
 ]

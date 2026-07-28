@@ -66,5 +66,17 @@
     "tool": "Edit",
     "edit_old": "from ulid import ULID\n",
     "edit_new": "y = ULID()\n"
+  },
+  {
+    "name": "python-dropped-import-defined-by-the-edit-clean",
+    "desc": "the import is removed and the SAME edit adds a def of that name — 'replace the dependency with a local implementation', done in one write. Pins the ExtractDefs(newLines) fold, the sibling of preBound: both feed the same `bound` set, so a mutation of `bound` itself would kill either fixture and prove neither. This case existed as a Write, was reshaped into an Edit to pin preBound properly, and that left ExtractDefs unpinned — a gap the mutation sweep caught on its first run. It is a Write on purpose: preBound is not computed for Write payloads, so the suppression here can only be ExtractDefs",
+    "check": "dropped-import",
+    "flags": [
+      "RUNECHO_GUARD_DROPPED_IMPORT=1"
+    ],
+    "file": "pkg/replace_dep.py",
+    "old": "from ulid import ULID\n\ndef make():\n    return str(ULID())\n",
+    "new": "def ULID():\n    return 'local'\n\ndef make():\n    return str(ULID())\n",
+    "expect_ask": false
   }
 ]

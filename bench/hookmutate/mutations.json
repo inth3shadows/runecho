@@ -1,0 +1,270 @@
+{
+  "_comment": [
+    "One entry = one behaviour of one hook-level check, broken in isolation.",
+    "`find` must match EXACTLY ONCE in `file`; a drifted pattern is reported, not skipped silently.",
+    "`replace` must leave the file valid Go — deleting a block often orphans a variable, so prefer",
+    "neutering a condition (`&& false`, `|| true`, `_ = x`) over removing lines.",
+    "`known_gap` marks a mutation nothing catches ON PURPOSE: an equivalent mutant, or a real hole",
+    "recorded rather than implied away. Without it, --strict fails on the survivor."
+  ],
+  "mutations": [
+    {
+      "id": "filescope/flag-gate",
+      "file": "cmd/runecho-guard/filescope.go",
+      "find": "func fileScopeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_FILESCOPE\") == \"1\" }",
+      "replace": "func fileScopeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_FILESCOPE\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "filescope/abstain-wholefile-arm",
+      "file": "internal/guard/filescope.go",
+      "find": "if abstainsFileScope(wholeFile) || abstainsFileScope(addedLines) {",
+      "replace": "if abstainsFileScope(addedLines) {",
+      "desc": "abstain no longer consults the pre-edit file"
+    },
+    {
+      "id": "filescope/abstain-addedlines-arm",
+      "file": "internal/guard/filescope.go",
+      "find": "if abstainsFileScope(wholeFile) || abstainsFileScope(addedLines) {",
+      "replace": "if abstainsFileScope(wholeFile) {",
+      "desc": "abstain no longer consults the added text"
+    },
+    {
+      "id": "filescope/star-import-gate",
+      "file": "internal/guard/filescope.go",
+      "find": "\t\tif rePyStarImport.MatchString(l.Text) {\n\t\t\treturn true\n\t\t}",
+      "replace": "",
+      "desc": "star-import abstain removed"
+    },
+    {
+      "id": "filescope/dynamic-binding-gate",
+      "file": "internal/guard/filescope.go",
+      "find": "\t\tfor _, marker := range pyDynamicBinding {\n\t\t\tif strings.Contains(l.Text, marker) {\n\t\t\t\treturn true\n\t\t\t}\n\t\t}",
+      "replace": "",
+      "desc": "dynamic-binding abstain removed"
+    },
+    {
+      "id": "filescope/firewall",
+      "file": "internal/guard/filescope.go",
+      "find": "\t\tif _, inRepo := repoKnown[ref.Name]; !inRepo {\n\t\t\tcontinue // the firewall: invented symbols belong to the additive check\n\t\t}",
+      "replace": "",
+      "desc": "firewall removed — file-scope also reports names absent from the repo, double-reporting what the additive check already said"
+    },
+    {
+      "id": "filescope/in-scope-rule",
+      "file": "internal/guard/filescope.go",
+      "find": "\t\tif _, bound := scope[ref.Name]; bound {\n\t\t\tcontinue // resolves in this file — correct usage\n\t\t}",
+      "replace": "",
+      "desc": "correct in-file usage is flagged too"
+    },
+    {
+      "id": "filescope/edit-binds-names",
+      "file": "internal/guard/filescope.go",
+      "find": "\tfor name := range pyFileScope(addedLines) {\n\t\tscope[name] = struct{}{}\n\t}",
+      "replace": "",
+      "desc": "a binding introduced by the edit itself no longer resolves"
+    },
+    {
+      "id": "filescope/no-context-bail",
+      "file": "internal/guard/filescope.go",
+      "find": "\tif len(wholeFile) == 0 {\n\t\treturn nil\n\t}",
+      "replace": "",
+      "desc": "a file with no pre-edit content is scanned instead of abstained"
+    },
+    {
+      "id": "filescope/imports-bind",
+      "file": "internal/guard/filescope.go",
+      "find": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\tscope[n] = struct{}{}\n\t}",
+      "replace": "",
+      "desc": "imports no longer bind names in file scope"
+    },
+    {
+      "id": "filescope/lang-gate-pure",
+      "file": "internal/guard/filescope.go",
+      "find": "\tif lang != LangPython {\n\t\treturn nil\n\t}",
+      "replace": "",
+      "known_gap": "the pure function and the hook wrapper gate independently, so neither is observable alone; internal/guard's unit suite covers the restriction",
+      "desc": "Python-only restriction removed from the pure function"
+    },
+    {
+      "id": "filescope/lang-gate-hook",
+      "file": "cmd/runecho-guard/filescope.go",
+      "find": "if !fileScopeEnabled() || lang != guard.LangPython {",
+      "replace": "if !fileScopeEnabled() {",
+      "known_gap": "redundant with the pure function's gate — see filescope/lang-gate-pure",
+      "desc": "Python-only restriction removed from the hook wrapper"
+    },
+    {
+      "id": "contract/flag-gate",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "func contractEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CONTRACT\") == \"1\" }",
+      "replace": "func contractEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CONTRACT\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "contract/session-exemption",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "if !contractEnabled() || sessionID == \"\" || !filepath.IsAbs(filePath) {",
+      "replace": "if !contractEnabled() || !filepath.IsAbs(filePath) {",
+      "known_gap": "equivalent mutant: the store lookup already returns nothing for an empty session, so the fast path changes no behaviour",
+      "desc": "edits carrying no session id are no longer exempt"
+    },
+    {
+      "id": "contract/haspositive-abstain",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "if err != nil || !c.HasPositive() {",
+      "replace": "if err != nil {",
+      "desc": "a negation-only contract no longer abstains, so it asks on every edit"
+    },
+    {
+      "id": "contract/in-scope-exemption",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "\tif c.InScope(rel) {\n\t\treturn nil\n\t}",
+      "replace": "",
+      "desc": "edits inside the declared scope are asked about too"
+    },
+    {
+      "id": "contract/session-key",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "active, err := db.GetActiveContract(repoID, sessionID)",
+      "replace": "active, err := db.GetActiveContract(repoID, \"sess-a\")",
+      "desc": "the active-contract lookup ignores which session it belongs to"
+    },
+    {
+      "id": "contract/inserted-lang-gate-unknown",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {\n\tif lang == guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "desc": "INSERTED fault: the check skips files with no parser (docs, configs) — half of 'keys on the path, not the language'"
+    },
+    {
+      "id": "contract/inserted-lang-gate-known",
+      "file": "cmd/runecho-guard/contract.go",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {\n\tif lang != guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "desc": "INSERTED fault: the check skips source files — the mirror half"
+    },
+    {
+      "id": "duplicate/flag-gate",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "func duplicateEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DUPLICATE\") == \"1\" }",
+      "replace": "func duplicateEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DUPLICATE\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "duplicate/lang-gate",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "\tif lang != guard.LangGo {",
+      "replace": "\tif false {",
+      "known_gap": "no fixture; a non-Go edit finds no same-directory Go candidate anyway, so the gate is not observable through the corpus",
+      "desc": "Go-only restriction removed"
+    },
+    {
+      "id": "duplicate/edited-test-file-skip",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "\tif isTestFile(filePath) {",
+      "replace": "\tif false {",
+      "desc": "edits TO a test file are checked for duplicates"
+    },
+    {
+      "id": "duplicate/same-dir-candidates",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
+      "replace": "\t\tif path.Dir(o) == selfDir || guard.LangFor(o) == guard.LangGo {",
+      "desc": "a definition in another directory counts as a duplicate"
+    },
+    {
+      "id": "duplicate/test-file-candidates",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
+      "replace": "\t\tif path.Dir(o) == selfDir && guard.LangFor(o) == guard.LangGo {",
+      "desc": "a definition in a _test.go counts as a duplicate location"
+    },
+    {
+      "id": "duplicate/cross-language-candidates",
+      "file": "cmd/runecho-guard/duplicate.go",
+      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
+      "replace": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) {",
+      "desc": "a same-named symbol in another language counts as a duplicate"
+    },
+    {
+      "id": "dangling/flag-gate",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "func danglingEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DANGLING\") == \"1\" }",
+      "replace": "func danglingEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DANGLING\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "dangling/no-removed-text-bail",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "\tif len(old) == 0 {\n\t\treturn nil\n\t}",
+      "replace": "",
+      "known_gap": "equivalent mutant: with no removed text there are no deleted defs, so the later len(deleted)==0 bail produces the same silence",
+      "desc": "the no-removed-text fast path is gone"
+    },
+    {
+      "id": "dangling/kept-set",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "\t\tif _, ok := kept[d]; !ok {",
+      "replace": "\t\tif _, ok := kept[d]; ok || true {",
+      "desc": "a definition removed and re-added in the same edit still counts as deleted"
+    },
+    {
+      "id": "dangling/self-referrer-exclusion",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "\t\tif self != \"\" && p == self {\n\t\t\tcontinue\n\t\t}",
+      "replace": "",
+      "desc": "the edited file counts as its own referrer"
+    },
+    {
+      "id": "dropped-import/flag-gate",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "func droppedImportEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DROPPED_IMPORT\") == \"1\" }",
+      "replace": "func droppedImportEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DROPPED_IMPORT\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "dropped-import/lang-gate",
+      "file": "internal/guard/dropped_import.go",
+      "find": "\tif lang != LangPython && lang != LangJS {\n\t\treturn nil\n\t}",
+      "replace": "",
+      "known_gap": "no fixture: a dropped Go import surfaces as a qualified reference, which never reads as an unqualified use, so the exclusion is not observable through the corpus. The fixture that claimed to cover it was cut for catching nothing (#248)",
+      "desc": "the Go exclusion is removed"
+    },
+    {
+      "id": "dropped-import/surviving-import",
+      "file": "internal/guard/dropped_import.go",
+      "find": "\t\tif _, still := newImps[name]; still {\n\t\t\tcontinue // the import survived in the new text\n\t\t}",
+      "replace": "\t\tif _, still := newImps[name]; still && false {\n\t\t\tcontinue\n\t\t}",
+      "desc": "an import merely MOVED to another line is reported as dropped — the refactor-relocation false positive bench/FINDINGS.md found dominates real transcripts"
+    },
+    {
+      "id": "dropped-import/prebound-fold",
+      "file": "internal/guard/dropped_import.go",
+      "find": "\tfor name := range preBound {\n\t\tbound[name] = struct{}{}\n\t}",
+      "replace": "\t_ = preBound\n",
+      "desc": "bindings from the PRE-EDIT file no longer suppress a drop (Edit payloads only — a Write has no prior state to fold)"
+    },
+    {
+      "id": "dropped-import/newtext-defs-fold",
+      "file": "internal/guard/dropped_import.go",
+      "find": "\tfor _, d := range ExtractDefs(lang, newLines) {\n\t\tbound[d] = struct{}{}\n\t}",
+      "replace": "",
+      "desc": "a definition added by the edit no longer suppresses a drop. Sibling of prebound-fold: both feed `bound`, so mutating `bound` itself would kill fixtures for either and prove neither"
+    },
+    {
+      "id": "dropped-import/still-used-check",
+      "file": "internal/guard/dropped_import.go",
+      "find": "\t\tif ln := uses[name]; ln > 0 {",
+      "replace": "\t\tif ln := uses[name]; ln >= 0 {",
+      "desc": "a dropped import is reported even when nothing uses the name — ordinary cleanup asks"
+    },
+    {
+      "id": "dangling/referrer-cap",
+      "file": "cmd/runecho-guard/dangling.go",
+      "find": "\t\t\tif len(others) > maxDanglingReferrers {",
+      "replace": "\t\t\tif len(others) > 1 {",
+      "desc": "the referrer list is truncated early — the ask still fires, so only a fixture asserting the referrer PATHS can see it"
+    }
+  ]
+}

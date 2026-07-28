@@ -26,9 +26,17 @@ import (
 // all (Enroll/Refs are both empty) — its true positives instead rely on
 // addInFileDefs folding the pre-edit on-disk file's OWN import into the known
 // set, which is what keeps the always-on additive check silent so the ask can
-// be attributed to dropped-import alone. Two checks remain tracked follow-ups
-// on #227: file-scope (file-scoped symbols) and contract (an activated
-// contract) — each adding its own enrollment shape as needed.
+// be attributed to dropped-import alone. Phase 4 adds file-scope, which inverts
+// the enrollment's role: the symbol is enrolled in ANOTHER file so it is known
+// repo-wide (satisfying the check's firewall, and keeping the additive check
+// silent) while being unresolvable in the edited file — the ask can then only
+// come from file-scope. Phase 4 also added the Tool/EditOld/EditNew shape, so a
+// fixture can replay a HUNK-scoped Edit rather than a whole-file Write: that is
+// what lets the abstain true-negatives (star import, dynamic binding) put their
+// marker OUTSIDE the edited hunk and thereby pin the pre-edit file read, each
+// paired with an identical-hunk control that does ask. One check remains a
+// tracked follow-up on #227: contract (an activated contract), which adds its
+// own enrollment shape.
 type hookCase struct {
 	Name   string              `json:"name"`
 	Desc   string              `json:"desc,omitempty"`
@@ -39,12 +47,25 @@ type hookCase struct {
 	// targets that file references. dangling-refs resolves "who still references
 	// the deleted def" through it (RefsToName), so a fixture proving a live
 	// cross-file referrer must enroll that referrer's Refs, not just its Symbols.
-	Refs       map[string][]string `json:"refs,omitempty"`
-	File       string              `json:"file"` // edited file, repo-relative
-	Old        string              `json:"old"`  // on-disk content BEFORE the edit
-	New        string              `json:"new"`  // content being written
-	ExpectAsk  bool                `json:"expect_ask"`
-	ExpectSyms []string            `json:"expect_symbols,omitempty"`
+	Refs map[string][]string `json:"refs,omitempty"`
+	File string              `json:"file"` // edited file, repo-relative
+	Old  string              `json:"old"`  // on-disk content BEFORE the edit
+	New  string              `json:"new"`  // content being written (Write only)
+	// Tool is the PreToolUse tool replayed; "" means Write, under which the whole
+	// New content IS the added-lines set. Set it to "Edit" with EditOld/EditNew
+	// for a HUNK-scoped replay: the only shape that can prove a signal is read
+	// from the pre-edit file ON DISK rather than from the added text. Under Write
+	// those two are the same bytes, so a fixture whose marker sits in both cannot
+	// tell which one the check consumed — it would pass even with the whole-file
+	// read deleted. Any fixture claiming to exercise whole-file context (an
+	// abstain marker, a pre-existing binding) MUST be an Edit, and should be
+	// paired with a control whose hunk is identical and whose file lacks the
+	// marker, so the difference in outcome is attributable to the file text.
+	Tool       string   `json:"tool,omitempty"`
+	EditOld    string   `json:"edit_old,omitempty"`
+	EditNew    string   `json:"edit_new,omitempty"`
+	ExpectAsk  bool     `json:"expect_ask"`
+	ExpectSyms []string `json:"expect_symbols,omitempty"`
 	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
 	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
 	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
@@ -106,7 +127,7 @@ func runHookCase(t *testing.T, c hookCase) {
 
 	enrollSnapshot(t, root, c.Enroll, c.Refs)
 	setFlags := flagController(t, c.Flags)
-	body := payload(t, "Write", edited, "", c.New, nil)
+	body := hookBody(t, c, edited)
 
 	// Structural anti-vacuous probe: resolve each pinned symbol through the guard's
 	// OWN store path (openLatestSnapshot → DefsOfName), the exact lookup the check
@@ -150,6 +171,34 @@ func runHookCase(t *testing.T, c hookCase) {
 		if _, _, d := runHook(t, body); d.Hook.PermissionDec == "ask" {
 			t.Errorf("expected no ask, got:\n%s", d.Hook.PermissionReason)
 		}
+	}
+}
+
+// hookBody renders the PreToolUse payload for a fixture. Write is the default and
+// sends the whole New content; Edit sends a hunk (EditOld/EditNew), which is what
+// separates "the check read the pre-edit file on disk" from "the check read the
+// added text" — under Write those are the same bytes and the distinction is
+// untestable. New is rejected on an Edit fixture because it would be silently
+// ignored, and a fixture author who set it would believe it was being replayed.
+func hookBody(t *testing.T, c hookCase, editedAbs string) string {
+	t.Helper()
+	switch c.Tool {
+	case "", "Write":
+		return payload(t, "Write", editedAbs, "", c.New, nil)
+	case "Edit":
+		if c.EditOld == "" || c.EditNew == "" {
+			t.Fatalf("%s: an Edit fixture needs both edit_old and edit_new", c.Name)
+		}
+		if c.New != "" {
+			t.Fatalf("%s: `new` is ignored for an Edit fixture — put the hunk in edit_old/edit_new", c.Name)
+		}
+		if !strings.Contains(c.Old, c.EditOld) {
+			t.Fatalf("%s: edit_old is not present in the pre-edit file — the hunk would not be locatable", c.Name)
+		}
+		return payloadOld(t, "Edit", editedAbs, c.EditOld, c.EditNew, "", nil)
+	default:
+		t.Fatalf("%s: unsupported tool %q (want Write or Edit)", c.Name, c.Tool)
+		return ""
 	}
 }
 

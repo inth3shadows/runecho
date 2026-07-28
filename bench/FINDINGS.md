@@ -133,6 +133,14 @@ alone. What each well actually contained:
   `import os`; `cfg` and `rows` were undefined *local variables* (outside the
   guard's symbol model entirely). The genuinely-invented cases the benchmark
   wants — `ULID`, `TASTING_ROOM_KIND`, `RouteContext` — were already in the 15.
+  This real-symbol-wrong-scope class is what the file-scope check
+  (`RUNECHO_GUARD_FILESCOPE=1`, default off) was built for. Like dropped-import
+  it is hook-level and therefore invisible to this benchmark's `guard.Run` path;
+  its wiring — including the star-import and dynamic-binding abstains that keep
+  it false-positive-safe, each replayed as a hunk-scoped edit with the marker
+  outside the hunk and paired with an identical-hunk control that does ask — is
+  validated by the replayable `cmd/runecho-guard` hookcorpus fixtures (#227
+  phase 4), its resolution logic by the `internal/guard` unit suite.
 
 - **Package-qualified.** The entire non-dependency universe was documentation
   placeholders (`pkg.Sym`), a build error *inside* a dependency (a

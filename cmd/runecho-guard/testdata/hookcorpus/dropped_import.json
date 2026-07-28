@@ -55,14 +55,16 @@
   },
   {
     "name": "python-dropped-import-now-locally-defined-clean",
-    "desc": "the import is gone and the name is now provided by a definition in the same edit — the deliberate 'stop depending on the library, implement it here' refactor. Pins the preBound suppression, the other half of FINDINGS' false-positive story: without it this legitimate edit asks, and the two clean cases here are what let the check be recommended for anyone's default-on list. Replaces go-dropped-import-excluded-clean, which caught nothing — removing the Go exclusion entirely left it silent anyway, since its qualified use never reads as an unqualified one",
+    "desc": "the import is gone and the name is provided by a definition ALREADY in the file — the 'stop depending on the library, implement it here' refactor, seen mid-way through. Pins preBound, the pre-edit binding set, which is computed ONLY for Edit payloads (main.go: `payload.ToolName != \"Write\"`): a Write replaces the file wholesale, so its bindings all arrive in the new text and there is no prior state to fold. This fixture was first written as a Write and pinned ExtractDefs(newLines) instead — the mutation that killed it removed the whole `bound` lookup, which both folds feed, so the coarser mutation hid the difference. The hunk must contain the USE as well as the import removal: firstUnqualifiedUseLines scans only the added text",
     "check": "dropped-import",
     "flags": [
       "RUNECHO_GUARD_DROPPED_IMPORT=1"
     ],
     "file": "pkg/localdef.py",
-    "old": "from ulid import ULID\n\ndef make():\n    return str(ULID())\n",
-    "new": "def ULID():\n    return 'local'\n\ndef make():\n    return str(ULID())\n",
-    "expect_ask": false
+    "old": "from ulid import ULID\n\ndef ULID():\n    return 'local'\n\ndef make():\n    return str(ULID())\n",
+    "expect_ask": false,
+    "tool": "Edit",
+    "edit_old": "from ulid import ULID\n",
+    "edit_new": "y = ULID()\n"
   }
 ]

@@ -44,8 +44,9 @@ import (
 //
 // # Every fixture here earns its place by mutation, not by argument
 //
-// The file-scope set was scored by breaking one behaviour of the check at a time
-// and recording which fixtures failed. Cases that caught nothing were deleted
+// EVERY set here has now been scored by breaking one behaviour of the check at a
+// time and recording which fixtures failed — file-scope and contract before they
+// merged, duplicate/dangling/dropped-import in a follow-up sweep. Cases that caught nothing were deleted
 // rather than kept as documentation — a fixture that no defect can fail is a
 // claim of coverage the corpus does not have, which is the exact failure #227
 // exists to fix. Three of the first draft's cases went that way, and the gaps
@@ -53,8 +54,12 @@ import (
 // firewall) became the three that replaced them. Adding a fixture here without
 // naming the change it would catch is how the set silts back up.
 //
-// Two things the scoring says the corpus does NOT cover, stated here rather than
-// implied away. First, file-scope's Python-only restriction: the pure function
+// What the scoring says the corpus does NOT cover, stated here rather than
+// implied away. First, dropped-import's Go exclusion: removing the language gate
+// outright leaves every fixture green, because a dropped Go import surfaces as a
+// qualified reference that never reads as an unqualified use — the fixture that
+// claimed to cover it was cut for catching nothing, and nothing replaced it.
+// Second, file-scope's Python-only restriction: the pure function
 // and the hook wrapper each gate on it, so removing either alone changes nothing
 // observable and removing both is caught by no fixture — the internal/guard unit
 // suite covers it instead. Second, the contract section of a MERGED ask (a
@@ -135,8 +140,10 @@ type hookCase struct {
 	// snapshot files reference a symbol via the guard's own RefsToName path. A
 	// self-only-referrer TN stays silent because self-exclusion drops the sole
 	// referrer, NOT because the refs index is empty — pinning count 1 proves the
-	// referrer was actually enrolled. A referenced-nowhere TN pins count 0 so its
-	// silence is a genuine absence rather than a global enrollment failure.
+	// referrer was actually enrolled. A count of 0 would say the opposite — that
+	// the silence is a genuine absence — but no dangling fixture pins 0 today: the
+	// one that did caught no defect and was cut. EnrolledDefs still has a 0 pin
+	// (filescope's invented symbol), so the zero case is exercised on that side only.
 	EnrolledRefs map[string]int `json:"enrolled_refs,omitempty"`
 }
 
@@ -336,8 +343,11 @@ func rawHookBody(t *testing.T, c hookCase, editedAbs string) string {
 	case "", "Write":
 		return payload(t, "Write", editedAbs, "", c.New, nil)
 	case "Edit":
-		if c.EditOld == "" || c.EditNew == "" {
-			t.Fatalf("%s: an Edit fixture needs both edit_old and edit_new", c.Name)
+		// EditNew may be empty: an Edit that removes a line and adds nothing is a
+		// real payload, and it is the canonical dropped-import shape. EditOld may
+		// not — without it the hunk is not locatable in the pre-edit file.
+		if c.EditOld == "" {
+			t.Fatalf("%s: an Edit fixture needs edit_old", c.Name)
 		}
 		if c.New != "" {
 			t.Fatalf("%s: `new` is ignored for an Edit fixture — put the hunk in edit_old/edit_new", c.Name)

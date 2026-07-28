@@ -62,7 +62,7 @@ import (
 // Second, file-scope's Python-only restriction: the pure function
 // and the hook wrapper each gate on it, so removing either alone changes nothing
 // observable and removing both is caught by no fixture — the internal/guard unit
-// suite covers it instead. Second, the contract section of a MERGED ask (a
+// suite covers it instead. Third, the contract section of a MERGED ask (a
 // contract firing alongside symbol violations in one message). Every ask a
 // fixture can produce today takes the contract-only early exit, and the merged
 // shape is inexpressible: its flag-off state is an ask (from the always-on

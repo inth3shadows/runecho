@@ -176,7 +176,11 @@ alone. What each well actually contained:
   bug. Every other spot-check (`logging`, `build_report`, `BASE_RATING`) was a
   **refactor that relocated the symbol to another import line** — it still
   resolves and would not fail. These are exactly the false positives
-  `DroppedImportRefs`' own `preBound` guard is built to suppress, not bugs.
+  `DroppedImportRefs`' **surviving-import** check is built to suppress — the name
+  is still imported, just on another line — not bugs. Its sibling `preBound`
+  guard covers the adjacent case, where the name is bound by the pre-edit file
+  rather than re-imported. Both now have a fixture; neither did before, and this
+  sentence credited the wrong one of the two.
 
 ### The structural reason
 

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.14] — 2026-07-28
+
+### Changed
+- test: score the phases 1-3 hook fixtures, replace the four that caught nothing (#248)
+
 ## [0.17.13] — 2026-07-28
 
 ### Changed

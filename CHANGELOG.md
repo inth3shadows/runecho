@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.12] — 2026-07-28
+
+### Changed
+- test: replayable hook fixtures for the file-scope check (#227, phase 4) (#246)
+
 ## [0.17.11] — 2026-07-28
 
 ### Changed

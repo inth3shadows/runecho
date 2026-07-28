@@ -20,12 +20,15 @@ import (
 // catch-rate it reports describes one check of six (#227). This harness closes
 // that gap by replaying such cases as data through runHookMode.
 //
-// Phase 1 covered duplicate-symbol; this file now also covers dangling-refs,
-// which enrolls a refs index (Refs) so a deleted def with a live cross-file
-// referrer can be detected. Three checks remain tracked follow-ups on #227:
-// dropped-import (pure old-vs-new text, no store), file-scope (file-scoped
-// symbols), and contract (an activated contract) — each adding its own
-// enrollment shape as needed.
+// Phase 1 covered duplicate-symbol; phase 2 added dangling-refs, which enrolls
+// a refs index (Refs) so a deleted def with a live cross-file referrer can be
+// detected. Phase 3 adds dropped-import, which needs no snapshot enrollment at
+// all (Enroll/Refs are both empty) — its true positives instead rely on
+// addInFileDefs folding the pre-edit on-disk file's OWN import into the known
+// set, which is what keeps the always-on additive check silent so the ask can
+// be attributed to dropped-import alone. Two checks remain tracked follow-ups
+// on #227: file-scope (file-scoped symbols) and contract (an activated
+// contract) — each adding its own enrollment shape as needed.
 type hookCase struct {
 	Name   string              `json:"name"`
 	Desc   string              `json:"desc,omitempty"`

@@ -37,6 +37,22 @@ import (
 // paired with an identical-hunk control that does ask. One check remains a
 // tracked follow-up on #227: contract (an activated contract), which adds its
 // own enrollment shape.
+//
+// # Every fixture here earns its place by mutation, not by argument
+//
+// The file-scope set was scored by breaking one behaviour of the check at a time
+// and recording which fixtures failed. Cases that caught nothing were deleted
+// rather than kept as documentation — a fixture that no defect can fail is a
+// claim of coverage the corpus does not have, which is the exact failure #227
+// exists to fix. Three of the first draft's cases went that way, and the gaps
+// the scoring exposed (the added-text abstain arm, the no-context bail, and the
+// firewall) became the three that replaced them. Adding a fixture here without
+// naming the change it would catch is how the set silts back up.
+//
+// One thing the scoring says the corpus does NOT cover: the Python-only
+// restriction. The pure function and the hook wrapper each gate on it, so
+// removing either alone changes nothing observable, and removing both is caught
+// by no fixture. It is covered by the internal/guard unit suite instead.
 type hookCase struct {
 	Name   string              `json:"name"`
 	Desc   string              `json:"desc,omitempty"`
@@ -66,6 +82,23 @@ type hookCase struct {
 	EditNew    string   `json:"edit_new,omitempty"`
 	ExpectAsk  bool     `json:"expect_ask"`
 	ExpectSyms []string `json:"expect_symbols,omitempty"`
+	// AskWithoutFlag inverts the isolation probe for the one case the probe cannot
+	// express: a fixture whose ask comes from an ALWAYS-ON check by design, where
+	// what is being pinned is that the gated check adds NOTHING to it. The default
+	// probe asserts flag-off is silent; with this set it asserts flag-off asks, and
+	// then that flag-on produces the byte-identical reason. That is what makes a
+	// suppression rule — the file-scope firewall, which must leave names absent
+	// from the repo to the additive check — detectable at all. Without it, removing
+	// the firewall only DOUBLES an existing report, which an ask/no-ask assertion
+	// cannot see.
+	AskWithoutFlag bool `json:"ask_without_flag,omitempty"`
+	// NoPreEditFile omits the on-disk pre-edit file entirely, which is the real
+	// shape of a Write that CREATES a file. It is not the same as an empty Old: an
+	// existing empty file still yields one (blank) line, so the checks run against
+	// it, while a missing file yields none and the whole-file-context bail engages.
+	// Only that second shape exercises the bail, so a fixture claiming to pin it
+	// must use this rather than `"old": ""`.
+	NoPreEditFile bool `json:"no_pre_edit_file,omitempty"`
 	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
 	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
 	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
@@ -121,7 +154,11 @@ func runHookCase(t *testing.T, c hookCase) {
 	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(edited, []byte(c.Old), 0o644); err != nil {
+	if c.NoPreEditFile {
+		if c.Old != "" {
+			t.Fatalf("%s: no_pre_edit_file and a non-empty `old` are contradictory", c.Name)
+		}
+	} else if err := os.WriteFile(edited, []byte(c.Old), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,14 +188,25 @@ func runHookCase(t *testing.T, c hookCase) {
 		// the ask is coming from somewhere else and the fixture would report a
 		// vacuous pass. Only after proving flag-off is silent do we trust flag-on.
 		setFlags(false)
-		if _, _, d := runHook(t, body); d.Hook.PermissionDec == "ask" {
+		_, _, off := runHook(t, body)
+		switch {
+		case c.AskWithoutFlag && off.Hook.PermissionDec != "ask":
+			t.Fatalf("flag-off did not ask — this fixture pins that the %s check adds nothing to an always-on ask, so the always-on ask must exist first", c.Check)
+		case !c.AskWithoutFlag && off.Hook.PermissionDec == "ask":
 			t.Fatalf("flag-off produced an ask (%q) — fixture does not isolate the %s check",
-				d.Hook.PermissionReason, c.Check)
+				off.Hook.PermissionReason, c.Check)
 		}
 		setFlags(true)
 		_, _, d := runHook(t, body)
 		if d.Hook.PermissionDec != "ask" {
 			t.Fatalf("flag-on: expected an ask from the %s check, got a defer", c.Check)
+		}
+		// The suppression case: turning the check ON must not change the message by
+		// one byte. Any added line means the gated check reported a name it was
+		// supposed to leave alone.
+		if c.AskWithoutFlag && d.Hook.PermissionReason != off.Hook.PermissionReason {
+			t.Fatalf("flag-on changed the ask — the %s check reported a name it should have suppressed.\nflag-off:\n%s\nflag-on:\n%s",
+				c.Check, off.Hook.PermissionReason, d.Hook.PermissionReason)
 		}
 		for _, s := range c.ExpectSyms {
 			if !strings.Contains(d.Hook.PermissionReason, s) {

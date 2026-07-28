@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.13] — 2026-07-28
+
+### Changed
+- test: replayable hook fixtures for the contract check (#227, phase 5) (#247)
+
 ## [0.17.12] — 2026-07-28
 
 ### Changed

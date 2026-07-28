@@ -80,6 +80,23 @@ this benchmark's `guard.Run` path — its wiring is validated by the replayable
 `cmd/runecho-guard` hookcorpus fixtures (#227 phase 3), its extraction logic by
 the `internal/guard` unit suite.
 
+### Which checks the published numbers cover (#227)
+
+The catch-rate above is measured through `guard.Run`, which reaches exactly one
+of the guard's six checks — the additive invented-symbol check. The other five
+are hook-level: they need edit old-vs-new text plus an enrolled snapshot store,
+and are reachable only through the PreToolUse entry point. As of #227 all five
+have replayable fixtures under `cmd/runecho-guard/testdata/hookcorpus/`, driven
+through `runHookMode` by `TestHookCorpus`.
+
+That is a *wiring* instrument, not a second catch-rate, and it should never be
+quoted as one: it proves each check fires and stays silent where intended, on
+cases chosen to isolate it. Every fixture in it was scored by mutation — break
+one behaviour of the check, confirm a fixture fails — and the ones that caught
+nothing were deleted rather than kept as apparent coverage. The gaps that
+scoring exposed are recorded in the harness's own comment instead of being
+implied away.
+
 ## Honest caveats (read before quoting the captured catch-rate — 4/9 post-#56; the 1/9 below is the pre-#56 first measurement)
 
 - **Selection bias toward qualified positions.** The corpus was mined by

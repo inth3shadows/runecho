@@ -3,31 +3,34 @@
     "name": "go-duplicate-same-dir-asks",
     "desc": "a new Go def whose name already exists in another file of the SAME package (dir) is a real collision → ask",
     "check": "duplicate",
-    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
-    "enroll": { "pkg/a.go": ["ProcessOrder"] },
+    "flags": [
+      "RUNECHO_GUARD_DUPLICATE=1"
+    ],
+    "enroll": {
+      "pkg/a.go": [
+        "ProcessOrder"
+      ]
+    },
     "file": "pkg/b.go",
     "old": "package pkg\n",
     "new": "package pkg\n\nfunc ProcessOrder() {}\n",
     "expect_ask": true,
-    "expect_symbols": ["ProcessOrder"]
-  },
-  {
-    "name": "go-duplicate-not-defined-elsewhere-clean",
-    "desc": "a new def whose name exists nowhere else in the snapshot is not a duplicate → no ask",
-    "check": "duplicate",
-    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
-    "enroll": { "pkg/a.go": ["SomethingElse"] },
-    "file": "pkg/b.go",
-    "old": "package pkg\n",
-    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
-    "expect_ask": false
+    "expect_symbols": [
+      "ProcessOrder"
+    ]
   },
   {
     "name": "go-duplicate-different-dir-clean",
     "desc": "same name in a DIFFERENT directory is an unrelated package symbol the compiler keeps distinct → no ask",
     "check": "duplicate",
-    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
-    "enroll": { "other/a.go": ["ProcessOrder"] },
+    "flags": [
+      "RUNECHO_GUARD_DUPLICATE=1"
+    ],
+    "enroll": {
+      "other/a.go": [
+        "ProcessOrder"
+      ]
+    },
     "file": "pkg/b.go",
     "old": "package pkg\n",
     "new": "package pkg\n\nfunc ProcessOrder() {}\n",
@@ -37,8 +40,14 @@
     "name": "go-duplicate-test-file-skipped",
     "desc": "test files legitimately reuse symbol names across files → the check skips an edited _test.go",
     "check": "duplicate",
-    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
-    "enroll": { "pkg/a.go": ["ProcessOrder"] },
+    "flags": [
+      "RUNECHO_GUARD_DUPLICATE=1"
+    ],
+    "enroll": {
+      "pkg/a.go": [
+        "ProcessOrder"
+      ]
+    },
     "file": "pkg/helper_test.go",
     "old": "package pkg\n",
     "new": "package pkg\n\nfunc ProcessOrder() {}\n",
@@ -48,11 +57,37 @@
     "name": "go-duplicate-cross-language-clean",
     "desc": "a Go def sharing a name with a Python sibling is not a collision (separate namespaces) → no ask",
     "check": "duplicate",
-    "flags": ["RUNECHO_GUARD_DUPLICATE=1"],
-    "enroll": { "pkg/a.py": ["ProcessOrder"] },
+    "flags": [
+      "RUNECHO_GUARD_DUPLICATE=1"
+    ],
+    "enroll": {
+      "pkg/a.py": [
+        "ProcessOrder"
+      ]
+    },
     "file": "pkg/b.go",
     "old": "package pkg\n",
     "new": "package pkg\n\nfunc ProcessOrder() {}\n",
     "expect_ask": false
+  },
+  {
+    "name": "go-duplicate-test-file-candidate-clean",
+    "desc": "the new symbol also exists in a _test.go in the SAME directory — a table-driven test's helper, or a fake with the same name as the thing it fakes. Test files are excluded as duplicate CANDIDATES, which is a different rule from skipping edits TO a test file (the case above): here the edited file is production code and only the match is a test. Replaces go-duplicate-not-defined-elsewhere-clean, which caught no defect: with nothing enrolled under that name the check has nothing to find, so its silence was structural rather than a rule doing work",
+    "check": "duplicate",
+    "flags": [
+      "RUNECHO_GUARD_DUPLICATE=1"
+    ],
+    "enroll": {
+      "pkg/a_test.go": [
+        "ProcessOrder"
+      ]
+    },
+    "file": "pkg/b.go",
+    "old": "package pkg\n",
+    "new": "package pkg\n\nfunc ProcessOrder() {}\n",
+    "expect_ask": false,
+    "enrolled_defs": {
+      "ProcessOrder": 1
+    }
   }
 ]

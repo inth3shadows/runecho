@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.11] — 2026-07-28
+
+### Changed
+- test: replayable hook fixtures for the dropped-import check (#227, phase 3) (#245)
+
 ## [0.17.10] — 2026-07-24
 
 ### Changed

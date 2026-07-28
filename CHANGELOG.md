@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.15] — 2026-07-28
+
+### Changed
+- bench: commit the hook-fixture mutation sweep, plus the two gaps it exposed (#249)
+
 ## [0.17.14] — 2026-07-28
 
 ### Changed

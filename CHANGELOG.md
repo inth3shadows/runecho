@@ -16,6 +16,16 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+
+- `runecho-ir contract activate|deactivate` now default `--session` to
+  `$CLAUDE_CODE_SESSION_ID` when the flag is omitted, so binding a contract at
+  task start no longer requires pasting a UUID ([#12](https://github.com/inth3shadows/runecho/issues/12), D3a).
+  An explicit `--session` still wins. With neither available the commands refuse
+  with a usage error rather than binding to an empty session — the guard abstains
+  on an empty session id, so a silent bind would report success and then never
+  speak again.
+
 ## [0.17.16] — 2026-07-29
 
 ### Changed

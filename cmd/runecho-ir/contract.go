@@ -158,15 +158,48 @@ func loadContractByName(dir, name string) (contract.Contract, int) {
 	return contract.Contract{}, ExitError
 }
 
+// sessionEnv is the environment variable Claude Code exports into the tool and
+// hook environment. It is the same identifier the PreToolUse payload carries as
+// `session_id`, which is what `contracts` rows are keyed by.
+const sessionEnv = "CLAUDE_CODE_SESSION_ID"
+
+// resolveSessionID picks the session a contract binds to: an explicit --session
+// always wins, otherwise the agent environment declares it (issue #12, D3a).
+//
+// The env fallback exists because the manual UUID paste was the entire reason
+// the D2 dogfood window never happened — six days with the flag on and zero
+// contracts activated. It is NOT an inference about intent (the one thing this
+// track forbids): branch name, last-contract-used and most-recently-edited file
+// are all guesses, but the environment *states* the session id.
+//
+// An empty result is a hard error rather than a silent bind to "". The guard
+// abstains whenever sessionID == "" (see contractWarningFor in
+// cmd/runecho-guard/contract.go), so activating against an empty session would
+// print success and then stay permanently silent — the #234 failure mode in a
+// new costume.
+func resolveSessionID(explicit string) (string, bool) {
+	if s := strings.TrimSpace(explicit); s != "" {
+		return s, true
+	}
+	if s := strings.TrimSpace(os.Getenv(sessionEnv)); s != "" {
+		return s, true
+	}
+	return "", false
+}
+
 func runContractActivate(args []string) int {
 	fs := flag.NewFlagSet("contract activate", flag.ContinueOnError)
 	dir := fs.String("dir", ".", "repo directory")
-	session := fs.String("session", "", "session id to bind the contract to (required)")
+	session := fs.String("session", "", "session id to bind the contract to (defaults to $"+sessionEnv+")")
 	if err := fs.Parse(args); err != nil {
 		return ExitError
 	}
-	if fs.NArg() != 1 || *session == "" {
-		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract activate --session <id> <name>")
+	sessionID, ok := resolveSessionID(*session)
+	if fs.NArg() != 1 || !ok {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract activate [--session <id>] <name>")
+		if fs.NArg() == 1 && !ok {
+			fmt.Fprintf(os.Stderr, "No session id: pass --session, or run inside an agent session that sets $%s.\n", sessionEnv)
+		}
 		return ExitError
 	}
 	c, code := loadContractByName(*dir, fs.Arg(0))
@@ -195,23 +228,37 @@ func runContractActivate(args []string) int {
 	if code != ExitOK {
 		return code
 	}
-	if err := db.ActivateContract(repo.ID, *session, c.Name, c.Path, c.Hash); err != nil {
+	if err := db.ActivateContract(repo.ID, sessionID, c.Name, c.Path, c.Hash); err != nil {
 		return printErr(err)
 	}
 	fmt.Printf("Activated contract %q for session %s (%d pattern(s), hash %s)\n",
-		c.Name, *session, len(c.Patterns), shortHashDisplay(c.Hash))
+		c.Name, sessionID, len(c.Patterns), shortHashDisplay(c.Hash))
 	return ExitOK
 }
 
 func runContractDeactivate(args []string) int {
 	fs := flag.NewFlagSet("contract deactivate", flag.ContinueOnError)
 	dir := fs.String("dir", ".", "repo directory")
-	session := fs.String("session", "", "session id (required)")
+	session := fs.String("session", "", "session id (defaults to $"+sessionEnv+")")
 	if err := fs.Parse(args); err != nil {
 		return ExitError
 	}
-	if *session == "" {
-		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract deactivate --session <id>")
+	// A task ends where it started: deactivate resolves the session the same way
+	// activate does, or the env fallback would only remove half the friction.
+	sessionID, ok := resolveSessionID(*session)
+	// Reject a stray argument. `activate` takes a contract name, so
+	// `deactivate <name>` is the natural mirror to type — and it is wrong, because
+	// a session has at most one binding and it is keyed by session, not name.
+	// While --session was mandatory that typo failed on the missing flag and
+	// corrected itself; now it would silently deactivate and ignore the argument.
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract deactivate [--session <id>]")
+		fmt.Fprintf(os.Stderr, "deactivate takes no contract name: a session has one active contract, keyed by session id (%q ignored).\n", fs.Arg(0))
+		return ExitError
+	}
+	if !ok {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract deactivate [--session <id>]")
+		fmt.Fprintf(os.Stderr, "No session id: pass --session, or run inside an agent session that sets $%s.\n", sessionEnv)
 		return ExitError
 	}
 	db, code := mustOpenDB()
@@ -228,10 +275,10 @@ func runContractDeactivate(args []string) int {
 		fmt.Println("Repo not enrolled; nothing to deactivate.")
 		return ExitOK
 	}
-	if err := db.DeactivateContract(repo.ID, *session); err != nil {
+	if err := db.DeactivateContract(repo.ID, sessionID); err != nil {
 		return printErr(err)
 	}
-	fmt.Printf("Deactivated contract for session %s\n", *session)
+	fmt.Printf("Deactivated contract for session %s\n", sessionID)
 	return ExitOK
 }
 
@@ -290,10 +337,17 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	if name != "" {
 		return loadContractByName(dir, name)
 	}
-	if session == "" {
-		fmt.Fprintln(os.Stderr, "Specify --contract <name> or --session <id> with an active contract.")
+	// `check` resolves the session exactly like activate/deactivate. Leaving it
+	// out would remove only half the friction: `contract activate my-scope`
+	// succeeds with no flag, and then a bare `contract check` — the natural
+	// pre-PR follow-up — would demand the UUID that activate just proved is
+	// knowable. The asymmetry reads as a bug, not as a design.
+	sessionID, ok := resolveSessionID(session)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Specify --contract <name>, or --session <id> with an active contract (or run where $%s is set).\n", sessionEnv)
 		return contract.Contract{}, ExitError
 	}
+	session = sessionID
 	db, code := mustOpenDB()
 	if code != ExitOK {
 		return contract.Contract{}, code

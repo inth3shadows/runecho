@@ -63,11 +63,16 @@ func (cw *contractWarning) drifted() bool { return cw.ActivatedHash != cw.Curren
 // or an intended removal") is about symbols and says nothing useful here.
 //
 // Every command it prints is fully qualified and runnable as-is. The first draft
-// suggested a bare `runecho-ir contract deactivate`, which ALWAYS fails —
-// --session is required and the guard is the only party that knows the id, since
-// it read it from the hook payload and never showed it. A remedy the user cannot
-// execute is worse than no remedy: it spends the one moment they are paying
-// attention on a usage error.
+// suggested a bare `runecho-ir contract deactivate`; at the time that ALWAYS
+// failed, because --session was required and the guard was the only party that
+// knew the id, having read it from the hook payload and never shown it.
+//
+// Since #12 D3a the flag is optional and defaults to $CLAUDE_CODE_SESSION_ID, so
+// the bare form would now usually work — but this stays fully qualified on
+// purpose. The ask is read in a terminal that may be a different session, a
+// different repo, or a plain shell with no agent environment at all, and a remedy
+// the user cannot execute is worse than no remedy: it spends the one moment they
+// are paying attention on a usage error.
 //
 // The ignorefile disclaimer is not padding either. In a merged ask this section
 // sits beside the fact checks' trailer, which offers .runechoguardignore as the

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-29
+
+### Changed
+- guard: extract Python call shape from a diff (#243 step 1) (#259)
+
 ## [0.18.0] — 2026-07-29
 
 ### Changed

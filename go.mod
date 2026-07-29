@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/odvcencio/gotreesitter v0.47.0
-	golang.org/x/text v0.39.0
+	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.37.0
 )
 

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.16] — 2026-07-29
+
+### Changed
+- ci: gate pull requests on the hook-fixture mutation sweep (#250)
+
 ## [0.17.15] — 2026-07-28
 
 ### Changed

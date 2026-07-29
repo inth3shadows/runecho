@@ -16,6 +16,17 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+
+- `fpreport` counted one tool call several times when the agent harness re-ran the
+  PreToolUse hook for it ([#252](https://github.com/inth3shadows/runecho/issues/252)).
+  Repeated ask records now collapse to one event at read time. This mattered in
+  one direction only: `Window.Asks` incremented per record while at most one ask
+  could claim a given approval, so duplicates **deflated** the approval rate and
+  flattered the guard — and `--max-rate` inherited that as a bias toward passing.
+  On a 20,719-record log the reported rate moves 72.2% → 79.0%. `decisions.jsonl`
+  is unchanged; it stays a faithful record of what the hook was asked.
+
 ## [0.17.17] — 2026-07-29
 
 ### Changed

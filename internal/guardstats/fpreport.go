@@ -138,6 +138,31 @@ func symbolKey(file string, symbols []string) string {
 	return file + "\x00" + strings.Join(sorted, "\x01")
 }
 
+// askEventKey identifies the tool call an ask record describes, so repeated
+// records written for one call collapse to one event (#252).
+//
+// Every field that could differ between two genuinely distinct asks is in the
+// key. Timestamps are second-resolution as logged, which is what makes this work
+// at all: a re-invocation lands in the same second, so identical records pair up
+// without a tolerance window to tune. It also bounds the damage — an over-eager
+// key would erase real asks, and the only way two distinct events collide here is
+// if they share a second, a file, a repo, a language, a guard version, a reason
+// AND a symbol set.
+//
+// Deliberately NOT applied to outcome records. They measured 1.000 records per
+// event on the reference log — the recorder is not on the re-invoked path — and
+// collapsing them would risk cutting the numerator to fix the denominator.
+func askEventKey(d Decision) string {
+	return strings.Join([]string{
+		d.TS.UTC().Format(time.RFC3339),
+		d.Repo,
+		d.Lang,
+		d.GV,
+		d.Reason,
+		symbolKey(d.File, d.Symbols),
+	}, "\x02")
+}
+
 // FPReport joins ask records to their approved outcomes and summarizes the
 // observed approval (upper-bound false-positive) rate over decisions at or after
 // since. topN caps the flagged-symbol and loudest-repo rankings.
@@ -169,6 +194,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	type stamp = time.Time
 	approvedByKey := map[string][]stamp{}
 	var asks []Decision
+	eventSeen := map[string]bool{}
 	for _, d := range decisions {
 		if d.TS.Before(since) {
 			continue
@@ -183,6 +209,28 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			}
 			if len(d.Symbols) == 0 {
 				continue // no join signal — would collide with other symbol-less records
+			}
+			// Collapse re-invocations of one tool call (#252). The agent harness can
+			// run the PreToolUse hook more than once for a single Edit/Write, and the
+			// guard writes a record each time — byte-identical apart from nothing.
+			//
+			// This has to happen here, not at the reporting end, because the two sides
+			// of the rate treat repeats differently: Window.Asks++ fires per RECORD,
+			// while `consumed` below lets at most one ask claim a given outcome. So N
+			// copies of one ask that was approved once score 1/N instead of 1/1 —
+			// duplication DEFLATES the approval rate and flatters the guard. Measured
+			// on the author's 20,719-record log: 72.2% raw vs 78.9% collapsed, a 6.7
+			// point understatement, and the `--max-rate` gate inherits it as a bias
+			// toward passing.
+			//
+			// Two genuine edits to the same file inside one second are indistinguishable
+			// from a re-invocation and collapse too. That is the right trade: it moves
+			// counts slightly, whereas the alternative moves the rate the report exists
+			// to state.
+			if k := askEventKey(d); eventSeen[k] {
+				continue
+			} else {
+				eventSeen[k] = true
 			}
 			asks = append(asks, d)
 		case "outcome":

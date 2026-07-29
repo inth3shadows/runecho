@@ -1,0 +1,3 @@
+name: guardstats-dedup
+description: #252 — de-duplicate repeated ask records at read time so fpreport's denominator reflects events, not hook re-invocations
+internal/guardstats/**

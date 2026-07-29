@@ -279,3 +279,60 @@ func TestSplitChecks_DropsEmptyTerms(t *testing.T) {
 		}
 	}
 }
+
+// #252 — the agent harness can run the PreToolUse hook several times for one
+// Edit/Write, and the guard logs each run. Window.Asks++ fires per record while
+// `consumed` caps approvals at one per outcome, so duplicates DEFLATE the rate:
+// three copies of one approved ask would score 1/3 instead of 1/1.
+func TestFPReport_CollapsesRepeatedAskRecords(t *testing.T) {
+	repeated := ask("violations", "py", "r1", "a.py", 0, "foo")
+	decs := []Decision{
+		repeated, repeated, repeated, // one tool call, three hook invocations
+		outcome("a.py", 2, "foo"), // approved once, because it happened once
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 1 {
+		t.Fatalf("asks = %d, want 1 — three records describe one tool call", s.Window.Asks)
+	}
+	if s.Window.Approved != 1 {
+		t.Fatalf("approved = %d, want 1", s.Window.Approved)
+	}
+	if got := s.Window.Rate(); got != 1 {
+		t.Errorf("rate = %.3f, want 1.000; duplicate asks are understating the approval rate", got)
+	}
+}
+
+// The collapse must not swallow genuinely distinct asks. Every field in the key
+// gets its own case, or an over-eager key would silently erase real data — the
+// failure mode that is worse than the bug being fixed.
+func TestFPReport_KeepsDistinctAsks(t *testing.T) {
+	base := ask("violations", "py", "r1", "a.py", 0, "foo")
+	vary := map[string]func(Decision) Decision{
+		"different second": func(d Decision) Decision { d.TS = ts(1); return d },
+		"different repo":   func(d Decision) Decision { d.Repo = "r2"; return d },
+		"different file":   func(d Decision) Decision { d.File = "b.py"; return d },
+		"different lang":   func(d Decision) Decision { d.Lang = "go"; return d },
+		"different reason": func(d Decision) Decision { d.Reason = "dangling"; return d },
+		"different symbol": func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
+		"different gv":     func(d Decision) Decision { d.GV = "v9.9.9"; return d },
+	}
+	for name, mutate := range vary {
+		t.Run(name, func(t *testing.T) {
+			s := FPReport([]Decision{base, mutate(base)}, ts(-1000), 10)
+			if s.Window.Asks != 2 {
+				t.Fatalf("asks = %d, want 2 — %s must not collapse", s.Window.Asks, name)
+			}
+		})
+	}
+}
+
+// Symbol ORDER is not a distinguishing field: symbolKey sorts, so the same set
+// logged in a different order is the same event.
+func TestFPReport_CollapseIsSymbolOrderIndependent(t *testing.T) {
+	a := ask("violations", "py", "r1", "a.py", 0, "foo", "bar")
+	b := ask("violations", "py", "r1", "a.py", 0, "bar", "foo")
+	s := FPReport([]Decision{a, b}, ts(-1000), 10)
+	if s.Window.Asks != 1 {
+		t.Fatalf("asks = %d, want 1 — symbol order must not create a second event", s.Window.Asks)
+	}
+}

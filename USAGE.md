@@ -358,6 +358,24 @@ records written before version stamping existed). For the same reason, `--max-ra
 **refuses to evaluate** a mixed-version window and says so on stderr rather than
 passing or failing on a pooled average.
 
+**Not every ask can be rated, and the report says which.** The join is
+symbol-exact, so an ask that carries no symbols has nothing to pair an outcome
+with. The edit-scope contract check is the clear case: it fires on a *path*, not
+on identifiers, so almost none of its asks are rateable. Those asks are counted
+as **unrated** and appear in no rate on the page:
+
+```
+contract      3 ask   0 approved    0%  ! +13 unrated (rate covers 19%)
+```
+
+Read that as "this 0% describes 3 of the check's 16 asks" — and the 3 are the
+ones that happened to co-fire with a symbol-bearing check, which is the opposite
+of a random sample. A row marked `!` has under half its asks rated; a row with
+none rated prints no percentage at all. In `--json`, every bucket carries
+`unrated`, `total` and `coverage` next to `rate` for the same reason. `asks` and
+`rate` keep their old meaning — rateable asks only — so `--max-rate` gates on
+exactly what it always did.
+
 The approval rate is an **upper bound** on the false-positive rate: an approved
 ask is one the guard raised and the user waved through, but some of those
 approvals are the user fixing the flagged symbol rather than dismissing a wrong

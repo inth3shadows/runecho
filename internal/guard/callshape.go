@@ -70,7 +70,16 @@ const (
 	// file of unbalanced parens can force. `foo(` repeated 60 times per line over
 	// 4000 lines measured 19 s before this budget existed, and maxDiffBytes is
 	// 64 MiB, so the input is reachable inside an agent's edit loop (#212).
-	callShapeMaxTotalScan = 4 << 20 // 4 MiB
+	//
+	// The value is set from the hook's own envelope, not picked round. Measured on
+	// adversarial input (`abcdef(` x60 per line, 400 lines), a full budget burn cost
+	// 45 ms at 4 MiB — well past the ~12 ms the whole hook has for every check
+	// combined — and 5.1 ms at 256 KiB. It cannot starve legitimate work: one honest
+	// argument list is capped at
+	// callShapeMaxArgBytes (8 KiB) and is typically under 200 bytes, so the budget
+	// still covers ~1300 ordinary candidates — far more than a diff contains — and
+	// exceeding it yields an abstention, never a wrong shape.
+	callShapeMaxTotalScan = 256 << 10 // 256 KiB
 )
 
 // ExtractCallShapes extracts the argument shape of every unqualified call site in

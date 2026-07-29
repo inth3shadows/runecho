@@ -145,7 +145,7 @@ func TestCallShapeDifferential(t *testing.T) {
 
 	for rel := range oracle {
 		path := filepath.Join(root, rel)
-		for _, got := range ExtractCallShapes(LangPython, fileAsAddedLines(t, path)) {
+		for _, got := range ExtractCallShapes(LangPython, fileAsAddedLines(t, path), nil) {
 			// A shape the extractor itself marked unreliable is an abstention: the
 			// consumer must skip the call, so its counts are never acted on and
 			// comparing them would measure nothing.

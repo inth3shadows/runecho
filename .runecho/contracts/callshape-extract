@@ -1,3 +1,5 @@
 name: callshape-extract
-description: "#243 step 1 — extract call shape (callee, positional count, kwarg names) from a diff's added lines; Python first. No check wiring, no schema change."
+description: #243 step 1 — extract call shape (callee, positional count, kwarg names) from a diff's added lines; Python first. No check wiring, no schema change.
 internal/guard/**
+# The contract file itself, so the commit that adds it is not its own drift.
+.runecho/contracts/**

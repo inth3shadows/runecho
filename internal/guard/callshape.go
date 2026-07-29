@@ -38,11 +38,15 @@ type CallShape struct {
 	// set this — its commas are not at depth zero.
 	HasLambda bool
 	// Unreliable reports that at least one argument could not be classified, so Pos
-	// and Kwargs undercount and a consumer must abstain on the call. It is set when
-	// a segment's masked text is empty but its source text is not, and the source
-	// does not begin with a quote — in practice an interleaved comment, whose text
-	// cannot be told apart from a value on the following line once the argument list
-	// has been joined into one string.
+	// and Kwargs undercount and a consumer must abstain on the call.
+	//
+	// It is the residual default for a segment whose masked text is empty while its
+	// source text is not, once the two known causes — a comment and an
+	// interpolation-nested literal — have been accounted for. No input is currently
+	// known to reach it; it exists so that an unanticipated masking case degrades to
+	// an abstention rather than to a silent undercount, and it is deliberately not
+	// pinned by a fixture because pinning would require inventing an input that
+	// cannot occur.
 	Unreliable bool
 }
 
@@ -59,6 +63,14 @@ const (
 	// hold enormous numbers of call sites; the check's value does not scale with
 	// them, and the hook's latency budget does not tolerate them.
 	callShapeMaxSites = 4096
+	// callShapeMaxTotalScan bounds the bytes examined looking for closing parens
+	// ACROSS every candidate in one call. The per-call ceilings above bound each
+	// attempt, and callShapeMaxSites bounds successes — but an abstention costs a
+	// full lookahead and produces no site, so neither ceiling bounds the work a
+	// file of unbalanced parens can force. `foo(` repeated 60 times per line over
+	// 4000 lines measured 19 s before this budget existed, and maxDiffBytes is
+	// 64 MiB, so the input is reachable inside an agent's edit loop (#212).
+	callShapeMaxTotalScan = 4 << 20 // 4 MiB
 )
 
 // ExtractCallShapes extracts the argument shape of every unqualified call site in
@@ -75,12 +87,24 @@ const (
 // hunk gap interrupts it, or when it exceeds the byte/line ceilings above. The
 // consumer therefore sees only call sites whose shape is certain, which is what
 // lets a mismatch be reported as fact rather than suspicion.
-func ExtractCallShapes(lang Lang, lines []AddedLine) []CallShape {
+//
+// openSeed mirrors extractRefs': openSeed(lineNo) returns the unterminated
+// multi-line string delimiter in effect at the START of new-file line lineNo, so a
+// hunk that begins inside a pre-existing docstring is scanned masked instead of as
+// code. Without it, prose reading `Runs COUNT(x) and calls helper(a, b).` inside an
+// existing docstring yields two confident call shapes — the #145 class the existence
+// check already fixed. A nil seed means every contiguous run starts outside any
+// string, which is correct only for a whole-file scan.
+func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) string) []CallShape {
 	if lang != LangPython {
 		return nil
 	}
 
 	var out []CallShape
+	// scanned accumulates bytes examined by collectArgText across every candidate —
+	// see callShapeMaxTotalScan. Successful and abandoned attempts both count, since
+	// abandonment is the expensive case.
+	scanned := 0
 
 	// Masked scan text per line, indexed the same as lines. Literal content is
 	// blanked (length-preserving) so a paren or `=` inside a string cannot alter
@@ -102,7 +126,11 @@ func ExtractCallShapes(lang Lang, lines []AddedLine) []CallShape {
 				runEnd[j] = i
 			}
 			runFrom = i
-			open = ""
+			if openSeed != nil {
+				open = openSeed(l.LineNo)
+			} else {
+				open = ""
+			}
 		}
 		prevNo = l.LineNo
 		if open == "" && isCommentLine(lang, l.Text) {
@@ -151,8 +179,14 @@ func ExtractCallShapes(lang Lang, lines []AddedLine) []CallShape {
 				continue
 			}
 
+			if scanned >= callShapeMaxTotalScan {
+				// Whole-input scan budget spent; abandon the rest rather than let a
+				// file of unbalanced parens dictate how long the hook runs.
+				return out
+			}
 			// idx[1] is one past the '(' the regex matched.
-			masked, orig, ok := collectArgText(scans, lines, i, runEnd[i], idx[1])
+			masked, orig, ok, used := collectArgText(scans, lines, i, runEnd[i], idx[1])
+			scanned += used
 			if !ok {
 				continue // unbalanced within the visible lines — abstain
 			}
@@ -184,7 +218,7 @@ func ExtractCallShapes(lang Lang, lines []AddedLine) []CallShape {
 //     read as ONE argument until orig was carried alongside. Masking is
 //     length-preserving, so the two strings stay index-aligned and a range taken
 //     from one applies exactly to the other.
-func collectArgText(scans []string, lines []AddedLine, start, end, from int) (string, string, bool) {
+func collectArgText(scans []string, lines []AddedLine, start, end, from int) (masked, orig string, ok bool, used int) {
 	var mb, ob strings.Builder
 	depth := 1
 	limit := start + callShapeMaxLookahead
@@ -201,7 +235,7 @@ func collectArgText(scans []string, lines []AddedLine, start, end, from int) (st
 			// comment), which contributes no bytes at all. Anything else means the
 			// invariant broke: abstain rather than mis-slice.
 			if s != "" {
-				return "", "", false
+				return "", "", false, used
 			}
 			raw = ""
 		}
@@ -223,22 +257,20 @@ func collectArgText(scans []string, lines []AddedLine, start, end, from int) (st
 			case ')', ']', '}':
 				depth--
 				if depth == 0 {
-					return mb.String(), ob.String(), true
+					return mb.String(), ob.String(), true, used
 				}
 			}
 			mb.WriteByte(s[j])
 			ob.WriteByte(raw[j])
+			used++
 			if mb.Len() > callShapeMaxArgBytes {
-				return "", "", false
+				return "", "", false, used
 			}
 		}
 	}
-	return "", "", false
+	return "", "", false, used
 }
 
-// parseArgShape classifies one balanced argument list into positional count,
-// keyword names, and the two unpacking flags. Name and LineNo are left to the
-// caller.
 // parseArgShape classifies one balanced argument list. masked drives every
 // structural decision; orig answers only whether a segment holds an argument at
 // all. The two must be index-aligned — see collectArgText.
@@ -260,8 +292,19 @@ func parseArgShape(masked, orig string) CallShape {
 			switch oseg := strings.TrimSpace(orig[r[0]:r[1]]); {
 			case oseg == "":
 				// punctuation
+			case oseg[0] == '#':
+				// A pure comment. It cannot be shadowing a value on the next line:
+				// masking blanks only the comment text, so a value there would still
+				// appear in masked and this branch would not be reached — which is
+				// what TestExtractCallShapes_CommentLineBeforeValueIsReliable pins.
+				// Ordinary Black-formatted Python with a magic trailing comma and
+				// per-argument comments lands here.
 			case oseg[0] == '\'' || oseg[0] == '"':
-				cs.Pos++ // a bare literal is positional; a keyword would show `k=` in masked
+				// A literal whose QUOTES were blanked too, which happens only inside an
+				// f-string interpolation (maskNestedLiteral). In plain context
+				// stripLiteralsStateful keeps the quote bytes, so such a segment is
+				// non-empty in masked and never reaches here.
+				cs.Pos++
 			default:
 				cs.Unreliable = true
 			}

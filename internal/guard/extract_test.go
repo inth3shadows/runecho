@@ -706,6 +706,18 @@ func TestExtractRefs_Python_FStringInterpolation(t *testing.T) {
 		{"b-prefix-not-fstring", `x = b"{Foo()}"`, nil, []string{"Foo"}},
 		{"two-interps", `x = f"{First(a)}-{Second(b)}"`, []string{"First", "Second"}, nil},
 		{"dict-literal-in-interp", `x = f"{lookup[Key(k)]}"`, []string{"Key"}, nil},
+		// A string literal nested INSIDE the interpolation is data, not code. Leaving
+		// its bytes intact reported the parenthesised text as a bare call: an aligned
+		// table header written as f"{'acc(curr)':>10}" flagged `acc` as a
+		// hallucinated symbol on working code. Found by the #243 differential harness
+		// against CPython's ast, on real repo source.
+		{"nested-literal-in-format-spec", `x = f"{'acc(curr)':>10}"`, nil, []string{"acc"}},
+		{"nested-literal-double-quoted", `x = f'{"ll(prev)":>9}'`, nil, []string{"ll"}},
+		{"nested-literal-dict-key", `x = f"{d['count(x)']}"`, nil, []string{"count"}},
+		// ...and the FN guard for that fix: masking the nested literal must not
+		// swallow a genuine call that follows it in the same interpolation.
+		{"call-after-nested-literal", `x = f"{Fmt('x(1)') + Compute(y)}"`, []string{"Compute"}, []string{"x"}},
+		{"call-before-nested-literal", `x = f"{Build(y)} {'z(2)'}"`, []string{"Build"}, []string{"z"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

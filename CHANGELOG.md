@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.17] — 2026-07-29
+
 ### Changed
 
 - `runecho-ir contract activate|deactivate` now default `--session` to

@@ -114,9 +114,19 @@ type FPStats struct {
 	TopSymbols   []SymbolCount // symbols on APPROVED asks (the FP suspects), ranked
 	LoudestRepos []RepoCount
 	// UnmatchedOutcomes counts "approved" outcome records with no ask they could
-	// join to in-window. A large value means the log is missing asks (rotated,
-	// or written by an older guard that did not stamp symbols) — a caveat on the
-	// rates above, surfaced rather than hidden.
+	// join to in-window. Causes, in rough order of likelihood:
+	//
+	//  1. The outcome recorder pairs on FILE only (declog.go's recentAsk), so a
+	//     later tool call on the same file inside maxOutcomeAge re-emits an
+	//     approval carrying the earlier ask's symbols. Those extra outcomes never
+	//     had a distinct ask.
+	//  2. Ask records collapsed as hook re-invocations (#252) release the extra
+	//     outcomes their duplicates had claimed.
+	//  3. The log really is missing asks — rotated, or written by an older guard
+	//     that did not stamp symbols.
+	//
+	// Only (3) is a data-integrity problem, so a large value is a caveat on the
+	// rates above, not by itself evidence of a damaged log.
 	UnmatchedOutcomes int
 }
 
@@ -136,6 +146,31 @@ func symbolKey(file string, symbols []string) string {
 	sorted := append([]string(nil), symbols...)
 	sort.Strings(sorted)
 	return file + "\x00" + strings.Join(sorted, "\x01")
+}
+
+// askEventKey identifies the tool call an ask record describes, so repeated
+// records written for one call collapse to one event (#252).
+//
+// Every field that could differ between two genuinely distinct asks is in the
+// key. Timestamps are second-resolution as logged, which is what makes this work
+// at all: a re-invocation lands in the same second, so identical records pair up
+// without a tolerance window to tune. It also bounds the damage — an over-eager
+// key would erase real asks, and the only way two distinct events collide here is
+// if they share a second, a file, a repo, a language, a guard version, a reason
+// AND a symbol set.
+//
+// Deliberately NOT applied to outcome records. They measured 1.000 records per
+// event on the reference log — the recorder is not on the re-invoked path — and
+// collapsing them would risk cutting the numerator to fix the denominator.
+func askEventKey(d Decision) string {
+	return strings.Join([]string{
+		d.TS.UTC().Format(time.RFC3339),
+		d.Repo,
+		d.Lang,
+		d.GV,
+		d.Reason,
+		symbolKey(d.File, d.Symbols),
+	}, "\x02")
 }
 
 // FPReport joins ask records to their approved outcomes and summarizes the
@@ -169,6 +204,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	type stamp = time.Time
 	approvedByKey := map[string][]stamp{}
 	var asks []Decision
+	eventSeen := map[string]bool{}
 	for _, d := range decisions {
 		if d.TS.Before(since) {
 			continue
@@ -183,6 +219,41 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			}
 			if len(d.Symbols) == 0 {
 				continue // no join signal — would collide with other symbol-less records
+			}
+			// Collapse re-invocations of one tool call (#252). The agent harness can
+			// run the PreToolUse hook more than once for a single Edit/Write, and the
+			// guard writes a record each time — byte-identical apart from nothing.
+			//
+			// This has to happen here, not at the reporting end, because Window.Asks++
+			// fires per RECORD: every duplicate enlarges the denominator.
+			//
+			// It moves the numerator too, and in the same direction — do not read this
+			// as a denominator-only fix. `consumed` below is keyed per OUTCOME, not per
+			// ask, so N duplicate asks at one timestamp can each claim a DIFFERENT
+			// outcome within the match window. Outcomes are plentiful enough for that to
+			// bite because the recorder pairs on file only (declog.go's recentAsk), so a
+			// later edit to the same file re-emits an approval carrying the earlier
+			// symbol set. Collapsing the asks therefore also releases the extra approvals
+			// their duplicates had claimed.
+			//
+			// The denominator falls faster than the numerator, so the net effect is that
+			// duplication DEFLATES the reported rate and flatters the guard. Measured on
+			// the author's 20,799-record log: 632 asks / 457 approved = 72.3% raw versus
+			// 552 / 436 = 79.0% collapsed — a 6.7 point understatement, which the
+			// `--max-rate` gate inherits as a bias toward passing.
+			//
+			// A smaller ask count also shrinks gate ELIGIBILITY: a window near
+			// gateMinAsks can drop below it and skip the gate (with the stderr note, not
+			// silently). On this log `--days=3` goes 33 asks to 20 — right at the floor.
+			//
+			// Two genuine edits to the same file inside one second are indistinguishable
+			// from a re-invocation and collapse too. That is the right trade: it moves
+			// counts slightly, whereas the alternative moves the rate the report exists
+			// to state.
+			if k := askEventKey(d); eventSeen[k] {
+				continue
+			} else {
+				eventSeen[k] = true
 			}
 			asks = append(asks, d)
 		case "outcome":
@@ -409,9 +480,11 @@ func FormatFP(s FPStats) string {
 	}
 
 	if s.UnmatchedOutcomes > 0 {
-		fmt.Fprintf(&b, "\nNote: %d approved outcome(s) had no matching ask in-window — the\n",
+		fmt.Fprintf(&b, "\nNote: %d approved outcome(s) had no matching ask in-window. Usually benign:\n",
 			s.UnmatchedOutcomes)
-		fmt.Fprintf(&b, "log may be missing asks (rotated, or from a guard that did not stamp symbols).\n")
+		fmt.Fprintf(&b, "outcomes are recorded per FILE, so repeat edits re-emit one; and asks collapsed\n")
+		fmt.Fprintf(&b, "as hook re-invocations release theirs. Only suspect a missing/rotated log if\n")
+		fmt.Fprintf(&b, "this is large relative to the ask count.\n")
 	}
 	return b.String()
 }

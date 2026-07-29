@@ -279,3 +279,109 @@ func TestSplitChecks_DropsEmptyTerms(t *testing.T) {
 		}
 	}
 }
+
+// #252 — the agent harness can run the PreToolUse hook several times for one
+// Edit/Write, and the guard logs each run. Window.Asks++ fires per record while
+// `consumed` caps approvals at one per outcome, so duplicates DEFLATE the rate:
+// three copies of one approved ask would score 1/3 instead of 1/1.
+func TestFPReport_CollapsesRepeatedAskRecords(t *testing.T) {
+	repeated := ask("violations", "py", "r1", "a.py", 0, "foo")
+	decs := []Decision{
+		repeated, repeated, repeated, // one tool call, three hook invocations
+		outcome("a.py", 2, "foo"), // approved once, because it happened once
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 1 {
+		t.Fatalf("asks = %d, want 1 — three records describe one tool call", s.Window.Asks)
+	}
+	if s.Window.Approved != 1 {
+		t.Fatalf("approved = %d, want 1", s.Window.Approved)
+	}
+	if got := s.Window.Rate(); got != 1 {
+		t.Errorf("rate = %.3f, want 1.000; duplicate asks are understating the approval rate", got)
+	}
+}
+
+// The collapse must not swallow genuinely distinct asks. Every field in the key
+// gets its own case, or an over-eager key would silently erase real data — the
+// failure mode that is worse than the bug being fixed.
+func TestFPReport_KeepsDistinctAsks(t *testing.T) {
+	base := ask("violations", "py", "r1", "a.py", 0, "foo")
+	vary := map[string]func(Decision) Decision{
+		// ONE SECOND, not ts(1) — ts counts minutes. A minute-resolution key would
+		// survive a whole-minute delta and still collapse two distinct asks 30s
+		// apart, so the mutation has to be as fine as the claim the doc comment makes.
+		"different second": func(d Decision) Decision { d.TS = d.TS.Add(time.Second); return d },
+		"different minute": func(d Decision) Decision { d.TS = ts(1); return d },
+		"different repo":   func(d Decision) Decision { d.Repo = "r2"; return d },
+		"different file":   func(d Decision) Decision { d.File = "b.py"; return d },
+		"different lang":   func(d Decision) Decision { d.Lang = "go"; return d },
+		"different reason": func(d Decision) Decision { d.Reason = "dangling"; return d },
+		"different symbol": func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
+		"different gv":     func(d Decision) Decision { d.GV = "v9.9.9"; return d },
+	}
+	for name, mutate := range vary {
+		t.Run(name, func(t *testing.T) {
+			s := FPReport([]Decision{base, mutate(base)}, ts(-1000), 10)
+			if s.Window.Asks != 2 {
+				t.Fatalf("asks = %d, want 2 — %s must not collapse", s.Window.Asks, name)
+			}
+		})
+	}
+}
+
+// Symbol ORDER is not a distinguishing field: symbolKey sorts, so the same set
+// logged in a different order is the same event.
+func TestFPReport_CollapseIsSymbolOrderIndependent(t *testing.T) {
+	a := ask("violations", "py", "r1", "a.py", 0, "foo", "bar")
+	b := ask("violations", "py", "r1", "a.py", 0, "bar", "foo")
+	s := FPReport([]Decision{a, b}, ts(-1000), 10)
+	if s.Window.Asks != 1 {
+		t.Fatalf("asks = %d, want 1 — symbol order must not create a second event", s.Window.Asks)
+	}
+}
+
+// The collapse is deliberately NOT applied to outcome records: they measured
+// 1.000 records per event, and cutting the numerator to fix the denominator
+// would be the wrong trade. Without this test that decision is free to be
+// reverted with no signal.
+func TestFPReport_DoesNotCollapseOutcomes(t *testing.T) {
+	o := outcome("a.py", 2, "foo")
+	decs := []Decision{
+		ask("violations", "py", "r1", "a.py", 0, "foo"),
+		ask("violations", "py", "r1", "a.py", 1, "foo"), // distinct minute → distinct ask
+		o, o, // two outcome records; both must remain claimable
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 {
+		t.Fatalf("asks = %d, want 2", s.Window.Asks)
+	}
+	if s.Window.Approved != 2 {
+		t.Fatalf("approved = %d, want 2 — outcome records must not be collapsed", s.Window.Approved)
+	}
+}
+
+// Collapsing asks shrinks Window.Asks, which shrinks --max-rate gate ELIGIBILITY:
+// a window sitting just above gateMinAsks can fall below it and skip the gate
+// entirely. The skip is announced on stderr rather than silent, but the coverage
+// loss is real and was not obvious from the rate change alone.
+func TestFPReport_CollapseCanDropWindowBelowGateFloor(t *testing.T) {
+	var decs []Decision
+	// 19 distinct asks, plus one asked twice → 21 records, 20 events.
+	for i := 0; i < 19; i++ {
+		decs = append(decs, ask("violations", "py", "r1", "f"+string(rune('a'+i))+".py", i, "s"))
+	}
+	dupe := ask("violations", "py", "r1", "zz.py", 30, "s")
+	decs = append(decs, dupe, dupe)
+
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 20 {
+		t.Fatalf("asks = %d, want 20 events from 21 records", s.Window.Asks)
+	}
+	// Same input read without the collapse would have reported 21 — one side of
+	// the gate floor, then the other. Pin the boundary so a future key change that
+	// over-collapses is visible as a gate-coverage change, not just a rate change.
+	if s.Window.Asks < 20 {
+		t.Errorf("collapse dropped the window below the gate floor of 20")
+	}
+}

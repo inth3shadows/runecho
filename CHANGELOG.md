@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.18] — 2026-07-29
+
 ### Fixed
 
 - `fpreport` counted one tool call several times when the agent harness re-ran the

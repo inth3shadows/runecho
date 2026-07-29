@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-29
+
+### Changed
+- guard: stop reading a string literal nested in an f-string interpolation as code (#256) (#257)
+
 ## [0.17.19] — 2026-07-29
 
 ### Changed

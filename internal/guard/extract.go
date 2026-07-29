@@ -1315,6 +1315,12 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 					depth := 1
 					i++
 					for i < n && depth > 0 && !hasAt(b, i, delim) {
+						if b[i] == '\'' || b[i] == '"' {
+							// A string literal nested in the interpolation is DATA, not
+							// code — see maskNestedLiteral.
+							i = maskNestedLiteral(b, out, i, n)
+							continue
+						}
 						if b[i] == '{' {
 							depth++
 						} else if b[i] == '}' {
@@ -1386,6 +1392,16 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 						depth := 1
 						i++ // past the '{'
 						for i < n && depth > 0 && b[i] != quote {
+							if b[i] == '\'' || b[i] == '"' {
+								// A string literal nested in the interpolation is DATA,
+								// not code — see maskNestedLiteral. Only a quote DIFFERENT
+								// from the outer one reaches here; a same-quote nested
+								// literal (valid only in Python 3.12+) already ends this
+								// loop, which is the pre-existing limitation documented
+								// below.
+								i = maskNestedLiteral(b, out, i, n)
+								continue
+							}
 							if b[i] == '{' {
 								depth++
 							} else if b[i] == '}' {
@@ -1458,6 +1474,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 // Python allows f, rf, fr, and case variants (and br/rb, which are NOT f-strings).
 // The prefix must be a token boundary on its left so we don't treat the `f` in an
 // identifier like `conf"x"` (not valid Python, but be defensive) as a prefix.
+
 func isFStringPrefix(b []byte, i int) bool {
 	// Collect the run of letters directly preceding the quote (max 2 for valid
 	// Python prefixes).
@@ -1482,6 +1499,66 @@ func isFStringPrefix(b []byte, i int) bool {
 		}
 	}
 	return false
+}
+
+// maskNestedLiteral blanks a plain string literal nested inside an f-string
+// interpolation and returns the index just past its closing quote (or n if the
+// literal is unterminated on this line). i must index the literal's opening quote.
+//
+// The bytes of an interpolation are deliberately left intact so a genuine call
+// inside `f"{Build(y)}"` is seen. A quoted literal WITHIN that interpolation is
+// data, though, and leaving it intact makes its contents read as code:
+// `f"{'acc(curr)':>10}"` reported `acc` as a bare call, and a format spec built
+// this way is common enough in real code to matter (#256).
+//
+// A nested F-STRING is the exception and is left INTACT: its own interpolation is
+// code, so blanking it drops any call inside — `f"outer {f'{Build(x)}'}"` would
+// stop reporting a hallucinated `Build`, trading a false positive for a false
+// negative, which is the worse direction for a truth oracle. Nested f-strings with
+// differing quotes are valid on every supported Python, not only 3.12+. The cost is
+// that the #256 false positive can still occur one level deeper, inside a nested
+// f-string — accepted, because it is exactly the pre-fix behavior and no worse.
+//
+// Blanking is length-preserving, so match indices stay honest, and only non-code
+// bytes are removed: a call that FOLLOWS the literal in the same interpolation
+// (`f"{fmt('x') + compute(y)}"`) is still scanned.
+func maskNestedLiteral(b, out []byte, i, n int) int {
+	if isFStringPrefix(b, i) {
+		// Skip the WHOLE nested f-string, leaving every byte intact so its
+		// interpolation is still scanned. Resuming one byte in instead would leave the
+		// nested string's CLOSING quote to be read as the opening of a fresh literal,
+		// which then blanks forward past the outer interpolation's closing brace.
+		q := b[i]
+		i++
+		for i < n {
+			if b[i] == '\\' && i+1 < n {
+				i += 2
+				continue
+			}
+			if b[i] == q {
+				return i + 1
+			}
+			i++
+		}
+		return n
+	}
+	quote := b[i]
+	out[i] = ' '
+	i++
+	for i < n {
+		if b[i] == '\\' && i+1 < n {
+			out[i] = ' '
+			out[i+1] = ' '
+			i += 2
+			continue
+		}
+		out[i] = ' '
+		i++
+		if b[i-1] == quote {
+			return i
+		}
+	}
+	return n
 }
 
 func isPrefixLetter(c byte) bool {

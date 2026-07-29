@@ -246,6 +246,16 @@ func runContractDeactivate(args []string) int {
 	// A task ends where it started: deactivate resolves the session the same way
 	// activate does, or the env fallback would only remove half the friction.
 	sessionID, ok := resolveSessionID(*session)
+	// Reject a stray argument. `activate` takes a contract name, so
+	// `deactivate <name>` is the natural mirror to type — and it is wrong, because
+	// a session has at most one binding and it is keyed by session, not name.
+	// While --session was mandatory that typo failed on the missing flag and
+	// corrected itself; now it would silently deactivate and ignore the argument.
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract deactivate [--session <id>]")
+		fmt.Fprintf(os.Stderr, "deactivate takes no contract name: a session has one active contract, keyed by session id (%q ignored).\n", fs.Arg(0))
+		return ExitError
+	}
 	if !ok {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir contract deactivate [--session <id>]")
 		fmt.Fprintf(os.Stderr, "No session id: pass --session, or run inside an agent session that sets $%s.\n", sessionEnv)
@@ -327,10 +337,17 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	if name != "" {
 		return loadContractByName(dir, name)
 	}
-	if session == "" {
-		fmt.Fprintln(os.Stderr, "Specify --contract <name> or --session <id> with an active contract.")
+	// `check` resolves the session exactly like activate/deactivate. Leaving it
+	// out would remove only half the friction: `contract activate my-scope`
+	// succeeds with no flag, and then a bare `contract check` — the natural
+	// pre-PR follow-up — would demand the UUID that activate just proved is
+	// knowable. The asymmetry reads as a bug, not as a design.
+	sessionID, ok := resolveSessionID(session)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Specify --contract <name>, or --session <id> with an active contract (or run where $%s is set).\n", sessionEnv)
 		return contract.Contract{}, ExitError
 	}
+	session = sessionID
 	db, code := mustOpenDB()
 	if code != ExitOK {
 		return contract.Contract{}, code

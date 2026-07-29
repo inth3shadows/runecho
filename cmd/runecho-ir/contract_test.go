@@ -61,6 +61,47 @@ func TestContractActivateRefusesEmptySession(t *testing.T) {
 	}
 }
 
+// `activate` takes a contract name, so `deactivate <name>` is the natural typo.
+// It is wrong — a binding is keyed by session, not name. While --session was
+// mandatory the typo failed on the missing flag; with the flag optional it would
+// otherwise deactivate silently and drop the argument on the floor.
+func TestContractDeactivateRejectsStrayArgument(t *testing.T) {
+	t.Setenv(sessionEnv, "some-session-id")
+	var code int
+	_, stderr := captureOutput(func() {
+		code = runContractDeactivate([]string{"contracts-d1"})
+	})
+	if code == ExitOK {
+		t.Fatal("deactivate with a stray contract name returned ExitOK; the argument was silently ignored")
+	}
+	if !strings.Contains(stderr, "contracts-d1") {
+		t.Errorf("stderr does not echo the ignored argument, so the typo is not obvious: %q", stderr)
+	}
+}
+
+// `check` must resolve the session the same way activate does, or a user who
+// activated with no flag is told to paste the UUID activate just proved is
+// knowable.
+func TestContractCheckUsesEnvSession(t *testing.T) {
+	const refusal = "Specify --contract"
+
+	t.Setenv(sessionEnv, "")
+	_, stderrEmpty := captureOutput(func() {
+		resolveCheckContract(t.TempDir(), t.TempDir(), "", "")
+	})
+	if !strings.Contains(stderrEmpty, refusal) {
+		t.Fatalf("with no contract and no session, want the %q refusal; got %q", refusal, stderrEmpty)
+	}
+
+	t.Setenv(sessionEnv, "some-session-id")
+	_, stderrEnv := captureOutput(func() {
+		resolveCheckContract(t.TempDir(), t.TempDir(), "", "")
+	})
+	if strings.Contains(stderrEnv, refusal) {
+		t.Errorf("with $%s set, check still demanded an explicit --session: %q", sessionEnv, stderrEnv)
+	}
+}
+
 func TestContractDeactivateRefusesEmptySession(t *testing.T) {
 	t.Setenv(sessionEnv, "")
 	var code int

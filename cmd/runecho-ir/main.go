@@ -124,6 +124,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir validate-claims --text=<file> [--ir=<path>]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir contract list | show <name> | activate --session=<id> <name> | deactivate --session=<id>")
+	fmt.Fprintln(os.Stderr, "       runecho-ir contract list | show <name> | activate [--session=<id>] <name> | deactivate [--session=<id>]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir contract check [--contract=<name>|--session=<id>] [--base=<ref>] [--dir=<p>]")
+	fmt.Fprintln(os.Stderr, "         (--session defaults to $CLAUDE_CODE_SESSION_ID)")
 }

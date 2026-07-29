@@ -435,9 +435,10 @@ func TestContract_AsksAreAttributedToTheRepo(t *testing.T) {
 	}
 }
 
-// The remedy the ask hands the user has to run as printed. A bare
-// `runecho-ir contract deactivate` always fails (--session is required) and the
-// session id is something only the guard knows, having read it from the payload.
+// The remedy the ask hands the user has to run as printed. Since #12 D3a a bare
+// `runecho-ir contract deactivate` defaults --session to $CLAUDE_CODE_SESSION_ID,
+// so it usually works — but the ask may be read in another repo, another session,
+// or a shell with no agent environment, so the printed form stays fully qualified.
 func TestContract_AskPrintsARunnableRemedy(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
 	top := contractRepo(t, "sess-xyz", inScopeBody)

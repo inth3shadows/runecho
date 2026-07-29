@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 // csLines turns a Python source block into contiguous added lines starting at
@@ -479,19 +478,30 @@ func TestExtractCallShapes_DocstringSeedSuppressesProse(t *testing.T) {
 // The per-attempt ceilings bound one argument list; an ABANDONED attempt still costs
 // a full lookahead and yields no site, so neither of them bounds a file of
 // unbalanced parens. Only the whole-input budget does.
-func TestExtractCallShapes_TotalScanBudgetBoundsAbandonedWork(t *testing.T) {
+//
+// Asserted behaviourally, not on wall-clock: unbalanced lines burn the budget, and a
+// genuine balanced call placed AFTER them must therefore never be reached. A timing
+// assertion would be environment-dependent — the first version of this test failed
+// in CI under `-race`, which is exactly the flakiness a budget test must not have.
+func TestExtractCallShapes_TotalScanBudgetStopsTheScan(t *testing.T) {
 	var lines []AddedLine
-	line := strings.Repeat("abcdef(", 60)
-	for i := 0; i < 4000; i++ {
-		lines = append(lines, AddedLine{LineNo: i + 1, Text: line})
+	junk := strings.Repeat("abcdef(", 60) // 60 candidates/line, none ever closing
+	for i := 0; i < 40; i++ {
+		lines = append(lines, AddedLine{LineNo: i + 1, Text: junk})
 	}
-	start := time.Now()
-	got := ExtractCallShapes(LangPython, lines, nil)
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("took %s on unbalanced input — the total-scan budget is not bounding work", elapsed)
+	lines = append(lines, AddedLine{LineNo: len(lines) + 1, Text: `target(x=1)`})
+
+	for _, s := range ExtractCallShapes(LangPython, lines, nil) {
+		if s.Name == "target" {
+			t.Fatalf("reached a call past the total-scan budget: %+v", s)
+		}
 	}
-	if len(got) != 0 {
-		t.Errorf("emitted %d shapes for input with no balanced call", len(got))
+
+	// Companion assertion: the same trailing call IS found without the junk, so the
+	// test pins the budget rather than a parse failure.
+	tail := []AddedLine{{LineNo: 1, Text: `target(x=1)`}}
+	if got := ExtractCallShapes(LangPython, tail, nil); len(got) != 1 || got[0].Name != "target" {
+		t.Fatalf("trailing call not extractable on its own: %+v", got)
 	}
 }
 

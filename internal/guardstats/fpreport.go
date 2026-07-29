@@ -2,6 +2,7 @@ package guardstats
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -99,10 +100,19 @@ func FilterVersion(decisions []Decision, gv string) []Decision {
 }
 
 // RepoCount is one entry in the loudest-repos ranking.
+//
+// Asks is the RATEABLE ask count, so the field reconciles with overall.asks
+// under the same name; Unrated is the rest of the volume, and the ranking is by
+// their sum. Folding both into one "asks" would have given the same JSON key two
+// different denominators in one document (#254 review).
 type RepoCount struct {
-	Repo string `json:"repo"`
-	Asks int    `json:"asks"`
+	Repo    string `json:"repo"`
+	Asks    int    `json:"asks"`
+	Unrated int    `json:"unrated"`
 }
+
+// Total is every ask the repo raised, rateable or not — the ranking key.
+func (r RepoCount) Total() int { return r.Asks + r.Unrated }
 
 // FPStats is the observed false-positive report over a decision-log window.
 //
@@ -118,7 +128,7 @@ type RepoCount struct {
 // Not every ask can be rated. An ask with no symbols has nothing to join an
 // outcome on, so it lands in each bucket's Unrated and in none of the rates
 // (#254). Any report of this struct that quotes Rate() without Coverage() is
-// quoting a subset — for the contract check, historically a 14% one.
+// quoting a subset — for the contract check on the author's log, a 19% one.
 type FPStats struct {
 	Since    time.Time
 	Until    time.Time
@@ -151,9 +161,11 @@ type FPStats struct {
 	ByCheck map[string]FPBucket
 	ByLang  map[string]FPBucket
 	// ByVersion buckets asks by the guard binary that wrote them (UnknownVersion
-	// for records predating the gv stamp). More than one key means the headline
-	// rate above pools the behaviour of different programs and must not be read
-	// as a measurement of the current guard — see MixedVersions.
+	// for records predating the gv stamp). More than one key with a RATEABLE ask
+	// means the headline rate above pools the behaviour of different programs and
+	// must not be read as a measurement of the current guard — see MixedVersions,
+	// which counts those and not keys: a key holding only unrated asks contributed
+	// to no rate and so cannot make one an average.
 	ByVersion    map[string]FPBucket
 	TopSymbols   []SymbolCount // symbols on APPROVED asks (the FP suspects), ranked
 	LoudestRepos []RepoCount
@@ -174,12 +186,29 @@ type FPStats struct {
 	UnmatchedOutcomes int
 }
 
-// MixedVersions reports whether the window's asks came from more than one guard
-// binary. When true, every pooled figure in the report — the headline rate, the
-// by-check and by-language tables, and the most-approved-symbols ranking — is an
-// average across different programs, and a fix shipped partway through the window
-// is invisible in it.
-func (s FPStats) MixedVersions() bool { return len(s.ByVersion) > 1 }
+// MixedVersions reports whether the window's RATEABLE asks came from more than
+// one guard binary. When true, every pooled figure in the report — the headline
+// rate, the by-check and by-language tables, and the most-approved-symbols
+// ranking — is an average across different programs, and a fix shipped partway
+// through the window is invisible in it.
+//
+// It counts versions with a rateable ask, not map keys. Since #254 an
+// unrateable ask also creates a ByVersion bucket, and a bucket that contributed
+// nothing to any rate cannot make a rate a pooled average. Counting keys would
+// let one symbol-less contract ask from a different build — or a single
+// pre-symbol-stamping record, which lands under UnknownVersion — flip this to
+// true and, through cmd/runecho-ir's gateEligible, silently skip the --max-rate
+// gate on a window whose rate is in fact single-version. It would also print
+// "the rate above pools 2 different builds" about a rate drawn from one.
+func (s FPStats) MixedVersions() bool {
+	n := 0
+	for _, b := range s.ByVersion {
+		if b.Asks > 0 {
+			n++
+		}
+	}
+	return n > 1
+}
 
 // symbolKey is the join key: the file plus the ask's symbol set, order-
 // independent. The outcome recorder copies the ask's symbols forward verbatim,
@@ -283,12 +312,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			//
 			// This matters because it is not a rare malformed record: the contract
 			// check (#12 D2) asks about a PATH, not about identifiers, so EVERY
-			// contract-only ask lands here. On the reference log 19 of 22
-			// contract-mentioning asks carry no symbols. Dropping them made
-			// `fpreport` print {"check":"contract","asks":3,"rate":1.0} — a rate over
-			// the 14% of contract asks that happened to co-fire with a symbol check,
-			// which is the least representative subset available, presented with no
-			// hint that it was a subset at all. Same failure class as #227.
+			// contract-only ask lands here. Measured on the author's log 2026-07-29
+			// (--days=90; it is append-only, so re-measure before quoting): 16
+			// contract ask EVENTS, of which 13 carry no symbols. Dropping them made
+			// `fpreport` print {"check":"contract","asks":3,"approved":0,"rate":0} —
+			// "the contract check is never approved anyway", over the 19% of contract
+			// asks that happened to co-fire with a symbol check, which is the least
+			// representative subset available, presented with no hint that it was a
+			// subset at all. Same failure class as #227.
 			//
 			// Counting-not-joining is the deliberate stopping point, not a first
 			// step. Giving contract asks a real `(file, contract)` join was piloted
@@ -380,6 +411,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	usedOutcomes := 0
 	approvedSymbolFreq := map[string]int{}
 	repoAsks := map[string]int{}
+	repoUnrated := map[string]int{}
 
 	for _, a := range asks {
 		s.Window.Asks++
@@ -457,7 +489,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		verBucket := s.ByVersion[gv]
 		verBucket.Unrated++
 		s.ByVersion[gv] = verBucket
-		repoAsks[a.Repo]++
+		repoUnrated[a.Repo]++
 	}
 
 	// Any approved outcome not consumed by an ask had no in-window ask to pair to.
@@ -468,7 +500,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	s.UnmatchedOutcomes = totalOutcomes - usedOutcomes
 
 	s.TopSymbols = topSymbolCounts(approvedSymbolFreq, topN)
-	s.LoudestRepos = topRepoCounts(repoAsks, topN)
+	s.LoudestRepos = topRepoCounts(repoAsks, repoUnrated, topN)
 	// No in-window record leaves Until at its zero value, which renders/marshals
 	// as a date before Since (an inverted window). Pin it to Since so an empty
 	// report shows a zero-width window rather than a nonsensical one.
@@ -517,14 +549,23 @@ func topSymbolCounts(freq map[string]int, topN int) []SymbolCount {
 	return out
 }
 
-func topRepoCounts(freq map[string]int, topN int) []RepoCount {
-	out := make([]RepoCount, 0, len(freq))
-	for repo, c := range freq {
-		out = append(out, RepoCount{Repo: repo, Asks: c})
+func topRepoCounts(rated, unrated map[string]int, topN int) []RepoCount {
+	repos := map[string]bool{}
+	for r := range rated {
+		repos[r] = true
 	}
+	for r := range unrated {
+		repos[r] = true
+	}
+	out := make([]RepoCount, 0, len(repos))
+	for repo := range repos {
+		out = append(out, RepoCount{Repo: repo, Asks: rated[repo], Unrated: unrated[repo]})
+	}
+	// Rank on total volume: "loudest" is how often the guard interrupted, and an
+	// unrateable interruption is just as loud.
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Asks != out[j].Asks {
-			return out[i].Asks > out[j].Asks
+		if out[i].Total() != out[j].Total() {
+			return out[i].Total() > out[j].Total()
 		}
 		return out[i].Repo < out[j].Repo
 	})
@@ -542,8 +583,16 @@ func FormatFP(s FPStats) string {
 	fmt.Fprintf(&b, "\nApproval rate = asks the agent approved anyway ÷ asks. An upper bound\n")
 	fmt.Fprintf(&b, "on the false-positive rate (some approvals are genuine fixes, not dismissals).\n\n")
 
-	fmt.Fprintf(&b, "Overall: %d ask(s), %d approved  →  %.0f%% approval rate\n",
-		s.Window.Asks, s.Window.Approved, 100*s.Window.Rate())
+	// The headline obeys the same rule as fpRow: with nothing rateable there is
+	// no rate, and printing "0% approval rate" over zero rateable asks reads as
+	// "the guard was never approved" — the exact misreading this change exists to
+	// stop, one level up from the table it was fixed in.
+	if s.Window.Asks == 0 {
+		fmt.Fprintf(&b, "Overall: 0 rateable ask(s)  →  no approval rate\n")
+	} else {
+		fmt.Fprintf(&b, "Overall: %d ask(s), %d approved  →  %.0f%% approval rate\n",
+			s.Window.Asks, s.Window.Approved, 100*s.Window.Rate())
+	}
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists
 	// entirely of them must not report itself as empty (#254).
@@ -555,10 +604,13 @@ func FormatFP(s FPStats) string {
 	// Directly under the headline for the same reason as the mixed-versions
 	// banner: a reader who stops at the first number has to see what it omits.
 	if s.Window.Unrated > 0 {
-		fmt.Fprintf(&b, "\n!! %d further ask(s) carry no symbols, so no outcome can be joined to them\n", s.Window.Unrated)
-		fmt.Fprintf(&b, "   and no approve-anyway rate exists for them. They are counted as \"unrated\"\n")
-		fmt.Fprintf(&b, "   below and are in NO rate on this page. A row marked ! has under half its\n")
-		fmt.Fprintf(&b, "   asks rated — its rate describes a minority of its own bucket, not the check.\n")
+		// "of the N asks", not "N FURTHER asks": when every ask is unrated there
+		// is no prior count for them to be further than.
+		fmt.Fprintf(&b, "\n!! %d of the %d ask(s) in this window carry no symbols, so no outcome can be\n",
+			s.Window.Unrated, s.Window.Total())
+		fmt.Fprintf(&b, "   joined to them and no approve-anyway rate exists for them. They are counted\n")
+		fmt.Fprintf(&b, "   as \"unrated\" below and are in NO rate on this page. A row marked ! has under\n")
+		fmt.Fprintf(&b, "   half its asks rated — its rate describes a minority of its own bucket.\n")
 	}
 
 	// Placed immediately under the headline, before any breakdown: a reader who
@@ -601,9 +653,14 @@ func FormatFP(s FPStats) string {
 	}
 
 	if len(s.LoudestRepos) > 0 {
-		fmt.Fprintf(&b, "\nLoudest repos (by ask count):\n")
+		fmt.Fprintf(&b, "\nLoudest repos (by ask count, rateable + unrated):\n")
 		for _, rc := range s.LoudestRepos {
-			fmt.Fprintf(&b, "  %4d  %s\n", rc.Asks, rc.Repo)
+			if rc.Unrated > 0 {
+				fmt.Fprintf(&b, "  %4d  %s  (%d rated, %d unrated)\n",
+					rc.Total(), rc.Repo, rc.Asks, rc.Unrated)
+				continue
+			}
+			fmt.Fprintf(&b, "  %4d  %s\n", rc.Total(), rc.Repo)
 		}
 	}
 
@@ -626,22 +683,42 @@ func FormatFP(s FPStats) string {
 // check is the motivating case: filtered to a window with no co-firing symbol
 // check, its bucket is entirely unrated.
 func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
+	// The "ask" column is ALWAYS the rateable count — the same quantity the
+	// headline and the --max-rate gate use — including when it is 0. Printing
+	// Total here instead would silently change what the column means between
+	// rows, so a reader comparing two rows would be comparing two quantities.
+	fmt.Fprintf(b, "  %-*s %4d ask  ", width, name, bkt.Asks)
 	if bkt.Asks == 0 {
-		fmt.Fprintf(b, "  %-*s %4d ask  %s\n", width, name, bkt.Total(),
-			"    (no rate — no ask here carries a join key)")
-		return
+		fmt.Fprintf(b, "  no rate (no ask here carries a join key)")
+	} else {
+		fmt.Fprintf(b, "%4d approved  %5.0f%%", bkt.Approved, 100*bkt.Rate())
 	}
-	fmt.Fprintf(b, "  %-*s %4d ask  %4d approved  %5.0f%%",
-		width, name, bkt.Asks, bkt.Approved, 100*bkt.Rate())
 	if bkt.Unrated > 0 {
 		mark := " "
 		if bkt.Coverage() < unratedCoverageFloor {
 			mark = "!"
 		}
-		fmt.Fprintf(b, "  %s +%d unrated (rate covers %.0f%%)",
-			mark, bkt.Unrated, 100*bkt.Coverage())
+		fmt.Fprintf(b, "  %s +%d unrated (rate covers %s)",
+			mark, bkt.Unrated, coveragePct(bkt))
 	}
 	fmt.Fprint(b, "\n")
+}
+
+// coveragePct renders a coverage as a percentage that never rounds to a lie.
+// %.0f turns 0.9978 into "100%", so a row would admit an unrated ask and claim
+// full coverage in the same breath. Truncating toward zero keeps "<100%" honest;
+// the ceiling case is symmetric — a coverage just above 0 must not read as "0%"
+// on a row that does have rateable asks.
+func coveragePct(b FPBucket) string {
+	pct := 100 * b.Coverage()
+	switch {
+	case b.Unrated > 0 && pct > 99:
+		return ">99%"
+	case b.Asks > 0 && pct < 1:
+		return "<1%"
+	default:
+		return fmt.Sprintf("%.0f%%", math.Floor(pct))
+	}
 }
 
 // sortedFPKeys orders buckets by TOTAL asks (rated plus unrated), so a check
@@ -670,8 +747,17 @@ func sortedFPKeys(m map[string]FPBucket) []string {
 // the honest volume, so no existing consumer's arithmetic changes silently.
 func PayloadFP(s FPStats) map[string]any {
 	bucket := func(b FPBucket) map[string]any {
+		// null, not 0, when nothing is rateable. FormatFP refuses to print a
+		// percentage there precisely because 0% reads as "never approved"; handing
+		// the same 0 to a jq filter or a dashboard would keep the defect on the
+		// machine path that this payload's doc names as the one at risk. A
+		// consumer that plots null plots a gap; one that plots 0 plots a claim.
+		var rate any
+		if b.Asks > 0 {
+			rate = b.Rate()
+		}
 		return map[string]any{
-			"asks": b.Asks, "approved": b.Approved, "rate": b.Rate(),
+			"asks": b.Asks, "approved": b.Approved, "rate": rate,
 			"unrated": b.Unrated, "total": b.Total(), "coverage": b.Coverage(),
 		}
 	}

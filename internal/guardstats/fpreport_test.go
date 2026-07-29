@@ -443,8 +443,12 @@ func TestFPReport_ContractOnlyAsksAreCountedNotDropped(t *testing.T) {
 	}
 	// Loudest-repos is a VOLUME ranking; answering it while discarding real asks
 	// is the same defect at a different address.
-	if len(s.LoudestRepos) != 1 || s.LoudestRepos[0].Asks != 3 {
-		t.Errorf("LoudestRepos = %+v, want one repo with 3 asks", s.LoudestRepos)
+	if len(s.LoudestRepos) != 1 || s.LoudestRepos[0].Total() != 3 {
+		t.Fatalf("LoudestRepos = %+v, want one repo with 3 total asks", s.LoudestRepos)
+	}
+	// Split, not blended: "asks" must keep reconciling with overall.asks.
+	if got := s.LoudestRepos[0]; got.Asks != 1 || got.Unrated != 2 {
+		t.Errorf("LoudestRepos[0] = %+v, want 1 rated / 2 unrated", got)
 	}
 }
 
@@ -583,7 +587,7 @@ func TestFormatFP_WindowOfOnlyUnratedAsksIsNotEmpty(t *testing.T) {
 	if strings.Contains(out, "No hook-mode asks in window") {
 		t.Fatalf("2 real asks reported as an empty window:\n%s", out)
 	}
-	if !strings.Contains(out, "no rate — no ask here carries a join key") {
+	if !strings.Contains(out, "no rate (no ask here carries a join key)") {
 		t.Errorf("a fully-unrated bucket must say so rather than print 0%%:\n%s", out)
 	}
 	if strings.Contains(out, "contract") == false {
@@ -685,5 +689,165 @@ func TestSortedFPKeys_OrdersByTotalNotRateableAsks(t *testing.T) {
 	got := sortedFPKeys(m)
 	if got[0] != "contract" {
 		t.Errorf("order = %v, want the 9-ask contract bucket first", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #254 review follow-ups. Each pins a defect the review found in the first cut.
+// ---------------------------------------------------------------------------
+
+// Review finding 1. ByVersion buckets unrated asks too, so counting map KEYS
+// would let one symbol-less ask from another build flip MixedVersions — and
+// through cmd/runecho-ir's gateEligible, silently skip the --max-rate gate on a
+// window whose rate is single-version.
+func TestFPStats_MixedVersionsIgnoresUnratedOnlyVersions(t *testing.T) {
+	var decs []Decision
+	for i := 0; i < 25; i++ {
+		d := ask("violations", "go", "r", "f.go", i, "s")
+		d.GV = "v0.17.18"
+		decs = append(decs, d)
+	}
+	if s := FPReport(decs, ts(-1000), 5); s.MixedVersions() {
+		t.Fatalf("one build with rateable asks is not mixed")
+	}
+
+	stray := contractAsk("c.go", 3000)
+	stray.GV = "v0.17.10" // a DIFFERENT build, contributing nothing rateable
+	s := FPReport(append(decs, stray), ts(-1000), 5)
+
+	if len(s.ByVersion) != 2 {
+		t.Fatalf("the stray build must still appear in ByVersion, got %+v", s.ByVersion)
+	}
+	if s.MixedVersions() {
+		t.Errorf("a version with 0 rateable asks cannot pool the rate; ByVersion=%+v", s.ByVersion)
+	}
+	if s.Window.Asks != 25 {
+		t.Errorf("gate denominator = %d, want 25", s.Window.Asks)
+	}
+	// A pre-symbol-stamping record lands under UnknownVersion and must not gate
+	// either — that shape is on every long window of the real log.
+	old := Decision{TS: ts(3001), Mode: "hook", File: "old.go", Decision: "ask", Reason: "violations"}
+	if s := FPReport(append(decs, old), ts(-1000), 5); s.MixedVersions() {
+		t.Errorf("an unrated UnknownVersion record must not flip MixedVersions")
+	}
+}
+
+// Review finding 2. fpRow refuses to print a rate over zero rateable asks; the
+// headline was exempt from its own rule and printed "0% approval rate".
+func TestFormatFP_HeadlineSuppressesRateWhenNothingIsRateable(t *testing.T) {
+	out := FormatFP(FPReport([]Decision{contractAsk("a.go", 0), contractAsk("b.go", 60)}, ts(-1000), 10))
+	if strings.Contains(out, "0% approval rate") {
+		t.Errorf("headline printed a 0%% rate over zero rateable asks:\n%s", out)
+	}
+	if !strings.Contains(out, "no approval rate") {
+		t.Errorf("headline must say there is no rate:\n%s", out)
+	}
+	// "N further asks" reads wrong when there were no prior asks to be further than.
+	if strings.Contains(out, "further ask") {
+		t.Errorf("caveat wording assumes prior rateable asks:\n%s", out)
+	}
+	if !strings.Contains(out, "2 of the 2 ask(s)") {
+		t.Errorf("caveat must state the share of the window:\n%s", out)
+	}
+}
+
+// Review finding 3. FormatFP suppresses the rate for a fully-unrated bucket;
+// the JSON path must not hand a dashboard a plottable 0 for the same bucket.
+func TestPayloadFP_FullyUnratedBucketHasNullRate(t *testing.T) {
+	p := PayloadFP(FPReport([]Decision{
+		contractAsk("a.go", 0),
+		ask("violations", "go", "r1", "b.go", 10, "sym"),
+	}, ts(-1000), 10))
+
+	var contractRow map[string]any
+	for _, row := range p["by_check"].([]map[string]any) {
+		if row["check"] == "contract" {
+			contractRow = row
+		}
+	}
+	if contractRow == nil {
+		t.Fatalf("no contract row: %+v", p["by_check"])
+	}
+	if contractRow["rate"] != nil {
+		t.Errorf("fully-unrated bucket rate = %v, want null", contractRow["rate"])
+	}
+	if contractRow["coverage"] != float64(0) {
+		t.Errorf("coverage = %v, want 0", contractRow["coverage"])
+	}
+	// A bucket that IS rateable still carries a number.
+	for _, row := range p["by_check"].([]map[string]any) {
+		if row["check"] == "violations" && row["rate"] == nil {
+			t.Errorf("rateable bucket lost its rate: %+v", row)
+		}
+	}
+}
+
+// Review finding 5. %.0f turns 0.9978 into "100%", so a row would admit an
+// unrated ask and claim full coverage in the same breath.
+func TestFormatFP_CoverageNeverRoundsUpToFull(t *testing.T) {
+	var decs []Decision
+	for i := 0; i < 457; i++ {
+		decs = append(decs, ask("violations", "go", "r", "f"+string(rune('a'+i%26))+".go", i, "s"))
+	}
+	decs = append(decs, Decision{TS: ts(900), Mode: "hook", Repo: "r", File: "x.go",
+		Lang: "go", Decision: "ask", Reason: "violations"})
+	s := FPReport(decs, ts(-1000), 10)
+
+	if got := s.ByCheck["violations"]; got.Unrated != 1 || got.Asks < 400 {
+		t.Fatalf("fixture wrong: %+v", got)
+	}
+	out := FormatFP(s)
+	if strings.Contains(out, "+1 unrated (rate covers 100%)") {
+		t.Errorf("a row cannot admit an unrated ask and claim 100%% coverage:\n%s", out)
+	}
+	if !strings.Contains(out, "+1 unrated (rate covers >99%)") {
+		t.Errorf("want a >99%% form:\n%s", out)
+	}
+}
+
+// Review finding 6. The worst-coverage row — 0% rated — was the one row with no
+// ! marker, while the banner tells the reader to look for exactly that mark.
+// And the "ask" column must mean the same quantity on every row.
+func TestFormatFP_FullyUnratedRowIsMarkedAndColumnIsConsistent(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r1", "a.go", 0, "sym"),
+		outcome("a.go", 1, "sym"),
+		contractAsk("b.go", 600),
+		contractAsk("c.go", 660),
+	}
+	out := FormatFP(FPReport(decs, ts(-1000), 10))
+	if !strings.Contains(out, "! +2 unrated") {
+		t.Errorf("the 0%%-rated contract row must carry the ! the banner promises:\n%s", out)
+	}
+	// The contract check has 0 RATEABLE asks; the column shows rateable counts.
+	if !strings.Contains(out, "contract                        0 ask") {
+		t.Errorf("the ask column must stay the rateable count on every row:\n%s", out)
+	}
+}
+
+// Review finding 7. loudest_repos[].asks and overall.asks must not carry two
+// different denominators under one JSON name.
+func TestPayloadFP_LoudestReposSplitsRatedAndUnrated(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "loud", "a.go", 0, "sym"),
+		contractAsk("b.go", 600), // repo r1
+		contractAsk("c.go", 660),
+	}
+	p := PayloadFP(FPReport(decs, ts(-1000), 10))
+	repos := p["loudest_repos"].([]RepoCount)
+	if len(repos) != 2 {
+		t.Fatalf("repos = %+v, want 2", repos)
+	}
+	// Ranked by total volume: r1's 2 unrated asks beat loud's 1 rated ask.
+	if repos[0].Repo != "r1" || repos[0].Total() != 2 || repos[0].Asks != 0 || repos[0].Unrated != 2 {
+		t.Errorf("repos[0] = %+v, want r1 with 0 rated / 2 unrated", repos[0])
+	}
+	sumAsks := 0
+	for _, r := range repos {
+		sumAsks += r.Asks
+	}
+	if overall := p["overall"].(map[string]any); sumAsks != overall["asks"] {
+		t.Errorf("sum(loudest_repos[].asks) = %d, must reconcile with overall.asks = %v",
+			sumAsks, overall["asks"])
 	}
 }

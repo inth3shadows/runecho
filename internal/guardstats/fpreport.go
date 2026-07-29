@@ -114,9 +114,19 @@ type FPStats struct {
 	TopSymbols   []SymbolCount // symbols on APPROVED asks (the FP suspects), ranked
 	LoudestRepos []RepoCount
 	// UnmatchedOutcomes counts "approved" outcome records with no ask they could
-	// join to in-window. A large value means the log is missing asks (rotated,
-	// or written by an older guard that did not stamp symbols) — a caveat on the
-	// rates above, surfaced rather than hidden.
+	// join to in-window. Causes, in rough order of likelihood:
+	//
+	//  1. The outcome recorder pairs on FILE only (declog.go's recentAsk), so a
+	//     later tool call on the same file inside maxOutcomeAge re-emits an
+	//     approval carrying the earlier ask's symbols. Those extra outcomes never
+	//     had a distinct ask.
+	//  2. Ask records collapsed as hook re-invocations (#252) release the extra
+	//     outcomes their duplicates had claimed.
+	//  3. The log really is missing asks — rotated, or written by an older guard
+	//     that did not stamp symbols.
+	//
+	// Only (3) is a data-integrity problem, so a large value is a caveat on the
+	// rates above, not by itself evidence of a damaged log.
 	UnmatchedOutcomes int
 }
 
@@ -214,14 +224,27 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// run the PreToolUse hook more than once for a single Edit/Write, and the
 			// guard writes a record each time — byte-identical apart from nothing.
 			//
-			// This has to happen here, not at the reporting end, because the two sides
-			// of the rate treat repeats differently: Window.Asks++ fires per RECORD,
-			// while `consumed` below lets at most one ask claim a given outcome. So N
-			// copies of one ask that was approved once score 1/N instead of 1/1 —
-			// duplication DEFLATES the approval rate and flatters the guard. Measured
-			// on the author's 20,719-record log: 72.2% raw vs 78.9% collapsed, a 6.7
-			// point understatement, and the `--max-rate` gate inherits it as a bias
-			// toward passing.
+			// This has to happen here, not at the reporting end, because Window.Asks++
+			// fires per RECORD: every duplicate enlarges the denominator.
+			//
+			// It moves the numerator too, and in the same direction — do not read this
+			// as a denominator-only fix. `consumed` below is keyed per OUTCOME, not per
+			// ask, so N duplicate asks at one timestamp can each claim a DIFFERENT
+			// outcome within the match window. Outcomes are plentiful enough for that to
+			// bite because the recorder pairs on file only (declog.go's recentAsk), so a
+			// later edit to the same file re-emits an approval carrying the earlier
+			// symbol set. Collapsing the asks therefore also releases the extra approvals
+			// their duplicates had claimed.
+			//
+			// The denominator falls faster than the numerator, so the net effect is that
+			// duplication DEFLATES the reported rate and flatters the guard. Measured on
+			// the author's 20,799-record log: 632 asks / 457 approved = 72.3% raw versus
+			// 552 / 436 = 79.0% collapsed — a 6.7 point understatement, which the
+			// `--max-rate` gate inherits as a bias toward passing.
+			//
+			// A smaller ask count also shrinks gate ELIGIBILITY: a window near
+			// gateMinAsks can drop below it and skip the gate (with the stderr note, not
+			// silently). On this log `--days=3` goes 33 asks to 20 — right at the floor.
 			//
 			// Two genuine edits to the same file inside one second are indistinguishable
 			// from a re-invocation and collapse too. That is the right trade: it moves
@@ -457,9 +480,11 @@ func FormatFP(s FPStats) string {
 	}
 
 	if s.UnmatchedOutcomes > 0 {
-		fmt.Fprintf(&b, "\nNote: %d approved outcome(s) had no matching ask in-window — the\n",
+		fmt.Fprintf(&b, "\nNote: %d approved outcome(s) had no matching ask in-window. Usually benign:\n",
 			s.UnmatchedOutcomes)
-		fmt.Fprintf(&b, "log may be missing asks (rotated, or from a guard that did not stamp symbols).\n")
+		fmt.Fprintf(&b, "outcomes are recorded per FILE, so repeat edits re-emit one; and asks collapsed\n")
+		fmt.Fprintf(&b, "as hook re-invocations release theirs. Only suspect a missing/rotated log if\n")
+		fmt.Fprintf(&b, "this is large relative to the ask count.\n")
 	}
 	return b.String()
 }

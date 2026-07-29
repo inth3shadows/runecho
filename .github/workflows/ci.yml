@@ -30,3 +30,17 @@ jobs:
         run: go test ./... -race -cover
       - name: Installer syntax
         run: bash -n install.sh
+      # Scores the hook-fixture corpus: breaks one guard behaviour at a time and
+      # fails if any fixture caught nothing, or if a mutation survived without a
+      # written `known_gap` reason. The corpus is the only instrument reaching
+      # five of the guard's six checks, and its failure mode is silent — a
+      # fixture can pass forever while pinning nothing, which is what #227 was
+      # filed about. `go test` above cannot see that; only this can.
+      #
+      # Pull requests only. It applies mutations to the working tree (restored in
+      # a finally, and it refuses to start on a dirty one), so it is kept off any
+      # job that could ever push, and off the master-push run where the same
+      # commit has already been gated on its PR. Costs ~2-4 min.
+      - name: Hook-fixture mutation gate
+        if: github.event_name == 'pull_request'
+        run: python3 bench/hookmutate/mutate.py --strict

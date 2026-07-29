@@ -1,6 +1,7 @@
 package guardstats
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,14 +173,22 @@ func TestFPReport_WindowBoundaryStrict(t *testing.T) {
 }
 
 // Adversarial #5: symbol-less records carry no join signal and must not collide.
-func TestFPReport_EmptySymbolRecordsIgnored(t *testing.T) {
+// A symbol-less record is never JOINED — but since #254 the ask half is still
+// counted, in Unrated. The outcome half stays fully dropped.
+func TestFPReport_EmptySymbolRecordsNotJoined(t *testing.T) {
 	decs := []Decision{
 		{TS: ts(0), Mode: "hook", File: "", Decision: "ask", Reason: "violations", Symbols: nil},
 		{TS: ts(1), Mode: "hook", File: "", Decision: "outcome", Reason: "approved", Symbols: nil},
 	}
 	s := FPReport(decs, ts(-1000), 10)
 	if s.Window.Asks != 0 {
-		t.Errorf("symbol-less ask must be skipped, got asks=%d", s.Window.Asks)
+		t.Errorf("symbol-less ask must stay out of the rateable denominator, got asks=%d", s.Window.Asks)
+	}
+	if s.Window.Unrated != 1 {
+		t.Errorf("symbol-less ask must be counted as unrated, got unrated=%d", s.Window.Unrated)
+	}
+	if s.Window.Approved != 0 {
+		t.Errorf("a symbol-less ask must never join an outcome, got approved=%d", s.Window.Approved)
 	}
 	if s.UnmatchedOutcomes != 0 {
 		t.Errorf("symbol-less outcome must not enter the denominator, got unmatched=%d", s.UnmatchedOutcomes)
@@ -383,5 +392,462 @@ func TestFPReport_CollapseCanDropWindowBelowGateFloor(t *testing.T) {
 	// over-collapses is visible as a gate-coverage change, not just a rate change.
 	if s.Window.Asks < 20 {
 		t.Errorf("collapse dropped the window below the gate floor of 20")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #254 — contract asks carry no symbols, so they had no join key and were
+// DROPPED. `fpreport` then printed a contract rate over the ~14% of contract
+// asks that happened to co-fire with a symbol-bearing check. These tests pin
+// the fix: such asks are COUNTED (Unrated) but still never JOINED.
+// ---------------------------------------------------------------------------
+
+// contractAsk is a contract-check ask as the guard actually writes it: a claim
+// about a PATH, with no symbols. Seconds, not minutes — the collapse key is
+// second-resolution and a minutes-only helper would let a coarser key pass
+// (the #253 lesson).
+func contractAsk(file string, secs int) Decision {
+	return Decision{TS: ts(0).Add(time.Duration(secs) * time.Second), Mode: "hook",
+		Repo: "r1", File: file, Lang: "go", GV: "v0.17.18",
+		Decision: "ask", Reason: "contract"}
+}
+
+// Restoring the `len(Symbols)==0` drop makes every Unrated assertion here read
+// 0, so this test is what fails if the fix is reverted.
+func TestFPReport_ContractOnlyAsksAreCountedNotDropped(t *testing.T) {
+	decs := []Decision{
+		contractAsk("a.go", 0),
+		contractAsk("b.go", 60),
+		ask("violations", "go", "r1", "c.go", 5, "foo"),
+	}
+	s := FPReport(decs, ts(-1000), 10)
+
+	if s.Window.Asks != 1 || s.Window.Unrated != 2 {
+		t.Fatalf("window = %d rated / %d unrated, want 1 / 2", s.Window.Asks, s.Window.Unrated)
+	}
+	if s.Window.Total() != 3 {
+		t.Errorf("Total = %d, want 3 — every ask the guard raised", s.Window.Total())
+	}
+	// The contract check exists in the report at all, which it did not before.
+	if got := s.ByCheck["contract"]; got.Unrated != 2 || got.Asks != 0 {
+		t.Errorf("ByCheck[contract] = %+v, want 0 rated / 2 unrated", got)
+	}
+	if got := s.ByReason["contract"]; got.Unrated != 2 {
+		t.Errorf("ByReason[contract].Unrated = %d, want 2", got.Unrated)
+	}
+	if got := s.ByLang["go"]; got.Unrated != 2 || got.Asks != 1 {
+		t.Errorf("ByLang[go] = %+v, want 1 rated / 2 unrated", got)
+	}
+	if got := s.ByVersion["v0.17.18"]; got.Unrated != 2 {
+		t.Errorf("ByVersion[v0.17.18].Unrated = %d, want 2", got.Unrated)
+	}
+	// Loudest-repos is a VOLUME ranking; answering it while discarding real asks
+	// is the same defect at a different address.
+	if len(s.LoudestRepos) != 1 || s.LoudestRepos[0].Total() != 3 {
+		t.Fatalf("LoudestRepos = %+v, want one repo with 3 total asks", s.LoudestRepos)
+	}
+	// Split, not blended: "asks" must keep reconciling with overall.asks.
+	if got := s.LoudestRepos[0]; got.Asks != 1 || got.Unrated != 2 {
+		t.Errorf("LoudestRepos[0] = %+v, want 1 rated / 2 unrated", got)
+	}
+}
+
+// The collision constraint: counting symbol-less asks must not create a join.
+// Two independent symbol-less asks and a symbol-less approved outcome all sit
+// on ONE file — the exact shape that would pair falsely if either side's guard
+// were lifted without a real key.
+func TestFPReport_SymbolLessRecordsOnOneFileNeverPair(t *testing.T) {
+	decs := []Decision{
+		contractAsk("same.go", 0),
+		contractAsk("same.go", 30), // distinct event, same file, still no symbols
+		{TS: ts(0).Add(45 * time.Second), Mode: "hook", File: "same.go",
+			Decision: "outcome", Reason: "approved"}, // in-window, symbol-less
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	// Asserted before (and independently of) the counting claim: this is THE
+	// collision constraint, and it must fail on its own terms if a future change
+	// lifts either symbol-less guard without giving both sides a real join key.
+	if s.Window.Approved != 0 {
+		t.Errorf("approved = %d, want 0 — symbol-less records must never pair", s.Window.Approved)
+	}
+	if s.Window.Unrated != 2 {
+		t.Errorf("unrated = %d, want 2 (two distinct symbol-less asks)", s.Window.Unrated)
+	}
+	if s.ByCheck["contract"].Approved != 0 {
+		t.Errorf("contract bucket claimed an approval it cannot have")
+	}
+	if s.UnmatchedOutcomes != 0 {
+		t.Errorf("a symbol-less outcome is dropped, not counted unmatched; got %d", s.UnmatchedOutcomes)
+	}
+}
+
+// One Write producing three identical contract asks is on the reference log.
+// #254 is what makes contract asks visible to fpreport at all, so it is also
+// where that triplication would first inflate a published number.
+func TestFPReport_ContractAskTriplicationCollapses(t *testing.T) {
+	trip := []Decision{contractAsk("a.go", 0), contractAsk("a.go", 0), contractAsk("a.go", 0)}
+	s := FPReport(trip, ts(-1000), 10)
+	if s.Window.Unrated != 1 {
+		t.Errorf("three records for one tool call = 1 unrated event, got %d", s.Window.Unrated)
+	}
+
+	// One second apart is a DIFFERENT event and must survive. A minute-resolution
+	// key would pass the case above and fail here.
+	distinct := []Decision{contractAsk("a.go", 0), contractAsk("a.go", 1)}
+	s = FPReport(distinct, ts(-1000), 10)
+	if s.Window.Unrated != 2 {
+		t.Errorf("asks one second apart are distinct events, got unrated=%d, want 2", s.Window.Unrated)
+	}
+
+	// Same second, different file: also distinct.
+	sameSec := []Decision{contractAsk("a.go", 0), contractAsk("b.go", 0)}
+	s = FPReport(sameSec, ts(-1000), 10)
+	if s.Window.Unrated != 2 {
+		t.Errorf("asks on different files are distinct events, got unrated=%d, want 2", s.Window.Unrated)
+	}
+}
+
+// Window.Asks is the --max-rate gate's denominator (cmd/runecho-ir/fpreport.go).
+// Making unrated asks visible must not move it, or #254 would silently re-tune
+// a gate while claiming to fix a report.
+func TestFPReport_UnratedAsksDoNotMoveRateOrGateDenominator(t *testing.T) {
+	rated := []Decision{
+		ask("violations", "go", "r1", "a.go", 0, "foo"),
+		outcome("a.go", 1, "foo"),
+		ask("violations", "go", "r1", "b.go", 10, "bar"),
+	}
+	before := FPReport(rated, ts(-1000), 10)
+
+	withUnrated := append(append([]Decision{}, rated...),
+		contractAsk("c.go", 0), contractAsk("d.go", 90), contractAsk("e.go", 120))
+	after := FPReport(withUnrated, ts(-1000), 10)
+
+	if before.Window.Asks != after.Window.Asks {
+		t.Errorf("gate denominator moved: %d → %d", before.Window.Asks, after.Window.Asks)
+	}
+	if before.Window.Approved != after.Window.Approved {
+		t.Errorf("numerator moved: %d → %d", before.Window.Approved, after.Window.Approved)
+	}
+	if before.Window.Rate() != after.Window.Rate() {
+		t.Errorf("headline rate moved: %.4f → %.4f", before.Window.Rate(), after.Window.Rate())
+	}
+	if after.Window.Coverage() >= 1 {
+		t.Errorf("coverage must fall below 1 once unrated asks exist, got %.3f", after.Window.Coverage())
+	}
+}
+
+// The exact #254 scenario: the contract bucket's rate is real but describes a
+// small, non-random slice of the check — the asks that co-fired with a
+// symbol-bearing check. Coverage is what makes that legible.
+func TestFPReport_ContractBucketDisclosesItsCoverage(t *testing.T) {
+	var decs []Decision
+	// 3 contract+violations asks — these carry the violations half's symbols and
+	// are the only contract asks that were ever visible.
+	for i := 0; i < 3; i++ {
+		f := string(rune('a'+i)) + ".go"
+		decs = append(decs, ask("contract+violations", "go", "r1", f, i*10, "sym"))
+		decs = append(decs, outcome(f, i*10+1, "sym"))
+	}
+	// 16 contract-only asks — invisible before #254.
+	for i := 0; i < 16; i++ {
+		decs = append(decs, contractAsk("scope"+string(rune('a'+i))+".go", i*7))
+	}
+	s := FPReport(decs, ts(-1000), 10)
+
+	c := s.ByCheck["contract"]
+	if c.Asks != 3 || c.Approved != 3 || c.Unrated != 16 {
+		t.Fatalf("ByCheck[contract] = %+v, want 3 rated / 3 approved / 16 unrated", c)
+	}
+	if c.Rate() != 1 {
+		t.Errorf("rate = %.3f, want 1.0 over the rateable subset", c.Rate())
+	}
+	if got := c.Coverage(); got < 0.157 || got > 0.159 {
+		t.Errorf("coverage = %.4f, want ~0.158 (3 of 19)", got)
+	}
+	if c.Coverage() >= unratedCoverageFloor {
+		t.Fatalf("this bucket must be below the callout floor")
+	}
+
+	out := FormatFP(s)
+	if !strings.Contains(out, "+16 unrated") {
+		t.Errorf("report hides the unrated contract asks:\n%s", out)
+	}
+	if !strings.Contains(out, "! +16 unrated") {
+		t.Errorf("a bucket under the coverage floor must be marked !:\n%s", out)
+	}
+	if !strings.Contains(out, "carry no symbols") {
+		t.Errorf("report lacks the headline caveat:\n%s", out)
+	}
+}
+
+// A window of nothing but contract asks must not report itself as empty.
+func TestFormatFP_WindowOfOnlyUnratedAsksIsNotEmpty(t *testing.T) {
+	s := FPReport([]Decision{contractAsk("a.go", 0), contractAsk("b.go", 60)}, ts(-1000), 10)
+	out := FormatFP(s)
+	if strings.Contains(out, "No hook-mode asks in window") {
+		t.Fatalf("2 real asks reported as an empty window:\n%s", out)
+	}
+	if !strings.Contains(out, "no rate (no ask here carries a join key)") {
+		t.Errorf("a fully-unrated bucket must say so rather than print 0%%:\n%s", out)
+	}
+	if strings.Contains(out, "contract") == false {
+		t.Errorf("the contract check is absent from the report:\n%s", out)
+	}
+}
+
+// An empty window is still an empty window.
+func TestFormatFP_TrulyEmptyWindowStillSaysSo(t *testing.T) {
+	out := FormatFP(FPReport(nil, ts(0), 10))
+	if !strings.Contains(out, "No hook-mode asks in window") {
+		t.Errorf("empty window lost its message:\n%s", out)
+	}
+}
+
+func TestFPBucket_TotalAndCoverage(t *testing.T) {
+	cases := []struct {
+		b            FPBucket
+		total        int
+		wantCoverage float64
+	}{
+		{FPBucket{Asks: 4, Approved: 2}, 4, 1},
+		{FPBucket{Asks: 3, Approved: 3, Unrated: 16}, 19, 3.0 / 19.0},
+		{FPBucket{Unrated: 5}, 5, 0},
+		{FPBucket{}, 0, 1}, // nothing to under-cover
+	}
+	for _, c := range cases {
+		if got := c.b.Total(); got != c.total {
+			t.Errorf("%+v Total = %d, want %d", c.b, got, c.total)
+		}
+		if got := c.b.Coverage(); got != c.wantCoverage {
+			t.Errorf("%+v Coverage = %.4f, want %.4f", c.b, got, c.wantCoverage)
+		}
+	}
+}
+
+// A consumer reading "rate" without "coverage" can read 1.0 off a 16% sample,
+// so both must be present on every bucket the payload emits.
+func TestPayloadFP_EveryBucketCarriesUnratedAndCoverage(t *testing.T) {
+	decs := []Decision{
+		ask("contract+violations", "go", "r1", "a.go", 0, "sym"),
+		outcome("a.go", 1, "sym"),
+		contractAsk("b.go", 120),
+	}
+	p := PayloadFP(FPReport(decs, ts(-1000), 10))
+
+	overall, ok := p["overall"].(map[string]any)
+	if !ok {
+		t.Fatalf("overall missing")
+	}
+	for _, k := range []string{"asks", "approved", "rate", "unrated", "total", "coverage"} {
+		if _, ok := overall[k]; !ok {
+			t.Errorf("overall missing %q", k)
+		}
+	}
+	if overall["unrated"] != 1 || overall["total"] != 2 {
+		t.Errorf("overall = %+v, want unrated 1 / total 2", overall)
+	}
+
+	for _, group := range []string{"by_reason", "by_check", "by_lang", "by_version"} {
+		rows, ok := p[group].([]map[string]any)
+		if !ok || len(rows) == 0 {
+			t.Fatalf("%s missing or empty", group)
+		}
+		for _, row := range rows {
+			for _, k := range []string{"unrated", "total", "coverage"} {
+				if _, ok := row[k]; !ok {
+					t.Errorf("%s row %+v missing %q", group, row, k)
+				}
+			}
+		}
+	}
+
+	// The contract check's own row must show the split.
+	var contractRow map[string]any
+	for _, row := range p["by_check"].([]map[string]any) {
+		if row["check"] == "contract" {
+			contractRow = row
+		}
+	}
+	if contractRow == nil {
+		t.Fatalf("by_check has no contract row: %+v", p["by_check"])
+	}
+	if contractRow["asks"] != 1 || contractRow["unrated"] != 1 {
+		t.Errorf("contract row = %+v, want 1 rated / 1 unrated", contractRow)
+	}
+	if got := contractRow["coverage"].(float64); got != 0.5 {
+		t.Errorf("contract coverage = %.3f, want 0.5", got)
+	}
+}
+
+// Ordering by rateable asks alone would bury a check whose asks are ALL
+// unrated at the bottom of the table, however loud it is.
+func TestSortedFPKeys_OrdersByTotalNotRateableAsks(t *testing.T) {
+	m := map[string]FPBucket{
+		"violations": {Asks: 2, Approved: 1},
+		"contract":   {Unrated: 9},
+	}
+	got := sortedFPKeys(m)
+	if got[0] != "contract" {
+		t.Errorf("order = %v, want the 9-ask contract bucket first", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #254 review follow-ups. Each pins a defect the review found in the first cut.
+// ---------------------------------------------------------------------------
+
+// Review finding 1. ByVersion buckets unrated asks too, so counting map KEYS
+// would let one symbol-less ask from another build flip MixedVersions — and
+// through cmd/runecho-ir's gateEligible, silently skip the --max-rate gate on a
+// window whose rate is single-version.
+func TestFPStats_MixedVersionsIgnoresUnratedOnlyVersions(t *testing.T) {
+	var decs []Decision
+	for i := 0; i < 25; i++ {
+		d := ask("violations", "go", "r", "f.go", i, "s")
+		d.GV = "v0.17.18"
+		decs = append(decs, d)
+	}
+	if s := FPReport(decs, ts(-1000), 5); s.MixedVersions() {
+		t.Fatalf("one build with rateable asks is not mixed")
+	}
+
+	stray := contractAsk("c.go", 3000)
+	stray.GV = "v0.17.10" // a DIFFERENT build, contributing nothing rateable
+	s := FPReport(append(decs, stray), ts(-1000), 5)
+
+	if len(s.ByVersion) != 2 {
+		t.Fatalf("the stray build must still appear in ByVersion, got %+v", s.ByVersion)
+	}
+	if s.MixedVersions() {
+		t.Errorf("a version with 0 rateable asks cannot pool the rate; ByVersion=%+v", s.ByVersion)
+	}
+	if s.Window.Asks != 25 {
+		t.Errorf("gate denominator = %d, want 25", s.Window.Asks)
+	}
+	// A pre-symbol-stamping record lands under UnknownVersion and must not gate
+	// either — that shape is on every long window of the real log.
+	old := Decision{TS: ts(3001), Mode: "hook", File: "old.go", Decision: "ask", Reason: "violations"}
+	if s := FPReport(append(decs, old), ts(-1000), 5); s.MixedVersions() {
+		t.Errorf("an unrated UnknownVersion record must not flip MixedVersions")
+	}
+}
+
+// Review finding 2. fpRow refuses to print a rate over zero rateable asks; the
+// headline was exempt from its own rule and printed "0% approval rate".
+func TestFormatFP_HeadlineSuppressesRateWhenNothingIsRateable(t *testing.T) {
+	out := FormatFP(FPReport([]Decision{contractAsk("a.go", 0), contractAsk("b.go", 60)}, ts(-1000), 10))
+	if strings.Contains(out, "0% approval rate") {
+		t.Errorf("headline printed a 0%% rate over zero rateable asks:\n%s", out)
+	}
+	if !strings.Contains(out, "no approval rate") {
+		t.Errorf("headline must say there is no rate:\n%s", out)
+	}
+	// "N further asks" reads wrong when there were no prior asks to be further than.
+	if strings.Contains(out, "further ask") {
+		t.Errorf("caveat wording assumes prior rateable asks:\n%s", out)
+	}
+	if !strings.Contains(out, "2 of the 2 ask(s)") {
+		t.Errorf("caveat must state the share of the window:\n%s", out)
+	}
+}
+
+// Review finding 3. FormatFP suppresses the rate for a fully-unrated bucket;
+// the JSON path must not hand a dashboard a plottable 0 for the same bucket.
+func TestPayloadFP_FullyUnratedBucketHasNullRate(t *testing.T) {
+	p := PayloadFP(FPReport([]Decision{
+		contractAsk("a.go", 0),
+		ask("violations", "go", "r1", "b.go", 10, "sym"),
+	}, ts(-1000), 10))
+
+	var contractRow map[string]any
+	for _, row := range p["by_check"].([]map[string]any) {
+		if row["check"] == "contract" {
+			contractRow = row
+		}
+	}
+	if contractRow == nil {
+		t.Fatalf("no contract row: %+v", p["by_check"])
+	}
+	if contractRow["rate"] != nil {
+		t.Errorf("fully-unrated bucket rate = %v, want null", contractRow["rate"])
+	}
+	if contractRow["coverage"] != float64(0) {
+		t.Errorf("coverage = %v, want 0", contractRow["coverage"])
+	}
+	// A bucket that IS rateable still carries a number.
+	for _, row := range p["by_check"].([]map[string]any) {
+		if row["check"] == "violations" && row["rate"] == nil {
+			t.Errorf("rateable bucket lost its rate: %+v", row)
+		}
+	}
+}
+
+// Review finding 5. %.0f turns 0.9978 into "100%", so a row would admit an
+// unrated ask and claim full coverage in the same breath.
+func TestFormatFP_CoverageNeverRoundsUpToFull(t *testing.T) {
+	var decs []Decision
+	for i := 0; i < 457; i++ {
+		decs = append(decs, ask("violations", "go", "r", "f"+string(rune('a'+i%26))+".go", i, "s"))
+	}
+	decs = append(decs, Decision{TS: ts(900), Mode: "hook", Repo: "r", File: "x.go",
+		Lang: "go", Decision: "ask", Reason: "violations"})
+	s := FPReport(decs, ts(-1000), 10)
+
+	if got := s.ByCheck["violations"]; got.Unrated != 1 || got.Asks < 400 {
+		t.Fatalf("fixture wrong: %+v", got)
+	}
+	out := FormatFP(s)
+	if strings.Contains(out, "+1 unrated (rate covers 100%)") {
+		t.Errorf("a row cannot admit an unrated ask and claim 100%% coverage:\n%s", out)
+	}
+	if !strings.Contains(out, "+1 unrated (rate covers >99%)") {
+		t.Errorf("want a >99%% form:\n%s", out)
+	}
+}
+
+// Review finding 6. The worst-coverage row — 0% rated — was the one row with no
+// ! marker, while the banner tells the reader to look for exactly that mark.
+// And the "ask" column must mean the same quantity on every row.
+func TestFormatFP_FullyUnratedRowIsMarkedAndColumnIsConsistent(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r1", "a.go", 0, "sym"),
+		outcome("a.go", 1, "sym"),
+		contractAsk("b.go", 600),
+		contractAsk("c.go", 660),
+	}
+	out := FormatFP(FPReport(decs, ts(-1000), 10))
+	if !strings.Contains(out, "! +2 unrated") {
+		t.Errorf("the 0%%-rated contract row must carry the ! the banner promises:\n%s", out)
+	}
+	// The contract check has 0 RATEABLE asks; the column shows rateable counts.
+	if !strings.Contains(out, "contract                        0 ask") {
+		t.Errorf("the ask column must stay the rateable count on every row:\n%s", out)
+	}
+}
+
+// Review finding 7. loudest_repos[].asks and overall.asks must not carry two
+// different denominators under one JSON name.
+func TestPayloadFP_LoudestReposSplitsRatedAndUnrated(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "loud", "a.go", 0, "sym"),
+		contractAsk("b.go", 600), // repo r1
+		contractAsk("c.go", 660),
+	}
+	p := PayloadFP(FPReport(decs, ts(-1000), 10))
+	repos := p["loudest_repos"].([]RepoCount)
+	if len(repos) != 2 {
+		t.Fatalf("repos = %+v, want 2", repos)
+	}
+	// Ranked by total volume: r1's 2 unrated asks beat loud's 1 rated ask.
+	if repos[0].Repo != "r1" || repos[0].Total() != 2 || repos[0].Asks != 0 || repos[0].Unrated != 2 {
+		t.Errorf("repos[0] = %+v, want r1 with 0 rated / 2 unrated", repos[0])
+	}
+	sumAsks := 0
+	for _, r := range repos {
+		sumAsks += r.Asks
+	}
+	if overall := p["overall"].(map[string]any); sumAsks != overall["asks"] {
+		t.Errorf("sum(loudest_repos[].asks) = %d, must reconcile with overall.asks = %v",
+			sumAsks, overall["asks"])
 	}
 }

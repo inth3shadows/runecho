@@ -718,6 +718,11 @@ func TestExtractRefs_Python_FStringInterpolation(t *testing.T) {
 		// swallow a genuine call that follows it in the same interpolation.
 		{"call-after-nested-literal", `x = f"{Fmt('x(1)') + Compute(y)}"`, []string{"Compute"}, []string{"x"}},
 		{"call-before-nested-literal", `x = f"{Build(y)} {'z(2)'}"`, []string{"Build"}, []string{"z"}},
+		// A nested F-STRING is code, not data: blanking it would drop a real call and
+		// trade the #256 false positive for a false negative, the worse direction.
+		{"nested-fstring-single-in-double", `msg = f"outer {f'{Build(x)}'} tail"`, []string{"Build"}, nil},
+		{"nested-fstring-double-in-single", `msg = f'outer {f"{Build(x)}"} tail'`, []string{"Build"}, nil},
+		{"nested-fstring-keeps-outer-fix", `msg = f"{f'{Build(x)}'} {'z(2)'}"`, []string{"Build"}, []string{"z"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

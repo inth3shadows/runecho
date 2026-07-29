@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.17.19] — 2026-07-29
+
+### Changed
+- fix(fpreport): count symbol-less asks instead of dropping them (#254) (#255)
+
 ## [0.17.18] — 2026-07-29
 
 ### Fixed

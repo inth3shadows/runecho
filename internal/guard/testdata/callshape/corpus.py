@@ -110,3 +110,33 @@ def nested_and_qualified(client, ctx):
     render(build(rows=[1], label="inner"), name="outer")
     client.render(ctx, name="qualified — not extracted")
     return None
+
+
+def comprehensions(a, b, items):
+    # An unparenthesized genexp puts a comma at depth zero, exactly like a lambda's
+    # parameters: one argument, two segments. CPython's statistics.py and
+    # dataclasses.py both write it this way.
+    _fmt(w / x for w, x in zip(a, b))
+    _results_frame(k for k, v in items())
+    build(rows=[(k, v) for k, v in items()])
+    render(dict((k, v) for k, v in items()))
+    return None
+
+
+def continued_method_chain(table, raw):
+    # The `.` is left on the previous line, so the callee below looks bare.
+    return table.replace("a", "b"). \
+        replace("c", "d"), raw.decode("utf-8"). \
+        strip()
+
+
+def pattern_matching(value):
+    # Structural pattern matching is not a call: CPython models `case build(...)` as
+    # MatchClass, so reading it as a call fabricates an arity claim against `build`.
+    match value:
+        case build():
+            return "build"
+        case render(ctx=0, name=0):
+            return "render"
+        case _:
+            return None

@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -93,9 +94,17 @@ func runOracle(t *testing.T, root string) map[string][]oracleShape {
 	if err := os.WriteFile(script, []byte(oracleScript), 0o600); err != nil {
 		t.Fatalf("write oracle: %v", err)
 	}
-	out, err := exec.Command(py, script, root).Output()
+	cmd := exec.Command(py, script, root)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run oracle: %v", err)
+		// The corpus mode is pointed at arbitrary repositories, where ast.parse can
+		// raise beyond the exceptions the script catches (ValueError on a NUL byte,
+		// RecursionError on deeply nested literals). Surface the traceback and SKIP:
+		// an oracle that cannot run is no evidence either way, not a failure of the
+		// code under test.
+		t.Skipf("oracle failed on %s: %v\n%s", root, err, stderr.String())
 	}
 	var got map[string][]oracleShape
 	if err := json.Unmarshal(out, &got); err != nil {

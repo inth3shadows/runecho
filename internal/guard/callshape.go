@@ -71,6 +71,11 @@ const (
 	// 4000 lines measured 19 s before this budget existed, and maxDiffBytes is
 	// 64 MiB, so the input is reachable inside an agent's edit loop (#212).
 	//
+	// SCOPE: the budget is per call to ExtractCallShapes, not per hook invocation. A
+	// consumer that calls this once per changed file multiplies the worst case by the
+	// file count, so such a consumer must thread a shared budget of its own — this
+	// constant alone does not bound the hook.
+	//
 	// The value is set from the hook's own envelope, not picked round. Measured on
 	// adversarial input (`abcdef(` x60 per line, 400 lines), a full budget burn cost
 	// 45 ms at 4 MiB — well past the ~12 ms the whole hook has for every check
@@ -163,6 +168,31 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 		if scan == "" {
 			continue
 		}
+		// A method chain broken across a backslash continuation leaves the `.` on the
+		// PREVIOUS line, so a callee at the start of this one looks bare:
+		// `table.replace('a','b'). \` / `replace('c','d')` emitted an unqualified
+		// `replace`. Since step 2 resolves by NAME, any repo declaring a module-level
+		// `replace`/`decode`/`encode` would get a fabricated mismatch against a method
+		// call. Carry the joiner as run state, the way `open` already is.
+		afterDot := false
+		if i > 0 && lines[i].LineNo == lines[i-1].LineNo+1 {
+			prev := strings.TrimRight(strings.TrimSpace(scans[i-1]), "\\")
+			afterDot = strings.HasSuffix(strings.TrimSpace(prev), ".")
+		}
+		// `match x:` and `case Pattern(...):` are structural pattern matching, not
+		// calls — CPython models `case Point(x=0)` as MatchClass, and reading it as a
+		// call fabricates an arity claim against the real Point. Soft keywords, so the
+		// shape of the whole line is what identifies them.
+		if trimmed := strings.TrimSpace(scan); strings.HasPrefix(trimmed, "case ") ||
+			strings.HasPrefix(trimmed, "match ") {
+			// A pattern ends the line with `:`, or with an open bracket when it spans
+			// lines (`case (` in CPython's turtle.py). Requiring one of those keeps a
+			// variable genuinely named `case`/`match` — `case = build()` — a real call.
+			if strings.HasSuffix(trimmed, ":") || strings.HasSuffix(trimmed, "(") ||
+				strings.HasSuffix(trimmed, "[") || strings.HasSuffix(trimmed, "{") {
+				continue
+			}
+		}
 		// Names this line DEFINES. `def foo(a=1)` matches the call regex on `foo(`
 		// but is a declaration, and its `a=1` is a default, not a keyword
 		// argument — reading it as a call would invent a caller that does not
@@ -180,6 +210,12 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 				if prev := scan[fullStart-1]; prev == '.' || isWordByte(prev) {
 					continue
 				}
+			}
+			// Only whitespace to the left means this callee begins the line, so a `.`
+			// left dangling on the previous line qualifies it. Indentation is why the
+			// check cannot just test fullStart == 0.
+			if afterDot && strings.TrimSpace(scan[:fullStart]) == "" {
+				continue
 			}
 			if _, ok := builtins[name]; ok {
 				continue
@@ -229,7 +265,11 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 //     from one applies exactly to the other.
 func collectArgText(scans []string, lines []AddedLine, start, end, from int) (masked, orig string, ok bool, used int) {
 	var mb, ob strings.Builder
-	depth := 1
+	// A stack, not a counter: a counter accepts any of `)]}` as the closer for `(`,
+	// so `foo(a, b]` returned a confident two-argument shape instead of abstaining.
+	// Abstention is the whole design, and a bracket mismatch means the masking or the
+	// source is not what we think it is.
+	stack := []byte{'('}
 	limit := start + callShapeMaxLookahead
 	if limit > end {
 		limit = end
@@ -260,12 +300,15 @@ func collectArgText(scans []string, lines []AddedLine, start, end, from int) (ma
 			ob.WriteByte(' ')
 		}
 		for ; j < len(s); j++ {
-			switch s[j] {
+			switch c := s[j]; c {
 			case '(', '[', '{':
-				depth++
+				stack = append(stack, c)
 			case ')', ']', '}':
-				depth--
-				if depth == 0 {
+				if closerFor(stack[len(stack)-1]) != c {
+					return "", "", false, used
+				}
+				stack = stack[:len(stack)-1]
+				if len(stack) == 0 {
 					return mb.String(), ob.String(), true, used
 				}
 			}
@@ -280,12 +323,41 @@ func collectArgText(scans []string, lines []AddedLine, start, end, from int) (ma
 	return "", "", false, used
 }
 
+// closerFor returns the closing bracket that matches an opener.
+func closerFor(open byte) byte {
+	switch open {
+	case '(':
+		return ')'
+	case '[':
+		return ']'
+	case '{':
+		return '}'
+	}
+	return 0
+}
+
 // parseArgShape classifies one balanced argument list. masked drives every
 // structural decision; orig answers only whether a segment holds an argument at
 // all. The two must be index-aligned — see collectArgText.
 func parseArgShape(masked, orig string) CallShape {
 	var cs CallShape
-	cs.HasLambda = hasTopLevelLambda(masked)
+	cs.HasLambda = hasTopLevelKeyword(masked, "lambda")
+	// A nested f-string survives masking intact (#256), which is right for finding
+	// calls inside it — but stripLiteralsStateful's open state carries only the quote
+	// byte, so a PEP 701 same-quote nesting (`f'{g(1, '2', 3)}'`, valid on 3.12+)
+	// terminates the outer string early and undercounts Pos with no other signal.
+	// Any surviving f-string prefix in the argument text therefore abstains.
+	if strings.Contains(masked, "f'") || strings.Contains(masked, "f\"") {
+		cs.Unreliable = true
+	}
+	// An unparenthesized generator expression puts a comma at depth zero too:
+	// `_sum(w / x for w, x in zip(a, b))` passes ONE argument and splits into two.
+	// Same ambiguity as a lambda's parameter commas, so it abstains the same way.
+	// `sum(x for x, y in pairs)` is ordinary Python — CPython's own statistics.py
+	// and dataclasses.py both do it.
+	if hasTopLevelKeyword(masked, "for") {
+		cs.Unreliable = true
+	}
 	for _, r := range splitTopLevel(masked) {
 		mseg := strings.TrimSpace(masked[r[0]:r[1]])
 		if mseg == "" {
@@ -301,6 +373,8 @@ func parseArgShape(masked, orig string) CallShape {
 			switch oseg := strings.TrimSpace(orig[r[0]:r[1]]); {
 			case oseg == "":
 				// punctuation
+			case oseg == "\\":
+				// A lone line-continuation before the closing paren: punctuation.
 			case oseg[0] == '#':
 				// A pure comment. It cannot be shadowing a value on the next line:
 				// masking blanks only the comment text, so a value there would still
@@ -335,12 +409,12 @@ func parseArgShape(masked, orig string) CallShape {
 	return cs
 }
 
-// hasTopLevelLambda reports a `lambda` keyword at bracket depth zero in an
-// argument list, which makes the comma split unreliable — see CallShape.HasLambda.
-// Word boundaries are required so an identifier merely containing the letters
-// (`lambda_fn`, `my_lambda`) does not trip it.
-func hasTopLevelLambda(s string) bool {
-	const kw = "lambda"
+// hasTopLevelKeyword reports keyword kw at bracket depth zero in an argument list.
+// Two keywords put a comma there and so make the comma split unreliable: `lambda`
+// (its parameter commas) and `for` (a comprehension's tuple target). Word boundaries
+// are required so an identifier merely containing the letters (`lambda_fn`,
+// `for_each`) does not trip it.
+func hasTopLevelKeyword(s, kw string) bool {
 	depth := 0
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -351,7 +425,7 @@ func hasTopLevelLambda(s string) bool {
 			depth--
 			continue
 		}
-		if depth != 0 || s[i] != 'l' || !strings.HasPrefix(s[i:], kw) {
+		if depth != 0 || s[i] != kw[0] || !strings.HasPrefix(s[i:], kw) {
 			continue
 		}
 		if i > 0 && isWordByte(s[i-1]) {

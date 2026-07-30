@@ -864,8 +864,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	if len(callShapes) > 0 {
 		fmt.Fprintf(&sb, "[runecho-guard] %d keyword argument(s) the declaration does not accept — the symbol resolves but the call does not match it:\n", len(callShapes))
 		for _, m := range callShapes {
-			fmt.Fprintf(&sb, "  snippet line %d: %s(%s=…)%s — %s is declared at line %d and accepts: %s\n",
-				m.LineNo, m.Callee, m.Keyword, suggestionSuffix(m.Suggestions), m.Callee, m.DeclLine, acceptedList(m.Accepted))
+			fmt.Fprintf(&sb, "  snippet line %d: %s(%s=…)%s — %s is declared at %s %d and accepts: %s\n",
+				m.LineNo, m.Callee, m.Keyword, suggestionSuffix(m.Suggestions), m.Callee,
+				declLineLabel(m.DeclLineIsSnippet), m.DeclLine, acceptedList(m.Accepted))
 			// The CALLEE is the symbol at issue, not the keyword: guardstats and
 			// fpreport aggregate by symbol, and a keyword name is not one.
 			syms = append(syms, m.Callee)

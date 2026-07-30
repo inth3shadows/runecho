@@ -39,9 +39,14 @@ type CallShapeMismatch struct {
 	Keyword string
 	// LineNo is the 1-based added-line number of the call's callee identifier.
 	LineNo int
-	// DeclLine is the 1-based line of the `def` this was compared against, in the
-	// same file, so the reader can go look at the signature.
+	// DeclLine is the 1-based line of the `def` this was compared against.
 	DeclLine int
+	// DeclLineIsSnippet reports that DeclLine numbers the EDIT HUNK, not the file:
+	// it is set when the signature was read from the added text (because this edit
+	// rewrites it), where line 1 is the first added line. Printing both cases as a
+	// file line sent the reader to the wrong place — the call site is already
+	// labelled "snippet line", and the declaration now says which it is too.
+	DeclLineIsSnippet bool
 	// Accepted are the keyword names the declaration does accept, in source order
 	// and capped — enough to fix the call from the message alone.
 	Accepted []string
@@ -177,6 +182,9 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	type resolved struct {
 		shape pyDeclShape
 		ok    bool
+		// fromAdded records that shape came from the hunk, so its Line numbers the
+		// hunk rather than the file.
+		fromAdded bool
 	}
 	checked := make(map[string]resolved, len(candidates))
 	for _, c := range candidates {
@@ -185,7 +193,7 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 		}
 		r, seen := checked[c.Name]
 		if !seen {
-			r.shape, r.ok = resolveDeclShape(c.Name, shadowedSet, declIndex, addedIndex, addedText, declLines, removedText, addedIsWholeFile)
+			r.shape, r.ok, r.fromAdded = resolveDeclShape(c.Name, shadowedSet, declIndex, addedIndex, addedText, removedText, addedIsWholeFile)
 			checked[c.Name] = r
 		}
 		if !r.ok {
@@ -206,11 +214,12 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 			}
 			reported[kw] = struct{}{}
 			m := CallShapeMismatch{
-				Callee:   c.Name,
-				Keyword:  kw,
-				LineNo:   c.LineNo,
-				DeclLine: r.shape.Line,
-				Accepted: capNames(r.shape.Keywords, callShapeMaxAccepted),
+				Callee:            c.Name,
+				Keyword:           kw,
+				LineNo:            c.LineNo,
+				DeclLine:          r.shape.Line,
+				DeclLineIsSnippet: r.fromAdded,
+				Accepted:          capNames(r.shape.Keywords, callShapeMaxAccepted),
 			}
 			if sug, found := Suggest(kw, accepted); found {
 				m.Suggestions = sug
@@ -233,13 +242,19 @@ func resolveDeclShape(
 	shadowedSet func() map[string]struct{},
 	declIndex, addedIndex *pyDeclIndex,
 	addedText string,
-	declLines []AddedLine,
 	removedText string,
 	addedIsWholeFile bool,
-) (pyDeclShape, bool) {
+) (shape pyDeclShape, ok bool, fromAdded bool) {
 	var zero pyDeclShape
 	if _, bad := shadowedSet()[name]; bad {
-		return zero, false
+		return zero, false, false
+	}
+	// A nested or conditionally-declared def of the same name means the column-zero
+	// signature may not be the one a call reaches. Methods are excluded — an
+	// unqualified call cannot reach one. Checked on the declaration source only: the
+	// hunk's own indentation is not a reliable guide to its enclosing block.
+	if declIndex.shadowedByNestedDef(name) {
+		return zero, false, false
 	}
 	// When the edit itself declares this name, its version of the signature is the
 	// one the post-edit file will have — the indexed/on-disk copy is stale by
@@ -247,7 +262,7 @@ func resolveDeclShape(
 	// routine agent move, so getting this wrong would be a recurring false
 	// positive rather than a corner case.
 	if !addedIsWholeFile && matchesPyDef(addedText, name) {
-		s, ok := soleShape(addedIndex.shapesFor(name))
+		added, ok := soleShape(addedIndex.shapesFor(name))
 		if ok {
 			// The hunk shows the parameter list but CANNOT show what sits above the
 			// `def`. An Edit whose old_string begins at the def line leaves the
@@ -263,7 +278,7 @@ func resolveDeclShape(
 			// That is the safe direction and the rarer shape.
 			for _, pre := range declIndex.shapesFor(name) {
 				if pre.Decorated {
-					s.Decorated = true
+					added.Decorated = true
 					break
 				}
 			}
@@ -273,19 +288,19 @@ func resolveDeclShape(
 			// truncated parameter list, or two disagreeing branches). Its true shape
 			// is unknown and the on-disk copy is known-stale, so there is nothing to
 			// compare against.
-			return zero, false
+			return zero, false, false
 		}
-		return s, s.usable()
+		return added, added.usable(), true
 	}
 	s, ok := soleShape(declIndex.shapesFor(name))
 	if !ok {
 		// No module-level def of this name in the file (a cross-file or third-party
 		// callee — the existence and file-scope checks own that), or two
 		// conditional branches with different accepted sets.
-		return zero, false
+		return zero, false, false
 	}
 	if !s.usable() {
-		return zero, false
+		return zero, false, false
 	}
 	// Last abstain: this edit may be changing the declaration WITHOUT the hunk
 	// containing a whole `def` line — a MultiEdit that rewrites one line of a
@@ -301,10 +316,10 @@ func resolveDeclShape(
 	// unreachable — a shape whose signature span does not balance is already
 	// Unknowable and returned above, and s.Line always exists in declLines because s
 	// came from an index built over them.
-	if removedText != "" && removesSignatureLine(declLines, s.Line, removedText) {
-		return zero, false
+	if removedText != "" && removesSignatureLine(declIndex, s.Line, removedText) {
+		return zero, false, false
 	}
-	return s, true
+	return s, true, false
 }
 
 // soleShape returns the one shape in shapes, treating "several declarations that
@@ -362,8 +377,8 @@ func matchesPyDef(text, name string) bool {
 // Trimmed whole-line equality is deliberately coarse: it will also fire when a
 // removed line elsewhere happens to look like `    b,`. That is over-abstention,
 // which costs reach; the alternative direction costs a false positive.
-func removesSignatureLine(declLines []AddedLine, declLine int, removedText string) bool {
-	sig := pySignatureLines(declLines, declLine)
+func removesSignatureLine(idx *pyDeclIndex, declLine int, removedText string) bool {
+	sig := idx.signatureLinesAt(declLine)
 	if len(sig) == 0 {
 		return false
 	}
@@ -379,46 +394,6 @@ func removesSignatureLine(declLines []AddedLine, declLine int, removedText strin
 		}
 	}
 	return false
-}
-
-// pySignatureLines returns the trimmed, non-empty lines spanning the parameter
-// list of the def at declLine (1-based), from the `def` line through the line
-// whose closing paren balances it. Returns nil if declLine is out of range or the
-// parens never balance within pySignatureMaxLines.
-func pySignatureLines(lines []AddedLine, declLine int) []string {
-	const pySignatureMaxLines = 60 // a signature longer than this abstains rather than scanning on
-	idx := -1
-	for i, l := range lines {
-		if l.LineNo == declLine {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil
-	}
-	var out []string
-	depth := 0
-	started := false
-	for i := idx; i < len(lines) && i-idx < pySignatureMaxLines; i++ {
-		text := lines[i].Text
-		if t := strings.TrimSpace(text); t != "" {
-			out = append(out, t)
-		}
-		for j := 0; j < len(text); j++ {
-			switch text[j] {
-			case '(':
-				depth++
-				started = true
-			case ')':
-				depth--
-			}
-		}
-		if started && depth <= 0 {
-			return out
-		}
-	}
-	return nil
 }
 
 // pyNonDefBindings collects every name these lines bind EXCEPT by `def`. A def is
@@ -441,6 +416,12 @@ func pyNonDefBindings(lines []AddedLine, idx *pyDeclIndex) map[string]struct{} {
 		out[n] = struct{}{}
 	}
 	for _, n := range PyDeclaredNames(lines) {
+		out[n] = struct{}{}
+	}
+	// PyDeclaredNames sees only plain `=` assignments. A `for` target (statement or
+	// comprehension), a `with`/`except ... as`, and a walrus all rebind a name too,
+	// and an adversarial review reproduced a false positive for each.
+	for n := range idx.rebindings() {
 		out[n] = struct{}{}
 	}
 	// Parameter names come from the index's already-located signature spans rather

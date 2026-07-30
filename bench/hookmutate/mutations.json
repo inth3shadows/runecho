@@ -363,6 +363,27 @@
       "find": "\t\tif prev := masked[at-1]; !isWordByte(prev) && prev != '.' {",
       "replace": "\t\tif prev := masked[at-1]; true || (!isWordByte(prev) && prev != '.') {",
       "desc": "a dynamic-binding marker matches as a bare substring again, darkening whole files"
+    },
+    {
+      "id": "callshape/rebinding-forms",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tfor n := range idx.rebindings() {\n\t\tout[n] = struct{}{}\n\t}",
+      "replace": "\tfor n := range idx.rebindings() {\n\t\t_ = n\n\t}",
+      "desc": "a for/with-as/except-as/comprehension/walrus target no longer shadows the callee"
+    },
+    {
+      "id": "callshape/nested-def-shadow",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tif declIndex.shadowedByNestedDef(name) {",
+      "replace": "\tif false && declIndex.shadowedByNestedDef(name) {",
+      "desc": "a nested or conditionally-declared def of the same name no longer abstains"
+    },
+    {
+      "id": "callshape/method-is-not-a-shadow",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\treturn rePyClassAnyIndent.MatchString(line)",
+      "replace": "\t\treturn false && rePyClassAnyIndent.MatchString(line)",
+      "desc": "a class method counts as a shadow, abstaining on a method and module function sharing a name"
     }
   ]
 }

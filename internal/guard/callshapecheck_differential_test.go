@@ -37,11 +37,16 @@ import (
 // keyword must be accepted whether or not a splat sits beside it, so those sites
 // are adjudicated like any other.
 //
-// It deliberately models FEWER abstentions than the Go side (it ignores shadowing
-// by imports, reassignment and parameters). That asymmetry is safe in one
-// direction only, which is the direction wanted: a site the oracle considers
-// checkable but Go abstains on is lost recall, while a site Go flags that the
-// oracle does not list at all is treated as a false positive.
+// It models FEWER abstentions than the Go side wherever doing so only costs
+// recall, but it MUST model everything that affects which declaration a call
+// reaches — otherwise a false positive is scored as a CONFIRMED true positive and
+// the headline number means nothing. An adversarial review found exactly that hole:
+// the oracle ignored rebinding, so a `for handler in fns: handler(...)` false
+// positive was counted as a real defect. It therefore now skips any callee that is
+// rebound by ANY store-context binding (assignment, for/comprehension target,
+// with/except as, walrus, parameter, import) or that has a non-column-zero
+// declaration. Over-skipping only shrinks the population, which keeps the claim
+// conservative; under-skipping would corrupt it.
 const declOracleScript = `
 import ast, json, os, sys
 
@@ -86,12 +91,28 @@ for root, dirs, files in os.walk(sys.argv[1]):
         except (SyntaxError, UnicodeDecodeError, OSError, ValueError, RecursionError):
             continue
         defs = module_defs(tree)
+        # Everything that could make a bare call reach something other than the
+        # module-level def. Over-inclusive on purpose.
+        rebound = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                rebound.add(n.id)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                rebound.add(n.name)
+            elif isinstance(n, ast.arg):
+                rebound.add(n.arg)
+            elif isinstance(n, ast.alias):
+                rebound.add((n.asname or n.name).split(".")[0])
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.col_offset != 0:
+                rebound.add(n.name)
         rows = []
         for n in ast.walk(tree):
             if not isinstance(n, ast.Call) or not isinstance(n.func, ast.Name):
                 continue
             named = [k.arg for k in n.keywords if k.arg is not None]
             if not named:
+                continue
+            if n.func.id in rebound:
                 continue
             shapes = defs.get(n.func.id)
             if not shapes or len(set(shapes)) != 1:

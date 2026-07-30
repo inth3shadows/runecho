@@ -41,8 +41,16 @@ var (
 	rePyDefAtColumnZero = regexp.MustCompile(`^(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(`)
 	// rePyDefAnyIndent is the shadow-set counterpart: EVERY def, at any indentation,
 	// because a nested def's parameters shadow an outer name just as a top-level
-	// one's do.
-	rePyDefAnyIndent = regexp.MustCompile(`^[ \t]*(?:async[ \t]+)?def[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(`)
+	// one's do. Captures the leading whitespace and the name — both are needed to
+	// tell a nested function (which shadows) from a method (which cannot be reached
+	// by an unqualified call, so does not).
+	rePyDefAnyIndent = regexp.MustCompile(`^([ \t]*)(?:async[ \t]+)?def[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\(`)
+	// rePyAnyForTarget is deliberately NOT anchored, unlike dropped_import.go's
+	// rePyForTarget: a comprehension puts the `for` mid-line
+	// (`[f(x) for f in fns]`), and an anchored pattern misses exactly that.
+	rePyAnyForTarget = regexp.MustCompile(`\bfor\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+in\b`)
+	// rePyClassAnyIndent identifies an enclosing `class` header by its indentation.
+	rePyClassAnyIndent = regexp.MustCompile(`^([ \t]*)class[ \t]+`)
 )
 
 const (
@@ -109,6 +117,13 @@ type pyDeclIndex struct {
 	// defOpens indexes EVERY def at any indentation, feeding params(); a nested
 	// def's parameters shadow an outer name just as a top-level one's do.
 	defOpens []int
+	// indentedDefs maps a name declared by an INDENTED def to those line indices.
+	// A nested function redefines the name for its own body, so a call there does
+	// not reach the column-zero def of the same name — the wrong-signature
+	// comparison an adversarial review reproduced.
+	indentedDefs map[string][]int
+	// rebound is rebindings()' memo; nil until first use.
+	rebound map[string]struct{}
 	// paramNames is params()' memo; nil until first use.
 	paramNames map[string]struct{}
 	// dynamic reports a star-import or a name-rebinding construct anywhere in the
@@ -124,11 +139,12 @@ type pyDeclIndex struct {
 // newPyDeclIndex builds the index. O(bytes), no parsing.
 func newPyDeclIndex(lines []AddedLine) *pyDeclIndex {
 	idx := &pyDeclIndex{
-		lines:    lines,
-		masked:   make([]string, 0, len(lines)),
-		defLines: make(map[string][]int),
-		cache:    make(map[string]pyDeclShape),
-		hasCache: make(map[string]bool),
+		lines:        lines,
+		masked:       make([]string, 0, len(lines)),
+		defLines:     make(map[string][]int),
+		indentedDefs: make(map[string][]int),
+		cache:        make(map[string]pyDeclShape),
+		hasCache:     make(map[string]bool),
 	}
 	// scanStripped threads multi-line string state across lines and resets it on a
 	// line-number gap, which is what keeps prose inside a docstring from reading as
@@ -153,8 +169,11 @@ func newPyDeclIndex(lines []AddedLine) *pyDeclIndex {
 		if m := rePyDefAtColumnZero.FindStringSubmatch(s); m != nil {
 			idx.defLines[m[1]] = append(idx.defLines[m[1]], i)
 		}
-		if rePyDefAnyIndent.MatchString(s) {
+		if m := rePyDefAnyIndent.FindStringSubmatch(s); m != nil {
 			defOpens = append(defOpens, i)
+			if m[1] != "" {
+				idx.indentedDefs[m[2]] = append(idx.indentedDefs[m[2]], i)
+			}
 		}
 	})
 	idx.defOpens = defOpens
@@ -186,6 +205,128 @@ func (idx *pyDeclIndex) params() map[string]struct{} {
 		}
 	}
 	return idx.paramNames
+}
+
+// rebindings returns names bound by a non-`def`, non-assignment construct: a
+// `for` target (statement OR comprehension), a `with`/`except ... as`, or a
+// walrus. Computed on first use, off the already-masked lines.
+//
+// PyDeclaredNames sees only plain `=` assignments, so without this every one of
+// these forms left a callee looking unshadowed and the check compared against the
+// module-level def. An adversarial review reproduced five false positives on valid
+// code that way — `for handler in fns: handler(item, verbose=True)` beside a
+// module-level `def handler(x, dry=False)`, and the with/except/comprehension/
+// walrus equivalents.
+func (idx *pyDeclIndex) rebindings() map[string]struct{} {
+	if idx.rebound != nil {
+		return idx.rebound
+	}
+	idx.rebound = make(map[string]struct{})
+	for _, line := range idx.masked {
+		if strings.Contains(line, "for ") {
+			for _, m := range rePyAnyForTarget.FindAllStringSubmatch(line, -1) {
+				for _, part := range strings.Split(m[1], ",") {
+					if n := strings.TrimSpace(part); n != "" {
+						idx.rebound[n] = struct{}{}
+					}
+				}
+			}
+		}
+		if strings.Contains(line, "as ") {
+			for _, m := range reAsBind.FindAllStringSubmatch(line, -1) {
+				idx.rebound[m[1]] = struct{}{}
+			}
+		}
+		if strings.Contains(line, ":=") {
+			for _, m := range reWalrus.FindAllStringSubmatch(line, -1) {
+				idx.rebound[m[1]] = struct{}{}
+			}
+		}
+	}
+	return idx.rebound
+}
+
+// shadowedByNestedDef reports whether name is also declared by an INDENTED def
+// that is NOT a class member. A nested function rebinds the name for its enclosing
+// function's body, and a conditionally-declared one (`if TYPE_CHECKING:`) is a
+// second module-level declaration — in both cases the column-zero signature may
+// not be what a call reaches.
+//
+// A METHOD is excluded, and that exclusion is the whole reason this is not simply
+// "any indented def": an unqualified `run(...)` cannot reach `C.run`, so treating
+// every class member as a shadow would abstain on the very common case of a method
+// and a module function sharing a name. The test is the nearest enclosing header
+// at strictly smaller indentation: `class` means method, anything else means the
+// def is reachable as a rebinding.
+func (idx *pyDeclIndex) shadowedByNestedDef(name string) bool {
+	for _, i := range idx.indentedDefs[name] {
+		if !idx.enclosedByClass(i) {
+			return true
+		}
+	}
+	return false
+}
+
+// enclosedByClass reports whether the nearest header above line index i with
+// strictly smaller indentation is a `class`.
+func (idx *pyDeclIndex) enclosedByClass(i int) bool {
+	own := leadingIndent(idx.masked[i])
+	for j := i - 1; j >= 0; j-- {
+		line := idx.masked[j]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if leadingIndent(line) >= own {
+			continue
+		}
+		return rePyClassAnyIndent.MatchString(line)
+	}
+	return false
+}
+
+// leadingIndent counts leading whitespace bytes, a tab weighing the same as a
+// space. Exact column arithmetic is not needed — only "strictly less than", and
+// Python forbids mixing the two inconsistently within one block.
+func leadingIndent(s string) int {
+	n := 0
+	for n < len(s) && (s[n] == ' ' || s[n] == '\t') {
+		n++
+	}
+	return n
+}
+
+// signatureLinesAt returns the trimmed ORIGINAL lines spanning the parameter list
+// of the def at file line declLine, or nil when there is no such def or its list
+// does not balance.
+//
+// Balancing runs over MASKED text via signatureContent. The earlier version
+// counted parens on raw text, so `sep="("` in a default made the span never
+// balance — silently switching off the "this edit rewrites the declaration"
+// abstain and reporting a correct parameter rename as a mismatch. Reproduced by an
+// adversarial review against the shipped fixture plus one extra parameter.
+func (idx *pyDeclIndex) signatureLinesAt(declLine int) []string {
+	start := -1
+	for _, sites := range idx.defLines {
+		for _, i := range sites {
+			if idx.lines[i].LineNo == declLine {
+				start = i
+			}
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	_, end, ok := idx.signatureContent(start)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for j := start; j <= end && j < len(idx.lines); j++ {
+		if t := strings.TrimSpace(idx.lines[j].Text); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // lineIsDynamic reports whether one line contains a star-import or a construct

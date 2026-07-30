@@ -394,19 +394,22 @@ func TestPyCallShapeMismatchesAcceptedListCapped(t *testing.T) {
 	}
 }
 
-func TestPySignatureLinesSpan(t *testing.T) {
-	lines := TextToAddedLines("x = 1\ndef f(\n    a,\n    b=2,\n):\n    pass\n")
-	got := pySignatureLines(lines, 2)
-	want := []string{"def f(", "a,", "b=2,", "):"}
+func TestSignatureLinesAtUsesMaskedText(t *testing.T) {
+	// The span must balance over MASKED text. Counting parens on raw text let a
+	// `sep="("` default make the span never balance, which silently switched off the
+	// "this edit rewrites the declaration" abstain — an adversarial review
+	// reproduced a false positive on a correct parameter rename that way.
+	src := "def f(\n    a,\n    sep=\"(\",\n    b=2,\n):\n    pass\n"
+	got := newPyDeclIndex(TextToAddedLines(src)).signatureLinesAt(1)
+	want := []string{"def f(", "a,", "sep=\"(\",", "b=2,", "):"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Errorf("pySignatureLines = %v, want %v", got, want)
+		t.Errorf("signatureLinesAt = %v, want %v", got, want)
 	}
-	if got := pySignatureLines(lines, 99); got != nil {
-		t.Errorf("out-of-range declLine: got %v, want nil", got)
+	// No def at that line, and a list that never balances, both abstain.
+	if got := newPyDeclIndex(TextToAddedLines(src)).signatureLinesAt(99); got != nil {
+		t.Errorf("unknown declLine: got %v, want nil", got)
 	}
-	// Never balances: abstain rather than returning a partial span that a caller
-	// would treat as complete.
-	if got := pySignatureLines(TextToAddedLines("def f(\n    a,\n"), 1); got != nil {
+	if got := newPyDeclIndex(TextToAddedLines("def f(\n    a,\n")).signatureLinesAt(1); got != nil {
 		t.Errorf("unbalanced signature: got %v, want nil", got)
 	}
 }
@@ -454,4 +457,138 @@ func TestPyCallShapeMismatchesEditCannotSeeDecoratorAbove(t *testing.T) {
 		FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)},
 		TextToAddedLines(fileNoDeco), false)
 	assertMismatches(t, got, []string{"fetch:attempts"})
+}
+
+func TestPyCallShapeMismatchesRebindingFormsAbstain(t *testing.T) {
+	// Five false positives an adversarial review reproduced on valid Python.
+	// PyDeclaredNames sees only plain `=` assignments, so every other rebinding form
+	// left the callee looking unshadowed and the check compared against the
+	// module-level def that the call does not reach.
+	for _, tc := range []struct{ name, src string }{
+		{
+			name: "for-statement target",
+			src: `def handler(x, dry=False):
+    return x
+
+def run(fns, item):
+    for handler in fns:
+        handler(item, verbose=True)
+`,
+		},
+		{
+			name: "with ... as target",
+			src: `def opener(p, text=True):
+    return p
+
+def run(p):
+    with make() as opener:
+        opener(p, binary=True)
+`,
+		},
+		{
+			name: "except ... as target",
+			src: `def fetch(url, timeout=1):
+    return url
+
+def run():
+    try:
+        pass
+    except Exception as fetch:
+        fetch("u", verify=False)
+`,
+		},
+		{
+			name: "comprehension target — the `for` is mid-line, so an anchored pattern misses it",
+			src: `def fetch(url, timeout=1):
+    return url
+
+def run(fns):
+    return [fetch("u", verify=False) for fetch in fns]
+`,
+		},
+		{
+			name: "walrus target",
+			src: `def fetch(url, timeout=1):
+    return url
+
+def run(g):
+    if (fetch := g()) is not None:
+        fetch("u", verify=False)
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMismatches(t, runMismatch(t, mismatchCase{added: tc.src, write: true}), nil)
+		})
+	}
+}
+
+func TestPyCallShapeMismatchesNestedRedefinitionAbstains(t *testing.T) {
+	// A nested def rebinds the name for its enclosing function's body, and a
+	// conditionally-declared one is a second module-level declaration. Either way the
+	// column-zero signature may not be what the call reaches. Both reproduced as
+	// false positives by an adversarial review.
+	for _, tc := range []struct{ name, src string }{
+		{
+			name: "nested def shadows the module-level one",
+			src: `def process(data=None):
+    return data
+
+def main(rows):
+    def process(rows=None):
+        return rows
+    return process(rows=[1])
+`,
+		},
+		{
+			name: "conditionally-declared second definition",
+			src: `def f(a=1):
+    return a
+
+if True:
+    def f(b=2):
+        return b
+
+f(b=3)
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertMismatches(t, runMismatch(t, mismatchCase{added: tc.src, write: true}), nil)
+		})
+	}
+}
+
+func TestPyCallShapeMismatchesMethodDoesNotShadow(t *testing.T) {
+	// The control the nested-def rule needs: a METHOD sharing a name with a module
+	// function is NOT a shadow, because an unqualified `fetch(...)` cannot reach
+	// `C.fetch`. Treating every indented def as a shadow would abstain on one of the
+	// most common shapes in Python and cost most of the check's reach.
+	got := runMismatch(t, mismatchCase{
+		added: `def fetch(url, timeout=1):
+    return url
+
+class C:
+    def fetch(self, url, retries=0):
+        return url
+
+def go():
+    return fetch("u", retries=2)
+`,
+		write: true,
+	})
+	assertMismatches(t, got, []string{"fetch:retries"})
+}
+
+func TestPyCallShapeMismatchesSignatureRenameWithStringParen(t *testing.T) {
+	// The reproduction from the review: a `sep="("` default in a multi-line signature
+	// made the raw-text paren scan never balance, so the abstain that protects a
+	// parameter rename stopped firing.
+	file := "def fetch(\n    url,\n    sep=\"(\",\n    timeout=1,\n):\n    return url\n\ndef go():\n    return fetch(\"u\")\n"
+	added := "    deadline=1,\n    return fetch(\"u\", deadline=5)\n"
+	removed := "    timeout=1,\n"
+	got := PyCallShapeMismatches(LangPython, TextToAddedLines(file),
+		FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)},
+		TextToAddedLines(removed), false)
+	assertMismatches(t, got, nil)
 }

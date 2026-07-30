@@ -49,6 +49,17 @@ func callShapeMismatches(lang guard.Lang, wholeFileLines []guard.AddedLine, fd g
 // gap, which would look like a formatting bug rather than a fact — and "accepts
 // nothing by keyword" is exactly the case where the reader most needs to be told
 // so plainly.
+// declLineLabel names which coordinate system a declaration's line number is in.
+// A signature read from the edit's own added text is numbered within the hunk, not
+// within the file, and printing that as a file line sends the reader somewhere
+// else entirely.
+func declLineLabel(isSnippet bool) string {
+	if isSnippet {
+		return "snippet line"
+	}
+	return "line"
+}
+
 func acceptedList(accepted []string) string {
 	if len(accepted) == 0 {
 		return "(none)"

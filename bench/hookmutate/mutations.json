@@ -346,8 +346,8 @@
     {
       "id": "callshape/removed-signature-line",
       "file": "internal/guard/callshapecheck.go",
-      "find": "\tif removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
-      "replace": "\tif false && removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
+      "find": "\tif removedText != \"\" && removesSignatureLine(declIndex, s.Line, removedText) {",
+      "replace": "\tif false && removedText != \"\" && removesSignatureLine(declIndex, s.Line, removedText) {",
       "desc": "a declaration this edit rewrites or deletes no longer abstains"
     },
     {

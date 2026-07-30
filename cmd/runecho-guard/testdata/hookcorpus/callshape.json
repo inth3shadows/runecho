@@ -224,5 +224,20 @@
     "edit_old": "def fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
     "edit_new": "def fetch(url, timeout=1, retries=0):\n    return url\n\ndef go():\n    return fetch(\"u\", attempts=3)\n",
     "expect_ask": false
+  },
+  {
+    "name": "python-callshape-helper-named-like-a-builtin-still-asks",
+    "desc": "the dynamic-binding markers are matched as identifiers, not as bare substrings. A file containing `def get_locals(...)` contains the text \"locals(\", and matching that as a substring set the file's dynamic flag and returned nothing for the WHOLE file — any helper ending in locals/globals/exec/eval silently switched off its own module. This fixture asks, so it fails the moment the boundary check is removed",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/builtinish.py",
+    "old": "def get_locals(a, b):\n    return a\n\ndef fetch(url, timeout=1):\n    return url\n",
+    "new": "def get_locals(a, b):\n    return a\n\ndef fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\", bogus=1)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
   }
 ]

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-07-30
+
+### Changed
+- guard: report keyword arguments a declaration does not accept (#243 slice 1) (#260)
+
 ## [0.19.0] — 2026-07-29
 
 ### Changed

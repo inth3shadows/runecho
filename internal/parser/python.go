@@ -376,7 +376,35 @@ func pyDocstring(body *ts.Node, lang *ts.Language, src []byte) string {
 	if str.Type(lang) != "string" {
 		return ""
 	}
+	// An f-string or a bytes literal is NOT a docstring: CPython assigns __doc__
+	// only from a plain str constant, so `def f(): f"hi {x}"` leaves __doc__ nil.
+	// The grammar calls both "string", so without this check RunEcho would report
+	// a doc where the language says there is none — and for an f-string the text
+	// would be mangled too, since pyStringContent concatenates only the literal
+	// segments and silently drops each {interpolation}. r/u prefixes stay: those
+	// are ordinary str literals and do document.
+	if p := pyStringPrefix(str, lang, src); strings.ContainsAny(p, "fFbB") {
+		return ""
+	}
 	return firstDocLine(pyStringContent(str, lang, src))
+}
+
+// pyStringPrefix returns the letter prefix of a string literal ("f", "rb", "" …).
+// The grammar exposes the opening delimiter as a string_start child holding the
+// prefix plus the quote characters; older grammars without that child fall back
+// to reading the leading letters of the literal text.
+func pyStringPrefix(str *ts.Node, lang *ts.Language, src []byte) string {
+	text := ""
+	for i := 0; i < str.NamedChildCount(); i++ {
+		if c := str.NamedChild(i); c.Type(lang) == "string_start" {
+			text = c.Text(src)
+			break
+		}
+	}
+	if text == "" {
+		text = str.Text(src)
+	}
+	return text[:len(text)-len(strings.TrimLeft(text, "rRbBuUfF"))]
 }
 
 // pyStringContent strips a Python string literal down to its text: the tree-

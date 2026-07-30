@@ -104,6 +104,58 @@ def gamma():
 	}
 }
 
+// TestPythonDocstringPrefixes pins which string PREFIXES make a first-statement
+// literal a docstring. CPython sets __doc__ only from a plain str constant, so
+// an f-string or a bytes literal must yield nothing — the f-string case doubly
+// so, because concatenating only its literal segments would silently drop each
+// {interpolation} and report text the author never wrote. r/u prefixes are
+// ordinary str literals and must still document.
+func TestPythonDocstringPrefixes(t *testing.T) {
+	const src = `def fstr():
+    f"Hello {name} world."
+    return 1
+
+def bytesdoc():
+    b"bytes are not docs."
+    return 2
+
+def rawdoc():
+    r"Raw doc.\n"
+    return 3
+
+def udoc():
+    u"Unicode doc."
+    return 4
+
+def concat():
+    "one " "two"
+    return 5
+`
+	fs, err := NewPythonParser().Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(fs.SymbolDocs) == 0 {
+		t.Skip("Python grammar unavailable in this build (grammar_subset)")
+	}
+	for _, tc := range []struct{ key, want string }{
+		{"function:rawdoc", `Raw doc.\n`},
+		{"function:udoc", "Unicode doc."},
+	} {
+		if got := fs.SymbolDocs[tc.key]; got != tc.want {
+			t.Errorf("%s doc = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+	// concat is an implicitly-concatenated literal: the grammar emits
+	// concatenated_string, not string, so it records nothing. Pinned as known
+	// behaviour — a missing doc is safe, an invented one is not.
+	for _, key := range []string{"function:fstr", "function:bytesdoc", "function:concat"} {
+		if got, ok := fs.SymbolDocs[key]; ok {
+			t.Errorf("%s must carry no doc, got %q", key, got)
+		}
+	}
+}
+
 // TestFirstDocLineTruncates pins the length cap: a long first line is truncated,
 // never dropped, so the field still orients.
 func TestFirstDocLineTruncates(t *testing.T) {

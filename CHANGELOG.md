@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-07-30
+
+### Changed
+- parser: an f-string or bytes literal is not a Python docstring (#244 follow-up)
+
 ## [0.20.0] — 2026-07-30
 
 ### Changed

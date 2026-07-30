@@ -267,14 +267,22 @@ func resolveDeclShape(
 	if !s.usable() {
 		return zero, false
 	}
-	// Last abstain: this edit may be rewriting the signature WITHOUT the hunk
-	// containing a whole `def` line — a MultiEdit that changes one line of a
-	// multi-line parameter list, then adds a call using the new keyword. The
-	// declaration read above would be pre-edit and would flag a valid call.
-	if removedText != "" {
-		if matchesPyDef(removedText, name) || removesSignatureLine(declLines, s.Line, removedText) {
-			return zero, false
-		}
+	// Last abstain: this edit may be changing the declaration WITHOUT the hunk
+	// containing a whole `def` line — a MultiEdit that rewrites one line of a
+	// multi-line parameter list and then adds a call using the new keyword, or one
+	// that deletes the declaration outright. The shape read above is pre-edit in
+	// both cases, and would flag a valid call.
+	//
+	// A separate `matchesPyDef(removedText, name)` test stood here and was removed
+	// as redundant, on the mutation harness's evidence: deleting or rewriting a
+	// declaration necessarily removes a line of its own signature, so
+	// removesSignatureLine already fires wherever that test would have, and no input
+	// could distinguish them. The two remaining ways it could have mattered are both
+	// unreachable — a shape whose signature span does not balance is already
+	// Unknowable and returned above, and s.Line always exists in declLines because s
+	// came from an index built over them.
+	if removedText != "" && removesSignatureLine(declLines, s.Line, removedText) {
+		return zero, false
 	}
 	return s, true
 }

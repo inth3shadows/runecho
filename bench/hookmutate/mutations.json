@@ -309,13 +309,6 @@
       "desc": "a signature rewritten by this edit is read from the stale on-disk copy"
     },
     {
-      "id": "callshape/removed-signature-line",
-      "file": "internal/guard/callshapecheck.go",
-      "find": "\t\tif matchesPyDef(removedText, name) || removesSignatureLine(declLines, s.Line, removedText) {",
-      "replace": "\t\tif matchesPyDef(removedText, name) {",
-      "desc": "a parameter-list line deleted by this edit no longer abstains"
-    },
-    {
       "id": "callshape/wholefile-read",
       "file": "internal/guard/callshapecheck.go",
       "find": "\tdeclLines := wholeFile\n\tif addedIsWholeFile {\n\t\tdeclLines = added\n\t}",
@@ -351,11 +344,11 @@
       "desc": "a `/` truncates the accepted set AND stops collecting the keyword-callable parameters after it"
     },
     {
-      "id": "callshape/removed-def-abstain",
+      "id": "callshape/removed-signature-line",
       "file": "internal/guard/callshapecheck.go",
-      "find": "\t\tif matchesPyDef(removedText, name) || removesSignatureLine(declLines, s.Line, removedText) {",
-      "replace": "\t\tif removesSignatureLine(declLines, s.Line, removedText) {",
-      "desc": "a declaration this edit removes or rewrites wholesale no longer abstains"
+      "find": "\tif removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
+      "replace": "\tif false && removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
+      "desc": "a declaration this edit rewrites or deletes no longer abstains"
     }
   ]
 }

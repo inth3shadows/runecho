@@ -33,6 +33,10 @@ import (
 // unqualified kwarg-bearing call site whose callee has exactly one module-level
 // `def` IN THAT FILE — the population this check restricts itself to.
 //
+// A `**splat` among the call's keywords is NOT skipped: an explicitly named
+// keyword must be accepted whether or not a splat sits beside it, so those sites
+// are adjudicated like any other.
+//
 // It deliberately models FEWER abstentions than the Go side (it ignores shadowing
 // by imports, reassignment and parameters). That asymmetry is safe in one
 // direction only, which is the direction wanted: a site the oracle considers
@@ -89,8 +93,6 @@ for root, dirs, files in os.walk(sys.argv[1]):
             named = [k.arg for k in n.keywords if k.arg is not None]
             if not named:
                 continue
-            if any(k.arg is None for k in n.keywords):
-                continue  # **kwargs at the call — accepts anything
             shapes = defs.get(n.func.id)
             if not shapes or len(set(shapes)) != 1:
                 continue  # undeclared here, or disagreeing branches

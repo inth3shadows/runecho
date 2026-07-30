@@ -103,13 +103,19 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	// read every line of the file. Most edits have no candidate at all, and those
 	// must cost the hunk scan and nothing more. Measured: reversing this order made
 	// a candidate-free edit to a 2677-line file cost 0.37 ms instead of 0.02 ms.
+	// A `**splat` at the call is deliberately NOT an abstention here, though the
+	// first draft made it one. `foo(bogus=1, **cfg)` is a TypeError in exactly the
+	// same way `foo(bogus=1)` is: a splat ADDS keywords, it never excuses an
+	// explicitly named one. Abstaining on it cost reach and bought nothing, and the
+	// mutation harness is what exposed it — the abstain had no fixture that could
+	// fail, because a call whose only argument is `**cfg` is already covered by the
+	// no-kwargs arm below. A splat DOES matter to an arity or required-argument
+	// check, so this reasoning does not carry to a later slice.
 	var candidates []CallShape
 	for _, c := range ExtractCallShapes(lang, added, seedFunc(lang, fd)) {
 		switch {
 		case len(c.Kwargs) == 0:
 			// Nothing to compare — positional arity is a later slice.
-		case c.HasKwStar:
-			// `foo(**opts)` may supply any keyword at runtime.
 		case c.HasLambda, c.Unreliable:
 			// The extractor says its own Pos/Kwargs are not trustworthy here.
 		default:

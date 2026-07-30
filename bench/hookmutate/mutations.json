@@ -295,13 +295,6 @@
       "desc": "the upward walk never recognises a decorator"
     },
     {
-      "id": "callshape/call-kwstar-abstain",
-      "file": "internal/guard/callshapecheck.go",
-      "find": "\t\tcase c.HasKwStar:",
-      "replace": "\t\tcase c.HasKwStar && false:",
-      "desc": "a call passing **kwargs is compared anyway"
-    },
-    {
       "id": "callshape/shadow-import-arm",
       "file": "internal/guard/callshapecheck.go",
       "find": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\tout[n] = struct{}{}\n\t}",
@@ -342,6 +335,27 @@
       "find": "\t\tcase seg == \"*\":\n\t\t\t// Start of the keyword-only region; binds no name.",
       "replace": "\t\tcase seg == \"*\":\n\t\t\treturn keywords, hasKwStar, false",
       "desc": "a bare `*` ends collection, dropping keyword-only parameters"
+    },
+    {
+      "id": "callshape/accepted-membership",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\t\tif _, okKw := accepted[kw]; okKw {\n\t\t\t\tcontinue\n\t\t\t}",
+      "replace": "\t\t\tif _, okKw := accepted[kw]; !okKw {\n\t\t\t\tcontinue\n\t\t\t}",
+      "desc": "the accepted-set test is inverted: correct calls are reported and wrong ones are not"
+    },
+    {
+      "id": "callshape/positional-only-stops-collection",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"/\":\n\t\t\tkeywords = nil // everything before is positional-only",
+      "replace": "\t\tcase seg == \"/\":\n\t\t\treturn nil, hasKwStar, false",
+      "desc": "a `/` truncates the accepted set AND stops collecting the keyword-callable parameters after it"
+    },
+    {
+      "id": "callshape/removed-def-abstain",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\tif matchesPyDef(removedText, name) || removesSignatureLine(declLines, s.Line, removedText) {",
+      "replace": "\t\tif removesSignatureLine(declLines, s.Line, removedText) {",
+      "desc": "a declaration this edit removes or rewrites wholesale no longer abstains"
     }
   ]
 }

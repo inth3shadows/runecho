@@ -501,8 +501,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// gate on this: it reads the whole pre-edit file itself (wholeFileText), so
 	// including duplicateEnabled() here would needlessly keep this fast-path
 	// guard from firing on an E5-only pure-deletion edit.
+	// The call-shape check needs it too, for a different reason: an edit that
+	// rewrites a declaration's parameter list makes the on-disk signature stale by
+	// exactly this edit, and comparing a call against the stale one is a false
+	// positive (see resolveDeclShape).
 	var removedText string
-	if danglingEnabled() || droppedImportEnabled() {
+	if danglingEnabled() || droppedImportEnabled() || callShapeEnabled() {
 		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
 	}
 	// A full-file-deletion Write (empty content) has text=="" and — since Write
@@ -687,6 +691,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// pre-fold snapshot taken above.
 	violations = append(violations, fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)...)
 
+	// Call-shape agreement (RUNECHO_GUARD_CALLSHAPE=1, default off): a keyword
+	// argument the declaration does not accept. Kept out of `violations` on purpose
+	// — a Violation means "this name does not resolve", and folding a
+	// resolves-but-misused finding into that list would make the ask's first line
+	// ("not found in the indexed code") false. It gets its own section below, like
+	// dangling and duplicate do. Store-free: it resolves against the same file's own
+	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
+	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
+	callShapes := callShapeMismatches(lang, fileLines, diffs[0], payload.ToolName, removedText)
+
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
 	// Write, which replaces wholesale so the old file is the only record of what it
@@ -761,7 +775,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 	}
 
-	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 {
+	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 && len(callShapes) == 0 {
 		// Every FACT check passed. The contract question is independent of all of
 		// them — a perfectly correct edit to a file the session said it would not
 		// touch is precisely the case this check exists for — so it is answered
@@ -847,9 +861,20 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			syms = append(syms, d.Symbol)
 		}
 	}
+	if len(callShapes) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d keyword argument(s) the declaration does not accept — the symbol resolves but the call does not match it:\n", len(callShapes))
+		for _, m := range callShapes {
+			fmt.Fprintf(&sb, "  snippet line %d: %s(%s=…)%s — %s is declared at %s %d and accepts: %s\n",
+				m.LineNo, m.Callee, m.Keyword, suggestionSuffix(m.Suggestions), m.Callee,
+				declLineLabel(m.DeclLineIsSnippet), m.DeclLine, acceptedList(m.Accepted))
+			// The CALLEE is the symbol at issue, not the keyword: guardstats and
+			// fpreport aggregate by symbol, and a keyword name is not one.
+			syms = append(syms, m.Callee)
+		}
+	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0)), Symbols: syms, LearnSymbols: learnSyms}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0, len(callShapes) > 0)), Symbols: syms, LearnSymbols: learnSyms}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

@@ -265,6 +265,125 @@
       "find": "\t\t\tif len(others) > maxDanglingReferrers {",
       "replace": "\t\t\tif len(others) > 1 {",
       "desc": "the referrer list is truncated early — the ask still fires, so only a fixture asserting the referrer PATHS can see it"
+    },
+    {
+      "id": "callshape/flag-gate",
+      "file": "cmd/runecho-guard/callshape.go",
+      "find": "func callShapeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CALLSHAPE\") == \"1\" }",
+      "replace": "func callShapeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CALLSHAPE\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "callshape/decl-kwstar-abstain",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Decorated && !s.Unknowable }",
+      "replace": "func (s pyDeclShape) usable() bool { return !s.Decorated && !s.Unknowable }",
+      "desc": "a **kwargs declaration no longer treated as accepting every keyword"
+    },
+    {
+      "id": "callshape/decl-decorated-abstain",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Decorated && !s.Unknowable }",
+      "replace": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Unknowable }",
+      "desc": "a decorated declaration's visible signature is trusted"
+    },
+    {
+      "id": "callshape/decorator-walk",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tif strings.HasPrefix(t, \"@\") {\n\t\t\treturn true\n\t\t}\n\t\treturn false",
+      "replace": "\t\tif false && strings.HasPrefix(t, \"@\") {\n\t\t\treturn true\n\t\t}\n\t\treturn false",
+      "desc": "the upward walk never recognises a decorator"
+    },
+    {
+      "id": "callshape/shadow-import-arm",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\tout[n] = struct{}{}\n\t}",
+      "replace": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\t_ = n\n\t}",
+      "desc": "an import binding the callee name no longer shadows the local def"
+    },
+    {
+      "id": "callshape/added-text-precedence",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tif !addedIsWholeFile && matchesPyDef(addedText, name) {",
+      "replace": "\tif false && matchesPyDef(addedText, name) {",
+      "desc": "a signature rewritten by this edit is read from the stale on-disk copy"
+    },
+    {
+      "id": "callshape/wholefile-read",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tdeclLines := wholeFile\n\tif addedIsWholeFile {\n\t\tdeclLines = added\n\t}",
+      "replace": "\tdeclLines := added\n\t_ = wholeFile",
+      "desc": "declarations are read from the hunk only, never from the pre-edit file"
+    },
+    {
+      "id": "callshape/positional-only-cut",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"/\":\n\t\t\tkeywords = nil // everything before is positional-only",
+      "replace": "\t\tcase seg == \"/\":\n\t\t\t// mutated: positional-only parameters stay keyword-callable",
+      "desc": "a `/` no longer removes positional-only names from the accepted set"
+    },
+    {
+      "id": "callshape/keyword-only-region",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"*\":\n\t\t\t// Start of the keyword-only region; binds no name.",
+      "replace": "\t\tcase seg == \"*\":\n\t\t\treturn keywords, hasKwStar, false",
+      "desc": "a bare `*` ends collection, dropping keyword-only parameters"
+    },
+    {
+      "id": "callshape/accepted-membership",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\t\tif _, okKw := accepted[kw]; okKw {\n\t\t\t\tcontinue\n\t\t\t}",
+      "replace": "\t\t\tif _, okKw := accepted[kw]; !okKw {\n\t\t\t\tcontinue\n\t\t\t}",
+      "desc": "the accepted-set test is inverted: correct calls are reported and wrong ones are not"
+    },
+    {
+      "id": "callshape/positional-only-stops-collection",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"/\":\n\t\t\tkeywords = nil // everything before is positional-only",
+      "replace": "\t\tcase seg == \"/\":\n\t\t\treturn nil, hasKwStar, false",
+      "desc": "a `/` truncates the accepted set AND stops collecting the keyword-callable parameters after it"
+    },
+    {
+      "id": "callshape/removed-signature-line",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tif removedText != \"\" && removesSignatureLine(declIndex, s.Line, removedText) {",
+      "replace": "\tif false && removedText != \"\" && removesSignatureLine(declIndex, s.Line, removedText) {",
+      "desc": "a declaration this edit rewrites or deletes no longer abstains"
+    },
+    {
+      "id": "callshape/added-text-decorator-fold",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated {",
+      "replace": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated && false {",
+      "desc": "a decorator outside the hunk is no longer folded into the added-text shape"
+    },
+    {
+      "id": "callshape/dynamic-marker-boundary",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tif prev := masked[at-1]; !isWordByte(prev) && prev != '.' {",
+      "replace": "\t\tif prev := masked[at-1]; true || (!isWordByte(prev) && prev != '.') {",
+      "desc": "a dynamic-binding marker matches as a bare substring again, darkening whole files"
+    },
+    {
+      "id": "callshape/rebinding-forms",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tfor n := range idx.rebindings() {\n\t\tout[n] = struct{}{}\n\t}",
+      "replace": "\tfor n := range idx.rebindings() {\n\t\t_ = n\n\t}",
+      "desc": "a for/with-as/except-as/comprehension/walrus target no longer shadows the callee"
+    },
+    {
+      "id": "callshape/nested-def-shadow",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tif declIndex.shadowedByNestedDef(name) {",
+      "replace": "\tif false && declIndex.shadowedByNestedDef(name) {",
+      "desc": "a nested or conditionally-declared def of the same name no longer abstains"
+    },
+    {
+      "id": "callshape/method-is-not-a-shadow",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\treturn rePyClassAnyIndent.MatchString(line)",
+      "replace": "\t\treturn false && rePyClassAnyIndent.MatchString(line)",
+      "desc": "a class method counts as a shadow, abstaining on a method and module function sharing a name"
     }
   ]
 }

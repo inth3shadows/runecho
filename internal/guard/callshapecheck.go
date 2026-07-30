@@ -248,6 +248,26 @@ func resolveDeclShape(
 	// positive rather than a corner case.
 	if !addedIsWholeFile && matchesPyDef(addedText, name) {
 		s, ok := soleShape(addedIndex.shapesFor(name))
+		if ok {
+			// The hunk shows the parameter list but CANNOT show what sits above the
+			// `def`. An Edit whose old_string begins at the def line leaves the
+			// decorator in the unchanged part of the file, so decoratedAbove finds
+			// nothing to walk and reports "undecorated" for a function a wrapper may
+			// have replaced — a false positive, and on the intersection of two shapes
+			// this code calls routine (editing a signature; decorated functions).
+			// Fold the PRE-EDIT file's answer in, which is where the decorator still
+			// is. Decoratedness is the only property that lives outside the signature,
+			// so nothing else needs this treatment.
+			//
+			// An edit that REMOVES a decorator therefore over-abstains for one edit.
+			// That is the safe direction and the rarer shape.
+			for _, pre := range declIndex.shapesFor(name) {
+				if pre.Decorated {
+					s.Decorated = true
+					break
+				}
+			}
+		}
 		if !ok {
 			// The hunk shows a `def name(` but no single parseable signature (a
 			// truncated parameter list, or two disagreeing branches). Its true shape

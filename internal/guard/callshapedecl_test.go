@@ -376,3 +376,44 @@ func TestPyDeclSignatureCeiling(t *testing.T) {
 			pyDeclMaxSignatureLines, got.Keywords)
 	}
 }
+
+func TestPyDeclDynamicMarkerNeedsAWordBoundary(t *testing.T) {
+	// A bare strings.Contains made `def get_locals(a, b)` set dynamic=true, which
+	// returns nil for the WHOLE file — an ordinary helper name silently switched the
+	// check off for its entire module. Found by adversarial review.
+	for _, tc := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"helper name ending in locals", "def get_locals(a, b):\n    return a\n", false},
+		{"helper name ending in eval", "def retrieval(a):\n    return a\n", false},
+		{"helper name ending in exec", "def do_exec(a):\n    return a\n", false},
+		{"helper name ending in globals", "def merge_globals(a):\n    return a\n", false},
+		{"the real builtin still counts", "def f(a):\n    globals()[\"f\"] = a\n", true},
+		{"the real builtin at line start", "eval(src)\n", true},
+		// A method call cannot rebind a module-level name, which is the only reason
+		// these markers abstain in the first place.
+		{"attribute access is a method, not the builtin", "def f(a):\n    return self.eval(a)\n", false},
+		{"builtin after an operator", "def f(a):\n    return 1 + eval(a)\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newPyDeclIndex(TextToAddedLines(tc.src)).dynamic; got != tc.want {
+				t.Errorf("dynamic = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPyDeclTabAfterDefIsStillADeclaration(t *testing.T) {
+	// Both def regexes accept `def[ \t]+`, so the cheap prefilter must not require a
+	// literal space — a tab-separated declaration would be invisible to resolution
+	// AND absent from the parameter shadow set.
+	got := declShapeOf(t, "def\tfetch(url, timeout=1):\n    return url\n", "fetch")
+	if strings.Join(got.Keywords, ",") != "url,timeout" {
+		t.Errorf("Keywords = %v, want [url timeout]", got.Keywords)
+	}
+	if _, ok := newPyDeclIndex(TextToAddedLines("def\thelper(fetch):\n    pass\n")).params()["fetch"]; !ok {
+		t.Errorf("a tab-separated def's parameters must reach the shadow set")
+	}
+}

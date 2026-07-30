@@ -199,7 +199,7 @@
   },
   {
     "name": "python-callshape-edit-removes-the-declaration-clean",
-    "desc": "the shape that makes matchesPyDef(removedText) load-bearing, and the only one that does: the hunk DELETES `def fetch` and rewrites a call, so the added text carries no `def` line (the precedence branch never engages) while the pre-edit file still shows the old signature. Comparing against a declaration this edit is removing is meaningless — a call to a deleted def is the dangling-refs check's business. The add-a-param fixtures cannot cover this: their hunks contain the whole new `def`, so they return from the added-text branch before the removed-text guard is ever reached",
+    "desc": "the hunk DELETES `def fetch` and rewrites a call, so the added text carries no `def` line (the precedence branch never engages) while the pre-edit file still shows the old signature. Comparing against a declaration this edit is removing is meaningless — a call to a deleted def is the dangling-refs check's business. removesSignatureLine is what abstains, matching the deleted `def` line's own trimmed text; the parameter-line fixture reaches the same guard through a different shape, and this one is the whole-declaration case",
     "check": "callshape",
     "flags": [
       "RUNECHO_GUARD_CALLSHAPE=1"
@@ -209,6 +209,20 @@
     "tool": "Edit",
     "edit_old": "def fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
     "edit_new": "def go():\n    return fetch(\"u\", deadline=5)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-edit-touches-decorated-signature-clean",
+    "desc": "the false positive an adversarial review found: an Edit whose hunk is the `def` line of a DECORATED function. The hunk cannot show the `@retry` above it, so the added-text precedence branch would read the function as undecorated and compare against a signature a wrapper may have replaced. Every other decorator fixture is a Write, where the decorator is always visible, so none of them can reach this path",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/decorated_edit.py",
+    "old": "@retry\ndef fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "tool": "Edit",
+    "edit_old": "def fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "edit_new": "def fetch(url, timeout=1, retries=0):\n    return url\n\ndef go():\n    return fetch(\"u\", attempts=3)\n",
     "expect_ask": false
   }
 ]

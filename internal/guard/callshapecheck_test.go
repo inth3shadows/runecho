@@ -428,3 +428,30 @@ func TestMatchesPyDefRegexMetacharactersAreLiteral(t *testing.T) {
 		t.Errorf("absent name must not match")
 	}
 }
+
+func TestPyCallShapeMismatchesEditCannotSeeDecoratorAbove(t *testing.T) {
+	// An adversarial review found this: an Edit whose hunk starts AT the `def` line
+	// of a decorated function. The added-text precedence branch reads the signature
+	// from the hunk, and the hunk cannot show the `@retry` sitting above it in the
+	// unchanged file — so without folding the pre-edit file's answer in, the
+	// function reads as undecorated and a wrapper's own keyword set gets flagged.
+	//
+	// It is the intersection of two shapes this check calls routine: editing a
+	// signature, and a decorated function (Flask routes, @retry, pytest fixtures).
+	// Every other decorator test is a Write, where the decorator is always visible.
+	file := "@retry\ndef fetch(url, timeout=1):\n    return url\n"
+	added := "def fetch(url, timeout=1, retries=0):\n    return url\n\ndef go():\n    return fetch(\"u\", attempts=3)\n"
+	got := PyCallShapeMismatches(LangPython, TextToAddedLines(file),
+		FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)},
+		TextToAddedLines("def fetch(url, timeout=1):\n    return url\n"), false)
+	assertMismatches(t, got, nil)
+
+	// The control: byte-identical hunk, pre-edit file with no decorator. It asks, so
+	// the silence above is attributable to the decorator and not to the shape of the
+	// hunk.
+	fileNoDeco := "def fetch(url, timeout=1):\n    return url\n"
+	got = PyCallShapeMismatches(LangPython, TextToAddedLines(fileNoDeco),
+		FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)},
+		TextToAddedLines(fileNoDeco), false)
+	assertMismatches(t, got, []string{"fetch:attempts"})
+}

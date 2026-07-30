@@ -349,6 +349,20 @@
       "find": "\tif removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
       "replace": "\tif false && removedText != \"\" && removesSignatureLine(declLines, s.Line, removedText) {",
       "desc": "a declaration this edit rewrites or deletes no longer abstains"
+    },
+    {
+      "id": "callshape/added-text-decorator-fold",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated {",
+      "replace": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated && false {",
+      "desc": "a decorator outside the hunk is no longer folded into the added-text shape"
+    },
+    {
+      "id": "callshape/dynamic-marker-boundary",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tif prev := masked[at-1]; !isWordByte(prev) && prev != '.' {",
+      "replace": "\t\tif prev := masked[at-1]; true || (!isWordByte(prev) && prev != '.') {",
+      "desc": "a dynamic-binding marker matches as a bare substring again, darkening whole files"
     }
   ]
 }

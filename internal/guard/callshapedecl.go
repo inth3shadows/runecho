@@ -141,10 +141,13 @@ func newPyDeclIndex(lines []AddedLine) *pyDeclIndex {
 		if !idx.dynamic && lineIsDynamic(l.Text, s) {
 			idx.dynamic = true
 		}
-		// Cheap substring reject before either regex. A def line must contain "def ",
-		// and running two regexes over every line of a 3000-line file instead cost
-		// 4.4 ms of a ~12 ms hook budget for nothing.
-		if !strings.Contains(s, "def ") {
+		// Cheap substring reject before either regex: running both over every line of
+		// a 3000-line file cost 4.4 ms of a ~12 ms hook budget for nothing. The
+		// needle is "def" and NOT "def " — both regexes accept `def[ \t]+`, so a
+		// tab-separated `def\tname(` would have been invisible to the tighter
+		// prefilter while remaining a real declaration, silently dropping it from
+		// both the resolvable set and the parameter shadow set.
+		if !strings.Contains(s, "def") {
 			return
 		}
 		if m := rePyDefAtColumnZero.FindStringSubmatch(s); m != nil {
@@ -210,11 +213,37 @@ func lineIsDynamic(original, masked string) bool {
 		return true
 	}
 	for _, marker := range callShapeDynamicBinding {
-		if strings.Contains(masked, marker) {
+		if containsCallAt(masked, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// containsCallAt reports whether masked contains marker (an identifier plus its
+// opening paren, e.g. "eval(") as a CALL of that builtin, rather than as the tail
+// of some other name.
+//
+// A plain strings.Contains was wrong in a way that silently switched the whole
+// check off for a file: `def get_locals(a, b)` contains "locals(", so an ordinary
+// helper name darkened every call site in its module. A preceding `.` is excluded
+// too — `self.eval(...)` is a method call, which cannot rebind a module-level
+// name, and that is the only reason these markers abstain at all.
+func containsCallAt(masked, marker string) bool {
+	for i := 0; ; {
+		j := strings.Index(masked[i:], marker)
+		if j < 0 {
+			return false
+		}
+		at := i + j
+		if at == 0 {
+			return true
+		}
+		if prev := masked[at-1]; !isWordByte(prev) && prev != '.' {
+			return true
+		}
+		i = at + 1
+	}
 }
 
 // callShapeDynamicBinding lists constructs that can rebind a module-level name.

@@ -62,7 +62,25 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	exports := []string{}
 	hashes := make(map[string]string)
 	lines := make(map[string]int)
+	docs := make(map[string]string)
 
+	// recordDoc attaches a symbol's doc comment, anchored to its FIRST definition
+	// like recordLine — for the same reason, and so the two never disagree about
+	// which declaration a collapsed name is describing. An empty first line (a
+	// comment group that is only a directive such as //go:generate, which
+	// CommentGroup.Text() strips to nothing) records nothing, leaving the field
+	// absent rather than empty.
+	recordDoc := func(key string, cg *ast.CommentGroup) {
+		if cg == nil {
+			return
+		}
+		if _, ok := docs[key]; ok {
+			return
+		}
+		if d := firstDocLine(cg.Text()); d != "" {
+			docs[key] = d
+		}
+	}
 	// recordLine anchors a symbol at its FIRST definition (parity with Python).
 	recordLine := func(key string, line int) {
 		if _, ok := lines[key]; !ok {
@@ -88,7 +106,14 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	fset := token.NewFileSet()
 	// SkipObjectResolution: we only walk top-level decls, so identifier object
 	// resolution is wasted work. The error is intentionally ignored — see doc.
-	f, _ := parser.ParseFile(fset, "", source, parser.SkipObjectResolution)
+	//
+	// ParseComments is what populates the Doc fields SymbolDocs reads (#244).
+	// It does NOT move any span this parser hashes: FuncDecl.Pos() is the `func`
+	// keyword and GenDecl.Pos() is the `type`/`var`/`const` keyword, both of
+	// which exclude the preceding comment group. Body hashes and start lines are
+	// therefore byte-identical with and without this flag, so enabling it does
+	// not invalidate a single existing snapshot.
+	f, _ := parser.ParseFile(fset, "", source, parser.SkipObjectResolution|parser.ParseComments)
 	if f != nil {
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
@@ -106,8 +131,9 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 				key := "function:" + full
 				recordHash(key, nodeSpan(fset, src, d))
 				recordLine(key, fset.Position(d.Pos()).Line)
+				recordDoc(key, d.Doc)
 			case *ast.GenDecl:
-				collectGenDecl(d, fset, src, &imports, &functions, &classes, &exports, recordLine, recordHash)
+				collectGenDecl(d, fset, src, &imports, &functions, &classes, &exports, recordLine, recordHash, recordDoc)
 			}
 		}
 	}
@@ -125,6 +151,9 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	if len(lines) == 0 {
 		lines = nil
 	}
+	if len(docs) == 0 {
+		docs = nil
+	}
 
 	return FileStructure{
 		Imports:      deduplicate(imports),
@@ -133,6 +162,7 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 		Exports:      deduplicate(exports),
 		SymbolHashes: hashes,
 		SymbolLines:  lines,
+		SymbolDocs:   docs,
 	}, nil
 }
 
@@ -141,7 +171,24 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 // two regex-era bugs for free: `var X, Y = 1, 2` yields both names (a ValueSpec
 // carries all of them), and a `var (...)` / `import (...)` block's boundaries are
 // owned by the AST, so a nested `)` no longer closes the block early.
-func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, functions, classes, exports *[]string, recordLine func(string, int), recordHash func(string, []byte)) {
+func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, functions, classes, exports *[]string, recordLine func(string, int), recordHash func(string, []byte), recordDoc func(string, *ast.CommentGroup)) {
+	// specDoc picks the comment group that documents one spec. A spec's own Doc
+	// wins. Falling back to the GenDecl's is correct ONLY for an unparenthesized
+	// declaration (`// Foo does X` above a bare `type Foo ...`), where the parser
+	// attaches the comment to the GenDecl and leaves TypeSpec.Doc nil. Inside a
+	// `type (...)` / `const (...)` block the GenDecl comment documents the GROUP,
+	// so reusing it would stamp one comment onto every member — the field would
+	// then repeat the same text for a dozen unrelated symbols and stop meaning
+	// anything. d.Lparen is the exact discriminator.
+	specDoc := func(own *ast.CommentGroup) *ast.CommentGroup {
+		if own != nil {
+			return own
+		}
+		if !d.Lparen.IsValid() {
+			return d.Doc
+		}
+		return nil
+	}
 	switch d.Tok {
 	case token.IMPORT:
 		for _, spec := range d.Specs {
@@ -165,6 +212,7 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 			key := "class:" + s.Name.Name
 			recordHash(key, nodeSpan(fset, src, s))
 			recordLine(key, fset.Position(s.Pos()).Line)
+			recordDoc(key, specDoc(s.Doc))
 			// Descend into an interface body so its method signatures become
 			// referenceable as Type.Method (parity with JS/TS interface methods
 			// and Python class methods). Only methods carry Names + a FuncType;
@@ -187,6 +235,9 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 					key := "function:" + full
 					recordHash(key, nodeSpan(fset, src, m))
 					recordLine(key, fset.Position(m.Pos()).Line)
+					// An interface method's comment always attaches to the field
+					// itself; there is no enclosing-group fallback to consider.
+					recordDoc(key, m.Doc)
 				}
 			}
 		}
@@ -202,6 +253,7 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 				}
 				*exports = append(*exports, nm.Name)
 				recordLine("export:"+nm.Name, fset.Position(nm.Pos()).Line)
+				recordDoc("export:"+nm.Name, specDoc(s.Doc))
 			}
 		}
 	}

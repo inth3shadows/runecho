@@ -44,6 +44,14 @@ type Symbol struct {
 	Kind string `json:"kind"`
 	Line int    `json:"line,omitempty"`
 	Hash string `json:"hash,omitempty"`
+	// Doc is the first line of the symbol's doc comment, verbatim and never
+	// generated; empty (and omitted) when the symbol carries none. Unlike every
+	// other field here it describes human text rather than code, so it can drift
+	// from what the symbol actually does — see FileStructure.SymbolDocs for why
+	// it is called "doc" and not "purpose". It is deliberately NOT persisted to
+	// the snapshot store: `structure` reparses live, so the field is always as
+	// fresh as the file, and no migration is needed to ship it.
+	Doc string `json:"doc,omitempty"`
 }
 
 // FileIR represents the parsed structure of a single file. Symbols is the

@@ -30,6 +30,20 @@ type FileStructure struct {
 	// map` (symbol → file:line). Nil for parsers without span info; consumers
 	// render an unknown line as "?".
 	SymbolLines map[string]int
+
+	// SymbolDocs maps "kind:name" to the FIRST line of the doc comment attached
+	// to that symbol — a Go doc comment or a Python docstring — with comment
+	// syntax stripped and length capped (see firstDocLine). Absent from the map
+	// when the symbol carries no doc comment; never synthesized, never a summary
+	// of the code.
+	//
+	// This is the one field in the IR that is NOT derived from code semantics: a
+	// doc comment is human text that can drift from the behaviour it describes.
+	// That asymmetry is why it is called "doc" (the first line of a comment)
+	// rather than "purpose" (verified intent) — consumers must not treat it as
+	// checked against the implementation. Nil for parsers that don't extract
+	// comments and for files whose symbols are all undocumented.
+	SymbolDocs map[string]string
 }
 
 // Parser extracts shallow structural information from source files.

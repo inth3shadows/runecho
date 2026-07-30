@@ -522,7 +522,7 @@ func symbolsFromStructure(s parser.FileStructure, path, src string) []Symbol {
 	add := func(names []string, kind string) {
 		for _, n := range names {
 			key := kind + ":" + n
-			syms = append(syms, Symbol{Name: n, Kind: kind, Line: s.SymbolLines[key], Hash: s.SymbolHashes[key]})
+			syms = append(syms, Symbol{Name: n, Kind: kind, Line: s.SymbolLines[key], Hash: s.SymbolHashes[key], Doc: s.SymbolDocs[key]})
 		}
 	}
 	add(s.Functions, "function")

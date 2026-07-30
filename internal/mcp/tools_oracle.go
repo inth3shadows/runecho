@@ -99,7 +99,7 @@ func structureSchema() map[string]any {
 			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo (see `health`/registry)"},
 			"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional glob filters; return only matching files (e.g. \"internal/mcp/**\" or \"*.go\"). `**` matches across directories. Omit for the whole repo."},
 			"detail": map[string]any{"type": "string", "enum": []string{"tree", "symbols", "hashes", "full"},
-				"description": "tree = file paths + symbol counts only (cheapest); symbols (default) = per-file symbols[] (name/kind/line) + refs; hashes = symbols plus each symbol's content hash (~2.5x the tokens; only needed to detect body-level drift, which `hash`/`diff`/`status` answer far more cheaply); full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
+				"description": "tree = file paths + symbol counts only (cheapest); symbols (default) = per-file symbols[] (name/kind/line, plus `doc` — the verbatim first line of the symbol's doc comment where it has one, absent otherwise; it is the one field NOT verified against the code, so treat it as what the author wrote, not as checked intent) + refs; hashes = symbols plus each symbol's content hash (~2.5x the tokens; only needed to detect body-level drift, which `hash`/`diff`/`status` answer far more cheaply); full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
 		},
 		"required": []string{"repo"},
 	}

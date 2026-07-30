@@ -97,7 +97,7 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 
 	imports, exports, hasAll := pyImportsAndExports(source)
-	functions, classes, hashes, lines := pySymbolsFromAST(source)
+	functions, classes, hashes, lines, docs := pySymbolsFromAST(source)
 
 	// When __all__ is absent, a module's public surface is conventionally its
 	// non-underscore top-level names (the rule `from m import *`, PEP 8, and
@@ -122,6 +122,7 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 		Exports:      deduplicate(exports),
 		SymbolHashes: hashes,
 		SymbolLines:  lines,
+		SymbolDocs:   docs,
 	}, nil
 }
 
@@ -203,7 +204,7 @@ func isPyPublicTopLevel(qualified string) bool {
 // members don't otherwise surface (e.g. an edited class-level field) is still
 // detected as a modification. lines carries each symbol's 1-based start line, keyed
 // "kind:<qualified name>", for the repo map.
-func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int) {
+func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int, docs map[string]string) {
 	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
 	// input; a panic here would otherwise propagate through parseFile→Generate
 	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
@@ -213,7 +214,7 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "runecho: Python parse panicked (%v); AST symbols for this file disabled\n", r)
-			functions, classes, hashes, lines = nil, nil, nil, nil
+			functions, classes, hashes, lines, docs = nil, nil, nil, nil, nil
 		}
 	}()
 	lang := pythonLanguage()
@@ -221,22 +222,23 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 		// Grammar unavailable (e.g. a grammar_subset build that omitted Python).
 		// Degrade to no AST symbols rather than panicking; imports/exports still
 		// come from the regex pass.
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	src := []byte(source)
 	// Reject pathologically-nested input before the super-linear tree-sitter
 	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: Python source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	hashes = make(map[string]string)
 	lines = make(map[string]int)
+	docs = make(map[string]string)
 
 	// recordHash stores a function's body hash. If the qualified name already has
 	// one (e.g. an @property getter/setter/deleter, or conditional def branches —
@@ -257,6 +259,18 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 			lines[key] = line
 		}
 	}
+	// recordDoc anchors a docstring to the FIRST definition, like recordLine —
+	// so a name that collapses several defs (@property getter/setter, or
+	// conditional def branches) reports the doc belonging to the same
+	// declaration recordLine points at, never a later variant's.
+	recordDoc := func(key, doc string) {
+		if doc == "" {
+			return
+		}
+		if _, ok := docs[key]; !ok {
+			docs[key] = doc
+		}
+	}
 
 	// record handles a function/class definition node, attributing it to spanNode
 	// for the hashed body and start line. spanNode differs from defNode only for a
@@ -269,19 +283,25 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 			return
 		}
 		full := qualify(prefix, name)
+		var key string
 		switch defNode.Type(lang) {
 		case "function_definition":
 			functions = append(functions, full)
-			recordHash("function:"+full, src[spanNode.StartByte():spanNode.EndByte()])
-			recordLine("function:"+full, int(spanNode.StartPoint().Row)+1)
+			key = "function:" + full
 		case "class_definition":
 			classes = append(classes, full)
-			recordHash("class:"+full, src[spanNode.StartByte():spanNode.EndByte()])
-			recordLine("class:"+full, int(spanNode.StartPoint().Row)+1)
+			key = "class:" + full
 		default:
 			return
 		}
+		recordHash(key, src[spanNode.StartByte():spanNode.EndByte()])
+		recordLine(key, int(spanNode.StartPoint().Row)+1)
 		if body := defNode.ChildByFieldName("body", lang); body != nil {
+			// The docstring is read from defNode's body, not spanNode's: for a
+			// decorated definition spanNode is the decorator-inclusive wrapper,
+			// whose "body" field is the inner definition rather than the suite
+			// that actually holds the docstring.
+			recordDoc(key, pyDocstring(body, lang, src))
 			walk(body, full, depth+1)
 		}
 	}
@@ -321,7 +341,61 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 	if len(lines) == 0 {
 		lines = nil
 	}
-	return functions, classes, hashes, lines
+	if len(docs) == 0 {
+		docs = nil
+	}
+	return functions, classes, hashes, lines, docs
+}
+
+// pyDocstring returns the first line of the docstring opening a def/class body,
+// or "" when the body does not start with one.
+//
+// A docstring is the FIRST statement of the suite and must be a bare string
+// expression. Both halves matter: a string appearing anywhere later is an
+// ordinary expression statement Python discards, and a first statement that is
+// an assignment or a call is not a docstring however string-like it looks. This
+// checks named-child 0 only, so an incidental string mid-body can never be
+// mistaken for documentation.
+func pyDocstring(body *ts.Node, lang *ts.Language, src []byte) string {
+	if body.NamedChildCount() == 0 {
+		return ""
+	}
+	// Two node shapes are accepted because grammars disagree about whether a bare
+	// string statement keeps its expression_statement wrapper: the vendored
+	// grammar flattens it to a bare `string` node, others wrap it. Handling both
+	// means a grammar bump cannot silently turn this field off — which is exactly
+	// the failure a type-name check makes easy to ship and hard to notice.
+	stmt := body.NamedChild(0)
+	str := stmt
+	if t := stmt.Type(lang); t == "expression_statement" || t == "expression_stmt" {
+		if stmt.NamedChildCount() == 0 {
+			return ""
+		}
+		str = stmt.NamedChild(0)
+	}
+	if str.Type(lang) != "string" {
+		return ""
+	}
+	return firstDocLine(pyStringContent(str, lang, src))
+}
+
+// pyStringContent strips a Python string literal down to its text: the tree-
+// sitter grammar exposes the body between the quotes as string_content children,
+// so concatenating them drops the quotes AND any prefix (r/b/f/u) without this
+// code having to know the prefix set or match quote styles itself. Older
+// grammars that expose no such child fall back to trimming quote characters,
+// which is imprecise for prefixed literals but never wrong about the text.
+func pyStringContent(str *ts.Node, lang *ts.Language, src []byte) string {
+	var sb strings.Builder
+	for i := 0; i < str.NamedChildCount(); i++ {
+		if c := str.NamedChild(i); c.Type(lang) == "string_content" {
+			sb.WriteString(c.Text(src))
+		}
+	}
+	if sb.Len() > 0 {
+		return sb.String()
+	}
+	return strings.Trim(str.Text(src), "\"'")
 }
 
 func qualify(prefix, name string) string {

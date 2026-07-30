@@ -61,23 +61,25 @@ func TestHookOldText(t *testing.T) {
 
 func TestAskReason(t *testing.T) {
 	cases := []struct {
-		v, d, i, u bool
-		want       string
+		v, d, i, u, c bool
+		want          string
 	}{
-		{true, false, false, false, "violations"},
-		{false, true, false, false, "dangling"},
-		{false, false, true, false, "dropped-import"},
-		{false, false, false, true, "duplicate-symbol"},
-		{true, true, false, false, "violations+dangling"},
-		{true, false, true, false, "violations+dropped-import"},
-		{true, false, false, true, "violations+duplicate-symbol"},
-		{false, true, true, false, "dangling+dropped-import"},
-		{true, true, true, true, "violations+dangling+dropped-import+duplicate-symbol"},
-		{false, false, false, false, "violations"}, // not called in practice when all false
+		{true, false, false, false, false, "violations"},
+		{false, true, false, false, false, "dangling"},
+		{false, false, true, false, false, "dropped-import"},
+		{false, false, false, true, false, "duplicate-symbol"},
+		{false, false, false, false, true, "call-shape"},
+		{true, true, false, false, false, "violations+dangling"},
+		{true, false, true, false, false, "violations+dropped-import"},
+		{true, false, false, true, false, "violations+duplicate-symbol"},
+		{true, false, false, false, true, "violations+call-shape"},
+		{false, true, true, false, false, "dangling+dropped-import"},
+		{true, true, true, true, true, "violations+dangling+dropped-import+duplicate-symbol+call-shape"},
+		{false, false, false, false, false, "violations"}, // not called in practice when all false
 	}
 	for _, c := range cases {
-		if got := askReason(c.v, c.d, c.i, c.u); got != c.want {
-			t.Errorf("askReason(%v,%v,%v,%v) = %q, want %q", c.v, c.d, c.i, c.u, got, c.want)
+		if got := askReason(c.v, c.d, c.i, c.u, c.c); got != c.want {
+			t.Errorf("askReason(%v,%v,%v,%v,%v) = %q, want %q", c.v, c.d, c.i, c.u, c.c, got, c.want)
 		}
 	}
 }

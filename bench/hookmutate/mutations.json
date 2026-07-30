@@ -265,6 +265,83 @@
       "find": "\t\t\tif len(others) > maxDanglingReferrers {",
       "replace": "\t\t\tif len(others) > 1 {",
       "desc": "the referrer list is truncated early — the ask still fires, so only a fixture asserting the referrer PATHS can see it"
+    },
+    {
+      "id": "callshape/flag-gate",
+      "file": "cmd/runecho-guard/callshape.go",
+      "find": "func callShapeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CALLSHAPE\") == \"1\" }",
+      "replace": "func callShapeEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_CALLSHAPE\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "callshape/decl-kwstar-abstain",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Decorated && !s.Unknowable }",
+      "replace": "func (s pyDeclShape) usable() bool { return !s.Decorated && !s.Unknowable }",
+      "desc": "a **kwargs declaration no longer treated as accepting every keyword"
+    },
+    {
+      "id": "callshape/decl-decorated-abstain",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Decorated && !s.Unknowable }",
+      "replace": "func (s pyDeclShape) usable() bool { return !s.HasKwStar && !s.Unknowable }",
+      "desc": "a decorated declaration's visible signature is trusted"
+    },
+    {
+      "id": "callshape/decorator-walk",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tif strings.HasPrefix(t, \"@\") {\n\t\t\treturn true\n\t\t}\n\t\treturn false",
+      "replace": "\t\tif false && strings.HasPrefix(t, \"@\") {\n\t\t\treturn true\n\t\t}\n\t\treturn false",
+      "desc": "the upward walk never recognises a decorator"
+    },
+    {
+      "id": "callshape/call-kwstar-abstain",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\tcase c.HasKwStar:",
+      "replace": "\t\tcase c.HasKwStar && false:",
+      "desc": "a call passing **kwargs is compared anyway"
+    },
+    {
+      "id": "callshape/shadow-import-arm",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\tout[n] = struct{}{}\n\t}",
+      "replace": "\tfor _, n := range ExtractImports(LangPython, lines) {\n\t\t_ = n\n\t}",
+      "desc": "an import binding the callee name no longer shadows the local def"
+    },
+    {
+      "id": "callshape/added-text-precedence",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tif !addedIsWholeFile && matchesPyDef(addedText, name) {",
+      "replace": "\tif false && matchesPyDef(addedText, name) {",
+      "desc": "a signature rewritten by this edit is read from the stale on-disk copy"
+    },
+    {
+      "id": "callshape/removed-signature-line",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\t\tif matchesPyDef(removedText, name) || removesSignatureLine(declLines, s.Line, removedText) {",
+      "replace": "\t\tif matchesPyDef(removedText, name) {",
+      "desc": "a parameter-list line deleted by this edit no longer abstains"
+    },
+    {
+      "id": "callshape/wholefile-read",
+      "file": "internal/guard/callshapecheck.go",
+      "find": "\tdeclLines := wholeFile\n\tif addedIsWholeFile {\n\t\tdeclLines = added\n\t}",
+      "replace": "\tdeclLines := added\n\t_ = wholeFile",
+      "desc": "declarations are read from the hunk only, never from the pre-edit file"
+    },
+    {
+      "id": "callshape/positional-only-cut",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"/\":\n\t\t\tkeywords = nil // everything before is positional-only",
+      "replace": "\t\tcase seg == \"/\":\n\t\t\t// mutated: positional-only parameters stay keyword-callable",
+      "desc": "a `/` no longer removes positional-only names from the accepted set"
+    },
+    {
+      "id": "callshape/keyword-only-region",
+      "file": "internal/guard/callshapedecl.go",
+      "find": "\t\tcase seg == \"*\":\n\t\t\t// Start of the keyword-only region; binds no name.",
+      "replace": "\t\tcase seg == \"*\":\n\t\t\treturn keywords, hasKwStar, false",
+      "desc": "a bare `*` ends collection, dropping keyword-only parameters"
     }
   ]
 }

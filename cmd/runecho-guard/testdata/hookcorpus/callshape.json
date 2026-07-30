@@ -1,0 +1,219 @@
+[
+  {
+    "name": "python-callshape-unaccepted-keyword-asks",
+    "desc": "the headline case: `fetch` resolves, so every existence check passes, but the call passes `timeuot=` and the declaration two lines up accepts only url/timeout. The pre-edit file already defines fetch, so addInFileDefs folds it into the known set — which is what proves this ask comes from call-shape and not from the additive check",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/client.py",
+    "old": "def fetch(url, timeout=10):\n    return url\n",
+    "new": "def fetch(url, timeout=10):\n    return url\n\ndef go():\n    return fetch(\"u\", timeuot=5)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
+  },
+  {
+    "name": "python-callshape-correct-keyword-clean",
+    "desc": "the anti-vacuity control for the case above — byte-identical except the keyword is spelled right. A check that fires on both is worthless, so this is the fixture that fails if the comparison degenerates to 'any kwarg asks'",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/client_ok.py",
+    "old": "def fetch(url, timeout=10):\n    return url\n",
+    "new": "def fetch(url, timeout=10):\n    return url\n\ndef go():\n    return fetch(\"u\", timeout=5)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-decl-takes-kwargs-clean",
+    "desc": "the declaration takes **opts, so it accepts every keyword name and no call can disagree with it. Fails if the HasKwStar abstain is removed — the single largest false-positive source, since **kwargs passthrough is idiomatic",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/passthrough.py",
+    "old": "def fetch(url, **opts):\n    return url\n",
+    "new": "def fetch(url, **opts):\n    return url\n\ndef go():\n    return fetch(\"u\", anything=1)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-decorated-decl-clean",
+    "desc": "a decorator may replace the callable with a wrapper accepting a different set (functools.wraps makes the visible signature a lie), so the accepted set is unknowable. Fails if the Decorated abstain is removed",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/decorated.py",
+    "old": "@retry\ndef fetch(url, timeout=1):\n    return url\n",
+    "new": "@retry\ndef fetch(url, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\", attempts=3)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-keyword-only-param-accepted-clean",
+    "desc": "parameters after a bare `*` are keyword-ONLY, which means they are the most keyword-callable parameters there are. Fails if pyKeywordParams treats the bare `*` as ending the accepted set instead of starting the keyword-only region — an inversion that would ask on every keyword-only API in the repo",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/kwonly.py",
+    "old": "def fetch(url, *, timeout=1, retries=0):\n    return url\n",
+    "new": "def fetch(url, *, timeout=1, retries=0):\n    return url\n\ndef go():\n    return fetch(\"u\", timeout=2, retries=1)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-positional-only-marker-keeps-later-params-clean",
+    "desc": "`/` makes the parameters BEFORE it positional-only; the ones after are still keyword-callable. Paired with the -asks case below: this one fails if the positional_separator handling truncates or abstains the whole list, that one if it stops truncating at all",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/posonly.py",
+    "old": "def fetch(url, /, timeout=1):\n    return url\n",
+    "new": "def fetch(url, /, timeout=1):\n    return url\n\ndef go():\n    return fetch(\"u\", timeout=2)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-shadowing-import-in-file-clean",
+    "desc": "an Edit, so the shadowing `from httpx import fetch` sits OUTSIDE the hunk and can only be seen by reading the pre-edit file. With two candidate fetches the call's target is unknowable, so the check must abstain. Fails if the import arm of pyNonDefBindings is removed, AND fails if the whole-file read is dropped — the hunk alone shows no import. Paired with the control below, whose hunk is byte-identical",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/shadowed.py",
+    "old": "from httpx import fetch\n\ndef fetch(url, timeout=1):\n    return url\n\ndef go():\n    return None\n",
+    "tool": "Edit",
+    "edit_old": "    return None\n",
+    "edit_new": "    return fetch(\"u\", verify=False)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-no-shadow-control-asks",
+    "desc": "the control for the shadowing case: byte-identical hunk, and a pre-edit file with the httpx import removed. It asks. That difference in outcome is what makes the shadow rule attributable to the FILE text rather than to the hunk",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/unshadowed.py",
+    "old": "def fetch(url, timeout=1):\n    return url\n\ndef go():\n    return None\n",
+    "tool": "Edit",
+    "edit_old": "    return None\n",
+    "edit_new": "    return fetch(\"u\", verify=False)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
+  },
+  {
+    "name": "python-callshape-edit-adds-param-and-uses-it-clean",
+    "desc": "the recurring-agent-move false positive: the same edit ADDS `timeout=10` to the signature and passes it. The on-disk signature is stale by exactly this edit, so comparing against it would ask on correct code. Fails if resolveDeclShape stops preferring the added text's declaration",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/newparam.py",
+    "old": "def fetch(url):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "tool": "Edit",
+    "edit_old": "def fetch(url):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "edit_new": "def fetch(url, timeout=10):\n    return url\n\ndef go():\n    return fetch(\"u\", timeout=5)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-edit-adds-param-and-typos-it-asks",
+    "desc": "the other half of the case above, and its anti-vacuity pair: the edit rewrites the signature AND misspells the keyword. Comparing against the edit's OWN declaration still disagrees, so it asks. Without this, the added-text-precedence rule could be replaced with a blanket abstain and every fixture would stay green",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/newparam_typo.py",
+    "old": "def fetch(url):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "tool": "Edit",
+    "edit_old": "def fetch(url):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "edit_new": "def fetch(url, timeout=10):\n    return url\n\ndef go():\n    return fetch(\"u\", timeuot=5)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
+  },
+  {
+    "name": "python-callshape-removes-signature-line-clean",
+    "desc": "a hunk that rewrites ONE line of a multi-line parameter list carries no whole `def` line, so the added-text path does not engage and the pre-edit declaration is stale. removesSignatureLine catches it from the removed text. Fails if that abstain is dropped — the MultiEdit shape of the add-a-param move, which the added-text rule alone does not cover",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/multiline_sig.py",
+    "old": "def fetch(\n    url,\n    timeout=1,\n):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "tool": "Edit",
+    "edit_old": "    timeout=1,\n):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "edit_new": "    deadline=1,\n):\n    return url\n\ndef go():\n    return fetch(\"u\", deadline=5)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-untouched-multiline-signature-asks",
+    "desc": "the control for the case above: the same multi-line declaration, and a hunk that touches only the call. Nothing about the signature is stale, so the pre-edit declaration is authoritative and the bogus keyword asks. Without this pair, removesSignatureLine could be widened to 'abstain whenever anything is removed' and stay green",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/multiline_sig_ok.py",
+    "old": "def fetch(\n    url,\n    timeout=1,\n):\n    return url\n\ndef go():\n    return fetch(\"u\")\n",
+    "tool": "Edit",
+    "edit_old": "    return fetch(\"u\")\n",
+    "edit_new": "    return fetch(\"u\", deadline=5)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
+  },
+  {
+    "name": "python-callshape-cross-file-declaration-clean",
+    "desc": "`fetch` is enrolled in ANOTHER file and not declared here, so the additive check is satisfied and call-shape has no same-file declaration to compare against. Deciding which same-named declaration is in scope is import resolution, which #243 puts out of scope. Fails if the resolution is ever widened past the edited file — the change that would trade this check's determinism for reach",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "enroll": {
+      "pkg/api.py": [
+        "fetch"
+      ]
+    },
+    "enrolled_defs": {
+      "fetch": 1
+    },
+    "file": "pkg/consumer.py",
+    "old": "from pkg.api import fetch\n\ndef go():\n    return None\n",
+    "tool": "Edit",
+    "edit_old": "    return None\n",
+    "edit_new": "    return fetch(\"u\", bogus=1)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-call-passes-kwargs-splat-clean",
+    "desc": "`fetch(\"u\", **cfg)` may supply any keyword at runtime, so no keyword name can be shown to be unaccepted. Fails if the call-side HasKwStar abstain is removed",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/splat.py",
+    "old": "def fetch(url, timeout=1):\n    return url\n",
+    "new": "def fetch(url, timeout=1):\n    return url\n\ndef go(cfg):\n    return fetch(\"u\", **cfg)\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-callshape-positional-only-passed-by-keyword-asks",
+    "desc": "`def fetch(url, /, timeout=1)` rejects `fetch(url=...)` — `url` is a real parameter name that is nevertheless not keyword-callable. This is the fixture that fails if the `/` truncation is dropped, which is the direction that would let a genuine TypeError through",
+    "check": "callshape",
+    "flags": [
+      "RUNECHO_GUARD_CALLSHAPE=1"
+    ],
+    "file": "pkg/posonly_kw.py",
+    "old": "def fetch(url, /, timeout=1):\n    return url\n",
+    "new": "def fetch(url, /, timeout=1):\n    return url\n\ndef go():\n    return fetch(url=\"u\")\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "fetch"
+    ]
+  }
+]

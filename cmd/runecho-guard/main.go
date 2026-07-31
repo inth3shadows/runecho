@@ -583,12 +583,36 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// usable snapshot. Answer it rather than defer — the user declared a
 		// scope this session and the answer does not depend on the index.
 		//
-		// It does NOT survive the other two, and neither does anything else:
+		// It does NOT survive the other two, but call-shape does, and that is why
+		// the contract binding is no longer the only thing answered here (#261).
 		// res.NoRepo means an unenrolled tree, which cannot hold a binding, and
 		// res.Warn (schema-newer) returns before ResolveRepo ever runs because
-		// the binary cannot read the store at all. cw is nil in both by
-		// construction, so those paths keep the behaviour they had.
-		if askContractOnly(out, cw, filePath, lang) {
+		// the binary cannot read the store at all — cw is nil in both by
+		// construction. Call-shape has no store dependency at all: it resolves a
+		// call against declarations in the file in front of it, so those are
+		// precisely the states where it still answers correctly and was silent.
+		//
+		// Gated on the flag AND on Python so the default path pays nothing. An
+		// unenrolled tree is the common case for a globally installed hook, and
+		// charging every edit there a file read for a check nobody switched on is
+		// the trade this gate exists to refuse — the alternative considered was
+		// hoisting readFileLines above the store gate unconditionally.
+		var degradedShapes []guard.CallShapeMismatch
+		if callShapeEnabled() && lang == guard.LangPython {
+			// Same construction as the main path below. Duplicated rather than
+			// hoisted because the two are mutually exclusive — this branch
+			// returns — so hoisting would charge every ENROLLED edit for a read
+			// it already does further down, to save a read this branch only
+			// makes when the flag is on.
+			preLines := readFileLines(filePath)
+			fd := guard.FileDiff{
+				Path:       filePath,
+				AddedLines: hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits),
+				SeedByLine: hookSeedByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, preLines, lang),
+			}
+			degradedShapes = callShapeMismatches(lang, preLines, fd, payload.ToolName, removedText)
+		}
+		if askWithoutIndex(out, cw, degradedShapes, filePath, lang, res.RepoName) {
 			return 0
 		}
 		switch {
@@ -861,17 +885,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			syms = append(syms, d.Symbol)
 		}
 	}
-	if len(callShapes) > 0 {
-		fmt.Fprintf(&sb, "[runecho-guard] %d keyword argument(s) the declaration does not accept — the symbol resolves but the call does not match it:\n", len(callShapes))
-		for _, m := range callShapes {
-			fmt.Fprintf(&sb, "  snippet line %d: %s(%s=…)%s — %s is declared at %s %d and accepts: %s\n",
-				m.LineNo, m.Callee, m.Keyword, suggestionSuffix(m.Suggestions), m.Callee,
-				declLineLabel(m.DeclLineIsSnippet), m.DeclLine, acceptedList(m.Accepted))
-			// The CALLEE is the symbol at issue, not the keyword: guardstats and
-			// fpreport aggregate by symbol, and a keyword name is not one.
-			syms = append(syms, m.Callee)
-		}
-	}
+	syms = append(syms, callShapeSection(&sb, callShapes)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0, len(callShapes) > 0)), Symbols: syms, LearnSymbols: learnSyms}

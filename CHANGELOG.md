@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.21.3] — 2026-07-31
+
+### Changed
+- ci: build the Docker image and smoke-test the MCP server over stdio (#265)
+
 ## [0.21.2] — 2026-07-31
 
 ### Changed

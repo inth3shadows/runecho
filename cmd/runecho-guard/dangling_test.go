@@ -61,25 +61,55 @@ func TestHookOldText(t *testing.T) {
 
 func TestAskReason(t *testing.T) {
 	cases := []struct {
-		v, d, i, u, c bool
-		want          string
+		f    firedChecks
+		want string
 	}{
-		{true, false, false, false, false, "violations"},
-		{false, true, false, false, false, "dangling"},
-		{false, false, true, false, false, "dropped-import"},
-		{false, false, false, true, false, "duplicate-symbol"},
-		{false, false, false, false, true, "call-shape"},
-		{true, true, false, false, false, "violations+dangling"},
-		{true, false, true, false, false, "violations+dropped-import"},
-		{true, false, false, true, false, "violations+duplicate-symbol"},
-		{true, false, false, false, true, "violations+call-shape"},
-		{false, true, true, false, false, "dangling+dropped-import"},
-		{true, true, true, true, true, "violations+dangling+dropped-import+duplicate-symbol+call-shape"},
-		{false, false, false, false, false, "violations"}, // not called in practice when all false
+		{firedChecks{Violations: true}, "violations"},
+		{firedChecks{Dangling: true}, "dangling"},
+		{firedChecks{Dropped: true}, "dropped-import"},
+		{firedChecks{Duplicate: true}, "duplicate-symbol"},
+		{firedChecks{CallShape: true}, "call-shape"},
+		// #268: these three used to be indistinguishable from Violations, which
+		// is what made their own false-positive rate unmeasurable.
+		{firedChecks{FileScope: true}, "file-scope"},
+		{firedChecks{Qualified: true}, "qualified"},
+		{firedChecks{DepsGo: true}, "deps-go"},
+		{firedChecks{Violations: true, Dangling: true}, "violations+dangling"},
+		{firedChecks{Violations: true, Dropped: true}, "violations+dropped-import"},
+		{firedChecks{Violations: true, Duplicate: true}, "violations+duplicate-symbol"},
+		{firedChecks{Violations: true, CallShape: true}, "violations+call-shape"},
+		{firedChecks{Dangling: true, Dropped: true}, "dangling+dropped-import"},
+		// The pre-#268 ordering must be preserved for combinations that predate
+		// it, or every historical bucket becomes incomparable rather than just
+		// the ones that involve a new term.
+		{firedChecks{Violations: true, Dangling: true, Dropped: true, Duplicate: true, CallShape: true},
+			"violations+dangling+dropped-import+duplicate-symbol+call-shape"},
+		// The new terms sit between violations and dangling, same family first.
+		{firedChecks{Violations: true, FileScope: true, Dangling: true}, "violations+file-scope+dangling"},
+		{firedChecks{FileScope: true, Qualified: true, DepsGo: true}, "file-scope+qualified+deps-go"},
+		{firedChecks{}, "violations"}, // not called in practice when all false
 	}
 	for _, c := range cases {
-		if got := askReason(c.v, c.d, c.i, c.u, c.c); got != c.want {
-			t.Errorf("askReason(%v,%v,%v,%v,%v) = %q, want %q", c.v, c.d, c.i, c.u, c.c, got, c.want)
+		if got := askReason(c.f); got != c.want {
+			t.Errorf("askReason(%+v) = %q, want %q", c.f, got, c.want)
+		}
+	}
+}
+
+func TestFiredChecksAny(t *testing.T) {
+	if (firedChecks{}).any() {
+		t.Error("zero firedChecks must report nothing fired — it gates the whole clean-path return")
+	}
+	// Every field must count. A field omitted from any() would make the hook take
+	// the clean path with a real finding in hand, silently dropping the ask.
+	for name, f := range map[string]firedChecks{
+		"Violations": {Violations: true}, "FileScope": {FileScope: true},
+		"Qualified": {Qualified: true}, "DepsGo": {DepsGo: true},
+		"Dangling": {Dangling: true}, "Dropped": {Dropped: true},
+		"Duplicate": {Duplicate: true}, "CallShape": {CallShape: true},
+	} {
+		if !f.any() {
+			t.Errorf("any() ignores %s — an ask with only that finding would be dropped", name)
 		}
 	}
 }

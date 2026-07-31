@@ -189,6 +189,15 @@ becomes default behaviour. All use the same ask-posture and fail-open rules; a
 single ask can carry several at once, and the decision log joins their names
 with `+` (`violations+dangling`).
 
+Each check owns a decision-log term, because `guardstats` and `fpreport` bucket
+on that exact string. Until #268 the file-scope, same-repo-qualified and
+dependency-qualified checks appended into the additive check's finding list and
+so all logged as `violations`, which left their own false-positive rate
+unmeasurable and blended up to four checks into the one number the default-on
+check is judged by. Records written before that change still say `violations`
+for edits that were partly one of the three; a bucket comparison spanning the
+change date is only valid for combinations that involve none of them.
+
 | Check | Flag | Asks when |
 |---|---|---|
 | E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |

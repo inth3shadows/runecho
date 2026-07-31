@@ -237,6 +237,10 @@ func runArgs(args []string) int {
 	}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
+	// Captured BEFORE the three checks below append into the same slice — that
+	// merge is what erased their provenance and made them all log as
+	// "violations" (#268).
+	fired := firedChecks{Violations: len(violations) > 0}
 
 	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
 	// default off). Reads each staged Go file's whole current text for import
@@ -249,7 +253,9 @@ func runArgs(args []string) int {
 					continue
 				}
 				whole := readFileLines(fd.AbsPath)
-				violations = append(violations, qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)...)
+				qv := qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)
+				fired.Qualified = fired.Qualified || len(qv) > 0
+				violations = append(violations, qv...)
 			}
 		}
 	}
@@ -264,7 +270,9 @@ func runArgs(args []string) int {
 				continue
 			}
 			whole := readFileLines(fd.AbsPath)
-			violations = append(violations, goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)...)
+			dv := goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)
+			fired.DepsGo = fired.DepsGo || len(dv) > 0
+			violations = append(violations, dv...)
 		}
 	}
 
@@ -278,7 +286,9 @@ func runArgs(args []string) int {
 				continue
 			}
 			whole := readFileLines(fd.AbsPath)
-			violations = append(violations, fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)...)
+			fv := fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)
+			fired.FileScope = fired.FileScope || len(fv) > 0
+			violations = append(violations, fv...)
 		}
 	}
 
@@ -306,7 +316,7 @@ func runArgs(args []string) int {
 		Mode:     "precommit",
 		Repo:     repo.Name,
 		Decision: "ask",
-		Reason:   "violations",
+		Reason:   askReason(fired),
 		Symbols:  syms,
 	})
 
@@ -705,6 +715,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
+	// See firedChecks: captured before the three merging checks below append.
+	fired := firedChecks{Violations: len(violations) > 0}
 
 	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
 	// default off). fileLines is the pre-edit whole file (read above); newLines is
@@ -712,7 +724,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// added same-repo import be seen. The file's own directory anchors go.mod.
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
-			violations = append(violations, qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)...)
+			qv := qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
+			fired.Qualified = len(qv) > 0
+			violations = append(violations, qv...)
 		}
 	}
 
@@ -722,7 +736,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	if lang == guard.LangGo {
 		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
-			violations = append(violations, goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)...)
+			dv := goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
+			fired.DepsGo = len(dv) > 0
+			violations = append(violations, dv...)
 		}
 	}
 
@@ -732,7 +748,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// the pre-edit whole file, newLines the proposed text; both are needed so a
 	// binding introduced by this very edit still resolves. repoSymbols is the
 	// pre-fold snapshot taken above.
-	violations = append(violations, fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)...)
+	fsv := fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)
+	fired.FileScope = len(fsv) > 0
+	violations = append(violations, fsv...)
 
 	// Call-shape agreement (RUNECHO_GUARD_CALLSHAPE=1, default off): a keyword
 	// argument the declaration does not accept. Kept out of `violations` on purpose
@@ -818,7 +836,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 	}
 
-	if len(violations) == 0 && len(dangling) == 0 && len(droppedImps) == 0 && len(duplicates) == 0 && len(callShapes) == 0 {
+	fired.Dangling = len(dangling) > 0
+	fired.Dropped = len(droppedImps) > 0
+	fired.Duplicate = len(duplicates) > 0
+	fired.CallShape = len(callShapes) > 0
+
+	if !fired.any() {
 		// Every FACT check passed. The contract question is independent of all of
 		// them — a perfectly correct edit to a file the session said it would not
 		// touch is precisely the case this check exists for — so it is answered
@@ -907,7 +930,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	syms = append(syms, callShapeSection(&sb, callShapes)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(len(violations) > 0, len(dangling) > 0, len(droppedImps) > 0, len(duplicates) > 0, len(callShapes) > 0)), Symbols: syms, LearnSymbols: learnSyms}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

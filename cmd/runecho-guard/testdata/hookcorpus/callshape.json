@@ -12,7 +12,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-correct-keyword-clean",
@@ -103,7 +104,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-edit-adds-param-and-uses-it-clean",
@@ -134,7 +136,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-removes-signature-line-clean",
@@ -165,7 +168,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-positional-only-passed-by-keyword-asks",
@@ -180,7 +184,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-splat-plus-named-keyword-asks",
@@ -195,7 +200,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-edit-removes-the-declaration-clean",
@@ -238,7 +244,8 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   },
   {
     "name": "python-callshape-for-target-rebinds-the-callee-clean",
@@ -277,6 +284,7 @@
     "expect_ask": true,
     "expect_symbols": [
       "fetch"
-    ]
+    ],
+    "expect_log_reason": "call-shape"
   }
 ]

@@ -189,6 +189,15 @@ becomes default behaviour. All use the same ask-posture and fail-open rules; a
 single ask can carry several at once, and the decision log joins their names
 with `+` (`violations+dangling`).
 
+Each check owns a decision-log term, because `guardstats` and `fpreport` bucket
+on that exact string. Until #268 the file-scope, same-repo-qualified and
+dependency-qualified checks appended into the additive check's finding list and
+so all logged as `violations`, which left their own false-positive rate
+unmeasurable and blended up to four checks into the one number the default-on
+check is judged by. Records written before that change still say `violations`
+for edits that were partly one of the three; a bucket comparison spanning the
+change date is only valid for combinations that involve none of them.
+
 | Check | Flag | Asks when |
 |---|---|---|
 | E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |
@@ -324,8 +333,12 @@ binary was six releases stale (#207). Records predating the field report as
 reasons: `clean`, `stale-ir`, `no-repo`, `store-degraded`, `check-degraded`,
 `schema-newer`, `unknown-lang`, `bad-path`, `empty-input`, `parse-fail`. Ask
 reasons name the checks that fired, joined with `+` when several do:
-`violations`, `dangling`, `dropped-import`, `duplicate-symbol` (and `contract`
-for an edit-scope ask). The write happens after the decision is emitted and all
+`violations`, `file-scope`, `qualified`, `deps-go`, `dangling`,
+`dropped-import`, `duplicate-symbol`, `call-shape` (and a `contract` prefix for
+an edit-scope ask). That order is the order they appear in a joined string. Keep
+this list complete: `guardstats` and `fpreport` bucket on the exact string, so a
+term missing from here is a term missing from whatever `jq` filter a reader
+writes against it — which under-counts silently rather than erroring. The write happens after the decision is emitted and all
 logging errors are discarded — the log can never alter a decision or slow the
 hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
 reports the approval rate (an upper bound on the true false-positive rate).

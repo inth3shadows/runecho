@@ -115,7 +115,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		File:     filePath,
 		Lang:     string(lang),
 		Decision: "ask",
-		Reason:   contractReason(cw != nil, askReason(false, false, false, false, true)),
+		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: true})),
 		Symbols:  syms,
 	}
 	if cw != nil {

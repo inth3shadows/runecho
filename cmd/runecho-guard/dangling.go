@@ -223,25 +223,59 @@ func excludeSelf(paths []string, self string) []string {
 	return out
 }
 
+// firedChecks names which checks produced a finding on one edit. It exists
+// because three checks — file-scope, same-repo qualified and dependency
+// qualified — append into the SAME []Violation slice the additive check fills,
+// so by the time the reason is built the origin is gone. They were therefore all
+// logged as "violations", which made their own false-positive rate unmeasurable
+// by construction and blended up to four checks into the one number the
+// default-on check is judged by (#268).
+//
+// Populate every field from the per-check result BEFORE it is appended. Reading
+// them back off the merged slice is what this type exists to stop.
+type firedChecks struct {
+	Violations bool // the additive hallucination check (guard.Run)
+	FileScope  bool
+	Qualified  bool
+	DepsGo     bool
+	Dangling   bool
+	Dropped    bool
+	Duplicate  bool
+	CallShape  bool
+}
+
+func (f firedChecks) any() bool {
+	return f.Violations || f.FileScope || f.Qualified || f.DepsGo ||
+		f.Dangling || f.Dropped || f.Duplicate || f.CallShape
+}
+
 // askReason names the decision-log reason for an ask so the dogfood stream is
 // greppable by which check(s) fired. Joins the active checks with '+' so any
 // combination is represented (e.g. "violations+dropped-import").
-func askReason(hasViolations, hasDangling, hasDropped, hasDuplicate, hasCallShape bool) string {
+//
+// The three checks added in #268 are ordered immediately after "violations"
+// because they are the same family (a name that does not resolve). Inserting
+// them there rather than appending keeps every pre-existing compound string
+// byte-identical, so a bucket that does not involve them is comparable across
+// the change; one that does is not, and cannot be made so.
+func askReason(f firedChecks) string {
 	var parts []string
-	if hasViolations {
-		parts = append(parts, "violations")
-	}
-	if hasDangling {
-		parts = append(parts, "dangling")
-	}
-	if hasDropped {
-		parts = append(parts, "dropped-import")
-	}
-	if hasDuplicate {
-		parts = append(parts, "duplicate-symbol")
-	}
-	if hasCallShape {
-		parts = append(parts, "call-shape")
+	for _, e := range []struct {
+		on   bool
+		name string
+	}{
+		{f.Violations, "violations"},
+		{f.FileScope, "file-scope"},
+		{f.Qualified, "qualified"},
+		{f.DepsGo, "deps-go"},
+		{f.Dangling, "dangling"},
+		{f.Dropped, "dropped-import"},
+		{f.Duplicate, "duplicate-symbol"},
+		{f.CallShape, "call-shape"},
+	} {
+		if e.on {
+			parts = append(parts, e.name)
+		}
 	}
 	if len(parts) == 0 {
 		return "violations"

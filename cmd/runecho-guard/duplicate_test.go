@@ -417,13 +417,13 @@ func TestDuplicate_PureDeletionEdit_HitsEmptyInputFastPath(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)
 	top := enrolledStoreWithFiles(t, repoRoot, defAndDupFiles("DoThing"))
+	// "Only E5 enabled" is load-bearing here: any OTHER gate on the removedText
+	// condition in main.go makes removedText non-empty for an unrelated reason
+	// and masks the fast-path bug this pins. The isolation comes from TestMain
+	// (env_test.go), which clears the whole RUNECHO_GUARD_* family — this test
+	// used to clear the two gates it knew about by hand, and that list went
+	// stale when #243 added a third (call-shape) to the same condition. #262.
 	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
-	// This test's whole point is isolating "only E5 enabled" — explicitly
-	// clear the other two gates so an ambient RUNECHO_GUARD_DANGLING=1 (e.g.
-	// from a dogfooding shell's exported env) can't mask the fast-path bug
-	// this pins by making removedText non-empty for an unrelated reason.
-	t.Setenv("RUNECHO_GUARD_DANGLING", "")
-	t.Setenv("RUNECHO_GUARD_DROPPED_IMPORT", "")
 
 	file := filepath.Join(top, "known.go")
 	if err := os.WriteFile(file, []byte("package p\nfunc Placeholder() {}\n"), 0644); err != nil {

@@ -198,6 +198,7 @@ with `+` (`violations+dangling`).
 | Dependency qualified | `RUNECHO_GUARD_DEPS_GO` | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
 | Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
+| Call-shape agreement | `RUNECHO_GUARD_CALLSHAPE` | (Python) A keyword argument the callee's declaration does not accept — the name resolves, the call does not match it (#243). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot (#261) |
 
 C3 **learned-allow** (`RUNECHO_GUARD_LEARN`) is not a check but a suppressor:
 after a symbol is approved `RUNECHO_GUARD_LEARN_N` times (default 2) it stops
@@ -209,7 +210,14 @@ dangling or duplicate ask says the edit was fine, never that the name resolves.
 
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
 error, or a hung git subprocess (2s cap, `gitutil.Timeout`) all degrade to
-silence — the guard blocks hallucinations; it must never block work. Repo
+silence — the guard blocks hallucinations; it must never block work. Two checks
+are exceptions, and only when explicitly enabled: the edit-scope contract
+resolves off the repo row alone, and call-shape resolves against the edited
+file's own declarations, so with `RUNECHO_GUARD_CONTRACT=1` /
+`RUNECHO_GUARD_CALLSHAPE=1` those two still answer on a repo with no usable
+snapshot, and call-shape also answers on an unenrolled tree (#261). A
+schema-newer store is never one of these: that advisory is surfaced instead,
+because a stale binary is the thing the user has to fix first. Repo
 resolution is three-tier: git-common-dir key (O(1), schema V4) → enrolled-path
 lookup → worktree-list scan, backfilling `common_dir` on a hit so the next fire
 takes the fast path.
@@ -290,6 +298,7 @@ Opt-in guard checks — all default OFF, each a dogfood gate. See
 | `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
 | `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
 | `RUNECHO_GUARD_CONTRACT` | — | `1` enables the edit-scope contract check |
+| `RUNECHO_GUARD_CALLSHAPE` | — | `1` enables call-shape agreement (Python) |
 | `RUNECHO_GUARD_LEARN` | — | `1` enables C3 learned-allow suppression |
 | `RUNECHO_GUARD_LEARN_N` | `2` | Approvals before a symbol is trusted |
 | `RUNECHO_GUARD_LEARN_TTL_DAYS` | `14` | Days an entry survives without re-approval |
@@ -508,7 +517,9 @@ which member changed.
   consistent checkouts.
 - **Some degraded guard states are intentionally fail-open.** Missing store,
   unenrolled repo, missing snapshots, and similar conditions degrade to silence
-  or warnings rather than blocking work.
+  or warnings rather than blocking work. The two store-free checks
+  (`RUNECHO_GUARD_CONTRACT`, `RUNECHO_GUARD_CALLSHAPE`) still answer in some of
+  those states when enabled — see Fail-open by design above.
 - **`--source-root` support is not fully uniform yet.** Reindex already
   respects it; some snapshot/compare flows still assume the caller's root path
   for live IR generation.

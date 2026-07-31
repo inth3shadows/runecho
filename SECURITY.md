@@ -48,8 +48,12 @@ enough to run its hooks against.
 
 `runecho-guard` is fail-open by design: missing store, unenrolled repo, no
 snapshot, DB error, or a hung git subprocess all degrade to silence rather than
-blocking work, and a clean check never auto-approves — it always defers to the
-normal permission flow. This means an unresolved-symbol warning is a
+blocking work. One consequence is worth stating plainly: with
+`RUNECHO_GUARD_CALLSHAPE=1` (default off) the guard reads and parses the edited
+Python file even on a tree that was never enrolled, since that check needs no
+index — so the trust boundary below covers any repo you EDIT under the hook, not
+only the ones you enroll. And a clean check never auto-approves — it always
+defers to the normal permission flow. This means an unresolved-symbol warning is a
 correctness signal, not an access-control decision. Do not rely on the guard
 to prevent a determined attacker from landing malicious code — it isn't built
 to, and it will step aside rather than block a workflow it can't cleanly

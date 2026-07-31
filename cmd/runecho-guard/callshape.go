@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -42,6 +44,85 @@ func callShapeMismatches(lang guard.Lang, wholeFileLines []guard.AddedLine, fd g
 		removed = guard.TextToAddedLines(removedText)
 	}
 	return guard.PyCallShapeMismatches(lang, wholeFileLines, fd, removed, toolName == "Write")
+}
+
+// callShapeSection appends the call-shape section of an ask to sb and returns
+// the symbol names to record on the decision. Extracted so the full ask and the
+// store-free ask below render this SECTION identically: two copies of the format
+// string would drift, and the store-free path is the one nobody looks at. The
+// surrounding trailer is deliberately not shared — see askWithoutIndex.
+//
+// Returns the CALLEE, not the keyword: guardstats and fpreport aggregate by
+// symbol, and a keyword name is not one. These names are deliberately not
+// learn-eligible — see LearnSymbols on decisionRecord.
+func callShapeSection(sb *strings.Builder, ms []guard.CallShapeMismatch) []string {
+	if len(ms) == 0 {
+		return nil
+	}
+	fmt.Fprintf(sb, "[runecho-guard] %d keyword argument(s) the declaration does not accept — the symbol resolves but the call does not match it:\n", len(ms))
+	syms := make([]string, 0, len(ms))
+	for _, m := range ms {
+		fmt.Fprintf(sb, "  snippet line %d: %s(%s=…)%s — %s is declared at %s %d and accepts: %s\n",
+			m.LineNo, m.Callee, m.Keyword, suggestionSuffix(m.Suggestions), m.Callee,
+			declLineLabel(m.DeclLineIsSnippet), m.DeclLine, acceptedList(m.Accepted))
+		syms = append(syms, m.Callee)
+	}
+	return syms
+}
+
+// askWithoutIndex emits the ask for a path where the symbol pipeline never ran —
+// an unenrolled tree, an unreadable store, an enrolled repo with no snapshot —
+// and reports whether it emitted. Two checks survive those states: a contract
+// binding, which resolves off the repo row alone, and call-shape, which needs no
+// store row at all. Everything else there is genuinely unanswerable.
+//
+// Callers must invoke this INSTEAD OF their defer, not before it: the hook emits
+// exactly one decision.
+//
+// With no mismatches it delegates verbatim to askContractOnly rather than
+// re-rendering, so the long-shipped contract-only text and its "contract" log
+// reason are untouched by this path existing.
+func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName, advisory string) bool {
+	if len(ms) == 0 {
+		return askContractOnly(out, cw, filePath, lang)
+	}
+	var sb strings.Builder
+	// Contract first, matching the full ask's ordering: "should you be editing
+	// this file at all" precedes "is this call shaped the way it is declared",
+	// and reading it the other way round invites fixing the call and
+	// re-submitting the same out-of-scope edit.
+	if cw != nil {
+		sb.WriteString(cw.section())
+	}
+	syms := callShapeSection(&sb, ms)
+	// Not the full ask's trailer. That one offers .runechoguardignore, which
+	// guard.Run consumes and call-shape never consults — and on an unenrolled
+	// tree there is no resolved repo root to hold one anyway. Naming a remedy
+	// that cannot work is worse than naming fewer: the user tries it, nothing
+	// changes, and the next ask reads as the guard being broken.
+	sb.WriteString("Approve if the call is legitimate (a dynamic or re-bound callee, or a signature this edit does not show). RUNECHO_GUARD_CALLSHAPE=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard.")
+	hookAskContext(out, sb.String(), advisory)
+
+	// Not contractReason(cw != nil, askReason(...)) with all-false flags:
+	// askReason falls back to "violations" when nothing is set, which would log a
+	// hallucination bucket for an ask that found no unresolved symbol. Only the
+	// checks that actually ran may name themselves here — fpreport buckets on the
+	// exact string, and a phantom "violations" term inflates the very rate the
+	// un-gating decision rests on.
+	rec := decisionRecord{
+		Mode:     "hook",
+		Repo:     repoName,
+		File:     filePath,
+		Lang:     string(lang),
+		Decision: "ask",
+		Reason:   contractReason(cw != nil, askReason(false, false, false, false, true)),
+		Symbols:  syms,
+	}
+	if cw != nil {
+		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
+	}
+	logDecision(rec)
+	return true
 }
 
 // acceptedList renders a declaration's accepted keyword names for the ask

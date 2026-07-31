@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP-compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![No LLM](https://img.shields.io/badge/No%20LLM-100%25%20local-brightgreen.svg)](#prerequisites)
+[![runecho MCP server](https://glama.ai/mcp/servers/inth3shadows/runecho/badges/score.svg)](https://glama.ai/mcp/servers/inth3shadows/runecho)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#quick-start)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#quick-start)

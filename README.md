@@ -16,8 +16,11 @@ hook inside the agent loop: every `Edit`/`Write` is checked against the symbols
 your code actually declares, and a reference to one that doesn't exist stops the
 write and asks you first. ~12 ms, no build, no language server.
 
-It is **model-free and vendor-neutral**: no LLM, no API keys, no network, no
-build, no language server. **The same code produces the same answer.**
+**The same code produces the same answer.** Every check is a parse and a lookup,
+so the verdict is identical on every run, every machine, and every agent — there
+is no model to sample from and nothing to re-roll. That is what makes it a gate
+rather than an opinion: it is **model-free and vendor-neutral** — no LLM, no API
+keys, no network, no build, no language server.
 
 **The guard costs zero context tokens** — measured, not asserted: a clean check
 writes nothing at all, and only an edit it actually stops costs anything (~100

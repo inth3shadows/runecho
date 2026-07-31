@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-07-31
+
+### Changed
+- guard: give file-scope, qualified and deps-go their own decision-log buckets (#268) (#270)
+
 ## [0.22.0] — 2026-07-31
 
 ### Changed

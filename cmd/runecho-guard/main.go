@@ -717,6 +717,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	violations := guard.Run(symbols, ignorePath, diffs)
 	// See firedChecks: captured before the three merging checks below append.
 	fired := firedChecks{Violations: len(violations) > 0}
+	// learnEligible is the additive check's OWN finding set, captured here for the
+	// same reason firedChecks is: the three checks below append into `violations`,
+	// and reading learn-eligibility back off the merged slice is the bug this
+	// pattern exists to stop. LearnSymbols must stay the hallucination-origin
+	// subset (see declog.go) because learned-allow feeds guard.Run's known-set —
+	// approving a file-scope ask on `render` (a real symbol, not imported here)
+	// would otherwise teach the guard that `render` resolves, and keep it silent
+	// on a genuine hallucination of that name until the TTL expires.
+	learnEligible := make(map[string]struct{}, len(violations))
+	for _, v := range violations {
+		learnEligible[v.Symbol] = struct{}{}
+	}
 
 	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
 	// default off). fileLines is the pre-edit whole file (read above); newLines is
@@ -901,7 +913,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// of a scope decision. Same reasoning that excludes dangling, dropped and
 			// duplicate approvals (see LearnSymbols on decisionRecord); contracts are
 			// a fourth category that comment did not anticipate.
-			if cw == nil {
+			if _, additive := learnEligible[v.Symbol]; cw == nil && additive {
 				learnSyms = append(learnSyms, v.Symbol)
 			}
 		}

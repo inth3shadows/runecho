@@ -21,7 +21,8 @@
     "enrolled_defs": {
       "render": 1
     },
-    "expect_log_reason": "file-scope"
+    "expect_log_reason": "file-scope",
+    "expect_no_learn_symbols": true
   },
   {
     "name": "python-symbol-imported-in-scope-clean",
@@ -67,7 +68,8 @@
     "enrolled_defs": {
       "render": 1
     },
-    "expect_log_reason": "file-scope"
+    "expect_log_reason": "file-scope",
+    "expect_no_learn_symbols": true
   },
   {
     "name": "python-star-import-abstains-clean",

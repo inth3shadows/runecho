@@ -333,8 +333,12 @@ binary was six releases stale (#207). Records predating the field report as
 reasons: `clean`, `stale-ir`, `no-repo`, `store-degraded`, `check-degraded`,
 `schema-newer`, `unknown-lang`, `bad-path`, `empty-input`, `parse-fail`. Ask
 reasons name the checks that fired, joined with `+` when several do:
-`violations`, `dangling`, `dropped-import`, `duplicate-symbol` (and `contract`
-for an edit-scope ask). The write happens after the decision is emitted and all
+`violations`, `file-scope`, `qualified`, `deps-go`, `dangling`,
+`dropped-import`, `duplicate-symbol`, `call-shape` (and a `contract` prefix for
+an edit-scope ask). That order is the order they appear in a joined string. Keep
+this list complete: `guardstats` and `fpreport` bucket on the exact string, so a
+term missing from here is a term missing from whatever `jq` filter a reader
+writes against it — which under-counts silently rather than erroring. The write happens after the decision is emitted and all
 logging errors are discarded — the log can never alter a decision or slow the
 hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
 reports the approval rate (an upper bound on the true false-positive rate).

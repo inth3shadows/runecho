@@ -104,6 +104,14 @@ type hookCase struct {
 	// green because none of them looked at the log (#268). Optional, because a
 	// fixture whose bucket is not the point should not be forced to restate it.
 	ExpectLogReason string `json:"expect_log_reason,omitempty"`
+	// ExpectNoLearnSymbols pins that this ask trains learned-allow on NOTHING.
+	// Only the additive hallucination check's findings may be learn-eligible: the
+	// learned set is folded into guard.Run's known-set, so learning a name from a
+	// file-scope ask ("real symbol, wrong scope") would teach the guard that the
+	// name resolves and silence a genuine hallucination of it until the TTL runs
+	// out. Code review found learnSyms still reading off the MERGED violation
+	// slice, which is exactly what firedChecks exists to stop.
+	ExpectNoLearnSymbols bool `json:"expect_no_learn_symbols,omitempty"`
 	// AskWithoutFlag inverts the isolation probe for the one case the probe cannot
 	// express: a fixture whose ask comes from an ALWAYS-ON check by design, where
 	// what is being pinned is that the gated check adds NOTHING to it. The default
@@ -257,6 +265,17 @@ func runHookCase(t *testing.T, c hookCase) {
 		for _, s := range c.ExpectSyms {
 			if !strings.Contains(d.Hook.PermissionReason, s) {
 				t.Errorf("ask reason does not name expected symbol %q:\n%s", s, d.Hook.PermissionReason)
+			}
+		}
+		if c.ExpectNoLearnSymbols {
+			if rec := readLastDecisionLog(t); rec != nil {
+				if ls, ok := rec["learn_symbols"]; ok {
+					if arr, isArr := ls.([]any); !isArr || len(arr) > 0 {
+						t.Errorf("ask trained learned-allow on %v — only additive-check "+
+							"findings are learn-eligible; learning this name would silence a "+
+							"later genuine hallucination of it", ls)
+					}
+				}
 			}
 		}
 		if c.ExpectLogReason != "" {

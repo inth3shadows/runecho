@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.21.2] — 2026-07-31
+
+### Changed
+- build: add a Dockerfile and glama.json for the Glama MCP directory (#264)
+
 ## [0.21.1] — 2026-07-31
 
 ### Changed

@@ -48,8 +48,9 @@ func callShapeMismatches(lang guard.Lang, wholeFileLines []guard.AddedLine, fd g
 
 // callShapeSection appends the call-shape section of an ask to sb and returns
 // the symbol names to record on the decision. Extracted so the full ask and the
-// store-free ask below render byte-identical text: two copies of this format
-// string would drift, and the store-free path is the one nobody looks at.
+// store-free ask below render this SECTION identically: two copies of the format
+// string would drift, and the store-free path is the one nobody looks at. The
+// surrounding trailer is deliberately not shared — see askWithoutIndex.
 //
 // Returns the CALLEE, not the keyword: guardstats and fpreport aggregate by
 // symbol, and a keyword name is not one. These names are deliberately not
@@ -81,7 +82,7 @@ func callShapeSection(sb *strings.Builder, ms []guard.CallShapeMismatch) []strin
 // With no mismatches it delegates verbatim to askContractOnly rather than
 // re-rendering, so the long-shipped contract-only text and its "contract" log
 // reason are untouched by this path existing.
-func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName string) bool {
+func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName, advisory string) bool {
 	if len(ms) == 0 {
 		return askContractOnly(out, cw, filePath, lang)
 	}
@@ -94,8 +95,13 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		sb.WriteString(cw.section())
 	}
 	syms := callShapeSection(&sb, ms)
-	sb.WriteString("Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
-	hookAsk(out, sb.String())
+	// Not the full ask's trailer. That one offers .runechoguardignore, which
+	// guard.Run consumes and call-shape never consults — and on an unenrolled
+	// tree there is no resolved repo root to hold one anyway. Naming a remedy
+	// that cannot work is worse than naming fewer: the user tries it, nothing
+	// changes, and the next ask reads as the guard being broken.
+	sb.WriteString("Approve if the call is legitimate (a dynamic or re-bound callee, or a signature this edit does not show). RUNECHO_GUARD_CALLSHAPE=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard.")
+	hookAskContext(out, sb.String(), advisory)
 
 	// Not contractReason(cw != nil, askReason(...)) with all-false flags:
 	// askReason falls back to "violations" when nothing is set, which would log a

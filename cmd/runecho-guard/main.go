@@ -597,8 +597,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// charging every edit there a file read for a check nobody switched on is
 		// the trade this gate exists to refuse — the alternative considered was
 		// hoisting readFileLines above the store gate unconditionally.
+		//
+		// res.Warn is excluded deliberately. Schema-newer means this binary cannot
+		// read the store at all, and that advisory is surfaced ALWAYS, strict or
+		// not, because the fix is "reinstall" and nothing else the guard says
+		// matters until it happens. An ask returns before the switch below, so
+		// answering call-shape there would trade a loud "your binary is stale" for
+		// a quiet keyword finding, and log reason "call-shape" in place of
+		// "schema-newer" — deleting the exact signal #207's gv stamp exists to
+		// preserve. The other two degraded arms lose nothing: NoRepo is silent by
+		// design, and the strict store-degraded advisory rides along on the ask.
 		var degradedShapes []guard.CallShapeMismatch
-		if callShapeEnabled() && lang == guard.LangPython {
+		if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
 			// Same construction as the main path below. Duplicated rather than
 			// hoisted because the two are mutually exclusive — this branch
 			// returns — so hoisting would charge every ENROLLED edit for a read
@@ -612,7 +622,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			}
 			degradedShapes = callShapeMismatches(lang, preLines, fd, payload.ToolName, removedText)
 		}
-		if askWithoutIndex(out, cw, degradedShapes, filePath, lang, res.RepoName) {
+		// Under strict, a store-degraded edit gets an advisory saying symbol
+		// validation is off. An ask returns before that switch, so the advisory
+		// rides along on the ask rather than being dropped: the finding and the
+		// fact that coverage was incomplete are both true, and the user needs
+		// both. NoRepo is silent by design and contributes nothing here.
+		var advisory string
+		if !res.NoRepo && strictMode() {
+			advisory = strictStoreDegradedAdvisory
+		}
+		if askWithoutIndex(out, cw, degradedShapes, filePath, lang, res.RepoName, advisory) {
 			return 0
 		}
 		switch {
@@ -628,7 +647,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// Store accessible but degraded (no snapshot, no symbols, etc.).
 			// Under strict, surface an advisory so the user knows validation is off.
 			if strictMode() {
-				hookDeferContext(out, "[runecho-guard] store unavailable or no snapshot — symbol validation is DISABLED for this edit (RUNECHO_GUARD_STRICT=1).")
+				hookDeferContext(out, strictStoreDegradedAdvisory)
 			} else {
 				hookDefer()
 			}
@@ -1422,6 +1441,31 @@ func hookDeferContext(out io.Writer, ctx string) {
 // rule (see runecho-guard-fp-precision-and-p5.md) is to move a language to a hard
 // "deny" only after it has fired correctly ~20 times with zero false blocks in live
 // use, reverting to "ask" on any confirmed false block.
+// strictStoreDegradedAdvisory is the strict-mode notice that this edit ran with
+// symbol validation off. Shared because it is emitted from two shapes now — as a
+// standalone defer context, and as additionalContext alongside a call-shape ask
+// that returns before the defer switch is reached. Two copies would let the
+// ask-borne one go stale silently, and it is the one nobody reads.
+const strictStoreDegradedAdvisory = "[runecho-guard] store unavailable or no snapshot — symbol validation is DISABLED for this edit (RUNECHO_GUARD_STRICT=1)."
+
+// hookAskContext is hookAsk plus additionalContext. The 2026 hookSpecificOutput
+// object carries both keys, so an ask does not have to cost the advisory that
+// would otherwise have been emitted by the defer path it pre-empts.
+func hookAskContext(out io.Writer, reason, ctx string) {
+	if ctx == "" {
+		hookAsk(out, reason)
+		return
+	}
+	_ = json.NewEncoder(out).Encode(map[string]any{
+		"hookSpecificOutput": map[string]string{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "ask",
+			"permissionDecisionReason": reason,
+			"additionalContext":        ctx,
+		},
+	})
+}
+
 func hookAsk(out io.Writer, reason string) {
 	_ = json.NewEncoder(out).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{

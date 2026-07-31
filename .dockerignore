@@ -1,0 +1,28 @@
+# Keep the build context to what install.sh actually compiles. Everything the
+# Go build needs (go.mod, go.sum, cmd/, internal/, install.sh) is NOT listed.
+#
+# .git is deliberately kept: install.sh derives the version stamp from
+# `git describe`, and dropping it would silently downgrade every local build to
+# "dev". Automated builders that copy without history get the same fallback and
+# can pass --build-arg RUNECHO_VERSION instead.
+
+# Build and coverage artefacts
+coverage.out
+*.test
+/out
+/dist
+
+# Documentation and planning — not compiled, and docs/ is the largest tree here
+docs/
+plans/
+*.md
+!README.md
+
+# Local editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Nothing in the image consumes these
+.github/
+.codegraph/

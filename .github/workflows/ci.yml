@@ -44,3 +44,38 @@ jobs:
       - name: Hook-fixture mutation gate
         if: github.event_name == 'pull_request'
         run: python3 bench/hookmutate/mutate.py --strict
+
+  # The Dockerfile is the third shipping channel (the Glama MCP directory builds
+  # and distributes from it), and it is the only one nothing else exercises: the
+  # `test` job proves the source compiles, not that the image does. Without this
+  # job the Dockerfile rots silently until Glama's next rebuild fails, which is a
+  # failure we would learn about from a stranger's listing page rather than CI.
+  #
+  # Deliberately build-only — no registry, no push, no credentials, so the
+  # workflow keeps `contents: read`. Plain `docker build` rather than the buildx
+  # actions: this repo pins every action by SHA, and two more pinned third-party
+  # deps buy nothing here when the runner already ships docker.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: docker build --build-arg RUNECHO_VERSION=ci-smoke -t runecho-mcp:ci .
+      # A build that succeeds can still ship a server that cannot speak. This is
+      # the same handshake Glama's inspection performs, so a pass here means the
+      # listing will build AND enumerate tools, not merely compile.
+      - name: Smoke-test the MCP server over stdio
+        run: |
+          set -euo pipefail
+          out=$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | docker run --rm -i runecho-mcp:ci)
+          echo "$out"
+          # Asserting the stamped version, not just any response, is what proves
+          # --build-arg threaded through install.sh. If that regressed, the image
+          # would still answer -- reporting "dev" to every directory listing.
+          echo "$out" | grep -q '"version":"ci-smoke"' || {
+            echo "::error::initialize did not report the RUNECHO_VERSION build arg"; exit 1; }
+          echo "$out" | grep -q '"name":"structure"' || {
+            echo "::error::tools/list did not advertise the structure tool"; exit 1; }

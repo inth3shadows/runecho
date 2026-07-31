@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-07-31
+
+### Changed
+- test: isolate the RUNECHO_GUARD_* family from the test process (#262)
+
 ## [0.21.0] — 2026-07-30
 
 ### Changed

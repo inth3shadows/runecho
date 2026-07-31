@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-07-31
+
+### Changed
+- guard: answer call-shape on trees the store cannot resolve (#261) (#266)
+
 ## [0.21.3] — 2026-07-31
 
 ### Changed

@@ -64,6 +64,13 @@ func TestInstallShipsEveryGrammarTag(t *testing.T) {
 	// result. A test that only compares the two known copies cannot see a third.
 	assertDerivesTags(t, filepath.Join("..", "..", "scripts", "agent-eval", "audit.sh"))
 
+	// The Dockerfile is a real shipping channel — it is what the Glama directory
+	// builds and distributes — so it is subject to the same rule. It calls
+	// install.sh, which is why it may not name a grammar tag at all. A hardcoded
+	// `-tags=...` here would ship a container whose parsers disagree with both
+	// the source install and the released binaries, and nothing else would fail.
+	assertNamesNoGrammarTags(t, filepath.Join("..", "..", "Dockerfile"))
+
 	// The two channels must also agree with EACH OTHER. A tag present in one and
 	// absent from the other means two builds of the same version behave
 	// differently, which is worse than both being wrong: it is unreproducible.
@@ -184,5 +191,28 @@ func assertDerivesTags(t *testing.T, path string) {
 	if regexp.MustCompile(`GRAMMAR_TAGS="grammar_subset`).Match(raw) {
 		t.Errorf("%s hardcodes its own grammar tag list; derive it from install.sh instead "+
 			"(a third copy is a third thing to forget when a parser is added)", path)
+	}
+}
+
+// assertNamesNoGrammarTags fails if a Dockerfile names a grammar tag in an
+// instruction. Comment lines are exempt on purpose: the Dockerfile explains this
+// very rule, and a check that could not tell an explanation from a build flag
+// would push the next maintainer to delete the explanation instead of the copy.
+func assertNamesNoGrammarTags(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v — this check must not skip quietly", path, err)
+	}
+	for i, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if strings.Contains(line, "grammar_subset") {
+			t.Errorf("%s:%d names a grammar build tag in an instruction: %q\n"+
+				"  It must build via install.sh so the tag list stays single-homed; a copy here "+
+				"ships a container whose parsers disagree with the source install and the "+
+				"released binaries, and no other test can see it.", path, i+1, strings.TrimSpace(line))
+		}
 	}
 }

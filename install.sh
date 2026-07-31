@@ -136,7 +136,11 @@ GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript gra
 # latest git tag. Outside a git checkout (tarball install, no tags) git describe
 # fails and we fall back to "dev" — honest about being an unstamped build rather
 # than asserting a release number.
-RUNECHO_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+#
+# An explicit RUNECHO_VERSION wins, for builders that have the version but not
+# the history: the Dockerfile receives it as a --build-arg because an image is
+# built from a context copy with no tags, where git describe can only say "dev".
+RUNECHO_VERSION="${RUNECHO_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 VERSION_LDFLAGS="-X github.com/inth3shadows/runecho/internal/version.Version=$RUNECHO_VERSION"
 
 for cmd in runecho-ir runecho-mcp runecho-guard; do

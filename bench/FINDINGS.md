@@ -83,11 +83,16 @@ the `internal/guard` unit suite.
 ### Which checks the published numbers cover (#227)
 
 The catch-rate above is measured through `guard.Run`, which reaches exactly one
-of the guard's six checks — the additive invented-symbol check. The other five
-are hook-level: they need edit old-vs-new text plus an enrolled snapshot store,
-and are reachable only through the PreToolUse entry point. As of #227 all five
-have replayable fixtures under `cmd/runecho-guard/testdata/hookcorpus/`, driven
-through `runHookMode` by `TestHookCorpus`.
+of the guard's nine checks — the additive invented-symbol check. The other eight
+are hook-level: they all need edit old-vs-new text and are reachable only through
+the PreToolUse entry point, and most also need an enrolled snapshot store or an
+on-disk module (a `go.mod`, a vendor tree). Two need neither, and the exception is
+worth stating rather than implying away: dropped-import reads the pre-edit file's
+own imports, and call-shape deliberately answers on trees the store cannot
+resolve (#261). All eight have replayable fixtures under
+`cmd/runecho-guard/testdata/hookcorpus/`, driven through `runHookMode` by
+`TestHookCorpus` — the five hook-only checks as of #227, call-shape with #243,
+and qualified and deps-go with #283.
 
 That is a *wiring* instrument, not a second catch-rate, and it should never be
 quoted as one: it proves each check fires and stays silent where intended, on

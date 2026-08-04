@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-08-04
+
+### Changed
+- parser(shell): replace maskShell with tree-sitter-bash (#281, #282) (#287)
+
 ## [0.24.0] — 2026-08-04
 
 ### Changed

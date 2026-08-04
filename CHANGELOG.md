@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-08-04
+
+### Changed
+- guard: gate the clean path on the findings, and pin the two unpinned buckets (#268 follow-up) (#283)
+
 ## [0.23.0] — 2026-07-31
 
 ### Changed

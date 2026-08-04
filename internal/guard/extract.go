@@ -155,6 +155,13 @@ var (
 	// ordinary generic TS. Kept in sync with reJSCallIdent's type-arg body.
 	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*(?:<[\w$,.\[\]<>\s]+>)?\s*\(`)
 	reJSVarDef  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
+	// reJSVarDefCont mirrors reJSVarDef but for a SECOND (or later) function/arrow
+	// declarator on the same `const`/`let`/`var` statement (`const a = () => {},
+	// b = () => {}`) — valid JS, each declarator needing its own initializer. Not
+	// anchored at `^` (it matches mid-line, after the comma), so defNames applies
+	// it with FindAllStringSubmatch to pick up every trailing declarator; reJSVarDef
+	// still owns the first one, which sits before any comma.
+	reJSVarDefCont = regexp.MustCompile(`,\s*([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
 	// rePyClassDef / rePyConstDef capture Python class and SCREAMING_SNAKE module
 	// constant definitions so that references to them elsewhere in the file are
 	// not mistaken for hallucinations once const/class references are extracted.
@@ -213,6 +220,13 @@ var (
 	reJSImport  = regexp.MustCompile(`^\s*import\s+(.+?)\s+from\s+`)
 	reJSRequire = regexp.MustCompile(`^\s*(?:const|let|var)\s+(.+?)\s*=\s*require\s*\(`)
 	reIdent     = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
+	// reJSExportFrom matches an `export ... from ...` re-export at any spacing —
+	// spaced (`export { a } from 'm'`), minified (`export{a}from"m"`), or a
+	// partially-spaced mix of the two (`export{a} from"m"`). isImportLine
+	// already checks the `export` prefix; this only needs to confirm a genuine
+	// `from` keyword (word-bounded, so it can't match inside an identifier like
+	// `fromCache`) appears somewhere after it.
+	reJSExportFrom = regexp.MustCompile(`^export\b.*\bfrom\b`)
 )
 
 // ExtractImports returns the locally-bound names introduced by import statements
@@ -355,26 +369,15 @@ func parseJSImportClause(s string) []string {
 }
 
 // parseJSBindingTarget parses the LHS of `const <target> = require('m')`: a bare
-// name or a `{a, b: c}` destructuring (binds `a`, `c`).
+// name, a `{a, b: c}` object destructuring, or a `[a, b]` array destructuring —
+// at any nesting depth. Delegates to jsBindingTargets, the bracket-depth-aware
+// parser JSDeclaredNames already uses for `const`/`let`/`var` declarators: a
+// require() binding target has the exact same LHS-pattern shape, so reusing it
+// (rather than the previous strings.Trim(s, "{}") cutset trim, which stripped
+// only the outermost brace pair and corrupted nested patterns, and never
+// recognized `[` at all) fixes both the nesting and array cases at once.
 func parseJSBindingTarget(s string) []string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "{") {
-		var out []string
-		for _, item := range strings.Split(strings.Trim(s, "{}"), ",") {
-			item = strings.TrimSpace(item)
-			if idx := strings.IndexByte(item, ':'); idx >= 0 {
-				item = strings.TrimSpace(item[idx+1:])
-			}
-			if reIdent.MatchString(item) {
-				out = append(out, item)
-			}
-		}
-		return out
-	}
-	if reIdent.MatchString(s) {
-		return []string{s}
-	}
-	return nil
+	return jsBindingTargets(strings.TrimSpace(s))
 }
 
 // JSDeclaredNames returns the identifiers bound by `const`/`let`/`var`
@@ -871,19 +874,59 @@ var tsTypeBuiltins = setOf(
 	"Capitalize", "Uncapitalize", "Iterable", "Iterator", "AsyncIterable",
 )
 
+// rePyTupleAssignTargets matches a Python tuple/multiple-assignment LHS list
+// (`MAX, OTHER = 5, 10`) and captures the whole comma-separated target span in
+// group 1, so EVERY name in it — not just the first — can be recognized as a
+// definition target rather than a reference. Requires at least one comma, so a
+// single target (`MAX = 5`) still falls through to appendConstRefs' plain `:`/
+// `=` check below, which also covers the annotation-only form (`MAX: int`) this
+// pattern does not. The trailing `(?:[^=]|$)` excludes `==` the same way
+// splitTopLevelAssigns does for chained assignment.
+var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A-Za-z_]\w*)\s*=(?:[^=]|$)`)
+
 // appendConstRefs adds SCREAMING_SNAKE constant references found in the (already
 // literal-stripped) scan to refs. Skips qualified attrs (`x.MAX`), definition
-// targets (`MAX =` / `MAX:`), and builtins.
-func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}) []Ref {
+// targets (`MAX: int = 5` / `MAX = 5` / `MAX, OTHER = 5, 10` / chained
+// `MAX = OTHER = 5`), and builtins.
+//
+// defs is the caller's already-computed defNames(lang, text) for this same
+// line — appendConstRefs previously never consulted it, so a name defNames
+// correctly recognizes as a chained-assignment target (`OTHER` in `MAX =
+// OTHER = 5`) was still added here as a plain reference: defNames' own fix
+// never reached the code path that actually decides ref-vs-definition for
+// SCREAMING_SNAKE names. Checking defs first covers that case; the two checks
+// below remain for shapes defNames does not itself capture (dict-key
+// disambiguation, tuple-assignment target spans).
+//
+// A `:` or `=` is only read as introducing a definition when the name is at
+// statement-start position (nothing but whitespace precedes it on the line) —
+// `{MAX: 5}` has MAX preceded by `{`, so it is a dict KEY (a genuine reference),
+// not a type annotation, even though the text after it looks identical to one.
+// Tuple-assignment targets are identified separately (rePyTupleAssignTargets)
+// since a name anywhere in `MAX, OTHER = 5, 10`'s target list — not only the
+// first — is being defined, not used.
+func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}) []Ref {
+	tupleTargetsEnd := -1
+	if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan); m != nil {
+		tupleTargetsEnd = m[3] // end of the captured target-list span (group 1)
+	}
 	for _, idx := range reUpperSnakeRef.FindAllStringSubmatchIndex(scan, -1) {
 		s, e := idx[2], idx[3]
 		name := scan[s:e]
 		if s > 0 && scan[s-1] == '.' {
 			continue // qualified attribute access
 		}
+		if _, isDef := defs[name]; isDef {
+			continue // recognized elsewhere on this line as a definition target
+		}
+		if tupleTargetsEnd >= 0 && e <= tupleTargetsEnd {
+			continue // part of a tuple-assignment LHS target list — a definition
+		}
 		rest := strings.TrimLeft(scan[e:], " \t")
-		if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
-			continue // assignment / annotation target — a definition, not a use
+		if strings.TrimSpace(scan[:s]) == "" {
+			if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
+				continue // `NAME: type = value` / `NAME = value` — a definition, not a use
+			}
 		}
 		if _, ok := builtins[name]; ok {
 			continue
@@ -1083,7 +1126,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 		if !isImportLine(lang, text) {
 			switch lang {
 			case LangPython:
-				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins)
+				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins, defs)
 			case LangJS:
 				refs = appendTypeRefs(refs, seen, scan, l.LineNo)
 			}
@@ -1493,10 +1536,13 @@ func isFStringPrefix(b []byte, i int) bool {
 			return false
 		}
 	}
-	for j := start; j < i; j++ {
-		if b[j] == 'f' || b[j] == 'F' {
-			return true
-		}
+	// The prefix must be EXACTLY a valid f-string combination, not merely
+	// CONTAIN an 'f' — the prior contains-check misclassified `bf`/`fb`/`ff`
+	// as f-strings, none of which are (bare/case-doubled `f` isn't a distinct
+	// prefix, and `b`+`f` are mutually exclusive prefix letters in Python).
+	switch strings.ToLower(string(b[start:i])) {
+	case "f", "rf", "fr":
+		return true
 	}
 	return false
 }
@@ -1593,10 +1639,29 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 // name), so a reference to a definition's own name can be skipped as a self-match
 // while genuine calls that share the line are still validated. Empty for a
 // non-definition line. Each def regex captures the declared name in group 1.
+//
+// captureAll exists alongside capture because a single statement can define more
+// than one name — `const a = () => {}, b = () => {}` (JS, one declarator per
+// function/arrow value) binds two names on one line. capture's underlying
+// regexes are `^`-anchored (true string-start only, never re-matching after an
+// internal comma), so switching capture itself to FindAll would not find a
+// second name — reJSVarDefCont is deliberately unanchored so FindAll can walk
+// the rest of the line for each later declarator. Python's chained-assignment
+// equivalent (`MAX_A = OTHER_B = 5`) is NOT handled this way: an unanchored
+// regex with a trailing `=` guard has the same problem one level up — FindAll's
+// non-overlapping matches consume that trailing `=`, so it can supply at most
+// one extra name and silently drops a third+ (confirmed: a 3-way chain lost
+// its last target). pyChainedAssignTargets splits on every top-level bare `=`
+// instead, which has no such limit.
 func defNames(lang Lang, text string) map[string]struct{} {
 	names := make(map[string]struct{})
 	capture := func(re *regexp.Regexp) {
 		if m := re.FindStringSubmatch(text); m != nil {
+			names[m[1]] = struct{}{}
+		}
+	}
+	captureAll := func(re *regexp.Regexp) {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
 			names[m[1]] = struct{}{}
 		}
 	}
@@ -1607,12 +1672,77 @@ func defNames(lang Lang, text string) map[string]struct{} {
 		capture(rePyDef)
 		capture(rePyClassDef)
 		capture(rePyConstDef)
+		for _, n := range pyChainedAssignTargets(text) {
+			names[n] = struct{}{}
+		}
 	case LangJS:
 		capture(reJSFuncDef)
 		capture(reJSVarDef)
+		captureAll(reJSVarDefCont)
 		capture(reJSTypeDef)
 	}
 	return names
+}
+
+// pyChainedAssignTargets returns every target name in a Python chained
+// assignment (`MAX_A = OTHER_B = THIRD_C = 5` → all three), or nil if text
+// isn't one. Splits on every top-level bare `=` (splitTopLevelAssigns already
+// excludes `==`/`!=`/`<=`/`>=`) rather than matching name-by-name, so it has no
+// limit on chain length — see defNames' comment for why the regex-FindAll
+// approach this replaced could not go past one extra name. Requires every
+// segment but the last to be, once trimmed, a single SCREAMING_SNAKE
+// identifier and nothing else; anything looser (`a.b = c = 5`, a genuine
+// single assignment with only one `=`) returns nil rather than guess.
+func pyChainedAssignTargets(text string) []string {
+	segs := splitTopLevelAssigns(text)
+	if len(segs) < 3 { // fewer than 2 targets + 1 value is not a chain
+		return nil
+	}
+	names := make([]string, 0, len(segs)-1)
+	for _, seg := range segs[:len(segs)-1] {
+		seg = strings.TrimSpace(seg)
+		if reUpperSnakeRef.FindString(seg) != seg {
+			return nil // not a clean NAME segment — bail rather than guess
+		}
+		names = append(names, seg)
+	}
+	return names
+}
+
+// splitTopLevelAssigns splits s on every bare `=` (excluding `==`, and
+// excluding `!=`/`<=`/`>=` by checking the preceding byte) that sits outside
+// any (), [], or {} nesting. Mirrors splitTopLevelCommas' bracket-depth
+// approach for a different operator.
+func splitTopLevelAssigns(s string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case '=':
+			if depth != 0 {
+				continue
+			}
+			if i+1 < len(s) && s[i+1] == '=' {
+				i++ // skip the whole `==`
+				continue
+			}
+			if i > 0 {
+				switch s[i-1] {
+				case '!', '<', '>':
+					continue // !=, <=, >=
+				}
+			}
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // isImportLine reports whether a line is an import/require statement. References
@@ -1624,13 +1754,19 @@ func isImportLine(lang Lang, text string) bool {
 		return rePyFrom.MatchString(text) || rePyImport.MatchString(text)
 	case LangJS:
 		t := strings.TrimSpace(text)
-		if strings.HasPrefix(t, "import ") {
+		// `import{` (no space) covers minified/bundled syntax
+		// (`import{a}from"m"`); the spaced form is still checked separately
+		// since `import(` (dynamic import, a call expression) must not match.
+		if strings.HasPrefix(t, "import ") || strings.HasPrefix(t, "import{") {
 			return true
 		}
 		// `export ... from '…'` is a re-export (binding); but `export function|const|
 		// class|interface …` is a definition whose param/annotation types we DO want
-		// to check, so only treat export-with-from as an import line.
-		if strings.HasPrefix(t, "export ") && strings.Contains(t, " from ") {
+		// to check, so only treat export-with-from as an import line. reJSExportFrom
+		// tolerates any (or no) whitespace around `from` — a literal `" from "`/
+		// `"}from"` substring check missed a partially-spaced minified/reformatted
+		// mix like `export{a} from"m"`.
+		if reJSExportFrom.MatchString(t) {
 			return true
 		}
 		return reJSRequire.MatchString(text)

@@ -32,18 +32,15 @@ import (
 // may mask imperfectly. A regex+state line-aware scan is intentional — a full
 // tree-sitter-bash grammar is heavier than the symbol model warrants.
 //
-// Two more, both from the heredoc-eligibility fix (#281/#282). A heredoc inside a
+// Two more, from the heredoc-eligibility fix (#281/#282). A heredoc inside a
 // backtick substitution is legal shell but is not recognised: `…` content is masked
 // wholesale without tracking inner structure, so there is nothing to hand a
-// recognised heredoc to. And `((` is ambiguous — arithmetic, or a subshell opening
-// another — which no masker can resolve the way bash does (by trying to parse), so
-// it is answered by heuristic. See arithShift: the guess is guarded by what it costs
-// when wrong, and the cost is asymmetric, because inside a STRUCTURAL frame a missed
-// heredoc is not a miss — its body is scanned as code and can invent a symbol.
-//
-// Multi-line bare arithmetic (`((` and `<<` on different lines) still mis-opens a
-// heredoc, unchanged from before the fix: the same-line `))` confirmation cannot see
-// it. Recorded rather than implied away.
+// recognised heredoc to. And an UNTERMINATED heredoc — one whose terminator never
+// appears before EOF — is abandoned rather than blanked, so the body of a truncated
+// script is scanned as code and can yield a phantom definition from its tail. That
+// is a deliberate trade (see the newline arm of maskShell): blanking forward
+// unconditionally is what let a single misread `<<` swallow an entire well-formed
+// file, and malformed input losing its tail is the smaller of the two.
 type ShellParser struct{}
 
 // NewShellParser creates a new shell parser.
@@ -269,7 +266,7 @@ func maskShell(src []byte) []byte {
 
 	var stack []byte
 	// stackAt[k] is the byte offset frame k was pushed at. Only heredoc eligibility
-	// reads it (see inArith); masking never does.
+	// reads it (see inArithNest); masking never does.
 	var stackAt []int
 	blanking := 0 // count of blanking frames (s/d/b/c/p) currently on the stack
 	// quoting counts only the frames whose BYTES are literal. It differs from
@@ -333,15 +330,14 @@ func maskShell(src []byte) []byte {
 	// failure being fixed. This stays a read-only predicate over frames pushed
 	// exactly as before, so a wrong answer can never desync anything.
 	//
-	// The offset-adjacency comparison is not currently pinned by any test, and the
-	// note is here rather than a fixture invented to cover it. Mutating it to accept
-	// ANY two stacked subshells survives the suite, because arithShift's same-line
-	// `))` confirmation independently rejects every non-adjacent case reachable in
-	// practice, and in the `blanking > 0` path a wrong answer is unobservable (the
-	// frame masks its contents anyway). It is kept because it is what makes this
-	// predicate mean "an arithmetic opener" rather than "some nested parens" — but
-	// it is redundancy, not load-bearing, and a fixture claiming otherwise would be
-	// the vacuous-coverage antipattern this package's tests exist to avoid.
+	// The offset-adjacency comparison is NOT pinned by any test, and this note is
+	// here instead of a fixture invented to cover it. Mutating both arms to return
+	// true unconditionally leaves the suite green, because arithShift only consults
+	// this inside a blanking frame, where a wrong answer emits nothing either way.
+	// It is kept because it is what makes the predicate mean "an arithmetic opener"
+	// rather than "some nested parens" — but it is redundancy, not load-bearing, and
+	// a fixture claiming to pin it would be the vacuous-coverage antipattern this
+	// package's tests exist to avoid.
 	inArithNest := func() bool {
 		for k := len(stack) - 1; k >= 1; k-- {
 			if stack[k] != frameSubshell {
@@ -359,56 +355,56 @@ func maskShell(src []byte) []byte {
 		return false
 	}
 
-	// arithClosesOnLine reports whether a `))` appears between pos and the end of
-	// its line. Arithmetic is an expression: `((x << y))` closes on the same line as
-	// its operator. A `((` that does NOT close on this line is far more likely a
-	// subshell opening a subshell.
-	arithClosesOnLine := func(pos int) bool {
-		for k := pos; k+1 < n && src[k] != '\n'; k++ {
-			if src[k] == ')' && src[k+1] == ')' {
-				return true
-			}
-		}
-		return false
-	}
-
 	// arithShift reports whether the `<<` at pos is the left-shift OPERATOR rather
-	// than a heredoc redirect (#281).
+	// than a heredoc redirect (#281) — and it deliberately answers true ONLY where
+	// being wrong is free.
 	//
-	// `((` is genuinely ambiguous in shell — `((expr))` is arithmetic, `((cmd)|cmd2)`
-	// is a subshell opening a subshell — and bash resolves it by trying to parse,
-	// which a masker cannot. So the guess is guarded by what it costs when wrong,
-	// and that cost is NOT symmetric:
+	// An earlier version also suppressed inside a bare `((…))`, confirmed by seeing
+	// a `))` close on the operator's line. Review found that backwards twice over.
+	// frameSubshell is STRUCTURAL: its contents are kept as code, so suppressing a
+	// heredoc there does not merely miss it — the body is scanned and `fake() {` in
+	// it becomes a definition that does not exist. And the confirmation could not
+	// tell `((cat <<EOF) | (tr a-z A-Z))` (a subshell pipeline whose own closer is
+	// `))`) from arithmetic, so it caused exactly that.
 	//
-	//   inside `$((…))`  frameCmdSub is a blanking frame, so its contents are masked
-	//                    wholesale. A heredoc missed there is genuinely just missed —
-	//                    no text escapes into the symbol table. Suppress freely.
-	//
-	//   inside `((…))`   frameSubshell is STRUCTURAL: contents are kept as code. A
-	//                    heredoc missed there is not a miss at all — its body is
-	//                    scanned, and `fake() {` in the body becomes a definition
-	//                    that does not exist. That is the #282 failure mode, arrived
-	//                    at from the other side, and it is worse than missing one.
-	//
-	// So in the non-blanking case the guess must be confirmed by seeing the `))`
-	// close on the same line. `((cat <<EOF` does not close, and its heredoc is real.
-	arithShift := func(pos int) bool {
-		if !inArithNest() {
-			return false
-		}
-		return blanking > 0 || arithClosesOnLine(pos)
-	}
+	// So suppression is now limited to `blanking > 0` — inside `$((…))`, where the
+	// frame masks its contents wholesale and a missed heredoc emits nothing. The
+	// bare `((x << y))` case is handled downstream instead, by refusing to blank for
+	// a heredoc whose terminator does not exist. That is a fact about the file
+	// rather than a guess about the syntax, which is why it can carry the case a
+	// heuristic kept getting wrong.
+	arithShift := func() bool { return inArithNest() && blanking > 0 }
 
 	// codeLevel reports whether these bytes are code rather than literal text — the
 	// half of heredoc eligibility that `blanking` used to answer wrongly, by counting
 	// frameCmdSub and so suppressing a real heredoc inside `$(…)` (#282).
-	codeLevel := func() bool { return quoting == 0 }
-
-	type hd struct {
-		term string
-		dash bool
+	//
+	// It walks the stack from the top and answers on the INNERMOST frame, not on a
+	// count. A count cannot express `x="$(cat <<EOF …)"` — the far more common
+	// spelling than a bare `$(…)` — where a double quote is open but the command
+	// substitution inside it re-enters code, and a heredoc there is legal. Counting
+	// any quoting frame anywhere on the stack left that half of #282 unclosed.
+	//
+	// This walk is NOT pinned by any test, and the note is here rather than a
+	// fixture invented for it: reverting to the count leaves the suite green,
+	// because the terminator lookahead independently prevents the damage the
+	// suppression used to cause. It is kept because a heredoc inside `"$(…)"` is
+	// legal shell and recognising it is simply correct — but it is correctness
+	// without an observable consequence in the symbol output, and saying so beats
+	// asserting coverage that is not there.
+	codeLevel := func() bool {
+		for k := len(stack) - 1; k >= 0; k-- {
+			switch stack[k] {
+			case frameSingle, frameDouble, frameBacktick, frameParam:
+				return false
+			case frameCmdSub, frameSubshell, frameGroup:
+				return true
+			}
+		}
+		return true
 	}
-	var heredocs []hd
+
+	var heredocs []shellHeredoc
 	atWordStart := true // for '#': a comment starts only at a command/word boundary
 
 	i := 0
@@ -613,7 +609,7 @@ func maskShell(src []byte) []byte {
 			}
 			// leave the newline for the next iteration to handle heredocs
 
-		case c == '<' && codeLevel() && !arithShift(i) && i+1 < n && src[i+1] == '<' &&
+		case c == '<' && codeLevel() && !arithShift() && i+1 < n && src[i+1] == '<' &&
 			(i+2 >= n || src[i+2] != '<') && (i == 0 || src[i-1] != '<'):
 			// Heredoc opener `<<`/`<<-` (not `<<<` herestring — guarded on both sides
 			// so neither the 1st nor the 2nd `<` of `<<<` is read as an opener) at
@@ -636,12 +632,21 @@ func maskShell(src []byte) []byte {
 				j++
 			}
 			if j > ws {
-				heredocs = append(heredocs, hd{term: string(src[ws:j]), dash: dash})
+				heredocs = append(heredocs, shellHeredoc{term: string(src[ws:j]), dash: dash})
 			}
 			if quoted && j < n && (src[j] == '\'' || src[j] == '"') {
 				j++
 			}
-			i = j // keep the `<<…delim` chars (code); resume after the delimiter spec
+			if wasBlank {
+				// Every other code-level branch masks inside a blanking frame; this one
+				// did not, and #282 made it reachable there. Without this `x=$(cat <<'END'`
+				// leaves `<<'END'` unmasked inside a frame whose contents are supposed to
+				// be blanked, including an unbalanced quote byte.
+				for k := i; k < j; k++ {
+					mask1(k)
+				}
+			}
+			i = j // resume after the delimiter spec
 			atWordStart = false
 
 		case c == '\n':
@@ -649,25 +654,36 @@ func maskShell(src []byte) []byte {
 			if codeLevel() && len(heredocs) > 0 {
 				i++ // move past the opener line's newline; bodies start here
 				for len(heredocs) > 0 && i < n {
-					lineEnd := i
-					for lineEnd < n && src[lineEnd] != '\n' {
-						lineEnd++
+					// Confirm the terminator EXISTS before blanking a single byte.
+					//
+					// This is the safety net that lets arithShift stop guessing. The
+					// old loop blanked forward unconditionally, so any `<<` misread as
+					// a redirect blanked every remaining line to EOF — which is what
+					// made #281 swallow whole files, and what made widening
+					// eligibility into `$(…)` dangerous (`x=$(let y=1<<n)` took `n` as
+					// a delimiter and dropped the rest of the file).
+					//
+					// A heredoc whose terminator never appears is a misparse, not a
+					// heredoc, so the honest response is to abandon it and mask
+					// nothing. The cost is a genuinely truncated script — an
+					// unterminated heredoc at EOF — whose body is then scanned as
+					// code. That is malformed shell and bounded to one file's tail;
+					// blanking to EOF on every misread is neither.
+					end, ok := heredocTermEnd(src, i, heredocs[0])
+					if !ok {
+						heredocs = nil
+						break
 					}
-					cmp := src[i:lineEnd]
-					if heredocs[0].dash {
-						cmp = trimLeftTabs(cmp)
+					for k := i; k < end; k++ {
+						if src[k] != '\n' { // keep newlines: masking is line-preserving
+							out[k] = ' '
+						}
 					}
-					for k := i; k < lineEnd; k++ {
-						out[k] = ' ' // blank the whole heredoc body/terminator line
-					}
-					matched := string(cmp) == heredocs[0].term
-					i = lineEnd
+					i = end
 					if i < n {
-						i++ // consume the line's newline (kept as '\n')
+						i++ // consume the terminator line's newline (kept as '\n')
 					}
-					if matched {
-						heredocs = heredocs[1:]
-					}
+					heredocs = heredocs[1:]
 				}
 			} else {
 				i++
@@ -687,6 +703,39 @@ func maskShell(src []byte) []byte {
 		}
 	}
 	return out
+}
+
+// shellHeredoc is one pending heredoc: the terminator line to look for, and
+// whether `<<-` tab-stripping applies to it.
+type shellHeredoc struct {
+	term string
+	dash bool
+}
+
+// heredocTermEnd scans forward from `from` (the first byte of the body) for the
+// line that exactly matches h's terminator, and returns the offset of that line's
+// end. ok is false when the terminator never appears before EOF — which the caller
+// treats as "this was not a heredoc", rather than blanking the rest of the file.
+func heredocTermEnd(src []byte, from int, h shellHeredoc) (int, bool) {
+	n := len(src)
+	for i := from; i < n; {
+		lineEnd := i
+		for lineEnd < n && src[lineEnd] != '\n' {
+			lineEnd++
+		}
+		cmp := src[i:lineEnd]
+		if h.dash {
+			cmp = trimLeftTabs(cmp)
+		}
+		if string(cmp) == h.term {
+			return lineEnd, true
+		}
+		i = lineEnd
+		if i < n {
+			i++
+		}
+	}
+	return 0, false
 }
 
 // trimLeftTabs returns b with leading TAB bytes removed (the `<<-` heredoc rule

@@ -350,14 +350,14 @@ func TestShellParser_HeredocEligibility(t *testing.T) {
 			wantHash: []string{"f", "g"},
 		},
 		{
-			// Adjacency is what separates arithmetic `((` from a subshell that merely
-			// opens another one. `( (` is two frames pushed two bytes apart, so it is
-			// NOT arithmetic and a heredoc inside it is real and must be masked.
+			// `( (` is two frames pushed two bytes apart, not an arithmetic `((`, and
+			// a heredoc inside it is real and must be masked.
 			//
-			// Added because mutation scoring found the gap: dropping the offset
-			// comparison from inArith — treating any two stacked subshells as
-			// arithmetic — survived every other case here. Without this the heuristic
-			// could quietly widen to swallow legitimate heredocs.
+			// This case does NOT pin the offset-adjacency comparison, and an earlier
+			// version of this comment claimed it did — review checked and the claim
+			// was false. What actually carries this is that arithShift only suppresses
+			// inside a blanking frame, which this is not. The survivor is recorded in
+			// inArithNest rather than asserted here.
 			name: "non-adjacent nested subshells are not arithmetic",
 			src: "f() {\n" +
 				"  ( (cat <<EOF\n" +
@@ -377,11 +377,12 @@ func TestShellParser_HeredocEligibility(t *testing.T) {
 			// arithmetic, and suppressing its heredoc is not a harmless miss.
 			// frameSubshell is STRUCTURAL — its contents are kept as code — so the
 			// unmasked body gets scanned and `fake_adj() {` becomes a definition that
-			// does not exist. Same failure mode as #282, reached from the other side,
-			// and worse than missing a heredoc.
+			// does not exist. Same failure mode as #282, reached from the other side.
 			//
-			// This is what the same-line `))` confirmation in arithShift exists for:
-			// real arithmetic closes on the line its operator is on; this does not.
+			// A second review round then killed the same-line `))` confirmation that
+			// first fixed it: it could not tell this from arithmetic when the closer
+			// happened to be `))`, which the next case covers. arithShift no longer
+			// suppresses in a structural frame at all.
 			name: "adjacent-paren pipeline heredoc is real, not arithmetic",
 			src: "f() {\n" +
 				"  ((cat <<EOF\n" +
@@ -419,16 +420,12 @@ func TestShellParser_HeredocEligibility(t *testing.T) {
 			wantHash: []string{"f", "g"},
 		},
 		{
-			// Multi-line `$((…))`: the same-line `))` confirmation cannot see the
-			// close, so what carries this is arithShift's `blanking > 0` short-circuit
-			// — inside a command substitution the contents are masked wholesale, so
-			// suppressing needs no confirmation and a missed heredoc costs nothing.
+			// Multi-line `$((…))`: carried by arithShift's `blanking > 0` rule — inside
+			// a command substitution the contents are masked wholesale, so suppressing
+			// needs no confirmation and a missed heredoc emits nothing.
 			//
 			// Pinned because it is a no-regression-vs-master property: before the fix
-			// `$(` made blanking > 0 and the opener was suppressed here. Demanding the
-			// same-line `))` in this branch too would swallow g, which master does not.
-			// (The bare `((` multi-line spelling stays broken, before and after — the
-			// header records it.)
+			// `$(` made blanking > 0 and the opener was suppressed here.
 			name: "multi-line arithmetic expansion is still not a heredoc",
 			src: "f() {\n" +
 				"  y=$((\n" +
@@ -439,6 +436,106 @@ func TestShellParser_HeredocEligibility(t *testing.T) {
 				"g() { echo two; }\n",
 			want:     []string{"f", "g"},
 			wantHash: []string{"f", "g"},
+		},
+		{
+			// Second review round, finding 1. The same-line `))` confirmation that
+			// fixed the case above could not tell this from arithmetic: a subshell
+			// pipeline whose own closer IS `))` on the opener's line. It suppressed a
+			// real heredoc in a structural frame, so the body was scanned and
+			// `fake_h() {` was emitted — the very failure the confirmation was added
+			// to prevent, on a one-character variation of its own fixture.
+			//
+			// The lesson the fix took: stop guessing from syntax. arithShift now only
+			// suppresses inside a blanking frame, and the bare `((x << y))` case is
+			// carried downstream by the terminator lookahead, which is a fact about
+			// the file rather than a guess about the grammar.
+			name: "subshell pipeline whose own closer is )) is not arithmetic",
+			src: "f() {\n" +
+				"  ((cat <<EOF) | (tr a-z A-Z))\n" +
+				"fake_h() {\n" +
+				"  :\n" +
+				"}\n" +
+				"EOF\n" +
+				"  echo done\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"fake_h"},
+		},
+		{
+			// Second review round, finding 2. Widening eligibility into `$(…)` made
+			// the body-blanking loop reachable there, and it blanked forward
+			// unconditionally — so a left-shift written any way OTHER than `((`
+			// (which arithShift does not recognise) took `n` as a delimiter and
+			// erased the rest of the file. #281's whole-file loss, relocated.
+			//
+			// Pins the terminator lookahead: no `n` line exists, so the heredoc is
+			// abandoned and nothing is masked.
+			name: "non-arithmetic left shift inside a command substitution",
+			src: "f() {\n" +
+				"  x=$(let y=1<<n)\n" +
+				"  echo after\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
+			// Second review round, finding 3: #282 was only half closed. `"$(…)"` is
+			// the commoner spelling than a bare `$(…)`, and counting any quoting frame
+			// anywhere on the stack left it ineligible — so a `"` in the heredoc body
+			// popped the double quote and the body was scanned as code. Broken on
+			// master too, so this is a widening rather than a regression fix.
+			//
+			// Pins codeLevel answering on the INNERMOST frame instead of a count.
+			//
+			// The body carries a `"`, and it has to: without one the enclosing
+			// frameDouble masks the body anyway and the case passes even with the fix
+			// reverted. The quote is what pops out of the double quote and exposes
+			// the body as code — verified by mutation, which is how the vacuous
+			// version was caught.
+			name: "heredoc inside a double-quoted command substitution",
+			src: "f() {\n" +
+				"  x=\"$(cat <<EOF\n" +
+				"fake_m() {\n" +
+				"  echo \"quoted\"\n" +
+				"}\n" +
+				"EOF\n" +
+				")\"\n" +
+				"  echo done\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"fake_m"},
+		},
+		{
+			// What keeps arithShift load-bearing once the terminator lookahead exists.
+			// `shift` is a real bash builtin that commonly appears on a line of its
+			// own, so a file can contain a line that exactly matches the operand name
+			// — the lookahead then FINDS a "terminator" and blanks everything between,
+			// swallowing g. Recognising `$((…))` as arithmetic is what stops the
+			// opener from ever being taken.
+			//
+			// Added because mutation scoring showed arithShift was otherwise dead:
+			// disabling it entirely left the suite green.
+			// The `shift` line must be at column 0 and the assertion must reach
+			// SymbolHashes: an indented operand line never matches the terminator, and
+			// f still appears in Functions either way — only its body hash is lost
+			// when the region through the false terminator is blanked. Both mistakes
+			// were in the first draft of this case, and mutation is what exposed them.
+			name: "arithmetic operand also appearing as a bare command line",
+			src: "f() {\n" +
+				"  y=$((x << shift))\n" +
+				"  echo after\n" +
+				"}\n" +
+				"shift\n" +
+				"h() {\n" +
+				"  echo tail\n" +
+				"}\n",
+			want:     []string{"f", "h"},
+			wantHash: []string{"f", "h"},
 		},
 		{
 			// The ordinary top-level heredoc must not regress: the fix widens where a

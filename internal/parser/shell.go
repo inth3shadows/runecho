@@ -36,9 +36,14 @@ import (
 // backtick substitution is legal shell but is not recognised: `…` content is masked
 // wholesale without tracking inner structure, so there is nothing to hand a
 // recognised heredoc to. And `((` is ambiguous — arithmetic, or a subshell opening
-// another — which no masker can resolve the way bash does (by trying to parse); the
-// heuristic is offset adjacency, and the cost of guessing wrong is a missed heredoc,
-// never a desynced stack. See inArith for why that bound is the design constraint.
+// another — which no masker can resolve the way bash does (by trying to parse), so
+// it is answered by heuristic. See arithShift: the guess is guarded by what it costs
+// when wrong, and the cost is asymmetric, because inside a STRUCTURAL frame a missed
+// heredoc is not a miss — its body is scanned as code and can invent a symbol.
+//
+// Multi-line bare arithmetic (`((` and `<<` on different lines) still mis-opens a
+// heredoc, unchanged from before the fix: the same-line `))` confirmation cannot see
+// it. Recorded rather than implied away.
 type ShellParser struct{}
 
 // NewShellParser creates a new shell parser.
@@ -310,47 +315,94 @@ func maskShell(src []byte) []byte {
 		return stack[len(stack)-1]
 	}
 
-	// inArith reports whether the top of the stack is an arithmetic `((…))`, where
-	// `<<` is the left-shift operator and never a heredoc redirect (#281).
-	//
-	// `((` is genuinely ambiguous in shell — `((expr))` is arithmetic, but
-	// `((cmd) | cmd2)` is a subshell opening a subshell. Bash resolves it by trying
-	// to parse; a masker cannot. So this is a HEURISTIC, and it is deliberately
-	// shaped as a read-only predicate over frames that were pushed exactly as
-	// before: two adjacent `(` at offsets n and n+1.
-	//
-	// A dedicated frameArith kind was rejected for this reason. It would have to be
-	// popped by `))`, so misreading `((echo a) | cat)` as arithmetic desyncs the
-	// stack on the first single `)` — and a desynced masker swallowing the rest of
-	// the file is precisely the #281 failure being fixed. Under this shape the cost
-	// of guessing wrong is at most one missed heredoc.
-	// Both arithmetic spellings are covered, and the second is not optional. `$((`
-	// used to be safe only by accident: `$(` pushed a frameCmdSub, so blanking > 0
-	// suppressed the opener. Once frameCmdSub stops counting toward quoting — which
-	// is the #282 fix — that accident is gone and `$((x << 2))` would start opening
-	// a heredoc. The arithmetic rule has to carry it instead.
+	// inArithNest reports whether an arithmetic paren pair is open somewhere in the
+	// run of frameSubshell frames at the top of the stack:
 	//
 	//   `((`  → frameSubshell, frameSubshell at offsets n, n+1
-	//   `$((` → frameCmdSub, frameSubshell   at offsets n, n+2  (the `$(` is 2 bytes)
-	inArith := func() bool {
-		k := len(stack)
-		if k < 2 || stack[k-1] != frameSubshell {
-			return false
-		}
-		switch stack[k-2] {
-		case frameSubshell:
-			return stackAt[k-1] == stackAt[k-2]+1
-		case frameCmdSub:
-			return stackAt[k-1] == stackAt[k-2]+2
+	//   `$((` → frameCmdSub,   frameSubshell at offsets n, n+2  (the `$(` is 2 bytes)
+	//
+	// It walks DOWN that run rather than checking only the top pair. A parenthesised
+	// subexpression inside arithmetic pushes its own frame — `x=$(( (1 << bit) ))`
+	// leaves the stack as cmdSub@n, subshell@n+2, subshell@m — so the arithmetic
+	// opener is no longer adjacent at the top, and a top-pair-only check re-opens
+	// #281 on exactly the spelling the arithmetic rule exists to cover.
+	//
+	// A dedicated frameArith kind was rejected: it would have to be popped by `))`,
+	// so misreading `((echo a) | cat)` as arithmetic desyncs the stack on the first
+	// single `)` — and a desynced masker swallowing the rest of the file IS the #281
+	// failure being fixed. This stays a read-only predicate over frames pushed
+	// exactly as before, so a wrong answer can never desync anything.
+	//
+	// The offset-adjacency comparison is not currently pinned by any test, and the
+	// note is here rather than a fixture invented to cover it. Mutating it to accept
+	// ANY two stacked subshells survives the suite, because arithShift's same-line
+	// `))` confirmation independently rejects every non-adjacent case reachable in
+	// practice, and in the `blanking > 0` path a wrong answer is unobservable (the
+	// frame masks its contents anyway). It is kept because it is what makes this
+	// predicate mean "an arithmetic opener" rather than "some nested parens" — but
+	// it is redundancy, not load-bearing, and a fixture claiming otherwise would be
+	// the vacuous-coverage antipattern this package's tests exist to avoid.
+	inArithNest := func() bool {
+		for k := len(stack) - 1; k >= 1; k-- {
+			if stack[k] != frameSubshell {
+				return false
+			}
+			switch stack[k-1] {
+			case frameSubshell:
+				if stackAt[k] == stackAt[k-1]+1 {
+					return true
+				}
+			case frameCmdSub:
+				return stackAt[k] == stackAt[k-1]+2
+			}
 		}
 		return false
 	}
 
-	// heredocOK reports whether a heredoc can START or CONTINUE at this position.
-	// This is the question shell.go used to ask `blanking`, which encodes something
-	// else and was wrong in both directions: it let `<<` open a heredoc inside an
-	// arithmetic `((…))` (#281) and suppressed a real one inside `$(…)` (#282).
-	heredocOK := func() bool { return quoting == 0 && !inArith() }
+	// arithClosesOnLine reports whether a `))` appears between pos and the end of
+	// its line. Arithmetic is an expression: `((x << y))` closes on the same line as
+	// its operator. A `((` that does NOT close on this line is far more likely a
+	// subshell opening a subshell.
+	arithClosesOnLine := func(pos int) bool {
+		for k := pos; k+1 < n && src[k] != '\n'; k++ {
+			if src[k] == ')' && src[k+1] == ')' {
+				return true
+			}
+		}
+		return false
+	}
+
+	// arithShift reports whether the `<<` at pos is the left-shift OPERATOR rather
+	// than a heredoc redirect (#281).
+	//
+	// `((` is genuinely ambiguous in shell — `((expr))` is arithmetic, `((cmd)|cmd2)`
+	// is a subshell opening a subshell — and bash resolves it by trying to parse,
+	// which a masker cannot. So the guess is guarded by what it costs when wrong,
+	// and that cost is NOT symmetric:
+	//
+	//   inside `$((…))`  frameCmdSub is a blanking frame, so its contents are masked
+	//                    wholesale. A heredoc missed there is genuinely just missed —
+	//                    no text escapes into the symbol table. Suppress freely.
+	//
+	//   inside `((…))`   frameSubshell is STRUCTURAL: contents are kept as code. A
+	//                    heredoc missed there is not a miss at all — its body is
+	//                    scanned, and `fake() {` in the body becomes a definition
+	//                    that does not exist. That is the #282 failure mode, arrived
+	//                    at from the other side, and it is worse than missing one.
+	//
+	// So in the non-blanking case the guess must be confirmed by seeing the `))`
+	// close on the same line. `((cat <<EOF` does not close, and its heredoc is real.
+	arithShift := func(pos int) bool {
+		if !inArithNest() {
+			return false
+		}
+		return blanking > 0 || arithClosesOnLine(pos)
+	}
+
+	// codeLevel reports whether these bytes are code rather than literal text — the
+	// half of heredoc eligibility that `blanking` used to answer wrongly, by counting
+	// frameCmdSub and so suppressing a real heredoc inside `$(…)` (#282).
+	codeLevel := func() bool { return quoting == 0 }
 
 	type hd struct {
 		term string
@@ -561,7 +613,7 @@ func maskShell(src []byte) []byte {
 			}
 			// leave the newline for the next iteration to handle heredocs
 
-		case c == '<' && heredocOK() && i+1 < n && src[i+1] == '<' &&
+		case c == '<' && codeLevel() && !arithShift(i) && i+1 < n && src[i+1] == '<' &&
 			(i+2 >= n || src[i+2] != '<') && (i == 0 || src[i-1] != '<'):
 			// Heredoc opener `<<`/`<<-` (not `<<<` herestring — guarded on both sides
 			// so neither the 1st nor the 2nd `<` of `<<<` is read as an opener) at
@@ -594,7 +646,7 @@ func maskShell(src []byte) []byte {
 
 		case c == '\n':
 			atWordStart = true
-			if heredocOK() && len(heredocs) > 0 {
+			if codeLevel() && len(heredocs) > 0 {
 				i++ // move past the opener line's newline; bodies start here
 				for len(heredocs) > 0 && i < n {
 					lineEnd := i

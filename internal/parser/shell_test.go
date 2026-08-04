@@ -372,6 +372,75 @@ func TestShellParser_HeredocEligibility(t *testing.T) {
 			noHash:   []string{"fake_nested"},
 		},
 		{
+			// Review of #285 caught this as a REGRESSION the first version of the fix
+			// introduced: `((cat <<EOF` is a subshell opening a subshell, not
+			// arithmetic, and suppressing its heredoc is not a harmless miss.
+			// frameSubshell is STRUCTURAL — its contents are kept as code — so the
+			// unmasked body gets scanned and `fake_adj() {` becomes a definition that
+			// does not exist. Same failure mode as #282, reached from the other side,
+			// and worse than missing a heredoc.
+			//
+			// This is what the same-line `))` confirmation in arithShift exists for:
+			// real arithmetic closes on the line its operator is on; this does not.
+			name: "adjacent-paren pipeline heredoc is real, not arithmetic",
+			src: "f() {\n" +
+				"  ((cat <<EOF\n" +
+				"fake_adj() {\n" +
+				"  echo hi\n" +
+				"}\n" +
+				"EOF\n" +
+				") | tr a-z A-Z)\n" +
+				"  echo done\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"fake_adj"},
+		},
+		{
+			// Also from the #285 review. A parenthesised subexpression inside
+			// arithmetic pushes its own frame, so the arithmetic opener is no longer
+			// the top pair — cmdSub@n, subshell@n+2, subshell@m. A top-pair-only
+			// check re-opened #281 on exactly the spelling the arithmetic rule was
+			// added to cover: `bit` was taken as a heredoc delimiter and every
+			// following line blanked to EOF, dropping g entirely.
+			//
+			// Both spellings, because the bare `((` form was broken BEFORE this fix
+			// too (blanking == 0 there), so it is a pre-existing bug the stack walk
+			// closes rather than a regression it avoids.
+			name: "parenthesised subexpression inside arithmetic",
+			src: "f() {\n" +
+				"  x=$(( (1 << bit) ))\n" +
+				"  (( m = (1 << bit) ))\n" +
+				"  echo after\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
+			// Multi-line `$((…))`: the same-line `))` confirmation cannot see the
+			// close, so what carries this is arithShift's `blanking > 0` short-circuit
+			// — inside a command substitution the contents are masked wholesale, so
+			// suppressing needs no confirmation and a missed heredoc costs nothing.
+			//
+			// Pinned because it is a no-regression-vs-master property: before the fix
+			// `$(` made blanking > 0 and the opener was suppressed here. Demanding the
+			// same-line `))` in this branch too would swallow g, which master does not.
+			// (The bare `((` multi-line spelling stays broken, before and after — the
+			// header records it.)
+			name: "multi-line arithmetic expansion is still not a heredoc",
+			src: "f() {\n" +
+				"  y=$((\n" +
+				"    x << shift\n" +
+				"  ))\n" +
+				"  echo after\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
 			// The ordinary top-level heredoc must not regress: the fix widens where a
 			// heredoc is recognised, and the risk of widening is that the common case
 			// starts behaving differently.

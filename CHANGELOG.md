@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-08-04
+
+### Changed
+- guard: fix 7 extract.go false positives/negatives (#274-#280) (#288)
+
 ## [0.25.0] — 2026-08-04
 
 ### Changed

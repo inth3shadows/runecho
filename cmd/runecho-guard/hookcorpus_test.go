@@ -13,13 +13,18 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Five checks —
-// dangling-refs, dropped-import, duplicate-symbol, file-scope, contract — need
-// old-vs-new edit text PLUS an enrolled snapshot store and are reachable ONLY
-// through the hook entry point (runHookMode). The published corpus in
-// internal/guard drives guard.Run in-process, which cannot reach them, so the
-// catch-rate it reports describes one check of six (#227). This harness closes
-// that gap by replaying such cases as data through runHookMode.
+// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Eight checks
+// — dangling-refs, dropped-import, duplicate-symbol, file-scope, contract,
+// call-shape, qualified, deps-go — need old-vs-new edit text PLUS an enrolled
+// snapshot store or an on-disk module, and are reachable ONLY through the hook
+// entry point (runHookMode). The published corpus in internal/guard drives
+// guard.Run in-process, which cannot reach them, so the catch-rate it reports
+// describes one check of nine (#227). This harness closes that gap by replaying
+// such cases as data through runHookMode.
+//
+// Keep that count honest when a check is added. It is this corpus's own claim
+// about what it covers, and the whole thesis here is that unmeasured coverage is
+// the hazard — a stale denominator is the same failure in prose.
 //
 // Phase 1 covered duplicate-symbol; phase 2 added dangling-refs, which enrolls
 // a refs index (Refs) so a deleted def with a live cross-file referrer can be
@@ -40,7 +45,11 @@ import (
 // worktree AND an activation row keyed to a session — so Contract/Session/
 // ActivateSession exist to express "activated, but for a different session",
 // which is the leak that would make every concurrent agent in a shared store
-// answer for a scope it never accepted. All six checks now have fixtures.
+// answer for a scope it never accepted. That completed the six checks that
+// existed then. Call-shape arrived with #243 and brought its own set; qualified
+// and deps-go were added last, and needed the `files` field, because their
+// preconditions live on disk (a go.mod, a vendor tree) rather than in the
+// snapshot store.
 //
 // # Every fixture here earns its place by mutation, not by argument
 //

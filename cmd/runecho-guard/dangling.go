@@ -244,9 +244,16 @@ type firedChecks struct {
 	CallShape  bool
 }
 
-// anyNonViolation reports the checks whose findings do NOT land in the
-// []Violation slice, so the clean-path gate can read
-// `len(violations) == 0 && !fired.anyNonViolation()`.
+// anyNonViolation reports every check EXCEPT the additive one, so the
+// clean-path gate can read `len(violations) == 0 && !fired.anyNonViolation()`.
+//
+// The two halves of that gate are not disjoint, and should not be. Four of the
+// seven fields here (dangling, dropped, duplicate, call-shape) are the only
+// record that their check fired — nothing else in the gate can see them. The
+// other three (file-scope, qualified, deps-go) ALSO append into `violations`,
+// so `len(violations)` already covers them and their flags are redundant to the
+// gate. That redundancy is deliberate belt-and-braces, not an oversight: it
+// costs nothing and means the gate survives either half being wrong.
 //
 // Violations is deliberately absent, and the omission is the point. File-scope,
 // qualified and deps-go append INTO `violations` while also setting their own

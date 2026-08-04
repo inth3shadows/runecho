@@ -165,6 +165,10 @@ func TestASTGrammarsLoad(t *testing.T) {
 	if rubyLanguage() == nil {
 		t.Error("ruby grammar is nil under these build tags — .rb files index to nothing")
 	}
+	if bashLanguage() == nil {
+		t.Error("bash grammar is nil under these build tags — .sh/.bash files fall back to " +
+			"the regex path (names only, best-effort spans) while still appearing to parse")
+	}
 	if pythonLanguage() == nil {
 		t.Error("python grammar is nil under these build tags — .py files index to nothing")
 	}

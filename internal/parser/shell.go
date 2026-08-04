@@ -58,7 +58,7 @@ var (
 	// `name()` / `name ()` — empty parens after a name is a function DEFINITION
 	// only (a call never writes `()`), so this is unambiguous and low false-positive.
 	// Used only by the regex-fallback path (see shellFallbackFunctions) when the
-	// AST parse errors; the primary path reads the AST directly.
+	// AST is unavailable entirely; the primary path reads the AST directly.
 	reShellFuncParen = regexp.MustCompile(`(?m)^[ \t]*(` + shellNameClass + `)[ \t]*\(\)`)
 	// `function name` / `function name()`.
 	reShellFuncKw = regexp.MustCompile(`(?m)^[ \t]*function[ \t]+(` + shellNameClass + `)`)
@@ -96,78 +96,56 @@ func (p *ShellParser) Parse(source string) (FileStructure, error) {
 	// (parity with the Go/Python parsers).
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 	src := []byte(source)
+	// Comments/quotes/backticks/param-expansions/heredoc bodies blanked to
+	// spaces — shared by the AST walk (to recognize and skip a fabricated
+	// function_definition whose start position lands inside one of these
+	// regions) and by the total-fallback path below. See shellFallbackMask.
+	masked := shellFallbackMask(src)
 
 	var (
 		astFunctions []string
 		astHashes    map[string]string
 		astLines     map[string]int
-		hasError     = true
 	)
 	if lang := bashLanguage(); lang != nil {
-		astFunctions, astHashes, astLines, hasError = shellSymbolsFromAST(source, lang)
+		astFunctions, astHashes, astLines = shellSymbolsFromAST(source, lang, masked)
 	}
 
 	var functions []string
 	var hashes map[string]string
 	var lines map[string]int
 
-	switch {
-	case !hasError:
-		// Clean parse: the AST is authoritative, no fallback consultation. The
-		// fallback's line-anchored regex is quote/heredoc-blind, so consulting
-		// it here would risk pulling in a def-shaped line the AST correctly
-		// recognized as non-code — e.g. a line that only LOOKS like a top-level
-		// definition because it sits inside a multi-line double-quoted string
-		// (see MaskingKeepsBodySpanHonest).
+	if len(astFunctions) > 0 {
+		// Trust the AST for whatever it found. shellSymbolsFromAST already
+		// excluded any function_definition node whose start position falls
+		// inside a masked (comment/quote/heredoc-body) region — the signature
+		// of the vendored grammar's confirmed stacked-heredoc gap, where error
+		// recovery can fabricate a function_definition out of what is
+		// actually heredoc body text (see shell_treesitter_acceptance_test.go
+		// and PR #285). That per-node filter is more precise than a whole-tree
+		// HasError() gate (which both over- and under-trusts: it flags a
+		// merely-quirky-but-correct span like `${z:-{a,b}}` as untrustworthy,
+		// while a fabricated sibling node can show HasError()==false itself),
+		// so no further cross-checking against the regex fallback is needed
+		// here — including no need to intersect against it, which would have
+		// silently dropped a genuine function only because the fallback's
+		// line-anchored regex can't see a definition after a `;` on the same
+		// line as another.
 		functions, hashes, lines = astFunctions, astHashes, astLines
-
-	case len(astFunctions) == 0:
-		// No AST result to cross-check against (grammar unavailable, parse
-		// panicked/over-nested/failed outright, or a genuinely function-free
-		// file that also errored) — use the heredoc-aware fallback directly.
-		// No body hashes on this path: nothing to derive them from.
-		fNames, fLines := shellFallbackFunctions(src)
+	} else {
+		// No AST result at all (grammar unavailable, parse panicked or
+		// over-nested, or every function_definition node the AST did see was
+		// heredoc-body noise) — fall back fully to the masked-regex scan,
+		// including hashes via a simple brace/paren depth count on the same
+		// masked buffer (safe because strings/comments/heredoc bodies are
+		// already blanked, so no stray delimiter from string content can
+		// desync the count).
+		fNames, fHashes, fLines := shellFallbackFunctions(masked, src)
 		functions = fNames
+		hashes = fHashes
 		lines = make(map[string]int, len(fLines))
 		for name, line := range fLines {
 			lines["function:"+name] = line
-		}
-
-	default:
-		// Partial/corrupted parse with at least one AST-found function: the
-		// vendored tree-sitter-bash grammar has a confirmed gap on stacked
-		// heredocs on one line (`<<A <<B`) where error recovery fabricates a
-		// real-looking function_definition node out of what is actually
-		// heredoc body text — verified by direct AST inspection. Trust only
-		// AST-found names the independent heredoc-aware fallback ALSO names
-		// (intersection, not union): a name the fallback does not corroborate
-		// is exactly that fabrication signature, and a name only the fallback
-		// finds is deliberately NOT added back in — on this same partial-parse
-		// path the fallback's quote-blind regex is exactly what could wrongly
-		// match a def-shaped line inside a string the AST correctly excluded.
-		// This does forgo the "union" coverage-never-regresses posture the
-		// JS/TS parser uses, because here (unlike there) the failure mode is
-		// fabrication, not just omission — see shell_treesitter_acceptance_test.go
-		// and PR #285 for the three rounds of masker patches this replaces.
-		fNames, _ := shellFallbackFunctions(src)
-		fallbackSet := make(map[string]bool, len(fNames))
-		for _, n := range fNames {
-			fallbackSet[n] = true
-		}
-		hashes = make(map[string]string)
-		lines = make(map[string]int)
-		for _, name := range astFunctions {
-			if !fallbackSet[name] {
-				continue
-			}
-			functions = append(functions, name)
-			key := "function:" + name
-			if h, ok := astHashes[key]; ok {
-				hashes[key] = h
-			}
-			if l, ok := astLines[key]; ok {
-				lines[key] = l
-			}
 		}
 	}
 
@@ -189,22 +167,25 @@ func (p *ShellParser) Parse(source string) (FileStructure, error) {
 }
 
 // shellSymbolsFromAST walks the Bash AST and returns every function definition
-// (both `name() {…}` and `function name {…}` forms), flat and unqualified. hasError
-// reports whether the parse panicked, over-nested, failed outright, or partially
-// recovered (Node.HasError) — any of which tells the caller to supplement with
-// the regex fallback.
-func shellSymbolsFromAST(source string, lang *ts.Language) (functions []string, hashes map[string]string, lines map[string]int, hasError bool) {
+// (both `name() {…}` and `function name {…}` forms), flat and unqualified. masked
+// is the shared comment/quote/heredoc-body mask (see shellFallbackMask): a
+// function_definition node whose name starts on a masked byte is skipped rather
+// than recorded — that position can only be reached by content the grammar
+// itself would never place a real definition on (heredoc body text mis-parsed as
+// code being the confirmed case), so trusting the node there would trust a
+// fabrication.
+func shellSymbolsFromAST(source string, lang *ts.Language, masked []byte) (functions []string, hashes map[string]string, lines map[string]int) {
 	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
 	// input; a panic here would otherwise propagate through parseFile→Generate
 	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
-	// (the same fail-safe path as a nil grammar) so one bad file can't take down
-	// the process. Named returns are reset so a panic mid-walk can't leak a
-	// partial, inconsistent symbol set. hasError=true tells the caller to
-	// supplement with the regex fallback, matching the JS/TS parser's posture.
+	// (the same fail-safe path as a nil grammar, which the caller then covers
+	// with the regex fallback) so one bad file can't take down the process.
+	// Named returns are reset so a panic mid-walk can't leak a partial,
+	// inconsistent symbol set.
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "runecho: shell parse panicked (%v); AST symbols for this file disabled\n", r)
-			functions, hashes, lines, hasError = nil, nil, nil, true
+			functions, hashes, lines = nil, nil, nil
 		}
 	}()
 	src := []byte(source)
@@ -212,13 +193,24 @@ func shellSymbolsFromAST(source string, lang *ts.Language) (functions []string, 
 	// parse can hang the process; degrade to the regex fallback (see maxParseNestDepth).
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: shell source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, true
+		return nil, nil, nil
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, true
+		return nil, nil, nil
 	}
-	hasError = tree.RootNode().HasError()
+	// Only consult the mask when the parse actually errored. shellFallbackMask
+	// does not — and, to avoid the `((` ambiguity that sank three review rounds
+	// on maskShell, deliberately cannot — track paren nesting, so its heredoc
+	// detector cannot tell `((x << y))` arithmetic from a real heredoc opener
+	// either; unconditionally trusting it here would misidentify legitimate
+	// arithmetic as a heredoc body and wrongly drop every real function after
+	// it (this is exactly #281, reappearing one layer up). Gating on HasError()
+	// keeps the mask out of the loop entirely on a clean parse, where the AST
+	// is already known-correct and there is nothing to distrust it against.
+	if !tree.RootNode().HasError() {
+		masked = nil
+	}
 
 	hashes = make(map[string]string)
 	lines = make(map[string]int)
@@ -250,7 +242,14 @@ func shellSymbolsFromAST(source string, lang *ts.Language) (functions []string, 
 		for i := 0; i < n.NamedChildCount(); i++ {
 			c := n.NamedChild(i)
 			if c.Type(lang) == "function_definition" {
-				if name := shellFieldText(c, "name", lang, src); name != "" {
+				start := int(c.StartByte())
+				if start < len(masked) && masked[start] == ' ' {
+					// This node's own start position falls inside a masked
+					// region (heredoc body, comment, string, ...) — a real
+					// function_definition can never legitimately start there,
+					// so this is the fabrication signature and the node is
+					// dropped rather than recorded.
+				} else if name := shellFieldText(c, "name", lang, src); name != "" {
 					functions = append(functions, name)
 					key := "function:" + name
 					recordHash(key, src[c.StartByte():c.EndByte()])
@@ -262,7 +261,7 @@ func shellSymbolsFromAST(source string, lang *ts.Language) (functions []string, 
 	}
 	walk(tree.RootNode(), 0)
 
-	return functions, hashes, lines, hasError
+	return functions, hashes, lines
 }
 
 // shellFieldText returns the text of n's named field, or "" if absent.
@@ -273,61 +272,278 @@ func shellFieldText(n *ts.Node, field string, lang *ts.Language, src []byte) str
 	return ""
 }
 
-// shellFallbackFunctions matches reShellFuncParen/reShellFuncKw against
-// heredoc-body-masked source — the degraded path used only when the AST pass
-// could not cleanly parse the file. lines is keyed by plain function name (the
-// caller adds the "function:" prefix), anchored at each name's first match.
-func shellFallbackFunctions(src []byte) (names []string, lines map[string]int) {
-	masked := shellFallbackMaskHeredocs(src)
+// shellFallbackFunctions matches reShellFuncParen/reShellFuncKw against masked
+// (comment/quote/heredoc-body-blanked) source — the degraded path used only when
+// the AST is entirely unavailable. Hashes are computed via shellFallbackBodyEnd
+// on the same masked buffer; lines is keyed by plain function name (the caller
+// adds the "function:" prefix), anchored at each name's first match.
+func shellFallbackFunctions(masked, src []byte) (names []string, hashes map[string]string, lines map[string]int) {
 	starts := lineStartsOf(src)
+	hashes = make(map[string]string)
 	lines = make(map[string]int)
-	record := func(nameStart, nameEnd int) {
+	record := func(nameStart, nameEnd, matchEnd int, kwForm bool) {
 		name := string(src[nameStart:nameEnd])
 		names = append(names, name)
 		if _, ok := lines[name]; !ok {
 			lines[name] = lineForOffset(starts, nameStart)
 		}
+		if end, ok := shellFallbackBodyEnd(masked, matchEnd, kwForm); ok {
+			h := hashBytesHex(src[nameStart : end+1])
+			if existing, ok := hashes[name]; ok {
+				h = hashBytesHex([]byte(existing + h))
+			}
+			hashes[name] = h
+		}
 	}
 	for _, m := range reShellFuncParen.FindAllSubmatchIndex(masked, -1) {
-		record(m[2], m[3])
+		record(m[2], m[3], m[1], false)
 	}
 	for _, m := range reShellFuncKw.FindAllSubmatchIndex(masked, -1) {
-		record(m[2], m[3])
+		record(m[2], m[3], m[1], true)
 	}
-	return names, lines
+	return names, hashes, lines
 }
 
-// shellFallbackMaskHeredocs returns a length-preserving copy of src with heredoc
-// body/terminator lines blanked to spaces, used only by shellFallbackFunctions so
-// a def-shaped line inside a heredoc body isn't mistaken for a real definition on
-// the degraded fallback path. Deliberately narrow: it tracks ONLY heredoc
-// openers and their terminator lines — no quote/paren/subshell frame stack — so
-// it cannot reintroduce the `((` ambiguity that caused three failed review
-// rounds on the deleted maskShell (see PR #285). A `<<` matched inside a string
-// is an accepted trade-off on this rarely-triggered path (see Parse's hasError
-// branch); a heredoc's own delimiter handling (quoted delimiter, `<<-`
-// tab-stripping, exact terminator match, stacked heredocs) is not ambiguous the
-// way `((` is, so replicating just that part carries none of that risk.
-func shellFallbackMaskHeredocs(src []byte) []byte {
+// shellFallbackBodyEnd finds the end offset of a function body on the masked
+// source, starting the search at `from` (just past the matched `name()` for the
+// paren form, or just past `name` for the keyword form). It skips whitespace to
+// the body opener — `{` (command group) or `(` (subshell) — then brace/paren-
+// matches to the closing delimiter via simple depth counting, which is safe here
+// because masked has already blanked every comment/quote/backtick/param-expansion
+// and heredoc body, so any `{}()`  remaining is genuine code-level structure (no
+// frame-kind ambiguity to resolve — see shellFallbackMask). For the keyword form
+// it first skips an optional empty `()`. Returns (closeOffset, true) or (0,
+// false) when no body opener is found (fail-open: the definition is still
+// recorded with a line, just no hash).
+func shellFallbackBodyEnd(masked []byte, from int, kwForm bool) (int, bool) {
+	n := len(masked)
+	i := from
+	skipWS := func() {
+		for i < n && (masked[i] == ' ' || masked[i] == '\t' || masked[i] == '\n') {
+			i++
+		}
+	}
+	skipWS()
+	if kwForm && i < n && masked[i] == '(' {
+		j := i + 1
+		for j < n && (masked[j] == ' ' || masked[j] == '\t' || masked[j] == '\n') {
+			j++
+		}
+		if j < n && masked[j] == ')' {
+			i = j + 1
+			skipWS()
+		}
+	}
+	if i >= n {
+		return 0, false
+	}
+	var open, close byte
+	switch masked[i] {
+	case '{':
+		open, close = '{', '}'
+	case '(':
+		open, close = '(', ')'
+	default:
+		return 0, false
+	}
+	depth := 0
+	for ; i < n; i++ {
+		switch masked[i] {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// shellFallbackMask returns a length-preserving copy of src with comments,
+// single/double-quoted string content, backtick content, ${…} parameter
+// expansion content, and heredoc bodies blanked to spaces (newlines preserved).
+// Shared by shellSymbolsFromAST (to recognize a fabricated function_definition —
+// see Parse) and shellFallbackFunctions (the total-fallback path).
+//
+// Deliberately narrower than the deleted maskShell: it tracks ONLY these
+// unambiguous, single-character-terminated contexts (plus heredoc openers gated
+// on not currently being inside one of them). It does NOT track `$(…)` command
+// substitution or bare `(`/`{` as structural frames — that `((` code-level
+// tracking, and the "is this `<<` a heredoc opener" question it fed, is exactly
+// what caused three failed review rounds on maskShell (see PR #285). Omitting it
+// here means a `$(…)` or bare `(…)`/`{…}` is walked as plain, unmasked bytes:
+// def-shaped text on its OWN line inside one is not protected the way it would
+// be inside a string, but that combination is not part of any known regression
+// (the demonstrated one — a def-shaped line inside a multi-line double-quoted
+// string — needs only quote tracking, which this does have) and adding paren
+// nesting back in would reintroduce the actual ambiguity, not remove a gap.
+func shellFallbackMask(src []byte) []byte {
 	n := len(src)
 	out := make([]byte, n)
 	copy(out, src)
+
+	mask1 := func(i int) {
+		if src[i] != '\n' {
+			out[i] = ' '
+		}
+	}
+
+	const (
+		frameSingle byte = 's'
+		frameDouble byte = 'd'
+		frameBack   byte = 'b'
+		frameParam  byte = 'p'
+	)
+	var stack []byte
+	push := func(k byte) { stack = append(stack, k) }
+	pop := func() { stack = stack[:len(stack)-1] }
+	top := func() byte {
+		if len(stack) == 0 {
+			return 0
+		}
+		return stack[len(stack)-1]
+	}
 
 	type hd struct {
 		term string
 		dash bool
 	}
 	var heredocs []hd
+	atWordStart := true
 
 	i := 0
 	for i < n {
 		c := src[i]
+		t := top()
+
+		if t == frameSingle {
+			mask1(i)
+			if c == '\'' {
+				pop()
+			}
+			i++
+			continue
+		}
+
+		if c == '\\' && t != frameSingle {
+			if i+1 < n && src[i+1] == '\n' {
+				mask1(i)
+				i++
+				atWordStart = false
+				continue
+			}
+			mask1(i)
+			if i+1 < n {
+				mask1(i + 1)
+			}
+			i += 2
+			atWordStart = false
+			continue
+		}
+
+		if t == frameDouble {
+			switch {
+			case c == '"':
+				mask1(i)
+				pop()
+				i++
+			case c == '`':
+				mask1(i)
+				push(frameBack)
+				i++
+			case c == '$' && i+1 < n && src[i+1] == '{':
+				mask1(i)
+				mask1(i + 1)
+				push(frameParam)
+				i += 2
+			default:
+				mask1(i)
+				i++
+			}
+			atWordStart = false
+			continue
+		}
+		if t == frameBack {
+			mask1(i)
+			if c == '`' {
+				pop()
+			}
+			i++
+			atWordStart = false
+			continue
+		}
+		if t == frameParam {
+			switch {
+			case c == '}':
+				mask1(i)
+				pop()
+				i++
+			case c == '{':
+				// A bare `{` inside ${…} (e.g. `${x:-{a,b}}`) nests a brace
+				// level, so the FIRST inner `}` closes it rather than popping
+				// the param early.
+				mask1(i)
+				push(frameParam)
+				i++
+			case c == '$' && i+1 < n && src[i+1] == '{':
+				mask1(i)
+				mask1(i + 1)
+				push(frameParam)
+				i += 2
+			case c == '\'':
+				mask1(i)
+				push(frameSingle)
+				i++
+			case c == '"':
+				mask1(i)
+				push(frameDouble)
+				i++
+			case c == '`':
+				mask1(i)
+				push(frameBack)
+				i++
+			default:
+				mask1(i)
+				i++
+			}
+			atWordStart = false
+			continue
+		}
+
+		// Top level: no `(`/`{` structural tracking (see doc comment) — only
+		// quote/comment/param-expansion openers and heredoc openers, gated on
+		// not currently inside one of the former.
 		switch {
+		case c == '\'':
+			push(frameSingle)
+			i++
+			atWordStart = false
+		case c == '"':
+			push(frameDouble)
+			i++
+			atWordStart = false
+		case c == '`':
+			push(frameBack)
+			i++
+			atWordStart = false
+		case c == '$' && i+1 < n && src[i+1] == '{':
+			mask1(i)
+			mask1(i + 1)
+			push(frameParam)
+			i += 2
+			atWordStart = false
+
+		case c == '#' && atWordStart:
+			for i < n && src[i] != '\n' {
+				mask1(i)
+				i++
+			}
+
 		case c == '<' && i+1 < n && src[i+1] == '<' &&
 			(i+2 >= n || src[i+2] != '<') && (i == 0 || src[i-1] != '<'):
-			// Heredoc opener `<<`/`<<-` (not `<<<` herestring — guarded on both
-			// sides so neither the 1st nor the 2nd `<` of `<<<` is read as an
-			// opener).
+			// Heredoc opener `<<`/`<<-` (not `<<<` herestring).
 			j := i + 2
 			dash := false
 			if j < n && src[j] == '-' {
@@ -352,30 +568,44 @@ func shellFallbackMaskHeredocs(src []byte) []byte {
 				j++
 			}
 			i = j
+			atWordStart = false
+
 		case c == '\n':
-			i++ // move past the opener line's newline; bodies start here
-			for len(heredocs) > 0 && i < n {
-				lineEnd := i
-				for lineEnd < n && src[lineEnd] != '\n' {
-					lineEnd++
+			atWordStart = true
+			if len(heredocs) > 0 {
+				i++ // move past the opener line's newline; bodies start here
+				for len(heredocs) > 0 && i < n {
+					lineEnd := i
+					for lineEnd < n && src[lineEnd] != '\n' {
+						lineEnd++
+					}
+					cmp := src[i:lineEnd]
+					if heredocs[0].dash {
+						cmp = trimLeftTabs(cmp)
+					}
+					for k := i; k < lineEnd; k++ {
+						out[k] = ' ' // blank the whole heredoc body/terminator line
+					}
+					matched := string(cmp) == heredocs[0].term
+					i = lineEnd
+					if i < n {
+						i++ // consume the line's newline (kept as '\n')
+					}
+					if matched {
+						heredocs = heredocs[1:]
+					}
 				}
-				cmp := src[i:lineEnd]
-				if heredocs[0].dash {
-					cmp = trimLeftTabs(cmp)
-				}
-				for k := i; k < lineEnd; k++ {
-					out[k] = ' ' // blank the whole heredoc body/terminator line
-				}
-				matched := string(cmp) == heredocs[0].term
-				i = lineEnd
-				if i < n {
-					i++ // consume the line's newline (kept as '\n')
-				}
-				if matched {
-					heredocs = heredocs[1:]
-				}
+			} else {
+				i++
 			}
+
 		default:
+			switch c {
+			case ' ', '\t', ';', '|', '&':
+				atWordStart = true
+			default:
+				atWordStart = false
+			}
 			i++
 		}
 	}

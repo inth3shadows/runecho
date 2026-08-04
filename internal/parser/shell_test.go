@@ -258,3 +258,172 @@ func TestShellParser_HeredocTerminatorExact(t *testing.T) {
 		t.Errorf("Functions = %v, want %v (a trailing-space delimiter line must NOT terminate the heredoc)", fs.Functions, want)
 	}
 }
+
+// TestShellParser_HeredocEligibility pins the two mirror-image defects #281/#282,
+// both caused by `blanking` being asked a question it does not encode. It counts
+// the frames whose BYTES are literal, which is right for masking and wrong for
+// "can a heredoc start here": frameSubshell is excluded (so `<<` inside an
+// arithmetic `((…))` read as a redirect — #281) while frameCmdSub is included (so a
+// legal heredoc inside `$(…)` was never recognised — #282).
+//
+// Every case asserts on Functions AND SymbolHashes, because in both issues the
+// wrong-symbol and missing-hash halves are separate failures: #281 drops a whole
+// later function and leaves the enclosing one unhashed; #282 invents a function out
+// of heredoc body text and unhashes the real one.
+func TestShellParser_HeredocEligibility(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      string
+		want     []string
+		wantHash []string // functions that must carry a non-empty body hash
+		noHash   []string // names that must NOT appear as a hashed symbol
+	}{
+		{
+			// #281: `((` pushes TWO frameSubshell frames, neither counted by
+			// `blanking`, so `<<` was read as a heredoc opener. The delimiter scan
+			// took `y` as the terminator and the newline handler then blanked every
+			// following line hunting a terminator that never comes — swallowing f's
+			// closing brace and all of g.
+			name: "arithmetic left-shift is not a heredoc opener (#281)",
+			src: "f() {\n" +
+				"  ((x << y))\n" +
+				"  echo after\n" +
+				"}\n" +
+				"\n" +
+				"g() {\n" +
+				"  echo two\n" +
+				"}\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
+			// #282: frameCmdSub IS counted by `blanking`, so the opener was
+			// suppressed and the body never blanked. The first literal `)` in the
+			// body then closed the `$(`, and the raw body text was scanned as code —
+			// extracting `fakefunc` as a real definition, which is worse than missing
+			// one: it enters the snapshot as a symbol that does not exist.
+			name: "heredoc inside a command substitution is masked (#282)",
+			src: "f() {\n" +
+				"  x=$(cat <<EOF\n" +
+				")\n" +
+				"fakefunc() {\n" +
+				"EOF\n" +
+				")\n" +
+				"  echo done\n" +
+				"}\n",
+			want:     []string{"f"},
+			wantHash: []string{"f"},
+			noHash:   []string{"fakefunc"},
+		},
+		{
+			// `$((…))` was already safe, but for the WRONG reason: `$(` pushed a
+			// frameCmdSub so `blanking > 0` suppressed the opener. Once frameCmdSub
+			// stops counting, its safety has to come from the arithmetic rule
+			// instead. Pinned because the basis changes even though the outcome
+			// does not — the case that would silently regress.
+			//
+			// The shift amount is an IDENTIFIER, not a literal. `<< 2` would pass
+			// even with the fix removed: the delimiter scan rejects a leading digit,
+			// so no heredoc is ever pushed and the case proves nothing. `<< shift`
+			// yields a real delimiter and actually exercises the rule.
+			name: "arithmetic expansion left-shift is not a heredoc opener",
+			src: "f() {\n" +
+				"  y=$((x << shift))\n" +
+				"  echo after\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
+			// The other reading of `((`: a subshell opening a subshell, which is NOT
+			// arithmetic. Nothing here is a heredoc either way, so what this pins is
+			// that the arithmetic heuristic does not disturb frame push/pop — if it
+			// desynced the stack, g would be swallowed exactly as in #281.
+			name: "adjacent-paren subshell still parses",
+			src: "f() {\n" +
+				"  ((echo a) | cat)\n" +
+				"  ( (echo b) | cat )\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+		},
+		{
+			// Adjacency is what separates arithmetic `((` from a subshell that merely
+			// opens another one. `( (` is two frames pushed two bytes apart, so it is
+			// NOT arithmetic and a heredoc inside it is real and must be masked.
+			//
+			// Added because mutation scoring found the gap: dropping the offset
+			// comparison from inArith — treating any two stacked subshells as
+			// arithmetic — survived every other case here. Without this the heuristic
+			// could quietly widen to swallow legitimate heredocs.
+			name: "non-adjacent nested subshells are not arithmetic",
+			src: "f() {\n" +
+				"  ( (cat <<EOF\n" +
+				"fake_nested() {\n" +
+				"EOF\n" +
+				"  ) )\n" +
+				"  echo done\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"fake_nested"},
+		},
+		{
+			// The ordinary top-level heredoc must not regress: the fix widens where a
+			// heredoc is recognised, and the risk of widening is that the common case
+			// starts behaving differently.
+			name: "plain top-level heredoc still masks its body",
+			src: "f() {\n" +
+				"  cat <<EOF\n" +
+				"buried() {\n" +
+				"EOF\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"buried"},
+		},
+		{
+			// The two heredoc variants with their own rules — `<<-` tab stripping and
+			// a quoted delimiter — exercised on the path #282 opens up. A fix that
+			// only handled the bare form would leave these two broken inside `$(…)`.
+			name: "dash and quoted heredocs inside a command substitution",
+			src: "f() {\n" +
+				"  a=$(cat <<-'END'\n" +
+				"\tburied_dash() {\n" +
+				"\tEND\n" +
+				")\n" +
+				"  echo done\n" +
+				"}\n" +
+				"g() { echo two; }\n",
+			want:     []string{"f", "g"},
+			wantHash: []string{"f", "g"},
+			noHash:   []string{"buried_dash"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs, err := NewShellParser().Parse(tt.src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(fs.Functions, tt.want) {
+				t.Errorf("Functions = %v, want %v", fs.Functions, tt.want)
+			}
+			for _, name := range tt.wantHash {
+				if fs.SymbolHashes["function:"+name] == "" {
+					t.Errorf("%s has no body hash — its closing brace was masked away, so a body edit would be invisible to diff", name)
+				}
+			}
+			for _, name := range tt.noHash {
+				if _, ok := fs.SymbolHashes["function:"+name]; ok {
+					t.Errorf("%s was hashed — heredoc body text entered the symbol table as a real definition", name)
+				}
+			}
+		})
+	}
+}

@@ -31,6 +31,14 @@ import (
 // is not detected; extremely exotic quoting/nesting a real shell lexer would resolve
 // may mask imperfectly. A regex+state line-aware scan is intentional — a full
 // tree-sitter-bash grammar is heavier than the symbol model warrants.
+//
+// Two more, both from the heredoc-eligibility fix (#281/#282). A heredoc inside a
+// backtick substitution is legal shell but is not recognised: `…` content is masked
+// wholesale without tracking inner structure, so there is nothing to hand a
+// recognised heredoc to. And `((` is ambiguous — arithmetic, or a subshell opening
+// another — which no masker can resolve the way bash does (by trying to parse); the
+// heuristic is offset adjacency, and the cost of guessing wrong is a missed heredoc,
+// never a desynced stack. See inArith for why that bound is the design constraint.
 type ShellParser struct{}
 
 // NewShellParser creates a new shell parser.
@@ -255,20 +263,44 @@ func maskShell(src []byte) []byte {
 	}
 
 	var stack []byte
+	// stackAt[k] is the byte offset frame k was pushed at. Only heredoc eligibility
+	// reads it (see inArith); masking never does.
+	var stackAt []int
 	blanking := 0 // count of blanking frames (s/d/b/c/p) currently on the stack
-	push := func(k byte) {
+	// quoting counts only the frames whose BYTES are literal. It differs from
+	// blanking by exactly frameCmdSub, and that difference is the whole of #282:
+	// `$(…)` content is masked, but it is still CODE, so a heredoc inside it is
+	// legal shell and must be recognised. blanking answers "are these bytes
+	// literal" (right for masking); quoting is half of "can a heredoc start here".
+	//
+	// frameBacktick stays counted here even though a heredoc inside `…` is also
+	// legal: backtick content is masked wholesale without tracking inner structure
+	// (see the frameBacktick arm below), so there is nothing to hand a recognised
+	// heredoc to. Known limitation, not an oversight.
+	quoting := 0
+	push := func(k byte, at int) {
 		stack = append(stack, k)
+		stackAt = append(stackAt, at)
 		switch k {
 		case frameSingle, frameDouble, frameBacktick, frameCmdSub, frameParam:
 			blanking++
+		}
+		switch k {
+		case frameSingle, frameDouble, frameBacktick, frameParam:
+			quoting++
 		}
 	}
 	pop := func() {
 		k := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+		stackAt = stackAt[:len(stackAt)-1]
 		switch k {
 		case frameSingle, frameDouble, frameBacktick, frameCmdSub, frameParam:
 			blanking--
+		}
+		switch k {
+		case frameSingle, frameDouble, frameBacktick, frameParam:
+			quoting--
 		}
 	}
 	top := func() byte {
@@ -277,6 +309,48 @@ func maskShell(src []byte) []byte {
 		}
 		return stack[len(stack)-1]
 	}
+
+	// inArith reports whether the top of the stack is an arithmetic `((…))`, where
+	// `<<` is the left-shift operator and never a heredoc redirect (#281).
+	//
+	// `((` is genuinely ambiguous in shell — `((expr))` is arithmetic, but
+	// `((cmd) | cmd2)` is a subshell opening a subshell. Bash resolves it by trying
+	// to parse; a masker cannot. So this is a HEURISTIC, and it is deliberately
+	// shaped as a read-only predicate over frames that were pushed exactly as
+	// before: two adjacent `(` at offsets n and n+1.
+	//
+	// A dedicated frameArith kind was rejected for this reason. It would have to be
+	// popped by `))`, so misreading `((echo a) | cat)` as arithmetic desyncs the
+	// stack on the first single `)` — and a desynced masker swallowing the rest of
+	// the file is precisely the #281 failure being fixed. Under this shape the cost
+	// of guessing wrong is at most one missed heredoc.
+	// Both arithmetic spellings are covered, and the second is not optional. `$((`
+	// used to be safe only by accident: `$(` pushed a frameCmdSub, so blanking > 0
+	// suppressed the opener. Once frameCmdSub stops counting toward quoting — which
+	// is the #282 fix — that accident is gone and `$((x << 2))` would start opening
+	// a heredoc. The arithmetic rule has to carry it instead.
+	//
+	//   `((`  → frameSubshell, frameSubshell at offsets n, n+1
+	//   `$((` → frameCmdSub, frameSubshell   at offsets n, n+2  (the `$(` is 2 bytes)
+	inArith := func() bool {
+		k := len(stack)
+		if k < 2 || stack[k-1] != frameSubshell {
+			return false
+		}
+		switch stack[k-2] {
+		case frameSubshell:
+			return stackAt[k-1] == stackAt[k-2]+1
+		case frameCmdSub:
+			return stackAt[k-1] == stackAt[k-2]+2
+		}
+		return false
+	}
+
+	// heredocOK reports whether a heredoc can START or CONTINUE at this position.
+	// This is the question shell.go used to ask `blanking`, which encodes something
+	// else and was wrong in both directions: it let `<<` open a heredoc inside an
+	// arithmetic `((…))` (#281) and suppressed a real one inside `$(…)` (#282).
+	heredocOK := func() bool { return quoting == 0 && !inArith() }
 
 	type hd struct {
 		term string
@@ -331,17 +405,17 @@ func maskShell(src []byte) []byte {
 				i++
 			case c == '`':
 				mask1(i)
-				push(frameBacktick)
+				push(frameBacktick, i)
 				i++
 			case c == '$' && i+1 < n && src[i+1] == '(':
 				mask1(i)
 				mask1(i + 1)
-				push(frameCmdSub)
+				push(frameCmdSub, i)
 				i += 2
 			case c == '$' && i+1 < n && src[i+1] == '{':
 				mask1(i)
 				mask1(i + 1)
-				push(frameParam)
+				push(frameParam, i)
 				i += 2
 			default:
 				mask1(i)
@@ -370,29 +444,29 @@ func maskShell(src []byte) []byte {
 				// e.g. `${x:-{a,b}}`) nests a brace level, so the FIRST inner `}` closes
 				// it rather than popping the param early and leaking a stray code `}`.
 				mask1(i)
-				push(frameParam)
+				push(frameParam, i)
 				i++
 			case c == '$' && i+1 < n && src[i+1] == '{':
 				mask1(i)
 				mask1(i + 1)
-				push(frameParam)
+				push(frameParam, i)
 				i += 2
 			case c == '$' && i+1 < n && src[i+1] == '(':
 				mask1(i)
 				mask1(i + 1)
-				push(frameCmdSub)
+				push(frameCmdSub, i)
 				i += 2
 			case c == '\'':
 				mask1(i)
-				push(frameSingle)
+				push(frameSingle, i)
 				i++
 			case c == '"':
 				mask1(i)
-				push(frameDouble)
+				push(frameDouble, i)
 				i++
 			case c == '`':
 				mask1(i)
-				push(frameBacktick)
+				push(frameBacktick, i)
 				i++
 			default:
 				mask1(i)
@@ -411,7 +485,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push(frameSingle)
+			push(frameSingle, i)
 			i++
 			atWordStart = false
 
@@ -419,7 +493,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push(frameDouble)
+			push(frameDouble, i)
 			i++
 			atWordStart = false
 
@@ -427,7 +501,7 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push(frameBacktick)
+			push(frameBacktick, i)
 			i++
 			atWordStart = false
 
@@ -436,7 +510,7 @@ func maskShell(src []byte) []byte {
 				mask1(i)
 			}
 			mask1(i + 1) // blank the '(' delimiter; content follows blanked
-			push(frameCmdSub)
+			push(frameCmdSub, i)
 			i += 2
 			atWordStart = false
 		case c == '$' && i+1 < n && src[i+1] == '{':
@@ -444,7 +518,7 @@ func maskShell(src []byte) []byte {
 				mask1(i)
 			}
 			mask1(i + 1)
-			push(frameParam)
+			push(frameParam, i)
 			i += 2
 			atWordStart = false
 
@@ -467,14 +541,14 @@ func maskShell(src []byte) []byte {
 			if wasBlank {
 				mask1(i)
 			}
-			push(frameSubshell)
+			push(frameSubshell, i)
 			i++
 			atWordStart = true
 		case c == '{':
 			if wasBlank {
 				mask1(i)
 			}
-			push(frameGroup)
+			push(frameGroup, i)
 			i++
 			atWordStart = true
 
@@ -487,7 +561,7 @@ func maskShell(src []byte) []byte {
 			}
 			// leave the newline for the next iteration to handle heredocs
 
-		case c == '<' && blanking == 0 && i+1 < n && src[i+1] == '<' &&
+		case c == '<' && heredocOK() && i+1 < n && src[i+1] == '<' &&
 			(i+2 >= n || src[i+2] != '<') && (i == 0 || src[i-1] != '<'):
 			// Heredoc opener `<<`/`<<-` (not `<<<` herestring — guarded on both sides
 			// so neither the 1st nor the 2nd `<` of `<<<` is read as an opener) at
@@ -520,7 +594,7 @@ func maskShell(src []byte) []byte {
 
 		case c == '\n':
 			atWordStart = true
-			if blanking == 0 && len(heredocs) > 0 {
+			if heredocOK() && len(heredocs) > 0 {
 				i++ // move past the opener line's newline; bodies start here
 				for len(heredocs) > 0 && i < n {
 					lineEnd := i

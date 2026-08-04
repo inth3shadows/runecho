@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -1080,4 +1081,136 @@ func containsStr(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestIsFStringPrefix_RejectsNonFCombinations pins #274: isFStringPrefix must
+// only return true for a valid f-string prefix (bare f/F, or rf/fr in any
+// case), not merely for any prefix run CONTAINING an f — bf/fb/ff are real
+// prefix-letter combinations but none of them are f-strings.
+func TestIsFStringPrefix_RejectsNonFCombinations(t *testing.T) {
+	cases := map[string]bool{
+		`f"x"`: true, `F"x"`: true, `rf"x"`: true, `fr"x"`: true,
+		`Rf"x"`: true, `fR"x"`: true, `RF"x"`: true, `FR"x"`: true,
+		`bf"x"`: false, `fb"x"`: false, `ff"x"`: false,
+		`b"x"`: false, `r"x"`: false, `br"x"`: false, `rb"x"`: false,
+	}
+	for s, want := range cases {
+		qi := strings.IndexByte(s, '"')
+		if got := isFStringPrefix([]byte(s), qi); got != want {
+			t.Errorf("isFStringPrefix(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// TestParseJSBindingTarget_ArrayDestructure pins #275: `const [a, b] =
+// require('m')` must bind both a and b, not fall through to the
+// bare-identifier branch and return nil.
+func TestParseJSBindingTarget_ArrayDestructure(t *testing.T) {
+	got := parseJSBindingTarget("[a, b]")
+	want := []string{"a", "b"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("parseJSBindingTarget(%q) = %v, want %v", "[a, b]", got, want)
+	}
+}
+
+// TestParseJSBindingTarget_NestedObjectDestructure pins #276: a nested object
+// destructuring target (`{a: {b, c}}`) must bind both b and c. The former
+// strings.Trim(s, "{}") cutset trim stripped only the outermost brace pair,
+// then split on "," produced a corrupted "{b" item that silently dropped b.
+func TestParseJSBindingTarget_NestedObjectDestructure(t *testing.T) {
+	got := parseJSBindingTarget("{a: {b, c}}")
+	found := map[string]bool{}
+	for _, g := range got {
+		found[g] = true
+	}
+	if !found["b"] || !found["c"] {
+		t.Errorf("parseJSBindingTarget(%q) = %v, want b AND c present", "{a: {b, c}}", got)
+	}
+}
+
+// TestAppendConstRefs_DictKeyIsAReference pins #277: a SCREAMING_SNAKE name
+// used as a dict key (`{MAX_VALUE: 5}`) is a genuine USE of the constant, not
+// a type-annotation definition target, even though the text after it (`: 5`)
+// looks identical to one. The distinguishing signal is position: MAX_VALUE is
+// preceded by `{`, not by only whitespace back to the start of the line.
+func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
+	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil)
+	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
+		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
+	}
+}
+
+// TestAppendConstRefs_AnnotationTargetStillSkipped guards the case
+// TestAppendConstRefs_DictKeyIsAReference's fix must not break: a genuine
+// statement-start type annotation (`MAX_VALUE: int = 5`) is still a
+// definition, not a use.
+func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil)
+	if len(refs) != 0 {
+		t.Errorf("got %+v, want none — this is a definition, not a use", refs)
+	}
+}
+
+// TestAppendConstRefs_TupleAssignTargetsNotReferences pins #278: every name in
+// a tuple/multiple-assignment LHS (`MAX_VALUE, OTHER_VALUE = 5, 10`) is being
+// DEFINED, not used — neither should be added as a reference. A call argument
+// list sharing the same shape (`foo(MAX_VALUE, OTHER_VALUE)`) must still be
+// treated as two genuine references.
+func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil)
+	if len(refs) != 0 {
+		t.Errorf("got %+v, want none — both names are tuple-assignment targets", refs)
+	}
+	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil)
+	if len(callRefs) != 2 {
+		t.Errorf("got %+v, want 2 references (call arguments)", callRefs)
+	}
+}
+
+// TestDefNames_MultipleDeclaratorsPerLine pins #279: a single statement can
+// define more than one name — a JS multi-declarator `const` with a
+// function/arrow value on each side of the comma, and a Python chained
+// assignment — and defNames must return all of them, not only the first.
+func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
+	js := defNames(LangJS, "const a = () => {}, b = () => {}")
+	if _, ok := js["a"]; !ok {
+		t.Errorf("js defNames missing a: %v", js)
+	}
+	if _, ok := js["b"]; !ok {
+		t.Errorf("js defNames missing b: %v", js)
+	}
+
+	py := defNames(LangPython, "MAX_A = OTHER_B = 5")
+	if _, ok := py["MAX_A"]; !ok {
+		t.Errorf("py defNames missing MAX_A: %v", py)
+	}
+	if _, ok := py["OTHER_B"]; !ok {
+		t.Errorf("py defNames missing OTHER_B: %v", py)
+	}
+
+	// A comparison must not be misread as a chained assignment.
+	cmp := defNames(LangPython, "x = MAX_A == OTHER_B")
+	if len(cmp) != 0 {
+		t.Errorf("py defNames(%q) = %v, want none — this is a comparison", "x = MAX_A == OTHER_B", cmp)
+	}
+}
+
+// TestIsImportLine_MinifiedJS pins #280: space-less minified/bundled import
+// and export-from syntax must still be recognized as import lines, so
+// references on those lines are skipped as bindings rather than checked as
+// unresolved calls. A plain `export{a}` (no `from`) is a local re-export, not
+// an import, and must NOT match — same distinction the spaced form already
+// draws. A dynamic `import(x)` call expression must not match either.
+func TestIsImportLine_MinifiedJS(t *testing.T) {
+	cases := map[string]bool{
+		`import{a}from"m"`: true,
+		`export{a}from"m"`: true,
+		`export{a}`:        false,
+		`import(x)`:        false,
+	}
+	for text, want := range cases {
+		if got := isImportLine(LangJS, text); got != want {
+			t.Errorf("isImportLine(%q) = %v, want %v", text, got, want)
+		}
+	}
 }

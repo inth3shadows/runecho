@@ -244,8 +244,26 @@ type firedChecks struct {
 	CallShape  bool
 }
 
-func (f firedChecks) any() bool {
-	return f.Violations || f.FileScope || f.Qualified || f.DepsGo ||
+// anyNonViolation reports the checks whose findings do NOT land in the
+// []Violation slice, so the clean-path gate can read
+// `len(violations) == 0 && !fired.anyNonViolation()`.
+//
+// Violations is deliberately absent, and the omission is the point. File-scope,
+// qualified and deps-go append INTO `violations` while also setting their own
+// flag here, so a gate of the form `!fired.any()` would rest on bookkeeping
+// rather than on the findings themselves: drop one flag assignment and a slice
+// holding real entries reads as clean, so the hook emits a `defer` where it
+// used to ask. That is not a mislabelled log line — a silently dropped ask is
+// the guard's worst failure mode, and it was gated on two assignments no test
+// pinned (both `fired.Qualified` and `fired.DepsGo` could be deleted with
+// `go test ./cmd/runecho-guard/` fully green; the fixtures added alongside this
+// now pin them).
+//
+// Gating on the merged slice makes that suppression structurally impossible
+// instead of merely tested-for, and leaves firedChecks the pure logging concern
+// its type comment describes.
+func (f firedChecks) anyNonViolation() bool {
+	return f.FileScope || f.Qualified || f.DepsGo ||
 		f.Dangling || f.Dropped || f.Duplicate || f.CallShape
 }
 

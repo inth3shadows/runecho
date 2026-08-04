@@ -80,9 +80,20 @@ type hookCase struct {
 	// the deleted def" through it (RefsToName), so a fixture proving a live
 	// cross-file referrer must enroll that referrer's Refs, not just its Symbols.
 	Refs map[string][]string `json:"refs,omitempty"`
-	File string              `json:"file"` // edited file, repo-relative
-	Old  string              `json:"old"`  // on-disk content BEFORE the edit
-	New  string              `json:"new"`  // content being written (Write only)
+	// Files are extra worktree files written before the hook runs: repo-relative
+	// path -> content. Unlike Enroll (which populates the snapshot store), these
+	// are read off DISK by the check itself, which is the only way to express the
+	// two Go checks' preconditions. qualified needs a go.mod, because it resolves
+	// the module path to tell a same-repo import from an external one and returns
+	// nil when that path is empty. deps-go needs a go.mod plus a vendor tree with
+	// modules.txt: a vendored build resolves imports from vendor/ and nothing
+	// else, which makes the fixture hermetic — no module cache, no GOROOT, no
+	// network — so "the package resolved and lacks this symbol" is a fact the
+	// fixture states rather than one it inherits from the machine.
+	Files map[string]string `json:"files,omitempty"`
+	File  string            `json:"file"` // edited file, repo-relative
+	Old   string            `json:"old"`  // on-disk content BEFORE the edit
+	New   string            `json:"new"`  // content being written (Write only)
 	// Tool is the PreToolUse tool replayed; "" means Write, under which the whole
 	// New content IS the added-lines set. Set it to "Edit" with EditOld/EditNew
 	// for a HUNK-scoped replay: the only shape that can prove a signal is read
@@ -201,6 +212,18 @@ func runHookCase(t *testing.T, c hookCase) {
 	if r, err := filepath.EvalSymlinks(root); err == nil {
 		root = r
 	}
+	for rel, content := range c.Files {
+		if rel == c.File {
+			t.Fatalf("%s: `files` may not contain the edited file — use `old` for its pre-edit content", c.Name)
+		}
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	edited := filepath.Join(root, filepath.FromSlash(c.File))
 	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
 		t.Fatal(err)
@@ -268,13 +291,21 @@ func runHookCase(t *testing.T, c hookCase) {
 			}
 		}
 		if c.ExpectNoLearnSymbols {
-			if rec := readLastDecisionLog(t); rec != nil {
-				if ls, ok := rec["learn_symbols"]; ok {
-					if arr, isArr := ls.([]any); !isArr || len(arr) > 0 {
-						t.Errorf("ask trained learned-allow on %v — only additive-check "+
-							"findings are learn-eligible; learning this name would silence a "+
-							"later genuine hallucination of it", ls)
-					}
+			// A nil record must fail, not pass. This is a safety pin — it asserts an
+			// ask did NOT teach learned-allow — so "no decision was logged" is the
+			// one outcome that cannot be read as agreement. Treating nil as a pass
+			// would let a harness change that stops exporting RUNECHO_HOME turn
+			// every pin on this field green while learn_symbols went unchecked:
+			// exactly the fixture-pins-nothing failure #227 exists to exclude.
+			rec := readLastDecisionLog(t)
+			if rec == nil {
+				t.Fatalf("no decision logged, want an ask with no learn_symbols")
+			}
+			if ls, ok := rec["learn_symbols"]; ok {
+				if arr, isArr := ls.([]any); !isArr || len(arr) > 0 {
+					t.Errorf("ask trained learned-allow on %v — only additive-check "+
+						"findings are learn-eligible; learning this name would silence a "+
+						"later genuine hallucination of it", ls)
 				}
 			}
 		}

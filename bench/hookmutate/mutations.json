@@ -384,6 +384,70 @@
       "find": "\t\treturn rePyClassAnyIndent.MatchString(line)",
       "replace": "\t\treturn false && rePyClassAnyIndent.MatchString(line)",
       "desc": "a class method counts as a shadow, abstaining on a method and module function sharing a name"
+    },
+    {
+      "id": "qualified/flag-gate",
+      "file": "cmd/runecho-guard/qualified.go",
+      "find": "func qualifiedEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_QUALIFIED\") == \"1\" }",
+      "replace": "func qualifiedEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_QUALIFIED\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "qualified/provenance",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "fired.Qualified = len(qv) > 0",
+      "replace": "fired.Qualified = false",
+      "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket"
+    },
+    {
+      "id": "qualified/repo-ir-lookup",
+      "file": "internal/guard/qualified.go",
+      "find": "if _, ok := known[sym]; ok {",
+      "replace": "if _, ok := known[sym]; ok && false {",
+      "desc": "a selector the repo IR does carry is no longer exonerated"
+    },
+    {
+      "id": "qualified/samerepo-prefix-gate",
+      "file": "internal/guard/qualified.go",
+      "find": "if path != modulePath && !strings.HasPrefix(path, modulePath+\"/\") {",
+      "replace": "if false {",
+      "desc": "stdlib and third-party imports are validated against the repo's own IR"
+    },
+    {
+      "id": "deps-go/flag-gate",
+      "file": "cmd/runecho-guard/depqualified.go",
+      "find": "func depQualifiedGoEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DEPS_GO\") == \"1\" }",
+      "replace": "func depQualifiedGoEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DEPS_GO\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "deps-go/provenance",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "fired.DepsGo = len(dv) > 0",
+      "replace": "fired.DepsGo = false",
+      "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket"
+    },
+    {
+      "id": "deps-go/exported-membership",
+      "file": "internal/guard/depqualified_go.go",
+      "find": "if pkg.Has(sym) {",
+      "replace": "if pkg.Has(sym) && false {",
+      "desc": "a symbol the dependency really exports is no longer exonerated"
+    },
+    {
+      "id": "deps-go/unresolved-bail",
+      "file": "internal/guard/depqualified_go.go",
+      "find": "if pkg.Res != depindex.Resolved {",
+      "replace": "if pkg.Res != depindex.Resolved && false {",
+      "desc": "an unresolvable package reads as an empty one, so every call into it is a violation"
+    },
+    {
+      "id": "gate/merged-slice",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "if len(violations) == 0 && !fired.anyNonViolation() {",
+      "replace": "if !fired.Violations && !fired.anyNonViolation() {",
+      "desc": "the clean-path gate reads the provenance flag instead of the findings slice",
+      "known_gap": "Equivalent mutant in isolation, and deliberately so: fired.Violations is assigned from len(violations)>0, so on unmutated bookkeeping the two spellings agree. It is defense in depth against a SECOND mutation, and only observable compounded with one. Compound it with qualified/provenance and go-samerepo-missing-selector-asks fails with 'expected an ask, got a defer' -- the ask is dropped outright rather than mislabelled, which is what gating on the merged slice makes impossible. Kept as a survivor with this note rather than deleted, because a future edit that reverts the gate would otherwise leave no trace of why it was written this way."
     }
   ]
 }

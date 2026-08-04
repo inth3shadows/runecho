@@ -96,21 +96,29 @@ func TestAskReason(t *testing.T) {
 	}
 }
 
-func TestFiredChecksAny(t *testing.T) {
-	if (firedChecks{}).any() {
-		t.Error("zero firedChecks must report nothing fired — it gates the whole clean-path return")
+func TestFiredChecksAnyNonViolation(t *testing.T) {
+	if (firedChecks{}).anyNonViolation() {
+		t.Error("zero firedChecks must report nothing fired — it half-gates the clean-path return")
 	}
-	// Every field must count. A field omitted from any() would make the hook take
-	// the clean path with a real finding in hand, silently dropping the ask.
+	// Every non-violation field must count. A field omitted here would make the
+	// hook take the clean path with a real finding in hand, silently dropping the
+	// ask — and unlike the three that merge into `violations`, nothing else in
+	// the gate would catch it.
 	for name, f := range map[string]firedChecks{
-		"Violations": {Violations: true}, "FileScope": {FileScope: true},
-		"Qualified": {Qualified: true}, "DepsGo": {DepsGo: true},
-		"Dangling": {Dangling: true}, "Dropped": {Dropped: true},
-		"Duplicate": {Duplicate: true}, "CallShape": {CallShape: true},
+		"FileScope": {FileScope: true}, "Qualified": {Qualified: true},
+		"DepsGo": {DepsGo: true}, "Dangling": {Dangling: true},
+		"Dropped": {Dropped: true}, "Duplicate": {Duplicate: true},
+		"CallShape": {CallShape: true},
 	} {
-		if !f.any() {
-			t.Errorf("any() ignores %s — an ask with only that finding would be dropped", name)
+		if !f.anyNonViolation() {
+			t.Errorf("anyNonViolation() ignores %s — an ask with only that finding would be dropped", name)
 		}
+	}
+	// Violations must NOT be counted here: the gate reads len(violations)
+	// directly, and folding the flag back in would restore the bookkeeping
+	// dependency this split exists to remove.
+	if (firedChecks{Violations: true}).anyNonViolation() {
+		t.Error("anyNonViolation() counts Violations — the gate must read the slice, not the flag")
 	}
 }
 

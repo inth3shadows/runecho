@@ -853,7 +853,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	fired.Duplicate = len(duplicates) > 0
 	fired.CallShape = len(callShapes) > 0
 
-	if !fired.any() {
+	// Gated on the merged slice, NOT on fired.any(): three checks above append
+	// into `violations` while separately setting their own flag, so reading the
+	// gate off the flags alone would let a dropped assignment turn a findings
+	// slice with real entries into a `defer`. See firedChecks.anyNonViolation.
+	if len(violations) == 0 && !fired.anyNonViolation() {
 		// Every FACT check passed. The contract question is independent of all of
 		// them — a perfectly correct edit to a file the session said it would not
 		// touch is precisely the case this check exists for — so it is answered

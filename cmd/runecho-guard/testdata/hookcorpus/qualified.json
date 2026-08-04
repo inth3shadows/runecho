@@ -1,0 +1,77 @@
+[
+  {
+    "name": "go-samerepo-missing-selector-asks",
+    "desc": "`store.FetchAll` on a same-repo internal package whose IR has `Fetch` and no `FetchAll`. The additive check structurally cannot see this — `FetchAll` is preceded by a '.', so extractRefs' left-guard never treats it as a bare call — which is why flag-off is silent and the ask is attributable to qualified alone. The load-bearing assertion is expect_log_reason: before #268 this logged as \"violations\", and deleting `fired.Qualified = len(qv) > 0` left the whole suite green, so the bucket the check is judged by was pinned by nothing. files carries the go.mod, without which GoModulePath returns \"\" and qualifiedViolations fails open",
+    "check": "qualified",
+    "flags": [
+      "RUNECHO_GUARD_QUALIFIED=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n"
+    },
+    "enroll": {
+      "internal/store/store.go": [
+        "Fetch"
+      ]
+    },
+    "file": "internal/api/handler.go",
+    "old": "package api\n\nimport (\n\t\"example.com/app/internal/store\"\n)\n\nfunc Handle() {\n\t_ = store.Fetch\n}\n",
+    "new": "package api\n\nimport (\n\t\"example.com/app/internal/store\"\n)\n\nfunc Handle() {\n\trows := store.FetchAll()\n\t_ = rows\n}\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "store.FetchAll"
+    ],
+    "enrolled_defs": {
+      "Fetch": 1,
+      "FetchAll": 0
+    },
+    "expect_log_reason": "qualified",
+    "expect_no_learn_symbols": true
+  },
+  {
+    "name": "go-samerepo-existing-selector-clean",
+    "desc": "the same import and the same call shape against a selector the repo IR DOES carry — correct usage stays silent. Pins the `known[sym]` consultation: delete it and every same-repo qualified call in the repo becomes a violation, which is the false-positive shape that would make this check unshippable. Paired with the fixture above, which differs only in the selector name, so the difference in outcome is attributable to the IR lookup and nothing else",
+    "check": "qualified",
+    "flags": [
+      "RUNECHO_GUARD_QUALIFIED=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n"
+    },
+    "enroll": {
+      "internal/store/store.go": [
+        "Fetch"
+      ]
+    },
+    "file": "internal/api/ok.go",
+    "old": "package api\n\nimport (\n\t\"example.com/app/internal/store\"\n)\n\nfunc Handle() {\n\t_ = store.Fetch\n}\n",
+    "new": "package api\n\nimport (\n\t\"example.com/app/internal/store\"\n)\n\nfunc Handle() {\n\trows := store.Fetch()\n\t_ = rows\n}\n",
+    "expect_ask": false,
+    "enrolled_defs": {
+      "Fetch": 1
+    }
+  },
+  {
+    "name": "go-external-import-is-not-this-checks-business-clean",
+    "desc": "`json.MarshalCanonical` does not exist, but `encoding/json` is not a same-repo package, so this check must leave it to deps-go and abstain. Pins the modulePath prefix gate in sameRepoGoAliases: remove it and every stdlib and third-party selector in the repo is validated against the repo's OWN IR, where none of them appear — a false positive on essentially every Go file the guard sees. CAVEAT, stated because the mutation table shows it: the silence here is CONTINGENT on deps-go being off, not purely on this check abstaining. `deps-go/flag-gate` kills this fixture — default-on deps-go resolves encoding/json from GOROOT and flags MarshalCanonical legitimately. So the day deps-go graduates to default-on this fixture goes red, and the failure ('expected no ask') will not name that as the reason. Fix it then by pointing the call at a selector encoding/json really exports, which leaves the prefix-gate mutation still caught",
+    "check": "qualified",
+    "flags": [
+      "RUNECHO_GUARD_QUALIFIED=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n"
+    },
+    "enroll": {
+      "internal/store/store.go": [
+        "Fetch"
+      ]
+    },
+    "file": "internal/api/ext.go",
+    "old": "package api\n\nimport (\n\t\"encoding/json\"\n)\n\nfunc Dump() {\n\t_ = json.Marshal\n}\n",
+    "new": "package api\n\nimport (\n\t\"encoding/json\"\n)\n\nfunc Dump() {\n\tb, _ := json.MarshalCanonical(nil)\n\t_ = b\n}\n",
+    "expect_ask": false,
+    "enrolled_defs": {
+      "MarshalCanonical": 0
+    }
+  }
+]

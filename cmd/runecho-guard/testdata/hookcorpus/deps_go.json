@@ -1,0 +1,82 @@
+[
+  {
+    "name": "go-vendored-dep-missing-selector-asks",
+    "desc": "`text.Lower` on a vendored external package that exports only `Upper`. Vendoring is what makes this hermetic: with vendor/modules.txt present the index resolves imports from vendor/ and nothing else, so \"the package resolved and lacks this symbol\" is a fact the fixture states rather than one inherited from the machine's module cache or GOROOT. The load-bearing assertion is expect_log_reason: before #268 this logged as \"violations\", and deleting `fired.DepsGo = len(dv) > 0` left the whole suite green — the same unpinned-bucket hole as qualified.json's first case",
+    "check": "deps-go",
+    "flags": [
+      "RUNECHO_GUARD_DEPS_GO=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n\nrequire example.com/lib v1.0.0\n",
+      "vendor/modules.txt": "# example.com/lib v1.0.0\n## explicit; go 1.25.0\nexample.com/lib/text\n",
+      "vendor/example.com/lib/text/text.go": "package text\n\nimport \"strings\"\n\n// Upper is the only exported symbol this package has.\nfunc Upper(s string) string { return strings.ToUpper(s) }\n"
+    },
+    "enroll": {
+      "internal/api/api.go": [
+        "Handle"
+      ]
+    },
+    "file": "internal/api/fmt.go",
+    "old": "package api\n\nimport (\n\t\"example.com/lib/text\"\n)\n\nfunc Norm(s string) string {\n\treturn text.Upper(s)\n}\n",
+    "new": "package api\n\nimport (\n\t\"example.com/lib/text\"\n)\n\nfunc Norm(s string) string {\n\treturn text.Lower(s)\n}\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "text.Lower"
+    ],
+    "enrolled_defs": {
+      "Lower": 0
+    },
+    "expect_log_reason": "deps-go",
+    "expect_no_learn_symbols": true
+  },
+  {
+    "name": "go-vendored-dep-existing-selector-clean",
+    "desc": "the same import and call shape against the symbol the vendored package really exports — correct usage stays silent. Pins `pkg.Has(sym)`: delete it and every call into every dependency becomes a violation, the false-positive shape that would make this check unshippable. Differs from the fixture above only in the selector name, so the outcome is attributable to the exported-name lookup",
+    "check": "deps-go",
+    "flags": [
+      "RUNECHO_GUARD_DEPS_GO=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n\nrequire example.com/lib v1.0.0\n",
+      "vendor/modules.txt": "# example.com/lib v1.0.0\n## explicit; go 1.25.0\nexample.com/lib/text\n",
+      "vendor/example.com/lib/text/text.go": "package text\n\nimport \"strings\"\n\n// Upper is the only exported symbol this package has.\nfunc Upper(s string) string { return strings.ToUpper(s) }\n"
+    },
+    "enroll": {
+      "internal/api/api.go": [
+        "Handle"
+      ]
+    },
+    "file": "internal/api/ok.go",
+    "old": "package api\n\nimport (\n\t\"example.com/lib/text\"\n)\n\nfunc Norm(s string) string {\n\treturn s\n}\n",
+    "new": "package api\n\nimport (\n\t\"example.com/lib/text\"\n)\n\nfunc Norm(s string) string {\n\treturn text.Upper(s)\n}\n",
+    "expect_ask": false,
+    "enrolled_defs": {
+      "Upper": 0
+    }
+  },
+  {
+    "name": "go-unresolvable-dep-abstains-clean",
+    "desc": "`missing.Nosuch` on a package that is imported but NOT vendored: the index returns Unknown rather than Resolved, and the check must fail silent. Pins the `pkg.Res != depindex.Resolved` bail — remove it and an unresolvable package reads as an EMPTY package, so every call into it is a violation. That is the check's worst failure mode in practice, because unresolvable is the normal state on a machine with a cold module cache, and it would fire on correct code",
+    "check": "deps-go",
+    "flags": [
+      "RUNECHO_GUARD_DEPS_GO=1"
+    ],
+    "files": {
+      "go.mod": "module example.com/app\n\ngo 1.25.0\n\nrequire example.com/lib v1.0.0\n",
+      "vendor/modules.txt": "# example.com/lib v1.0.0\n## explicit; go 1.25.0\nexample.com/lib/text\n",
+      "vendor/example.com/lib/text/text.go": "package text\n\nimport \"strings\"\n\n// Upper is the only exported symbol this package has.\nfunc Upper(s string) string { return strings.ToUpper(s) }\n"
+    },
+    "enroll": {
+      "internal/api/api.go": [
+        "Handle"
+      ]
+    },
+    "file": "internal/api/unres.go",
+    "old": "package api\n\nimport (\n\t\"example.com/lib/missing\"\n)\n\nfunc Other(s string) string {\n\t_ = missing.Nosuch\n\treturn s\n}\n",
+    "new": "package api\n\nimport (\n\t\"example.com/lib/missing\"\n)\n\nfunc Other(s string) string {\n\treturn missing.Nosuch(s)\n}\n",
+    "expect_ask": false,
+    "enrolled_defs": {
+      "Nosuch": 0
+    }
+  }
+]

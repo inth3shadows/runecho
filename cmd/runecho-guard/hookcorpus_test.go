@@ -13,13 +13,18 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Five checks —
-// dangling-refs, dropped-import, duplicate-symbol, file-scope, contract — need
-// old-vs-new edit text PLUS an enrolled snapshot store and are reachable ONLY
-// through the hook entry point (runHookMode). The published corpus in
-// internal/guard drives guard.Run in-process, which cannot reach them, so the
-// catch-rate it reports describes one check of six (#227). This harness closes
-// that gap by replaying such cases as data through runHookMode.
+// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Eight checks
+// — dangling-refs, dropped-import, duplicate-symbol, file-scope, contract,
+// call-shape, qualified, deps-go — need old-vs-new edit text PLUS an enrolled
+// snapshot store or an on-disk module, and are reachable ONLY through the hook
+// entry point (runHookMode). The published corpus in internal/guard drives
+// guard.Run in-process, which cannot reach them, so the catch-rate it reports
+// describes one check of nine (#227). This harness closes that gap by replaying
+// such cases as data through runHookMode.
+//
+// Keep that count honest when a check is added. It is this corpus's own claim
+// about what it covers, and the whole thesis here is that unmeasured coverage is
+// the hazard — a stale denominator is the same failure in prose.
 //
 // Phase 1 covered duplicate-symbol; phase 2 added dangling-refs, which enrolls
 // a refs index (Refs) so a deleted def with a live cross-file referrer can be
@@ -40,7 +45,11 @@ import (
 // worktree AND an activation row keyed to a session — so Contract/Session/
 // ActivateSession exist to express "activated, but for a different session",
 // which is the leak that would make every concurrent agent in a shared store
-// answer for a scope it never accepted. All six checks now have fixtures.
+// answer for a scope it never accepted. That completed the six checks that
+// existed then. Call-shape arrived with #243 and brought its own set; qualified
+// and deps-go were added last, and needed the `files` field, because their
+// preconditions live on disk (a go.mod, a vendor tree) rather than in the
+// snapshot store.
 //
 // # Every fixture here earns its place by mutation, not by argument
 //
@@ -80,9 +89,20 @@ type hookCase struct {
 	// the deleted def" through it (RefsToName), so a fixture proving a live
 	// cross-file referrer must enroll that referrer's Refs, not just its Symbols.
 	Refs map[string][]string `json:"refs,omitempty"`
-	File string              `json:"file"` // edited file, repo-relative
-	Old  string              `json:"old"`  // on-disk content BEFORE the edit
-	New  string              `json:"new"`  // content being written (Write only)
+	// Files are extra worktree files written before the hook runs: repo-relative
+	// path -> content. Unlike Enroll (which populates the snapshot store), these
+	// are read off DISK by the check itself, which is the only way to express the
+	// two Go checks' preconditions. qualified needs a go.mod, because it resolves
+	// the module path to tell a same-repo import from an external one and returns
+	// nil when that path is empty. deps-go needs a go.mod plus a vendor tree with
+	// modules.txt: a vendored build resolves imports from vendor/ and nothing
+	// else, which makes the fixture hermetic — no module cache, no GOROOT, no
+	// network — so "the package resolved and lacks this symbol" is a fact the
+	// fixture states rather than one it inherits from the machine.
+	Files map[string]string `json:"files,omitempty"`
+	File  string            `json:"file"` // edited file, repo-relative
+	Old   string            `json:"old"`  // on-disk content BEFORE the edit
+	New   string            `json:"new"`  // content being written (Write only)
 	// Tool is the PreToolUse tool replayed; "" means Write, under which the whole
 	// New content IS the added-lines set. Set it to "Edit" with EditOld/EditNew
 	// for a HUNK-scoped replay: the only shape that can prove a signal is read
@@ -201,6 +221,18 @@ func runHookCase(t *testing.T, c hookCase) {
 	if r, err := filepath.EvalSymlinks(root); err == nil {
 		root = r
 	}
+	for rel, content := range c.Files {
+		if rel == c.File {
+			t.Fatalf("%s: `files` may not contain the edited file — use `old` for its pre-edit content", c.Name)
+		}
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	edited := filepath.Join(root, filepath.FromSlash(c.File))
 	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
 		t.Fatal(err)
@@ -268,13 +300,21 @@ func runHookCase(t *testing.T, c hookCase) {
 			}
 		}
 		if c.ExpectNoLearnSymbols {
-			if rec := readLastDecisionLog(t); rec != nil {
-				if ls, ok := rec["learn_symbols"]; ok {
-					if arr, isArr := ls.([]any); !isArr || len(arr) > 0 {
-						t.Errorf("ask trained learned-allow on %v — only additive-check "+
-							"findings are learn-eligible; learning this name would silence a "+
-							"later genuine hallucination of it", ls)
-					}
+			// A nil record must fail, not pass. This is a safety pin — it asserts an
+			// ask did NOT teach learned-allow — so "no decision was logged" is the
+			// one outcome that cannot be read as agreement. Treating nil as a pass
+			// would let a harness change that stops exporting RUNECHO_HOME turn
+			// every pin on this field green while learn_symbols went unchecked:
+			// exactly the fixture-pins-nothing failure #227 exists to exclude.
+			rec := readLastDecisionLog(t)
+			if rec == nil {
+				t.Fatalf("no decision logged, want an ask with no learn_symbols")
+			}
+			if ls, ok := rec["learn_symbols"]; ok {
+				if arr, isArr := ls.([]any); !isArr || len(arr) > 0 {
+					t.Errorf("ask trained learned-allow on %v — only additive-check "+
+						"findings are learn-eligible; learning this name would silence a "+
+						"later genuine hallucination of it", ls)
 				}
 			}
 		}

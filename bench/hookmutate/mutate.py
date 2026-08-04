@@ -2,7 +2,7 @@
 """Mutation-score the hook-level guard fixtures.
 
 The hook corpus (cmd/runecho-guard/testdata/hookcorpus/*.json) is the only
-instrument that reaches five of the guard's six checks. A fixture in it is worth
+instrument that reaches eight of the guard's nine checks. A fixture in it is worth
 keeping only if some defect can make it fail; one that no mutation kills is a
 claim of coverage the corpus does not have, which is the exact failure #227 was
 filed about.

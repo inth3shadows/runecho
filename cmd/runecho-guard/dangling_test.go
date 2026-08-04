@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,21 +97,90 @@ func TestAskReason(t *testing.T) {
 	}
 }
 
-func TestFiredChecksAny(t *testing.T) {
-	if (firedChecks{}).any() {
-		t.Error("zero firedChecks must report nothing fired — it gates the whole clean-path return")
+// firedOnly returns a firedChecks with exactly the named bool field set, so the
+// two tests below can enumerate the struct by REFLECTION rather than by a
+// hand-written list.
+//
+// That choice is the point of this helper. A table someone must remember to
+// extend is not a pin, it is a habit — and an unextended one is precisely the
+// hole this file's gate change was written to close (#268 added three fields;
+// two of their assignments shipped with nothing pinning them). Add a field to
+// firedChecks and forget it in anyNonViolation or askReason, and reflection
+// fails the build rather than staying quietly green.
+func firedOnly(t *testing.T, field string) firedChecks {
+	t.Helper()
+	var f firedChecks
+	v := reflect.ValueOf(&f).Elem().FieldByName(field)
+	if !v.IsValid() || v.Kind() != reflect.Bool {
+		t.Fatalf("firedChecks has no bool field %q", field)
 	}
-	// Every field must count. A field omitted from any() would make the hook take
-	// the clean path with a real finding in hand, silently dropping the ask.
-	for name, f := range map[string]firedChecks{
-		"Violations": {Violations: true}, "FileScope": {FileScope: true},
-		"Qualified": {Qualified: true}, "DepsGo": {DepsGo: true},
-		"Dangling": {Dangling: true}, "Dropped": {Dropped: true},
-		"Duplicate": {Duplicate: true}, "CallShape": {CallShape: true},
-	} {
-		if !f.any() {
-			t.Errorf("any() ignores %s — an ask with only that finding would be dropped", name)
+	v.SetBool(true)
+	return f
+}
+
+// firedCheckFields lists every field of firedChecks, in declaration order.
+func firedCheckFields(t *testing.T) []string {
+	t.Helper()
+	rt := reflect.TypeOf(firedChecks{})
+	names := make([]string, 0, rt.NumField())
+	for i := 0; i < rt.NumField(); i++ {
+		if rt.Field(i).Type.Kind() != reflect.Bool {
+			t.Fatalf("firedChecks.%s is not a bool — these tests assume a flat bool struct", rt.Field(i).Name)
 		}
+		names = append(names, rt.Field(i).Name)
+	}
+	if len(names) < 2 {
+		t.Fatal("reflection found almost no fields — the walk is broken, not the struct")
+	}
+	return names
+}
+
+func TestFiredChecksAnyNonViolation(t *testing.T) {
+	if (firedChecks{}).anyNonViolation() {
+		t.Error("zero firedChecks must report nothing fired — it half-gates the clean-path return")
+	}
+	// Every field except Violations must count. Four of them (dangling, dropped,
+	// duplicate, call-shape) are the ONLY record that their check fired, so a
+	// field omitted here makes the hook take the clean path with a real finding
+	// in hand and silently drop the ask. The other three also merge into
+	// `violations`, where len() catches them — their presence here is deliberate
+	// redundancy, and asserting it keeps the two halves of the gate from silently
+	// drifting apart.
+	for _, name := range firedCheckFields(t) {
+		if name == "Violations" {
+			continue
+		}
+		if !firedOnly(t, name).anyNonViolation() {
+			t.Errorf("anyNonViolation() ignores %s — an ask with only that finding would be dropped", name)
+		}
+	}
+	// Violations must NOT be counted here: the gate reads len(violations)
+	// directly, and folding the flag back in would restore the bookkeeping
+	// dependency this split exists to remove.
+	if (firedChecks{Violations: true}).anyNonViolation() {
+		t.Error("anyNonViolation() counts Violations — the gate must read the slice, not the flag")
+	}
+}
+
+// TestAskReasonNamesEveryField is the log-side twin of the test above: every
+// field must map to its own decision-log bucket. A field askReason does not know
+// about falls through to the zero-value "violations" fallback, which is exactly
+// the mislabelling #268 was opened to fix — so a duplicate term is the failure
+// signal, not merely an empty one.
+func TestAskReasonNamesEveryField(t *testing.T) {
+	seen := map[string]string{}
+	for _, name := range firedCheckFields(t) {
+		got := askReason(firedOnly(t, name))
+		if got == "" {
+			t.Errorf("askReason names nothing for %s", name)
+			continue
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("askReason returns %q for both %s and %s — %s has no bucket of its own, so "+
+				"its false-positive rate is unmeasurable and it inflates %s's", got, prev, name, name, prev)
+			continue
+		}
+		seen[got] = name
 	}
 }
 

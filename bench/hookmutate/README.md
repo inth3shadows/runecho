@@ -1,8 +1,8 @@
 # hookmutate — does each hook fixture actually catch anything?
 
 `cmd/runecho-guard/testdata/hookcorpus/*.json` is the only instrument that
-reaches five of the guard's six checks (#227). It is a **wiring** instrument, not
-a catch-rate — never quote it as one.
+reaches eight of the guard's nine checks (#227). It is a **wiring** instrument,
+not a catch-rate — never quote it as one.
 
 Its own failure mode is silent: a fixture can pass forever while pinning nothing,
 and the corpus then reports coverage it does not have. That is the exact defect

@@ -33,7 +33,7 @@ jobs:
       # Scores the hook-fixture corpus: breaks one guard behaviour at a time and
       # fails if any fixture caught nothing, or if a mutation survived without a
       # written `known_gap` reason. The corpus is the only instrument reaching
-      # five of the guard's six checks, and its failure mode is silent — a
+      # eight of the guard's nine checks, and its failure mode is silent — a
       # fixture can pass forever while pinning nothing, which is what #227 was
       # filed about. `go test` above cannot see that; only this can.
       #

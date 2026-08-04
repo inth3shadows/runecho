@@ -1134,7 +1134,7 @@ func TestParseJSBindingTarget_NestedObjectDestructure(t *testing.T) {
 // looks identical to one. The distinguishing signal is position: MAX_VALUE is
 // preceded by `{`, not by only whitespace back to the start of the line.
 func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil, nil)
 	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
 		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
 	}
@@ -1145,7 +1145,7 @@ func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
 // statement-start type annotation (`MAX_VALUE: int = 5`) is still a
 // definition, not a use.
 func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil, nil)
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — this is a definition, not a use", refs)
 	}
@@ -1157,11 +1157,11 @@ func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
 // list sharing the same shape (`foo(MAX_VALUE, OTHER_VALUE)`) must still be
 // treated as two genuine references.
 func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil, nil)
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — both names are tuple-assignment targets", refs)
 	}
-	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil)
+	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil, nil)
 	if len(callRefs) != 2 {
 		t.Errorf("got %+v, want 2 references (call arguments)", callRefs)
 	}
@@ -1195,18 +1195,62 @@ func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
 	}
 }
 
+// TestDefNames_ChainedAssignmentAnyLength pins the code-review finding on
+// #279's first fix: a regex-FindAll approach to a chained assignment's second
+// target has a trailing-`=`-guard that gets consumed by its own match, so it
+// can supply at most one extra name and silently drops a third or later
+// target. pyChainedAssignTargets (split-based, no such limit) replaced it.
+func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		names []string
+	}{
+		{"MAX_A = OTHER_B = THIRD_C = 5", []string{"MAX_A", "OTHER_B", "THIRD_C"}},
+		{"A_A = B_B = C_C = D_D = 5", []string{"A_A", "B_B", "C_C", "D_D"}},
+	} {
+		got := defNames(LangPython, tc.text)
+		for _, want := range tc.names {
+			if _, ok := got[want]; !ok {
+				t.Errorf("defNames(%q) = %v, missing %s", tc.text, got, want)
+			}
+		}
+	}
+}
+
+// TestAppendConstRefs_ChainedAssignmentTargetsNotReferences pins the
+// code-review finding on #279's first fix: appendConstRefs never consulted
+// defNames' defs map, so a chained-assignment target that defNames correctly
+// recognizes (`OTHER_B` in `MAX_A = OTHER_B = 5`) was still added here as a
+// plain reference — the fix in defNames never reached the function that
+// actually decides ref-vs-definition for SCREAMING_SNAKE names. Mirrors how
+// the real caller in ExtractRefs threads its own defNames result through.
+func TestAppendConstRefs_ChainedAssignmentTargetsNotReferences(t *testing.T) {
+	text := "MAX_A = OTHER_B = 5"
+	defs := defNames(LangPython, text)
+	refs := appendConstRefs(nil, map[string]struct{}{}, text, 1, nil, defs)
+	if len(refs) != 0 {
+		t.Errorf("got %+v, want none — both names are chained-assignment targets", refs)
+	}
+}
+
 // TestIsImportLine_MinifiedJS pins #280: space-less minified/bundled import
 // and export-from syntax must still be recognized as import lines, so
 // references on those lines are skipped as bindings rather than checked as
 // unresolved calls. A plain `export{a}` (no `from`) is a local re-export, not
 // an import, and must NOT match — same distinction the spaced form already
-// draws. A dynamic `import(x)` call expression must not match either.
+// draws. A dynamic `import(x)` call expression must not match either. The
+// partially-spaced mixes (space on only one side of `from`) pin the
+// code-review finding that a literal `"}from"` substring check missed them.
 func TestIsImportLine_MinifiedJS(t *testing.T) {
 	cases := map[string]bool{
-		`import{a}from"m"`: true,
-		`export{a}from"m"`: true,
-		`export{a}`:        false,
-		`import(x)`:        false,
+		`import{a}from"m"`:               true,
+		`export{a}from"m"`:               true,
+		`export{a} from"m"`:              true,
+		`export {a}from"m"`:              true,
+		`export { a } from 'm'`:          true,
+		`export{a}`:                      false,
+		`import(x)`:                      false,
+		`export function fromThing() {}`: false,
 	}
 	for text, want := range cases {
 		if got := isImportLine(LangJS, text); got != want {

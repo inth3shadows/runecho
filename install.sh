@@ -130,7 +130,7 @@ command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not fou
 # to regex (names only, no per-symbol spans). runecho-guard does not import the
 # parser, so the tags are a harmless no-op there. Build stays CGO-free; do not
 # set CGO_ENABLED=1.
-GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx grammar_subset_rust grammar_subset_ruby"
+GRAMMAR_TAGS="grammar_subset grammar_subset_python grammar_subset_javascript grammar_subset_typescript grammar_subset_tsx grammar_subset_rust grammar_subset_ruby grammar_subset_bash"
 
 # Stamp the version both binaries report (internal/version.Version) from the
 # latest git tag. Outside a git checkout (tarball install, no tags) git describe

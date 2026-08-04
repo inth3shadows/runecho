@@ -2,13 +2,12 @@ package parser
 
 import "testing"
 
-// FuzzShellParse hardens the hand-rolled shell masker/parser against arbitrary
-// input by pinning its two load-bearing invariants — maskShell is length-preserving
-// and only ever turns non-newline bytes into spaces (never inserts, deletes, or
-// moves a newline), and neither maskShell nor Parse panics. Every branch in the
-// scanner advances i and every pop is guarded by top(), so these must always hold;
-// the fuzzer exercises the escape/quote/heredoc/nesting edges the table tests can't
-// enumerate. Parity with the tree-sitter parsers' nestguard/fuzz coverage.
+// FuzzShellParse asserts the shell parser never panics on arbitrary input and
+// keeps the sorted/deduplicated invariants the IR relies on. The AST walk's own
+// recover() (shellSymbolsFromAST) is what should make this hold — the fuzzer
+// exercises the escape/quote/heredoc/nesting edges the table tests can't
+// enumerate, parity with the other tree-sitter parsers' fuzz coverage.
+// Run: go test -run=x -fuzz=FuzzShellParse ./internal/parser
 func FuzzShellParse(f *testing.F) {
 	seeds := []string{
 		"f() {\n  echo hi\n}\n",
@@ -21,21 +20,18 @@ func FuzzShellParse(f *testing.F) {
 		"cat <<-A <<B\n\tA\nB\n",
 		"echo \\{ \\} \\( \\) \\\n next",
 		"${", "$(", "`", "\"", "'", "{{{{", "}}}}", "((((",
+		"f() {\n  ((x << y))\n}\n",
+		"f() {\n  x=$(cat <<EOF\n)\nEOF\n)\n}\n",
 	}
 	for _, s := range seeds {
 		f.Add(s)
 	}
+	p := NewShellParser()
 	f.Fuzz(func(t *testing.T, s string) {
-		masked := maskShell([]byte(s))
-		if len(masked) != len(s) {
-			t.Fatalf("maskShell changed length: %d != %d", len(masked), len(s))
+		fs, err := p.Parse(s) // must never panic
+		if err != nil {
+			return
 		}
-		for i := range masked {
-			if (masked[i] == '\n') != (s[i] == '\n') {
-				t.Fatalf("maskShell altered a newline at offset %d", i)
-			}
-		}
-		// Must not panic on arbitrary input.
-		_, _ = NewShellParser().Parse(s)
+		assertParserInvariants(t, fs)
 	})
 }

@@ -137,5 +137,28 @@
     "file": "fetcher.py",
     "edit": "async def fetch_all(urls):\n    return [u for u in urls]\n",
     "expect": []
+  },
+  {
+    "name": "py-tp-multiline-dict-key-is-a-use",
+    "desc": "#289: a SCREAMING_SNAKE key on its own line inside a multi-line dict literal is a genuine USE of the constant, not a definition — it is preceded by only whitespace on ITS line, so nothing but the cross-line brace state tells it from a top-level annotation. Undefined here, so it must be flagged. This is the arm that fails if the positional brace resolution added for #292 ever swings back to reading a key as a definition",
+    "file": "settings.py",
+    "edit": "result = {\n    MAX_VALUE: 5,\n}\n",
+    "expect": ["MAX_VALUE"]
+  },
+  {
+    "name": "py-tn-fstring-interpolation-does-not-leak-brace-depth",
+    "desc": "#291: a call spanning lines inside an f-string interpolation leaves its `{` on the opening line while the matching `}` lands on a continuation line the propagated open-quote state blanks wholesale. Counting braces on the code scan leaks +1 permanently, so MAX_RETRIES — defined in this same edit — is misread as a dict key and flagged. An f-string's braces are string syntax; the depth counter must not see them",
+    "file": "report.py",
+    "known": ["compute"],
+    "edit": "msg = f\"{compute(\n    a, b\n)}\"\nMAX_RETRIES = 5\nprint(MAX_RETRIES)\n",
+    "expect": []
+  },
+  {
+    "name": "py-tn-const-after-dict-closes-on-same-line",
+    "desc": "#292: a dict literal's closing `}` and a fresh top-level constant definition can share one physical line. The brace state deciding ref-vs-definition must be read at the NAME's offset — after the close — not from a line-start snapshot, and rePyConstDef's `^` anchor has to run per top-level `;`-separated statement to see the definition at all. Both passes must agree, or the later use on line 4 resolves against nothing and is flagged",
+    "file": "config.py",
+    "known": ["use"],
+    "edit": "cfg = {\n    \"a\": 1,\n}; MAX_TIMEOUT = 30\nuse(MAX_TIMEOUT)\n",
+    "expect": []
   }
 ]

@@ -86,11 +86,25 @@ fi
 # mode check above cannot catch it: it validates the argument this script was
 # given, not whether the resolved binary understands it.
 #
-# So run it rather than exec it, discard stderr, and always exit 0. Nothing is
-# hidden by that: runOutcomeMode writes nothing to stderr and always returns 0,
-# so the only output this can suppress IS the stale-binary usage dump.
+# So run it rather than exec it, and always exit 0.
+#
+# Do NOT blanket-discard stderr here. An earlier revision did, on the claim that
+# "runOutcomeMode writes nothing to stderr" — that claim is false. The outcome
+# path reaches registry/snapshot/generator and the parser grammar loaders, which
+# warn on a corrupt enrolled_at, a DB fault, or a grammar that failed to load
+# (internal/snapshot/registry.go's warning exists specifically so a DB fault is
+# "debuggable rather than silent"). Blanket-discarding re-silenced exactly those,
+# for every plugin user, on every edit.
+#
+# So filter instead of discard: drop only the stale-binary flag-parse dump, and
+# let every other diagnostic through. Stderr is captured rather than streamed,
+# which is fine for an observational hook.
 if [ "$mode" = "--outcome-mode" ]; then
-  "$guard" --outcome-mode 2>/dev/null || true
+  err="$("$guard" --outcome-mode 2>&1 >/dev/null)" || true
+  case "$err" in
+    *"flag provided but not defined"*) ;; # stale binary predating --outcome-mode
+    ?*) printf '%s\n' "$err" >&2 ;;       # a real diagnostic — surface it
+  esac
   exit 0
 fi
 

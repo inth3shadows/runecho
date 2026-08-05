@@ -296,10 +296,9 @@ func TestGuardShimSurvivesStaleBinary(t *testing.T) {
 			"becomes a hook error on every single edit, for a purely "+
 			"observational step", code)
 	}
-	if stderr != "" {
-		t.Errorf("guard.sh --outcome-mode leaked stderr from a stale binary: %q\n"+
-			"runOutcomeMode writes nothing to stderr, so this can only be the "+
-			"flag-parse usage dump", stderr)
+	if strings.Contains(stderr, "flag provided but not defined") {
+		t.Errorf("guard.sh --outcome-mode leaked a stale binary's flag-parse dump: %q",
+			stderr)
 	}
 
 	// The decision path must stay loud. If this ever starts passing silently,
@@ -307,6 +306,102 @@ func TestGuardShimSurvivesStaleBinary(t *testing.T) {
 	if _, code := run("--hook-mode"); code == 0 {
 		t.Error("guard.sh --hook-mode swallowed a stale binary's failure — the " +
 			"decision path must surface it, not defer silently")
+	}
+}
+
+// TestGuardShimOutcomeModeInvokesBinary pins that the --outcome-mode branch
+// actually RUNS the guard.
+//
+// This exists because that branch had zero execution coverage: replacing its
+// body with a bare `exit 0` — leaving PostToolUse completely inert — passed the
+// entire suite. That is the exact bug this PR fixes (a channel that looks wired
+// and does nothing), reintroduced inside the fix for it. The neighbouring tests
+// could not catch it: one runs with no binary present, and the other asserts
+// exit 0 plus no flag-parse dump, both of which an inert branch satisfies.
+//
+// A sentinel file is the assertion because it is the one thing an inert branch
+// cannot fake.
+func TestGuardShimOutcomeModeInvokesBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("guard.sh is a bash shim; the Windows install path does not use it")
+	}
+	root := repoRoot(t)
+	shim := trackedPath(t, root, "plugins", "runecho-guard", "hooks", "guard.sh")
+
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	binDir := t.TempDir()
+	sentinel := filepath.Join(binDir, "invoked")
+	stub := "#!/usr/bin/env bash\nprintf '%s\\n' \"$1\" > " + sentinel + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "runecho-guard"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	cmd := exec.Command("bash", shim, "--outcome-mode")
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + filepath.Dir(bashPath),
+		"HOME=" + binDir, "RUNECHO_BIN_DIR=",
+	}
+	cmd.Stdin = strings.NewReader("{}")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("guard.sh --outcome-mode: %v", err)
+	}
+
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("guard.sh --outcome-mode never invoked the binary — PostToolUse "+
+			"is inert while every config still reports it as wired: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != "--outcome-mode" {
+		t.Errorf("binary invoked with %q, want %q", strings.TrimSpace(string(got)), "--outcome-mode")
+	}
+}
+
+// TestGuardShimSurfacesRealDiagnostics is the counterpart to the stale-binary
+// swallow: everything that is NOT a flag-parse dump has to reach the user.
+//
+// The outcome path reaches the registry, snapshot, generator and parser grammar
+// loaders, all of which warn on stderr — a corrupt enrolled_at, a DB fault, a
+// grammar that failed to load. An earlier revision discarded stderr wholesale on
+// the false premise that runOutcomeMode never writes any, which silenced those
+// for every plugin user on every edit.
+func TestGuardShimSurfacesRealDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("guard.sh is a bash shim; the Windows install path does not use it")
+	}
+	root := repoRoot(t)
+	shim := trackedPath(t, root, "plugins", "runecho-guard", "hooks", "guard.sh")
+
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	binDir := t.TempDir()
+	const warning = "runecho: warning: repo 1 enrolled_at is corrupt"
+	stub := "#!/usr/bin/env bash\necho '" + warning + "' >&2\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "runecho-guard"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	cmd := exec.Command("bash", shim, "--outcome-mode")
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + filepath.Dir(bashPath),
+		"HOME=" + binDir, "RUNECHO_BIN_DIR=",
+	}
+	cmd.Stdin = strings.NewReader("{}")
+	var stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("guard.sh --outcome-mode: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), warning) {
+		t.Errorf("guard.sh swallowed a real diagnostic: got %q, want it to contain %q\n"+
+			"Only the stale-binary flag-parse dump may be filtered; a DB fault or a "+
+			"failed grammar load must stay debuggable.", stderr.String(), warning)
 	}
 }
 

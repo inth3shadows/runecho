@@ -232,11 +232,14 @@ new state instead of the old one.
 > records this hook is the only source of. Re-run
 > `install.sh --print-hook-config` for the current snippet.
 >
-> If you end up with both wired anyway, nothing breaks — Claude Code runs every
-> matching hook, so the recorder fires twice, and the second fire sees the
+> If you end up with both wired anyway it is handled, not fatal: Claude Code runs
+> every matching hook, so the recorder fires twice, and the second fire sees the
 > outcome the first one wrote and no-ops. That dedupe is what keeps a
 > double-wired install from reporting an *inflated* approval rate instead of an
-> empty one.
+> empty one. It serializes the check with an advisory lock, which is best-effort
+> by design — it never blocks an edit, so on a platform without file locking, or
+> if the lock cannot be taken, a rare duplicate is still possible. Prefer wiring
+> the hook once.
 
 ### Inspect recent history
 

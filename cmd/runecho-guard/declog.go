@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/store"
 	"github.com/inth3shadows/runecho/internal/version"
 )
 
@@ -134,25 +135,52 @@ const (
 // below) can attribute the approval to specific symbols without re-joining the
 // log. When the learned-allow feature is enabled, the approval is also folded
 // into the per-repo learned-allow store.
+// The dedupe below is a read-check-write across two calls, and logDecision is
+// deliberately lock-free O_APPEND — so without serialization two hooks firing
+// for the SAME edit can both read "no outcome yet" and both write one. Measured
+// at 5 duplicates in 30 trials with two concurrent --outcome-mode processes,
+// which is exactly the user-settings + project-settings wiring.
+//
+// Same primitive and same reasoning as recordApprovals one function below. The
+// two locks are distinct files and only this function takes both, always in this
+// order, so they cannot deadlock. recordApprovals is called AFTER the lock is
+// released, and only when this process actually wrote the record — otherwise a
+// suppressed duplicate would still train learned-allow, which is the half of the
+// double-count that matters most (it halves the effective approval threshold).
+//
+// Honest scope: store.WithFileLock is fail-open (runs unlocked if the lock can't
+// be taken) and a no-op on non-Unix. So this closes the race on Unix and remains
+// best-effort elsewhere — it is not an absolute guarantee, and the comments and
+// docs must not claim one.
 func logOutcomeForFile(file string) {
 	dir, err := runechoDir()
 	if err != nil {
 		return
 	}
-	ask, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file)
-	if !ok {
+
+	var ask decisionRecord
+	var wrote bool
+	store.WithFileLock(filepath.Join(dir, "decisions.jsonl.lock"), func() {
+		rec, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file)
+		if !ok {
+			return
+		}
+		logDecision(decisionRecord{
+			Mode:         "hook",
+			Repo:         rec.Repo,
+			File:         file,
+			Lang:         rec.Lang,
+			Decision:     "outcome",
+			Reason:       "approved",
+			Symbols:      rec.Symbols,
+			LearnSymbols: rec.LearnSymbols,
+		})
+		ask, wrote = rec, true
+	})
+	if !wrote {
 		return
 	}
-	logDecision(decisionRecord{
-		Mode:         "hook",
-		Repo:         ask.Repo,
-		File:         file,
-		Lang:         ask.Lang,
-		Decision:     "outcome",
-		Reason:       "approved",
-		Symbols:      ask.Symbols,
-		LearnSymbols: ask.LearnSymbols,
-	})
+
 	// Train learned-allow only on the hallucination-origin subset — see the
 	// LearnSymbols doc on decisionRecord for why dangling/dropped/duplicate
 	// approvals must not populate the hallucination known-set. Records written

@@ -386,3 +386,41 @@ func countOutcomes(t *testing.T, home, file string) int {
 	}
 	return n
 }
+
+// Two hooks can fire for one edit genuinely concurrently (user settings.json and
+// project settings.json both invoke the binary directly). The dedupe is a
+// read-check-write and logDecision is lock-free O_APPEND, so without
+// serialization both processes read "no outcome yet" and both write. Measured at
+// 5/30 duplicates before the lock was added.
+//
+// In-process goroutines exercise the same critical section the cross-process
+// flock guards; WithFileLock is advisory and works for both.
+func TestLogOutcomeForFile_ConcurrentFiresWriteOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	file := "/some/repo/race.go"
+	logDecision(decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go",
+		Decision: "ask", Reason: "violations",
+		Symbols: []string{"Foo"}, LearnSymbols: []string{"Foo"},
+	})
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release together to maximise overlap
+			logOutcomeForFile(file)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := countOutcomes(t, home, file); got != 1 {
+		t.Errorf("outcome records = %d, want 1 — concurrent PostToolUse fires for "+
+			"one edit are racing the dedupe's read-check-write", got)
+	}
+}

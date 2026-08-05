@@ -329,3 +329,56 @@ func TestRun_UnknownLang_Skipped(t *testing.T) {
 		t.Errorf("unknown lang files should be skipped, got %v", violations)
 	}
 }
+
+// TestPyBraceDepthSeedProvidersAgree pins the HIGH finding from code review on
+// the #291/#292 PR: the brace-depth seed had THREE hand-kept copies of one
+// accounting rule, and only two were converted. pyBraceDepthSeedFor — the
+// pre-commit path's provider, used whenever a FileDiff carries an AbsPath — kept
+// counting an f-string interpolation's braces as dict nesting, so a hunk below a
+// multi-line interpolation was seeded at depth 1 where the hook's
+// PyBraceDepthBefore seeded 0. The pre-commit path therefore still produced the
+// exact false positive the fix claims to close.
+//
+// Pinning agreement rather than either provider's absolute numbers is the point:
+// any future edit to one that does not land in the other fails here, which is
+// what a third copy makes possible in the first place.
+func TestPyBraceDepthSeedProvidersAgree(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{
+			"multi-line f-string interpolation",
+			"msg = f\"{compute(\n    a, b\n)}\"\nMAX_RETRIES = 5\nprint(MAX_RETRIES)\n",
+		},
+		{
+			"dict closes and a statement begins on one line",
+			"cfg = {\n    \"a\": 1,\n}; MAX_TIMEOUT = 30\nuse(MAX_TIMEOUT)\n",
+		},
+		{
+			"stray close followed by a real open",
+			"}{\nMAX_VALUE = 1\n",
+		},
+		{
+			"docstring holding a brace",
+			"x = 1\n\"\"\"\nnot a dict {\n\"\"\"\nMAX_VALUE = 2\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "mod.py")
+			if err := os.WriteFile(path, []byte(tc.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seed := pyBraceDepthSeedFor(path)
+			if seed == nil {
+				t.Fatal("pyBraceDepthSeedFor returned nil")
+			}
+			fileLines := TextToAddedLines(tc.src)
+			for lineNo := 1; lineNo <= len(fileLines)+1; lineNo++ {
+				want := PyBraceDepthBefore(fileLines, lineNo-1)
+				if got := seed(lineNo); got != want {
+					t.Errorf("line %d: pre-commit seed = %d, hook seed = %d — the two providers must not drift",
+						lineNo, got, want)
+				}
+			}
+		})
+	}
+}

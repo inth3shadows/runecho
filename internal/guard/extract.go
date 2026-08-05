@@ -158,7 +158,7 @@ var (
 	// reJSVarDefCont mirrors reJSVarDef but for a SECOND (or later) function/arrow
 	// declarator on the same `const`/`let`/`var` statement (`const a = () => {},
 	// b = () => {}`) — valid JS, each declarator needing its own initializer. Not
-	// anchored at `^` (it matches mid-line, after the comma), so defNames applies
+	// anchored at `^` (it matches mid-line, after the comma), so defNamesInContext applies
 	// it with FindAllStringSubmatch to pick up every trailing declarator; reJSVarDef
 	// still owns the first one, which sits before any comma.
 	reJSVarDefCont = regexp.MustCompile(`,\s*([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
@@ -939,13 +939,13 @@ var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A
 // targets (`MAX: int = 5` / `MAX = 5` / `MAX, OTHER = 5, 10` / chained
 // `MAX = OTHER = 5`), and builtins.
 //
-// defs is the caller's already-computed defNames(lang, text) for this same
-// line — appendConstRefs previously never consulted it, so a name defNames
+// defs is the caller's already-computed defNamesInContext result for this same
+// line — appendConstRefs previously never consulted it, so a name defNamesInContext
 // correctly recognizes as a chained-assignment target (`OTHER` in `MAX =
-// OTHER = 5`) was still added here as a plain reference: defNames' own fix
+// OTHER = 5`) was still added here as a plain reference: its own fix
 // never reached the code path that actually decides ref-vs-definition for
 // SCREAMING_SNAKE names. Checking defs first covers that case; the two checks
-// below remain for shapes defNames does not itself capture (dict-key
+// below remain for shapes defNamesInContext does not itself capture (dict-key
 // disambiguation, tuple-assignment target spans).
 //
 // A `:` or `=` is only read as introducing a definition when the name is at
@@ -959,10 +959,7 @@ var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A
 // (rePyTupleAssignTargets) since a name anywhere in `MAX, OTHER = 5, 10`'s
 // target list — not only the first — is being defined, not used.
 func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}, ctx pyLineCtx) []Ref {
-	tupleTargetsEnd := -1
-	if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan); m != nil {
-		tupleTargetsEnd = m[3] // end of the captured target-list span (group 1)
-	}
+	tupleTargets := pyTupleTargetSpans(ctx, scan)
 	for _, idx := range reUpperSnakeRef.FindAllStringSubmatchIndex(scan, -1) {
 		s, e := idx[2], idx[3]
 		name := scan[s:e]
@@ -972,7 +969,7 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 		if _, isDef := defs[name]; isDef {
 			continue // recognized elsewhere on this line as a definition target
 		}
-		if tupleTargetsEnd >= 0 && e <= tupleTargetsEnd {
+		if inAnySpan(tupleTargets, s, e) {
 			continue // part of a tuple-assignment LHS target list — a definition
 		}
 		rest := strings.TrimLeft(scan[e:], " \t")
@@ -991,6 +988,16 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 		refs = append(refs, Ref{Name: name, LineNo: lineNo})
 	}
 	return refs
+}
+
+// inAnySpan reports whether [s,e) lies wholly inside one of the spans.
+func inAnySpan(spans [][2]int, s, e int) bool {
+	for _, sp := range spans {
+		if s >= sp[0] && e <= sp[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // appendTypeRefs adds PascalCase type-annotation references (`param: TypeName`)
@@ -1069,7 +1076,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// inIface reports whether we are inside a Go `interface { ... }` body. Its lines
 	// are method *signatures* (Name(params) returns) and embedded interface names —
 	// declarations, never calls — but reCallIdent reads `Name(` as a call and
-	// defNames only recognizes `func`-prefixed defs, so without this an added
+	// defNamesInContext only recognizes `func`-prefixed defs, so without this an added
 	// interface flags every method as an unresolved call. Interface bodies hold no
 	// nested braces in practice (methods have no body; type sets use `|`/`~`), so a
 	// boolean entered on a genuine body opener and cleared on the first `}` is both
@@ -1444,10 +1451,16 @@ func (c pyLineCtx) depthAtEnd() int {
 	return depth
 }
 
-// stmtStarts returns the byte offsets at which a statement begins on this line:
-// 0, plus the offset after each top-level `;`.
+// stmtStarts returns the byte offsets at which a statement begins on this line
+// OUTSIDE any open `{}` literal: 0 when the line itself starts at depth 0, plus
+// the offset after each top-level `;`. A line that opens inside a multi-line dict
+// has no statement start at all, which is what keeps its keys from being read as
+// definitions.
 func (c pyLineCtx) stmtStarts() []int {
-	starts := []int{0}
+	var starts []int
+	if c.base == 0 {
+		starts = append(starts, 0)
+	}
 	depth := c.base
 	for i := 0; i < len(c.scan); i++ {
 		switch c.scan[i] {
@@ -1479,9 +1492,47 @@ func pyConstDefNames(ctx pyLineCtx) []string {
 		if m == nil {
 			continue
 		}
+		// rePyConstDef's `\s*[:=]` matches the FIRST `=` of a `==`, so a
+		// comparison reads as a definition and the name is folded into the known
+		// set unchecked — a hallucinated constant used only in a comparison would
+		// never be flagged. appendConstRefs carries the same guard; running the
+		// regex at every top-level `;` offset is what made it matter here too
+		// (code review on this PR).
+		if strings.HasPrefix(strings.TrimLeft(ctx.scan[start+m[3]:], " \t"), "==") {
+			continue
+		}
 		if pos := start + m[2]; ctx.isDefinitionPos(pos) {
 			names = append(names, ctx.scan[pos:start+m[3]])
 		}
+	}
+	return names
+}
+
+// pyTupleTargetSpans returns the byte span of every top-level statement's
+// tuple-assignment target list (`MAX, OTHER = 5, 10`), so a name anywhere inside
+// one is read as a definition rather than a use. Per-statement for the same
+// reason pyConstDefNames is: rePyTupleAssignTargets is `^`-anchored and so could
+// only ever see a line's first statement, leaving `}; MAX_A, MAX_B = 1, 2` — the
+// multi-target arm of #292's own shape — flagging both names (code review on this
+// PR).
+func pyTupleTargetSpans(ctx pyLineCtx, scan string) [][2]int {
+	var spans [][2]int
+	for _, start := range ctx.stmtStarts() {
+		if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan[start:]); m != nil {
+			spans = append(spans, [2]int{start + m[2], start + m[3]})
+		}
+	}
+	return spans
+}
+
+// pyChainedTargetNames returns every chained-assignment target on the line
+// (`MAX_A = OTHER_B = 5` → both), once per top-level statement. Read off the
+// masked scan rather than the raw text so an `=` inside a string literal cannot
+// be mistaken for an assignment operator.
+func pyChainedTargetNames(ctx pyLineCtx) []string {
+	var names []string
+	for _, start := range ctx.stmtStarts() {
+		names = append(names, pyChainedAssignTargets(ctx.scan[start:])...)
 	}
 	return names
 }
@@ -1941,7 +1992,8 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 // non-overlapping matches consume that trailing `=`, so it can supply at most
 // one extra name and silently drops a third+ (confirmed: a 3-way chain lost
 // its last target). pyChainedAssignTargets splits on every top-level bare `=`
-// instead, which has no such limit.
+// instead, which has no such limit; pyChainedTargetNames runs it once per
+// top-level statement.
 func defNamesInContext(lang Lang, text string, ctx pyLineCtx) map[string]struct{} {
 	names := make(map[string]struct{})
 	capture := func(re *regexp.Regexp) {
@@ -1963,7 +2015,7 @@ func defNamesInContext(lang Lang, text string, ctx pyLineCtx) map[string]struct{
 		for _, n := range pyConstDefNames(ctx) {
 			names[n] = struct{}{}
 		}
-		for _, n := range pyChainedAssignTargets(text) {
+		for _, n := range pyChainedTargetNames(ctx) {
 			names[n] = struct{}{}
 		}
 	case LangJS:
@@ -1979,7 +2031,7 @@ func defNamesInContext(lang Lang, text string, ctx pyLineCtx) map[string]struct{
 // assignment (`MAX_A = OTHER_B = THIRD_C = 5` → all three), or nil if text
 // isn't one. Splits on every top-level bare `=` (splitTopLevelAssigns already
 // excludes `==`/`!=`/`<=`/`>=`) rather than matching name-by-name, so it has no
-// limit on chain length — see defNames' comment for why the regex-FindAll
+// limit on chain length — see defNamesInContext' comment for why the regex-FindAll
 // approach this replaced could not go past one extra name. Requires every
 // segment but the last to be, once trimmed, a single SCREAMING_SNAKE
 // identifier and nothing else; anything looser (`a.b = c = 5`, a genuine

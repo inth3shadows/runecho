@@ -325,7 +325,7 @@ func TestExtractRefs_Go_ExportedStillChecked(t *testing.T) {
 
 // TestExtractRefs_Go_InterfaceMethodNotACall pins the interface-method FP: an
 // exported method signature inside a Go `interface { ... }` body is a
-// declaration, not a call. reCallIdent matches `ExecContext(` and defNames only
+// declaration, not a call. reCallIdent matches `ExecContext(` and defNamesInContext only
 // recognizes `func`-prefixed lines, so before the fix these method signatures
 // were extracted as unresolved calls — flagging any diff that adds an interface.
 func TestExtractRefs_Go_InterfaceMethodNotACall(t *testing.T) {
@@ -1335,6 +1335,76 @@ func containsRef(refs []Ref, want string) bool {
 	return false
 }
 
+// TestConstDefsAfterDictCloseMultiTarget pins the multi-target arm of #292's
+// shape, found by code review on this PR. Applying the per-statement split to
+// rePyConstDef alone left `}; MAX_A, MAX_B = 1, 2` and `}; MAX_A = MAX_B = 1`
+// flagging names the edit plainly defines: rePyTupleAssignTargets is `^`-anchored
+// and pyChainedAssignTargets read the whole line, so neither could see past the
+// line's first statement either.
+func TestConstDefsAfterDictCloseMultiTarget(t *testing.T) {
+	for _, tc := range []struct {
+		last     string
+		targets  []string
+		wantDefs bool // chained targets land in defs; tuple targets are only ref-suppressed
+	}{
+		{`}; MAX_A, MAX_B = 1, 2`, []string{"MAX_A", "MAX_B"}, false},
+		{`}; MAX_A = MAX_B = 1`, []string{"MAX_A", "MAX_B"}, true},
+	} {
+		t.Run(tc.last, func(t *testing.T) {
+			lines := []AddedLine{
+				{LineNo: 1, Text: `cfg = {`},
+				{LineNo: 2, Text: `    "a": 1,`},
+				{LineNo: 3, Text: tc.last},
+			}
+			// Neither arm may report a target as an unresolved use — that is the
+			// false positive. Tuple targets have never been added to defs (they are
+			// suppressed at the reference site instead), so only the chained arm
+			// asserts on ExtractDefs.
+			for _, r := range ExtractRefs(LangPython, lines) {
+				if containsStr(tc.targets, r.Name) {
+					t.Errorf("ExtractRefs emitted %q as a reference; that line defines it", r.Name)
+				}
+			}
+			if !tc.wantDefs {
+				return
+			}
+			defs := ExtractDefs(LangPython, lines)
+			for _, want := range tc.targets {
+				if !containsStr(defs, want) {
+					t.Errorf("ExtractDefs = %v, missing %s — it is defined after the dict closes", defs, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPyConstDefNames_ComparisonIsNotADefinition pins the `==` hole code review
+// found: rePyConstDef's `\s*[:=]` matches the FIRST `=` of a `==`, so a
+// comparison was captured as a definition and folded into the known set — a
+// hallucinated constant used only in a comparison would never be checked.
+// Running the regex at every top-level `;` offset made it reachable in more
+// places, which is why the guard appendConstRefs already carried belongs here.
+func TestPyConstDefNames_ComparisonIsNotADefinition(t *testing.T) {
+	for _, text := range []string{
+		`MAX_VALUE == 2`,
+		`x = 1; MAX_VALUE == 2`,
+	} {
+		if got := pyConstDefNames(pyCtxFor(text, 0)); len(got) != 0 {
+			t.Errorf("pyConstDefNames(%q) = %v, want none — this is a comparison", text, got)
+		}
+	}
+	// The genuine definitions must survive the guard.
+	for _, tc := range []struct{ text, want string }{
+		{`MAX_VALUE = 2`, "MAX_VALUE"},
+		{`MAX_VALUE: int = 2`, "MAX_VALUE"},
+		{`x = 1; MAX_VALUE = 2`, "MAX_VALUE"},
+	} {
+		if got := pyConstDefNames(pyCtxFor(tc.text, 0)); !containsStr(got, tc.want) {
+			t.Errorf("pyConstDefNames(%q) = %v, missing %s", tc.text, got, tc.want)
+		}
+	}
+}
+
 // TestPyBraceStateAt covers the positional walk both #291 and #292 rest on,
 // independent of the plumbing above it: depth at an offset, the progressive
 // clamp on a stray close, and where a statement is considered to start.
@@ -1440,28 +1510,28 @@ func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
 // TestDefNames_MultipleDeclaratorsPerLine pins #279: a single statement can
 // define more than one name — a JS multi-declarator `const` with a
 // function/arrow value on each side of the comma, and a Python chained
-// assignment — and defNames must return all of them, not only the first.
+// assignment — and defNamesInContext must return all of them, not only the first.
 func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
 	js := defNamesNoContext(LangJS, "const a = () => {}, b = () => {}")
 	if _, ok := js["a"]; !ok {
-		t.Errorf("js defNames missing a: %v", js)
+		t.Errorf("js defNamesInContext missing a: %v", js)
 	}
 	if _, ok := js["b"]; !ok {
-		t.Errorf("js defNames missing b: %v", js)
+		t.Errorf("js defNamesInContext missing b: %v", js)
 	}
 
 	py := defNamesNoContext(LangPython, "MAX_A = OTHER_B = 5")
 	if _, ok := py["MAX_A"]; !ok {
-		t.Errorf("py defNames missing MAX_A: %v", py)
+		t.Errorf("py defNamesInContext missing MAX_A: %v", py)
 	}
 	if _, ok := py["OTHER_B"]; !ok {
-		t.Errorf("py defNames missing OTHER_B: %v", py)
+		t.Errorf("py defNamesInContext missing OTHER_B: %v", py)
 	}
 
 	// A comparison must not be misread as a chained assignment.
 	cmp := defNamesNoContext(LangPython, "x = MAX_A == OTHER_B")
 	if len(cmp) != 0 {
-		t.Errorf("py defNames(%q) = %v, want none — this is a comparison", "x = MAX_A == OTHER_B", cmp)
+		t.Errorf("py defNamesInContext(%q) = %v, want none — this is a comparison", "x = MAX_A == OTHER_B", cmp)
 	}
 }
 
@@ -1481,7 +1551,7 @@ func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
 		got := defNamesNoContext(LangPython, tc.text)
 		for _, want := range tc.names {
 			if _, ok := got[want]; !ok {
-				t.Errorf("defNames(%q) = %v, missing %s", tc.text, got, want)
+				t.Errorf("defNamesInContext(%q) = %v, missing %s", tc.text, got, want)
 			}
 		}
 	}
@@ -1489,11 +1559,11 @@ func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
 
 // TestAppendConstRefs_ChainedAssignmentTargetsNotReferences pins the
 // code-review finding on #279's first fix: appendConstRefs never consulted
-// defNames' defs map, so a chained-assignment target that defNames correctly
+// defNamesInContext' defs map, so a chained-assignment target that defNamesInContext correctly
 // recognizes (`OTHER_B` in `MAX_A = OTHER_B = 5`) was still added here as a
-// plain reference — the fix in defNames never reached the function that
+// plain reference — the fix in defNamesInContext never reached the function that
 // actually decides ref-vs-definition for SCREAMING_SNAKE names. Mirrors how
-// the real caller in ExtractRefs threads its own defNames result through.
+// the real caller in ExtractRefs threads its own defNamesInContext result through.
 func TestAppendConstRefs_ChainedAssignmentTargetsNotReferences(t *testing.T) {
 	text := "MAX_A = OTHER_B = 5"
 	defs := defNamesNoContext(LangPython, text)

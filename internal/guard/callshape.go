@@ -124,11 +124,16 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 	// blanked (length-preserving) so a paren or `=` inside a string cannot alter
 	// the parse, and a comment cannot close an argument list.
 	scans := make([]string, len(lines))
-	// braceScans is scans with f-string interpolation braces additionally
-	// neutralized — what defNamesInContext needs to tell a dict key from a
-	// constant definition (#291/#292). Captured in the same masking pass so the
-	// per-line lookup below costs no second strip, and so it carries the run's
-	// multi-line string state rather than re-masking each line from scratch.
+	// braceScans is scans with f-string interpolation regions additionally
+	// blanked — the statement-structure view defNamesInContext reads (#291/#292).
+	// Captured in the same masking pass so the per-line lookup below costs no
+	// second strip, and so it carries the run's multi-line string state rather
+	// than re-masking each line from scratch. NOTE: no brace-depth seed is
+	// threaded here, so every ctx starts at depth 0 and a key inside an unchanged
+	// multi-line dict still reads as a definition. That matches the behaviour
+	// this replaced (defNames was equivalent to depth 0) and is not what this
+	// context is here to fix; call-shape has no cross-line brace tracking to
+	// seed from.
 	braceScans := make([]string, len(lines))
 	// runEnd[i] is one past the last line of i's contiguous run. Argument lists are
 	// only followed within a run: a diff hunk's added lines may not be contiguous,

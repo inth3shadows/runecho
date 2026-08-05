@@ -960,6 +960,9 @@ var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A
 // target list — not only the first — is being defined, not used.
 func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}, ctx pyLineCtx) []Ref {
 	tupleTargets := pyTupleTargetSpans(ctx, scan)
+	// reUpperSnakeRef yields matches in increasing offset order, so one forward
+	// scanner answers every position without re-walking the line per match.
+	defPos := newPyDefPosScanner(ctx)
 	for _, idx := range reUpperSnakeRef.FindAllStringSubmatchIndex(scan, -1) {
 		s, e := idx[2], idx[3]
 		name := scan[s:e]
@@ -973,7 +976,7 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 			continue // part of a tuple-assignment LHS target list — a definition
 		}
 		rest := strings.TrimLeft(scan[e:], " \t")
-		if ctx.isDefinitionPos(s) {
+		if defPos.at(s) {
 			if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
 				continue // `NAME: type = value` / `NAME = value` — a definition, not a use
 			}
@@ -1449,6 +1452,37 @@ func pyBraceStep(c byte, depth int, stmtStart bool) (int, bool) {
 		return depth, stmtStart // whitespace does not end statement-start position
 	}
 	return depth, false
+}
+
+// pyDefPosScanner answers isDefinitionPos for a sequence of NON-DECREASING
+// offsets in ONE forward pass. isDefinitionPos re-walks from offset 0 every
+// call, which is fine for the handful of statement starts pyConstDefNames asks
+// about but quadratic over a line's SCREAMING_SNAKE matches: it replaced an
+// effectively O(1) prefix test, and a single module-level constant tuple
+// (`ALLOWED = (CODE_0, CODE_1, ...)`) is exactly the shape that has thousands of
+// them on one line. Measured before this scanner: 74ms for a 21KB line and 751ms
+// at the 64KiB capLine ceiling, against a PreToolUse budget of ~12ms.
+type pyDefPosScanner struct {
+	ctx       pyLineCtx
+	i         int
+	depth     int
+	stmtStart bool
+}
+
+func newPyDefPosScanner(ctx pyLineCtx) pyDefPosScanner {
+	return pyDefPosScanner{ctx: ctx, depth: ctx.base, stmtStart: true}
+}
+
+// at reports isDefinitionPos(pos). pos must be >= the previous call's.
+func (s *pyDefPosScanner) at(pos int) bool {
+	if pos > len(s.ctx.scan) {
+		pos = len(s.ctx.scan)
+	}
+	for s.i < pos {
+		s.depth, s.stmtStart = pyBraceStep(s.ctx.scan[s.i], s.depth, s.stmtStart)
+		s.i++
+	}
+	return s.stmtStart && s.depth == 0
 }
 
 // isDefinitionPos reports whether a SCREAMING_SNAKE name starting at byte offset
@@ -2051,6 +2085,16 @@ func defNamesInContext(lang Lang, text string, ctx pyLineCtx) map[string]struct{
 		}
 		for _, n := range pyChainedTargetNames(ctx) {
 			names[n] = struct{}{}
+		}
+		// Tuple-assignment targets are definitions too. Suppressing them only at
+		// the reference site left them out of the known set, so a LATER use
+		// (`}; MAX_A, MAX_B = 1, 2` then `use(MAX_A, MAX_B)`) still flagged both —
+		// the false positive was relocated by a line, not removed (code review,
+		// round 3).
+		for _, sp := range pyTupleTargetSpans(ctx, ctx.scan) {
+			for _, n := range reUpperSnakeRef.FindAllString(ctx.scan[sp[0]:sp[1]], -1) {
+				names[n] = struct{}{}
+			}
 		}
 	case LangJS:
 		capture(reJSFuncDef)

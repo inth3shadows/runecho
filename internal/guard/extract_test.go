@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1693,5 +1694,73 @@ func TestIsImportLine_MinifiedJS(t *testing.T) {
 		if got := isImportLine(LangJS, text); got != want {
 			t.Errorf("isImportLine(%q) = %v, want %v", text, got, want)
 		}
+	}
+}
+
+// TestPyDefPosScannerAgreesWithIsDefinitionPos pins that the linear forward
+// scanner and the re-walking isDefinitionPos give the same answer at every
+// offset. The scanner exists only to make appendConstRefs linear (a 21KB
+// constant tuple cost 74ms per line before it, against a ~12ms hook budget);
+// it must not change a single verdict.
+func TestPyDefPosScannerAgreesWithIsDefinitionPos(t *testing.T) {
+	for _, tc := range []struct {
+		scan string
+		base int
+	}{
+		{`ALLOWED = (CODE_A, CODE_B, CODE_C)`, 0},
+		{`}; MAX_A = 1; MAX_B = 2`, 1},
+		{`    MAX_VALUE: 5,`, 1},
+		{`x = {"a": MAX_A}; MAX_B = 2`, 0},
+		{`} {MAX_A: 1}`, 0},
+	} {
+		t.Run(tc.scan, func(t *testing.T) {
+			ctx := pyLineCtx{scan: tc.scan, base: tc.base}
+			s := newPyDefPosScanner(ctx)
+			for pos := 0; pos <= len(tc.scan); pos++ {
+				if got, want := s.at(pos), ctx.isDefinitionPos(pos); got != want {
+					t.Fatalf("pos %d: scanner=%t isDefinitionPos=%t", pos, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestTupleTargetsAfterDictCloseResolveLater pins the round-3 finding: the tuple
+// arm of #292 suppressed the reference on the DEFINING line but never put the
+// names in the known set, so a later use flagged both — the false positive was
+// relocated by a line, not removed.
+func TestTupleTargetsAfterDictCloseResolveLater(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `cfg = {`},
+		{LineNo: 2, Text: `    "a": 1,`},
+		{LineNo: 3, Text: `}; MAX_A, MAX_B = 1, 2`},
+		{LineNo: 4, Text: `use(MAX_A, MAX_B)`},
+	}
+	known := map[string]struct{}{"use": {}}
+	for _, d := range ExtractDefs(LangPython, lines) {
+		known[d] = struct{}{}
+	}
+	for _, v := range Run(known, "", []FileDiff{{Path: "config.py", AddedLines: lines}}) {
+		t.Errorf("unexpected violation %q at line %d — it is defined on line 3", v.Symbol, v.Line)
+	}
+}
+
+// BenchmarkAppendConstRefsWideLine records the shape that made the per-match
+// re-walk untenable: one module-level constant tuple with many SCREAMING_SNAKE
+// names on a single line.
+func BenchmarkAppendConstRefsWideLine(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString("ALLOWED = (")
+	for i := 0; i < 2000; i++ {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(&sb, "CODE_%d", i)
+	}
+	sb.WriteString(")")
+	lines := []AddedLine{{LineNo: 1, Text: sb.String()}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ExtractRefs(LangPython, lines)
 	}
 }

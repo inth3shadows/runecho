@@ -273,10 +273,13 @@ func pyBraceDepthSeedFor(absPath string) func(int) int {
 	depth := 0
 	for i, ln := range fileLines {
 		prefix[i] = depth
-		// pyLineCtx.depthAtEnd is the ONE accounting function every brace-depth
-		// consumer goes through — extractRefs' per-line advance, the hook's
-		// PyBraceDepthBefore, and this pre-commit seed. It was three hand-kept
-		// copies, and this one silently kept the pre-#291 arithmetic: it counted an
+		// pyLineCtx.depthAtEnd is the one accounting function the three DICT-DEPTH
+		// consumers go through — extractRefs' per-line advance, the hook's
+		// PyBraceDepthBefore, and this pre-commit seed. (PyDeclaredNames and
+		// PyParamNames still run their own pyBracketDelta over the CODE scan, so
+		// they keep the pre-#291 f-string exposure — that is #294, not this.) These
+		// three were hand-kept copies, and this one silently kept the old
+		// arithmetic: it counted an
 		// f-string interpolation's braces as dict nesting, so a hunk below a
 		// multi-line interpolation was seeded at depth 1 where the hook seeded 0,
 		// and the pre-commit path still produced the false positive #291 closed

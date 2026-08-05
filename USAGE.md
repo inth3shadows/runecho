@@ -221,14 +221,22 @@ new state instead of the old one.
 > `repo reindex` becomes optional rather than a chore. Manual snapshots
 > (`reindex`, `session-start`, …) are never touched by the auto-refresh.
 >
-> The plugin and `install.sh --print-hook-config` both wire this hook alongside
-> the PreToolUse guard. If you installed before that was true, or hand-rolled
-> your `settings.json`, check that the `PostToolUse` entry is present —
-> **earlier releases shipped no config that included it**, so those installs run
-> the guard without it. The symptom is quiet: stale-IR false positives keep
-> appearing, and `runecho-ir fpreport` reports every ask as unrated, because the
-> approval rate is computed by joining asks to outcome records this hook is the
-> only source of.
+> **Using the plugin?** It wires this hook for you — do not add a `PostToolUse`
+> entry to `settings.json` as well.
+>
+> **Hand-rolled your `settings.json`?** Check the `PostToolUse` entry is present.
+> **Earlier releases shipped no config that included it**, so an install from
+> that era runs the guard without it, and the symptom is quiet: stale-IR false
+> positives keep appearing, and `runecho-ir fpreport` reports every ask as
+> unrated, because the approval rate is computed by joining asks to outcome
+> records this hook is the only source of. Re-run
+> `install.sh --print-hook-config` for the current snippet.
+>
+> If you end up with both wired anyway, nothing breaks — Claude Code runs every
+> matching hook, so the recorder fires twice, and the second fire sees the
+> outcome the first one wrote and no-ops. That dedupe is what keeps a
+> double-wired install from reporting an *inflated* approval rate instead of an
+> empty one.
 
 ### Inspect recent history
 

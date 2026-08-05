@@ -233,6 +233,111 @@ func extractJSONBlock(out string) (string, error) {
 	return strings.Join(block, "\n"), nil
 }
 
+// TestGuardShimSurvivesStaleBinary covers version skew between the two update
+// channels. The plugin is git-sourced and moves on `/plugin update`; the binary
+// comes from install.sh and is known to lag (a dogfood session once found it six
+// releases behind). --outcome-mode only exists from v0.10.0, so a fresh plugin
+// driving an old binary would hit flag.ContinueOnError — usage to stderr, exit
+// 2 — and because the shim execs, that 2 became the hook's exit code on EVERY
+// Edit/Write/MultiEdit. The mode validation cannot catch this: it checks the
+// argument the shim was handed, not whether the binary understands it.
+//
+// --outcome-mode is observational, so it must swallow that. --hook-mode is the
+// decision path and must NOT: a guard that cannot run needs to stay visible.
+func TestGuardShimSurvivesStaleBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("guard.sh is a bash shim; the Windows install path does not use it")
+	}
+	root := repoRoot(t)
+	shim := trackedPath(t, root, "plugins", "runecho-guard", "hooks", "guard.sh")
+
+	// A binary that rejects every flag, the way a pre-v0.10.0 build rejects
+	// --outcome-mode.
+	binDir := t.TempDir()
+	stale := "#!/usr/bin/env bash\necho \"flag provided but not defined: $1\" >&2\nexit 2\n"
+	if err := os.WriteFile(filepath.Join(binDir, "runecho-guard"), []byte(stale), 0o755); err != nil {
+		t.Fatalf("write stale binary: %v", err)
+	}
+
+	// bash's own directory has to stay on PATH. With PATH set to binDir alone
+	// the stub's `#!/usr/bin/env bash` shebang cannot resolve an interpreter, so
+	// it exits 127 without ever reaching its flag-rejection logic — the test
+	// then still fails on a reverted fix, but for "binary is unrunnable" rather
+	// than "binary rejected the flag", which is not the scenario it claims to
+	// cover. Caught by reading a mutation's failure text instead of just its
+	// pass/fail.
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	pathEnv := binDir + string(os.PathListSeparator) + filepath.Dir(bashPath)
+
+	run := func(mode string) (string, int) {
+		cmd := exec.Command("bash", shim, mode)
+		cmd.Env = []string{"PATH=" + pathEnv, "HOME=" + binDir, "RUNECHO_BIN_DIR="}
+		cmd.Stdin = strings.NewReader("{}")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		cmd.Stdout = io.Discard
+		err := cmd.Run()
+		code := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatalf("run guard.sh %s: %v", mode, err)
+		}
+		return stderr.String(), code
+	}
+
+	stderr, code := run("--outcome-mode")
+	if code != 0 {
+		t.Errorf("guard.sh --outcome-mode exited %d against a stale binary — that "+
+			"becomes a hook error on every single edit, for a purely "+
+			"observational step", code)
+	}
+	if stderr != "" {
+		t.Errorf("guard.sh --outcome-mode leaked stderr from a stale binary: %q\n"+
+			"runOutcomeMode writes nothing to stderr, so this can only be the "+
+			"flag-parse usage dump", stderr)
+	}
+
+	// The decision path must stay loud. If this ever starts passing silently,
+	// the swallow has been applied too broadly.
+	if _, code := run("--hook-mode"); code == 0 {
+		t.Error("guard.sh --hook-mode swallowed a stale binary's failure — the " +
+			"decision path must surface it, not defer silently")
+	}
+}
+
+// TestTechnicalDocDescribesEveryHookEvent covers the prose channel. install.sh
+// and guard.sh both tell the reader TECHNICAL.md documents this contract, and
+// TECHNICAL.md described it as "three places" with no PostToolUse and no
+// --outcome-mode long after the code had two events — the same stale-contract
+// defect this file exists to prevent, one file over.
+//
+// Docs are checked for the load-bearing TOKENS, not prose shape: asserting on
+// wording would fail on every rewrite and teach the next person to delete the
+// test rather than fix the doc.
+func TestTechnicalDocDescribesEveryHookEvent(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "TECHNICAL.md"))
+	if err != nil {
+		t.Fatalf("read TECHNICAL.md: %v", err)
+	}
+	doc := string(raw)
+
+	for event, mode := range hookContract {
+		if !strings.Contains(doc, event) {
+			t.Errorf("TECHNICAL.md never mentions %s, but install.sh and guard.sh both "+
+				"point readers here for the hook contract", event)
+		}
+		if !strings.Contains(doc, mode) {
+			t.Errorf("TECHNICAL.md never mentions %s", mode)
+		}
+	}
+}
+
 // TestHookModesAreRealFlags is the derived half. The contract table names two
 // mode strings; if either stops being a flag main.go actually defines (renamed,
 // typo'd), every config above would still "pass" while wiring a flag the binary

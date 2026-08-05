@@ -139,7 +139,7 @@ func logOutcomeForFile(file string) {
 	if err != nil {
 		return
 	}
-	ask, ok := recentAsk(filepath.Join(dir, "decisions.jsonl"), file)
+	ask, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file)
 	if !ok {
 		return
 	}
@@ -161,11 +161,42 @@ func logOutcomeForFile(file string) {
 	recordApprovals(dir, ask.Repo, ask.LearnSymbols, time.Now())
 }
 
-// recentAsk returns the MOST RECENT "ask" record for file in decisions.jsonl
-// within the last maxOutcomeAge (and whether one was found). Reads only the tail
-// of the file to keep the hot path fast. The full record is returned (not just a
-// bool) so callers can copy its Symbols/Repo forward onto the outcome record.
-func recentAsk(path, file string) (decisionRecord, bool) {
+// recentUnrecordedAsk returns the MOST RECENT "ask" record for file in
+// decisions.jsonl within the last maxOutcomeAge, and whether one was found that
+// has NOT already had an outcome recorded against it. Reads only the tail of the
+// file to keep the hot path fast. The full record is returned (not just a bool)
+// so callers can copy its Symbols/Repo forward onto the outcome record.
+//
+// The "unrecorded" half exists because a single edit can fire the PostToolUse
+// hook more than once. Claude Code merges hooks from the plugin, the user's
+// settings.json and the project's settings.json, and runs EVERY matching entry;
+// the plugin invokes `guard.sh --outcome-mode` while a hand-merged snippet
+// invokes `runecho-guard --outcome-mode`, so the command strings differ and no
+// dedupe upstream is even possible. Both are documented wirings, so a user with
+// two of them configured is following instructions, not misconfiguring.
+//
+// Without this check each fire appends its own outcome record for one real
+// approval, and both consumers are corrupted rather than merely noisy:
+//
+//   - recordApprovals does e.Count++ per fire, so RUNECHO_GUARD_LEARN reaches
+//     its two-approval threshold on a SINGLE approval — an auto-allow that
+//     trains twice as fast as designed.
+//   - fpreport's `consumed` map is keyed per OUTCOME, not per ask (see the note
+//     at internal/guardstats/fpreport.go:341), so a surplus outcome is claimed
+//     by a later, genuinely-unapproved ask on the same file. The approval rate
+//     comes out INFLATED — silently wrong rather than obviously empty, which is
+//     worse than the missing-recorder bug that made it empty.
+//
+// Deduping here rather than in the configs makes double-wiring harmless however
+// the user arrived at it. It is deliberately keyed on the same (file, window)
+// pair the ask lookup already uses: a second fire for one edit sees the outcome
+// the first fire wrote and no-ops.
+//
+// Ordering is what makes the single pass correct. The log is append-ordered, so
+// resetting the flag on each newly-seen ask means an outcome only suppresses the
+// ask it FOLLOWS — an outcome for a previous edit to the same file cannot mask a
+// genuine new ask.
+func recentUnrecordedAsk(path, file string) (decisionRecord, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return decisionRecord{}, false
@@ -187,24 +218,39 @@ func recentAsk(path, file string) (decisionRecord, bool) {
 	cutoff := time.Now().UTC().Add(-maxOutcomeAge)
 	var match decisionRecord
 	var found bool
+	// recorded tracks whether an outcome has already been written for `match`.
+	// Reset whenever a newer ask supersedes it — see the ordering note above.
+	var recorded bool
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		var rec decisionRecord
 		if json.Unmarshal(sc.Bytes(), &rec) != nil {
 			continue
 		}
-		if rec.Decision != "ask" || rec.File != file {
+		if rec.File != file {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339, rec.TS)
-		if err != nil {
-			continue
+		switch rec.Decision {
+		case "ask":
+			ts, err := time.Parse(time.RFC3339, rec.TS)
+			if err != nil {
+				continue
+			}
+			if ts.After(cutoff) {
+				// Keep scanning: the log is append-ordered, so the last in-window
+				// match is the most recent ask for this file.
+				match, found, recorded = rec, true, false
+			}
+		case "outcome":
+			// An outcome for this file after the ask above means some other
+			// PostToolUse fire already recorded that approval. Not time-filtered
+			// on purpose: it only matters that it came AFTER the ask we matched,
+			// which its position in the append-ordered log already establishes.
+			recorded = true
 		}
-		if ts.After(cutoff) {
-			// Keep scanning: the log is append-ordered, so the last in-window
-			// match is the most recent ask for this file.
-			match, found = rec, true
-		}
+	}
+	if recorded {
+		return decisionRecord{}, false
 	}
 	return match, found
 }

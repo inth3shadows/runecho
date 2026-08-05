@@ -76,6 +76,24 @@ if [ -z "$guard" ]; then
   exit 0
 fi
 
+# --outcome-mode is observational, and the plugin and the binary update through
+# DIFFERENT channels: the plugin is git-sourced and moves on `/plugin update`,
+# the binary comes from install.sh or a tarball and is known to go stale (a
+# dogfood session once found it six releases behind). --outcome-mode only exists
+# from v0.10.0, so a freshly-updated plugin driving an older binary hits
+# flag.ContinueOnError, which prints usage and exits 2 — and because this shim
+# execs, that 2 becomes the hook's exit code on EVERY Edit/Write/MultiEdit. The
+# mode check above cannot catch it: it validates the argument this script was
+# given, not whether the resolved binary understands it.
+#
+# So run it rather than exec it, discard stderr, and always exit 0. Nothing is
+# hidden by that: runOutcomeMode writes nothing to stderr and always returns 0,
+# so the only output this can suppress IS the stale-binary usage dump.
+if [ "$mode" = "--outcome-mode" ]; then
+  "$guard" --outcome-mode 2>/dev/null || true
+  exit 0
+fi
+
 # exec so the guard owns stdin/stdout directly — the hook protocol is JSON in,
 # JSON out, and an extra shell frame between them buys nothing.
 exec "$guard" "$mode"

@@ -390,10 +390,22 @@ cannot report on its own, and a hook that fires on every edit must not turn it
 into a per-edit error. `plugin.json` carries no `version` field: a git-sourced
 plugin reports its commit SHA, which cannot drift from the release tag.
 
-The matcher (`Edit|Write|MultiEdit`) and `--hook-mode` invocation are one contract
-in three places — `plugins/runecho-guard/hooks/hooks.json`,
-`install.sh --print-hook-config`, and `cmd/runecho-guard/main.go`. Changing one
-without the others silently unwires the guard.
+The matcher (`Edit|Write|MultiEdit`) and the two mode invocations are one
+contract in four places — `plugins/runecho-guard/hooks/hooks.json`,
+`install.sh --print-hook-config`, `.claude/settings.json`, and
+`cmd/runecho-guard/main.go`. Changing one without the others silently unwires
+the guard. Both events are load-bearing:
+
+| Event | Invocation | Role |
+|---|---|---|
+| `PreToolUse` | `--hook-mode` | the decision — ask or defer, before the write |
+| `PostToolUse` | `--outcome-mode` | records the approval and runs the E6 auto-fresh reindex |
+
+`PostToolUse` is not optional. Without it `fpreport` has no join key (every ask
+is unrated), `RUNECHO_GUARD_LEARN` never reaches its threshold, and the E6
+refresh never runs. It shipped unwired in every config until this was enforced;
+`cmd/runecho-guard/hookwiring_test.go` now parses each of these files — this one
+included — and fails if any goes out of step.
 
 Rollback: `/plugin uninstall runecho-guard@runecho`, `claude mcp remove runecho`,
 delete the Codex block, and remove the binaries from `$RUNECHO_BIN_DIR`. The store

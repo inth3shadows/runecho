@@ -10,15 +10,18 @@
 #   bash install.sh            # build all three binaries to $BIN_DIR
 #   bash install.sh --hook     # also install the GIT pre-commit hook in the cwd repo
 #   bash install.sh --hook --force      # overwrite an existing pre-commit hook
-#   bash install.sh --print-hook-config # print the Claude Code PreToolUse snippet
-#                                      # (fallback; the plugin is the preferred wiring)
+#   bash install.sh --print-hook-config # print the Claude Code hook snippet
+#                                      # (PreToolUse + PostToolUse; fallback —
+#                                      #  the plugin is the preferred wiring)
 #   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
 #                                        # (this repo's own release safety net, #51/#63)
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
-#   --print-hook-config  emits the Claude Code PreToolUse settings.json snippet
-#                        (--hook-mode; fires on every Edit/Write/MultiEdit). This
+#   --print-hook-config  emits the Claude Code settings.json snippet for BOTH
+#                        events (PreToolUse/--hook-mode decides; PostToolUse/
+#                        --outcome-mode records the outcome and refreshes the
+#                        IR), each firing on every Edit/Write/MultiEdit. This
 #                        is the FALLBACK wiring for the primary, edit-time
 #                        integration. The supported path is the plugin in
 #                        plugins/runecho-guard/, installed with:

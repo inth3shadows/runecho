@@ -333,30 +333,52 @@ func TestGuardShimOutcomeModeInvokesBinary(t *testing.T) {
 		t.Skipf("bash not found: %v", err)
 	}
 	binDir := t.TempDir()
-	sentinel := filepath.Join(binDir, "invoked")
-	stub := "#!/usr/bin/env bash\nprintf '%s\\n' \"$1\" > " + sentinel + "\nexit 0\n"
+	argFile := filepath.Join(binDir, "invoked")
+	stdinFile := filepath.Join(binDir, "payload")
+	// The stub records BOTH the flag it was given and the payload it received.
+	// Recording only the flag is not enough — see the stdin assertion below.
+	stub := "#!/usr/bin/env bash\nprintf '%s\\n' \"$1\" > " + argFile +
+		"\ncat > " + stdinFile + "\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(binDir, "runecho-guard"), []byte(stub), 0o755); err != nil {
 		t.Fatalf("write stub: %v", err)
 	}
 
+	const payload = `{"tool_input":{"file_path":"/x/y.go"}}`
 	cmd := exec.Command("bash", shim, "--outcome-mode")
 	cmd.Env = []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + filepath.Dir(bashPath),
 		"HOME=" + binDir, "RUNECHO_BIN_DIR=",
 	}
-	cmd.Stdin = strings.NewReader("{}")
+	cmd.Stdin = strings.NewReader(payload)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("guard.sh --outcome-mode: %v", err)
 	}
 
-	got, err := os.ReadFile(sentinel)
+	got, err := os.ReadFile(argFile)
 	if err != nil {
 		t.Fatalf("guard.sh --outcome-mode never invoked the binary — PostToolUse "+
 			"is inert while every config still reports it as wired: %v", err)
 	}
 	if strings.TrimSpace(string(got)) != "--outcome-mode" {
 		t.Errorf("binary invoked with %q, want %q", strings.TrimSpace(string(got)), "--outcome-mode")
+	}
+
+	// The hook protocol is JSON on stdin, and runOutcomeMode decodes it to find
+	// the edited file. A shim that invokes the binary but severs stdin (adding
+	// `</dev/null` to the redirection is one token) leaves the decoder at EOF:
+	// it returns 0, records no outcome and never runs the E6 refresh, so
+	// PostToolUse is inert while every config still reports it wired. Asserting
+	// only on the flag misses that entirely — the mutation passed the whole
+	// suite before this check existed.
+	body, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("stub received no stdin at all: %v", err)
+	}
+	if strings.TrimSpace(string(body)) != payload {
+		t.Errorf("payload reaching the binary = %q, want %q — the shim is not "+
+			"passing the hook's JSON through, so runOutcomeMode decodes EOF and "+
+			"silently does nothing", strings.TrimSpace(string(body)), payload)
 	}
 }
 

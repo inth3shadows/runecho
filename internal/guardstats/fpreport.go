@@ -172,7 +172,7 @@ type FPStats struct {
 	// UnmatchedOutcomes counts "approved" outcome records with no ask they could
 	// join to in-window. Causes, in rough order of likelihood:
 	//
-	//  1. The outcome recorder pairs on FILE only (declog.go's recentAsk), so a
+	//  1. The outcome recorder pairs on FILE only (declog.go's recentUnrecordedAsk), so a
 	//     later tool call on the same file inside maxOutcomeAge re-emits an
 	//     approval carrying the earlier ask's symbols. Those extra outcomes never
 	//     had a distinct ask.
@@ -326,8 +326,10 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// on the reference log before any code was written and rejected: a
 			// contract ask has no symbols, so that key collapses to one axis, and
 			// the outcome recorder already pairs on file alone (declog.go's
-			// recentAsk) with posture always "ask", never "deny". "Edited again" and
-			// "approved" become the same event, and the pilot bore that out — both
+			// recentUnrecordedAsk) with posture always "ask", never "deny". "Edited
+			// again" and "approved" become the same event — less completely so since
+			// the recorder began skipping an ask that already has an outcome, but the
+			// pilot's verdict stands on the collapsed key alone. The pilot bore it out: both
 			// ask events from the one genuine dogfood contract read approved, a rate
 			// of 100% by construction. It would also have had to forward
 			// decisionRecord.Contract onto the outcome record, which declog.go
@@ -345,7 +347,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// as a denominator-only fix. `consumed` below is keyed per OUTCOME, not per
 			// ask, so N duplicate asks at one timestamp can each claim a DIFFERENT
 			// outcome within the match window. Outcomes are plentiful enough for that to
-			// bite because the recorder pairs on file only (declog.go's recentAsk), so a
+			// bite because the recorder pairs on file only (declog.go's recentUnrecordedAsk), so a
 			// later edit to the same file re-emits an approval carrying the earlier
 			// symbol set. Collapsing the asks therefore also releases the extra approvals
 			// their duplicates had claimed.

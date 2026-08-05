@@ -100,11 +100,18 @@ fi
 # let every other diagnostic through. Stderr is captured rather than streamed,
 # which is fine for an observational hook.
 if [ "$mode" = "--outcome-mode" ]; then
+  # Redirection order matters: inside the substitution fd1 is already the capture
+  # pipe, 2>&1 points stderr at it, then >/dev/null moves stdout away. Captures
+  # stderr only. Discarding stdout is safe — runOutcomeMode writes none.
   err="$("$guard" --outcome-mode 2>&1 >/dev/null)" || true
-  case "$err" in
-    *"flag provided but not defined"*) ;; # stale binary predating --outcome-mode
-    ?*) printf '%s\n' "$err" >&2 ;;       # a real diagnostic — surface it
-  esac
+  # Filter per LINE, not on the whole blob: a `case` over the full string would
+  # let one flag-parse line suppress a genuine warning emitted alongside it.
+  # Not reachable today (every warner is lazy and post-flag-parse, so a binary
+  # that fails flag parsing never reaches one) — but the airtight form costs
+  # nothing and does not depend on that staying true.
+  if [ -n "$err" ]; then
+    printf '%s\n' "$err" | grep -v 'flag provided but not defined' >&2 || true
+  fi
   exit 0
 fi
 

@@ -47,6 +47,16 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 
+	// braceSeeds is computed once per diff, up front, and reused across both
+	// passes below — braceDepthSeedFunc reads the file (pyBraceDepthSeedFor) when
+	// fd.AbsPath is set, and Pass 1 and Pass 2 both need it (code-review finding
+	// on PR #290's brace-depth-seeding follow-up: computing it separately in each
+	// pass read + rescanned the same Python file twice on the pre-commit path).
+	braceSeeds := make([]func(lineNo int) int, len(diffs))
+	for i, fd := range diffs {
+		braceSeeds[i] = braceDepthSeedFunc(LangFor(fd.Path), fd)
+	}
+
 	// Pass 1: collect all new definitions AND imported names across the entire
 	// diff and add to known. An imported name (`from pathlib import Path`,
 	// `import {Foo} from './m'`) is a real, bound symbol — a bare call to it is
@@ -57,13 +67,13 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// the indexed IR: generator.go indexes each file's bound import names under the
 	// "import_name" symbol kind, so SymbolsForLatestSnapshot already carries them
 	// into `symbols` here — the deeper half of #76/#80, closed by PR #82.
-	for _, fd := range diffs {
+	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		// Seeded so a dict key added to an EXISTING multi-line literal (opener
 		// unchanged, outside the diff) is not added to known as a definition here
 		// — which would silently suppress Pass 2's now-correct read of it as a
 		// reference. See extractDefsSeeded.
-		for _, def := range extractDefsSeeded(lang, fd.AddedLines, braceDepthSeedFunc(lang, fd)) {
+		for _, def := range extractDefsSeeded(lang, fd.AddedLines, braceSeeds[i]) {
 			known[def] = struct{}{}
 		}
 		for _, imp := range ExtractImports(lang, fd.AddedLines) {
@@ -117,7 +127,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// Dedupe by (file, symbol) — report first line only.
 	seen := make(map[string]struct{})
 	var violations []Violation
-	for _, fd := range diffs {
+	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		if lang == LangUnknown {
 			continue
@@ -126,8 +136,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
 		openSeed := seedFunc(lang, fd)
-		braceSeed := braceDepthSeedFunc(lang, fd)
-		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed, braceSeed) {
+		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed, braceSeeds[i]) {
 			if _, ok := known[ref.Name]; ok {
 				continue
 			}

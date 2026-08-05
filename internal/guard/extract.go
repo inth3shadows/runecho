@@ -182,37 +182,52 @@ var (
 // methods, and — for Python/TS — classes, module constants, and type-level
 // declarations). Used in pass 1 to include same-commit definitions in the known
 // set, so a reference to something defined elsewhere in the edit/file does not
-// read as a hallucination.
+// read as a hallucination. Order is NOT deterministic when a single Python line
+// defines more than one name (e.g. a chained assignment) — the Python branch
+// ranges over a map. Every current caller folds the result into a set, so this
+// is unobserved today; a future order-sensitive consumer should sort first (#296).
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
-	return extractDefsSeeded(lang, lines, nil)
+	return extractDefsSeeded(lang, lines, nil, nil)
 }
 
-// extractDefsSeeded is ExtractDefs with an optional braceDepthSeed — Pass 1's
-// counterpart to extractRefs' own pyBraceDepth seeding (code-review finding on PR
-// #290, #289's follow-up). ExtractDefs used to match rePyConstDef directly with
-// no brace-context awareness at all: a multi-line dict key was added to the
-// known set as a DEFINITION regardless of whether it sat inside an open dict
-// literal. That made #289's actual fix (appendConstRefs/defNamesInContext
-// correctly reading the key as a reference) moot in Run's full pipeline — Pass 2
-// checks `known[ref.Name]` first, and Pass 1 had already put the key there. The
-// Python branch now delegates to defNamesInContext (the same brace-context-aware
-// logic appendConstRefs/extractRefs use) instead of re-matching rePyConstDef on
-// its own; this is a strict superset of the old set (it also picks up chained-
+// extractDefsSeeded is ExtractDefs with optional openSeed/braceDepthSeed — Pass
+// 1's counterpart to extractRefs' own seeding (code-review finding on PR #290,
+// #289's follow-up). ExtractDefs used to match rePyConstDef directly with no
+// brace-context awareness at all: a multi-line dict key was added to the known
+// set as a DEFINITION regardless of whether it sat inside an open dict literal.
+// That made #289's actual fix (appendConstRefs/defNamesInContext correctly
+// reading the key as a reference) moot in Run's full pipeline — Pass 2 checks
+// `known[ref.Name]` first, and Pass 1 had already put the key there. The Python
+// branch now delegates to defNamesInContext (the same brace-context-aware logic
+// appendConstRefs/extractRefs use) instead of re-matching rePyConstDef on its
+// own; this is a strict superset of the old set (it also picks up chained-
 // assignment targets ExtractDefs never captured), which only ever narrows Pass
 // 2's violation surface, never widens it.
-func extractDefsSeeded(lang Lang, lines []AddedLine, braceDepthSeed func(lineNo int) int) []string {
+//
+// openSeed matters here too, not just braceDepthSeed: without it, a hunk that
+// begins inside a pre-existing docstring has its own local pyOpen tracker start
+// OUTSIDE any string (the unseeded default), so the docstring's closing `"""`
+// reads as OPENING a new one — desyncing this function's brace count from
+// extractRefs' correctly-masked one for the exact same hunk (round-3 review
+// finding: Pass 1 and Pass 2 disagreeing on whether a name sits inside an open
+// dict literal). Callers must pass the SAME openSeed they give extractRefs.
+func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []string {
 	var defs []string
 	pyBraceDepth := 0
 	pyOpen := ""
 	prevNo := 0
 	for i, l := range lines {
 		if lang == LangPython && (i == 0 || l.LineNo != prevNo+1) {
+			if openSeed != nil {
+				pyOpen = openSeed(l.LineNo)
+			} else {
+				pyOpen = ""
+			}
 			if braceDepthSeed != nil {
 				pyBraceDepth = braceDepthSeed(l.LineNo)
 			} else {
 				pyBraceDepth = 0
 			}
-			pyOpen = ""
 		}
 		prevNo = l.LineNo
 		switch lang {
@@ -225,12 +240,19 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, braceDepthSeed func(lineNo 
 				defs = append(defs, name)
 			}
 			// Brace counting uses the literal-stripped scan (a `{` inside a string
-			// on this same line must not count), threading its own local,
-			// unseeded string-open state — ExtractDefs never masked string content
-			// before, so there is nothing to seed there.
+			// on this same line must not count).
 			var scan string
 			scan, pyOpen = stripLiteralsStateful(LangPython, l.Text, pyOpen)
 			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
+			if pyBraceDepth < 0 {
+				// A stray unmatched `}` earlier in this run (closing something
+				// genuinely opened in unseeded/unchanged context) must not leave
+				// depth negative — a real dict opened a few lines later would then
+				// read as depth 0 and reopen the exact #289 false negative this
+				// tracking exists to close. Mirrors PyDeclaredNames' own bracket
+				// counter in this file, which clamps for the identical reason.
+				pyBraceDepth = 0
+			}
 		case LangJS:
 			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
@@ -1107,6 +1129,13 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		pyInOpenBrace := lang == LangPython && pyBraceDepth > 0
 		if lang == LangPython {
 			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
+			if pyBraceDepth < 0 {
+				// A stray unmatched `}` earlier in this run must not leave depth
+				// negative, or a real dict opened a few lines later reads as depth
+				// 0 and reopens the #289 false negative (round-3 review finding;
+				// mirrors PyDeclaredNames' own bracket-counter clamp).
+				pyBraceDepth = 0
+			}
 		}
 		// Go interface bodies hold method signatures, not calls (see inIface). Braces
 		// are counted on the stripped scan (literals blanked, so braces in strings
@@ -1349,6 +1378,11 @@ func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
 		var scan string
 		scan, open = stripLiteralsStateful(LangPython, l.Text, open)
 		depth += strings.Count(scan, "{") - strings.Count(scan, "}")
+		if depth < 0 {
+			// A stray unmatched `}` must not leave the running depth negative —
+			// see extractRefs' identical clamp for why (round-3 review finding).
+			depth = 0
+		}
 	}
 	return depth
 }

@@ -1405,6 +1405,103 @@ func TestPyConstDefNames_ComparisonIsNotADefinition(t *testing.T) {
 	}
 }
 
+// TestPyChainedTargets_StatementFollowedByMore pins the round-2 review finding:
+// the per-statement slices ran to END OF LINE, so the split only worked for the
+// LAST statement. pyChainedAssignTargets splits its whole input, so on
+// `MAX_A = OTHER_B = 5; z = 1` the first slice swallowed the trailing statement,
+// the segment `" 5; z "` failed its clean-name check, the whole detection bailed,
+// and OTHER_B came out as an unresolved use. Bounding each span at the next
+// statement is what makes the split real rather than order-dependent.
+func TestPyChainedTargets_StatementFollowedByMore(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want []string
+	}{
+		{`MAX_A = OTHER_B = 5; z = 1`, []string{"MAX_A", "OTHER_B"}},
+		{`z = 1; MAX_A = OTHER_B = 5`, []string{"MAX_A", "OTHER_B"}},
+		{`MAX_A = OTHER_B = 5; MAX_C = MAX_D = 6`, []string{"MAX_A", "OTHER_B", "MAX_C", "MAX_D"}},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			lines := []AddedLine{{LineNo: 1, Text: tc.text}}
+			defs := ExtractDefs(LangPython, lines)
+			for _, want := range tc.want {
+				if !containsStr(defs, want) {
+					t.Errorf("ExtractDefs(%q) = %v, missing %s", tc.text, defs, want)
+				}
+			}
+			for _, r := range ExtractRefs(LangPython, lines) {
+				if containsStr(tc.want, r.Name) {
+					t.Errorf("ExtractRefs(%q) emitted %q as a reference; that line defines it", tc.text, r.Name)
+				}
+			}
+		})
+	}
+}
+
+// TestStripLiteralsBraces_InterpolationBodyIsNotStatementSyntax pins the round-2
+// review finding that blanking only an interpolation's BRACES left the rest of
+// it readable as statement structure. A `;` in a format spec or nested
+// replacement field then reads as a top-level statement separator, and the name
+// after it is folded into the known set as a module constant that does not
+// exist — a silent false negative, the worst class for a truth oracle. braceScan
+// drops the whole region; scan keeps it, so the call inside is still checked.
+func TestStripLiteralsBraces_InterpolationBodyIsNotStatementSyntax(t *testing.T) {
+	const text = `f"{v:{W};{MAX_A:{X}}}"`
+	scan, braceScan, _ := stripLiteralsBraces(LangPython, text, "")
+	if strings.ContainsAny(braceScan, "{};") {
+		t.Errorf("braceScan = %q, want the interpolation region gone entirely", braceScan)
+	}
+	if got := pyConstDefNames(pyLineCtx{scan: braceScan}); len(got) != 0 {
+		t.Errorf("pyConstDefNames = %v, want none — nothing here defines a constant", got)
+	}
+	// The code scan must be unchanged, or a call inside an interpolation stops
+	// being validated — the false negative #291's masking exists to avoid.
+	if !strings.Contains(scan, "MAX_A") {
+		t.Errorf("scan = %q, want the interpolation body intact for reference extraction", scan)
+	}
+	if len(scan) != len(text) || len(braceScan) != len(text) {
+		t.Errorf("length not preserved: scan=%d braceScan=%d, want %d", len(scan), len(braceScan), len(text))
+	}
+}
+
+// TestStmtSpansAgreeWithPyBraceStateAt pins that the line's two walkers share one
+// accounting rule. They do today because both step through pyBraceStep, and this
+// is the test that keeps it that way: the PR's own HIGH finding was three
+// hand-kept copies of the brace arithmetic where one kept the pre-fix behaviour,
+// and a second walker with its own inlined clamp would reopen that class.
+func TestStmtSpansAgreeWithPyBraceStateAt(t *testing.T) {
+	for _, tc := range []struct {
+		scan string
+		base int
+	}{
+		{`MAX_A = 1; MAX_B = 2`, 0},
+		{`}; MAX_A = 1`, 1},
+		{`    "a": 1,`, 1},
+		{`} {`, 0},
+		{`x = {"a": 1}; MAX_A = 2`, 0},
+		{`;`, 0},
+		{`a; b; c`, 0},
+		{``, 0},
+	} {
+		t.Run(tc.scan, func(t *testing.T) {
+			ctx := pyLineCtx{scan: tc.scan, base: tc.base}
+			for _, sp := range ctx.stmtSpans() {
+				// Every span start must be a position the OTHER walker also calls a
+				// statement start at depth 0 — that is the invariant every consumer
+				// of stmtSpans relies on.
+				if !ctx.isDefinitionPos(sp[0]) {
+					depth, stmtStart := pyBraceStateAt(tc.scan, tc.base, sp[0])
+					t.Errorf("stmtSpans gave a start at %d that pyBraceStateAt calls depth=%d stmtStart=%t",
+						sp[0], depth, stmtStart)
+				}
+				if sp[0] > sp[1] || sp[1] > len(tc.scan) {
+					t.Errorf("span %v out of range for scan of len %d", sp, len(tc.scan))
+				}
+			}
+		})
+	}
+}
+
 // TestPyBraceStateAt covers the positional walk both #291 and #292 rest on,
 // independent of the plumbing above it: depth at an offset, the progressive
 // clamp on a stray close, and where a statement is considered to start.

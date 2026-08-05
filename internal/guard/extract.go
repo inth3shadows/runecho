@@ -1407,33 +1407,48 @@ type pyLineCtx struct {
 // count negative, or a genuine dict opened later on the SAME line reads as depth
 // 0 and reopens the #289 false negative the tracking exists to close.
 func pyBraceStateAt(scan string, base, pos int) (depth int, stmtStart bool) {
-	depth = base
-	stmtStart = true
+	depth, stmtStart = base, true
 	if pos > len(scan) {
 		pos = len(scan)
 	}
 	for i := 0; i < pos; i++ {
-		switch scan[i] {
-		case '{':
-			depth++
-			stmtStart = false
-		case '}':
-			if depth > 0 {
-				depth--
-			}
-			stmtStart = false
-		case ';':
-			// A top-level `;` ends the statement, so what follows starts a fresh
-			// one exactly as the line start does. Inside a literal it is just
-			// punctuation (and inside a string it is already blanked).
-			stmtStart = depth == 0
-		case ' ', '\t':
-			// Leading whitespace does not end statement-start position.
-		default:
-			stmtStart = false
-		}
+		depth, stmtStart = pyBraceStep(scan[i], depth, stmtStart)
 	}
 	return depth, stmtStart
+}
+
+// pyBraceStep applies ONE byte of a masked line to the running (depth,
+// stmtStart) pair. It is the single definition of how Python brace/statement
+// state moves, and both walkers over a line — pyBraceStateAt and stmtSpans — step
+// through it rather than keeping a copy.
+//
+// That is not stylistic. Hand-keeping two copies of one accounting rule is
+// exactly what produced this PR's own seed-provider bug: three copies of the
+// brace arithmetic existed, one kept the pre-fix behaviour, and the divergence
+// was invisible until a review found it. A second walker with its own inlined
+// clamp would have reopened the same class one function later.
+func pyBraceStep(c byte, depth int, stmtStart bool) (int, bool) {
+	switch c {
+	case '{':
+		return depth + 1, false
+	case '}':
+		// Clamp at 0: a stray close, whose opener sits in unchanged context this
+		// run never saw, must not push the count negative — a genuine dict opened
+		// later on the SAME line would then read as depth 0 and reopen the #289
+		// false negative this tracking exists to close.
+		if depth > 0 {
+			depth--
+		}
+		return depth, false
+	case ';':
+		// A top-level `;` ends the statement, so what follows starts a fresh one
+		// exactly as the line start does. Inside a literal it is punctuation (and
+		// inside a string it is already blanked).
+		return depth, depth == 0
+	case ' ', '\t':
+		return depth, stmtStart // whitespace does not end statement-start position
+	}
+	return depth, false
 }
 
 // isDefinitionPos reports whether a SCREAMING_SNAKE name starting at byte offset
@@ -1451,32 +1466,42 @@ func (c pyLineCtx) depthAtEnd() int {
 	return depth
 }
 
-// stmtStarts returns the byte offsets at which a statement begins on this line
-// OUTSIDE any open `{}` literal: 0 when the line itself starts at depth 0, plus
-// the offset after each top-level `;`. A line that opens inside a multi-line dict
-// has no statement start at all, which is what keeps its keys from being read as
-// definitions.
-func (c pyLineCtx) stmtStarts() []int {
-	var starts []int
+// stmtSpans returns the byte span of every statement on this line that begins
+// OUTSIDE any open `{}` literal: one starting at 0 when the line itself starts at
+// depth 0, plus one after each top-level `;`. A line that opens inside a
+// multi-line dict has no statement span at all, which is what keeps its keys from
+// being read as definitions.
+//
+// Each span is bounded at the NEXT statement rather than at end-of-line. That
+// matters for any consumer that scans a whole segment instead of anchoring at its
+// start: slicing to end-of-line made the per-statement split work only for the
+// LAST statement on a line, so `MAX_A = OTHER_B = 5; z = 1` still lost OTHER_B
+// and reported it as an unresolved use (code review, round 2).
+func (c pyLineCtx) stmtSpans() [][2]int {
+	var spans [][2]int
+	start := -1
 	if c.base == 0 {
-		starts = append(starts, 0)
+		start = 0
 	}
-	depth := c.base
+	depth, stmtStart := c.base, true
 	for i := 0; i < len(c.scan); i++ {
-		switch c.scan[i] {
-		case '{':
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-			}
-		case ';':
-			if depth == 0 && i+1 < len(c.scan) {
-				starts = append(starts, i+1)
-			}
+		depth, stmtStart = pyBraceStep(c.scan[i], depth, stmtStart)
+		// stmtStart is true after a `;` exactly when that `;` separates top-level
+		// statements — the shared step's own notion, not a second copy of it.
+		if c.scan[i] != ';' || !stmtStart {
+			continue
+		}
+		if start >= 0 {
+			spans = append(spans, [2]int{start, i})
+		}
+		if start = i + 1; start >= len(c.scan) {
+			start = -1
 		}
 	}
-	return starts
+	if start >= 0 {
+		spans = append(spans, [2]int{start, len(c.scan)})
+	}
+	return spans
 }
 
 // pyConstDefNames returns every SCREAMING_SNAKE name this line DEFINES via a
@@ -1487,8 +1512,9 @@ func (c pyLineCtx) stmtStarts() []int {
 // checked, so a dict key never qualifies.
 func pyConstDefNames(ctx pyLineCtx) []string {
 	var names []string
-	for _, start := range ctx.stmtStarts() {
-		m := rePyConstDef.FindStringSubmatchIndex(ctx.scan[start:])
+	for _, sp := range ctx.stmtSpans() {
+		seg := ctx.scan[sp[0]:sp[1]]
+		m := rePyConstDef.FindStringSubmatchIndex(seg)
 		if m == nil {
 			continue
 		}
@@ -1498,11 +1524,11 @@ func pyConstDefNames(ctx pyLineCtx) []string {
 		// never be flagged. appendConstRefs carries the same guard; running the
 		// regex at every top-level `;` offset is what made it matter here too
 		// (code review on this PR).
-		if strings.HasPrefix(strings.TrimLeft(ctx.scan[start+m[3]:], " \t"), "==") {
+		if strings.HasPrefix(strings.TrimLeft(seg[m[3]:], " \t"), "==") {
 			continue
 		}
-		if pos := start + m[2]; ctx.isDefinitionPos(pos) {
-			names = append(names, ctx.scan[pos:start+m[3]])
+		if pos := sp[0] + m[2]; ctx.isDefinitionPos(pos) {
+			names = append(names, seg[m[2]:m[3]])
 		}
 	}
 	return names
@@ -1517,9 +1543,9 @@ func pyConstDefNames(ctx pyLineCtx) []string {
 // PR).
 func pyTupleTargetSpans(ctx pyLineCtx, scan string) [][2]int {
 	var spans [][2]int
-	for _, start := range ctx.stmtStarts() {
-		if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan[start:]); m != nil {
-			spans = append(spans, [2]int{start + m[2], start + m[3]})
+	for _, sp := range ctx.stmtSpans() {
+		if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan[sp[0]:sp[1]]); m != nil {
+			spans = append(spans, [2]int{sp[0] + m[2], sp[0] + m[3]})
 		}
 	}
 	return spans
@@ -1528,11 +1554,13 @@ func pyTupleTargetSpans(ctx pyLineCtx, scan string) [][2]int {
 // pyChainedTargetNames returns every chained-assignment target on the line
 // (`MAX_A = OTHER_B = 5` → both), once per top-level statement. Read off the
 // masked scan rather than the raw text so an `=` inside a string literal cannot
-// be mistaken for an assignment operator.
+// be mistaken for an assignment operator. This is the consumer that makes
+// stmtSpans' right-hand bound load-bearing: pyChainedAssignTargets splits its
+// WHOLE input, so an unbounded slice would swallow every following statement.
 func pyChainedTargetNames(ctx pyLineCtx) []string {
 	var names []string
-	for _, start := range ctx.stmtStarts() {
-		names = append(names, pyChainedAssignTargets(ctx.scan[start:])...)
+	for _, sp := range ctx.stmtSpans() {
+		names = append(names, pyChainedAssignTargets(ctx.scan[sp[0]:sp[1]])...)
 	}
 	return names
 }
@@ -1554,28 +1582,33 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 }
 
 // stripLiteralsBraces is stripLiteralsStateful plus a second scan — braceScan —
-// in which every `{`/`}` that survives stripping only because it belongs to a
-// Python f-string interpolation is ALSO blanked.
+// in which every Python f-string interpolation region is blanked outright.
 //
-// The f-string branches below deliberately leave an interpolation's braces (and
-// its interior) intact so a call inside `f"{Build(x)}"` is still seen. Those
-// braces are string syntax, not dict/set nesting, so a caller counting `{`/`}`
-// to track multi-line dict literals (#289's pyBraceDepth) must not see them:
-// when the matching close does not survive on the same line — a call spanning
-// lines inside an interpolation, where the continuation is blanked wholesale by
-// the propagated open-quote state — the depth leaks upward permanently and
-// every later constant definition in that run is misread as a dict key (#291).
-// braceScan is the same string as scan whenever no such brace exists, which is
-// every non-f-string line, so the common path costs no extra allocation.
+// The f-string branches below deliberately leave an interpolation intact so a
+// call inside `f"{Build(x)}"` is still seen. That is right for the CODE scan and
+// wrong for the STATEMENT-STRUCTURE one: an interpolation's `{`/`}` are string
+// syntax, not dict/set nesting, so when the matching close does not survive on
+// the same line — a call spanning lines inside an interpolation, whose
+// continuation the propagated open-quote state blanks wholesale — the depth
+// leaks upward permanently and every later constant definition in that run is
+// misread as a dict key (#291). The braces are not the only hazard: a `;` inside
+// a format spec or nested replacement field would likewise read as a statement
+// separator, so the whole region goes rather than a chosen subset of its
+// punctuation (code review, round 2). Reference extraction still reads scan, so
+// nothing inside an interpolation stops being checked.
+//
+// braceScan is the same string as scan whenever a line has no interpolation,
+// which is every non-f-string line, so the common path costs no extra
+// allocation.
 func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) {
 	b := []byte(text)
 	n := len(b)
 	out := make([]byte, n)
 	copy(out, b)
 	i := 0
-	// Offsets of braces left intact by an f-string interpolation — blanked in
-	// braceScan only (see finishStrip).
-	var fstrBraces []int
+	// Spans of the f-string interpolation regions left intact for the code scan —
+	// blanked in braceScan only (see finishStrip).
+	var fstrSpans [][2]int
 
 	// Continuation of a multi-line string from a previous line: blank until the
 	// closing delimiter, or the whole line if it does not close here.
@@ -1590,7 +1623,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 			i++
 		}
 		if open != "" {
-			return finishStrip(out, fstrBraces, open)
+			return finishStrip(out, fstrSpans, open)
 		}
 	}
 
@@ -1626,7 +1659,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 				i++
 			}
 			if !closed {
-				return finishStrip(out, fstrBraces, "*/") // opens multi-line comment state
+				return finishStrip(out, fstrSpans, "*/") // opens multi-line comment state
 			}
 			continue
 		}
@@ -1655,9 +1688,10 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 				if fstr && b[i] == '{' {
 					// Interpolation: leave bytes intact so reCallIdent sees the call.
 					// Track brace depth (dict literals can appear); stop at the delim.
-					// Every brace kept here is f-string syntax, never dict nesting the
-					// cross-line counter should see — record it for braceScan (#291).
-					fstrBraces = append(fstrBraces, i)
+					// The whole region is f-string syntax, never the statement
+					// structure the brace/`;` walkers read — record it for braceScan
+					// (#291).
+					spanStart := i
 					depth := 1
 					i++
 					for i < n && depth > 0 && !hasAt(b, i, delim) {
@@ -1669,10 +1703,8 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 						}
 						if b[i] == '{' {
 							depth++
-							fstrBraces = append(fstrBraces, i)
 						} else if b[i] == '}' {
 							depth--
-							fstrBraces = append(fstrBraces, i)
 							if depth == 0 {
 								i++
 								break
@@ -1680,6 +1712,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 						}
 						i++
 					}
+					fstrSpans = append(fstrSpans, [2]int{spanStart, i})
 					continue
 				}
 				out[i] = ' '
@@ -1691,7 +1724,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 				// f-string flag, so interpolations on continuation lines of a
 				// multi-line triple f-string are NOT scanned (rare; single-line
 				// triple f-strings are handled above).
-				return finishStrip(out, fstrBraces, delim)
+				return finishStrip(out, fstrSpans, delim)
 			}
 			continue
 		}
@@ -1705,7 +1738,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 			if i < n {
 				i++ // closing backtick on same line
 			} else {
-				return finishStrip(out, fstrBraces, "`")
+				return finishStrip(out, fstrSpans, "`")
 			}
 			continue
 		}
@@ -1736,12 +1769,12 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 						// Interpolation region: leave bytes intact so the call inside
 						// is seen by reCallIdent. Runs to the matching '}' (no nesting
 						// of '{' inside an interpolation in valid f-strings, but a dict
-						// literal could appear — track brace depth to be safe). Every
-						// brace kept here is f-string syntax, never dict nesting the
-						// cross-line counter should see — record it for braceScan
-						// (#291); this is the branch whose unclosed `{` leaks depth
-						// when the interpolation runs past end of line.
-						fstrBraces = append(fstrBraces, i)
+						// literal could appear — track brace depth to be safe). The
+						// whole region is f-string syntax, never the statement structure
+						// the brace/`;` walkers read — record it for braceScan (#291).
+						// This is the branch whose unclosed `{` leaks depth when the
+						// interpolation runs past end of line.
+						spanStart := i
 						depth := 1
 						i++ // past the '{'
 						for i < n && depth > 0 && b[i] != quote {
@@ -1757,10 +1790,8 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 							}
 							if b[i] == '{' {
 								depth++
-								fstrBraces = append(fstrBraces, i)
 							} else if b[i] == '}' {
 								depth--
-								fstrBraces = append(fstrBraces, i)
 								if depth == 0 {
 									i++ // past the closing '}'
 									break
@@ -1768,6 +1799,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 							}
 							i++
 						}
+						fstrSpans = append(fstrSpans, [2]int{spanStart, i})
 						if depth > 0 && i >= n {
 							// The interpolation's own '(' / '[' runs past end of line
 							// unterminated (valid Python 3.12+: a call spanning lines
@@ -1789,7 +1821,7 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 							// continuation), and rare; a full fix would need open-state
 							// to carry an interpolation-depth counter, not just the
 							// quote byte — deferred.
-							return finishStrip(out, fstrBraces, string(quote))
+							return finishStrip(out, fstrSpans, string(quote))
 						}
 					default:
 						out[i] = ' '
@@ -1821,20 +1853,22 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 		}
 		i++
 	}
-	return finishStrip(out, fstrBraces, open)
+	return finishStrip(out, fstrSpans, open)
 }
 
 // finishStrip builds stripLiteralsBraces' two scans from the one masked buffer:
-// scan as-is, and braceScan with the recorded f-string interpolation braces
+// scan as-is, and braceScan with the recorded f-string interpolation regions
 // blanked. out is mutated only after scan has been materialized (string(out)
 // copies), and when there is nothing to blank both results share one allocation.
-func finishStrip(out []byte, fstrBraces []int, open string) (string, string, string) {
+func finishStrip(out []byte, fstrSpans [][2]int, open string) (string, string, string) {
 	scan := string(out)
-	if len(fstrBraces) == 0 {
+	if len(fstrSpans) == 0 {
 		return scan, scan, open
 	}
-	for _, p := range fstrBraces {
-		out[p] = ' '
+	for _, sp := range fstrSpans {
+		for i := sp[0]; i < sp[1] && i < len(out); i++ {
+			out[i] = ' '
+		}
 	}
 	return scan, string(out), open
 }

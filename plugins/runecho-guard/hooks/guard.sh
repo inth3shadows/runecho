@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# PreToolUse shim for the runecho guard, invoked by hooks/hooks.json.
+# Hook shim for the runecho guard, invoked by hooks/hooks.json for BOTH events:
+#
+#   PreToolUse   guard.sh --hook-mode      decides (ask / defer) before the write
+#   PostToolUse  guard.sh --outcome-mode   records the outcome + refreshes the IR
+#
+# One shim serves both on purpose. The binary-resolution block below is the part
+# that rots (three fallback locations, an env override), and a second copy of it
+# in an outcome.sh is exactly the drift this file's own contract note warns
+# about — see the PostToolUse history in that note.
 #
 # Why this wrapper exists instead of calling `runecho-guard --hook-mode` directly:
 # installing the plugin does NOT install the binary. The plugin only wires the
@@ -16,13 +24,38 @@
 # degraded states it CAN detect; it cannot detect its own absence, which is what
 # this file covers.
 #
-# The matcher (Edit|Write|MultiEdit) and the --hook-mode invocation are one
-# contract shared by three places, and they must agree:
+# The matcher (Edit|Write|MultiEdit) and the two mode flags are one contract
+# shared by four places, and they must agree:
 #   - plugins/runecho-guard/hooks/hooks.json   (this plugin)
 #   - install.sh --print-hook-config           (the manual fallback)
+#   - .claude/settings.json                    (this repo dogfooding itself)
 #   - cmd/runecho-guard/main.go                (what the binary actually reads)
+#
+# That list said "three places" and omitted PostToolUse entirely, and nothing
+# enforced it: --outcome-mode shipped as a working flag that NO config ever
+# invoked. Every external install therefore produced asks and zero outcomes, so
+# `fpreport` had no join key (its approval rate is computed from outcome
+# records), RUNECHO_GUARD_LEARN could never reach its approval threshold, and
+# the E6 auto-fresh reindex never ran — leaving the stale-IR false-positive
+# class live for everyone but the author, whose personal settings.json wired it
+# by hand. A prose list is not a contract: cmd/runecho-guard/hookwiring_test.go
+# now parses all three configs and fails if any event goes unwired.
 
 set -uo pipefail
+
+# Mode is the first argument, defaulting to --hook-mode so an older hooks.json
+# that calls this shim bare still gets the PreToolUse behavior it expects.
+# Validated against a closed set rather than passed through: a typo would
+# otherwise reach the binary as an unknown flag, and flag-parse failure on a
+# PostToolUse hook is a per-edit error banner for a purely observational step.
+mode="${1:---hook-mode}"
+case "$mode" in
+  --hook-mode | --outcome-mode) ;;
+  *)
+    echo "guard.sh: unknown mode '$mode' (want --hook-mode or --outcome-mode)" >&2
+    exit 0
+    ;;
+esac
 
 # Resolve the binary: PATH first (the normal case), then the two locations
 # install.sh writes to. RUNECHO_BIN_DIR is install.sh's own override, so a user
@@ -45,4 +78,4 @@ fi
 
 # exec so the guard owns stdin/stdout directly — the hook protocol is JSON in,
 # JSON out, and an extra shell frame between them buys nothing.
-exec "$guard" --hook-mode
+exec "$guard" "$mode"

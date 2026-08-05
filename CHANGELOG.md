@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-08-05
+
+### Changed
+- guard: resolve Python brace state per position, not per line (#297)
+
 ## [0.27.0] — 2026-08-05
 
 ### Changed

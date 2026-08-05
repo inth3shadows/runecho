@@ -1128,13 +1128,30 @@ func TestParseJSBindingTarget_NestedObjectDestructure(t *testing.T) {
 	}
 }
 
+// pyCtxFor builds the per-line brace context appendConstRefs and
+// defNamesInContext take, the same way extractRefs does: mask the line, then
+// read it starting from base — the {}-depth a real caller's cross-line tracking
+// would have carried into this line.
+func pyCtxFor(text string, base int) pyLineCtx {
+	_, braceScan, _ := stripLiteralsBraces(LangPython, text, "")
+	return pyLineCtx{scan: braceScan, base: base}
+}
+
+// defNamesNoContext is defNamesInContext for one line with no cross-line state.
+// Production callers always have a masked scan in hand from their own scanning
+// pass and hand it over, so no such wrapper exists outside tests.
+func defNamesNoContext(lang Lang, text string) map[string]struct{} {
+	_, braceScan, _ := stripLiteralsBraces(lang, text, "")
+	return defNamesInContext(lang, text, pyLineCtx{scan: braceScan})
+}
+
 // TestAppendConstRefs_DictKeyIsAReference pins #277: a SCREAMING_SNAKE name
 // used as a dict key (`{MAX_VALUE: 5}`) is a genuine USE of the constant, not
 // a type-annotation definition target, even though the text after it (`: 5`)
 // looks identical to one. The distinguishing signal is position: MAX_VALUE is
 // preceded by `{`, not by only whitespace back to the start of the line.
 func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil, nil, false)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil, nil, pyCtxFor(`result = {MAX_VALUE: 5}`, 0))
 	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
 		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
 	}
@@ -1145,7 +1162,7 @@ func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
 // statement-start type annotation (`MAX_VALUE: int = 5`) is still a
 // definition, not a use.
 func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil, nil, false)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil, nil, pyCtxFor(`MAX_VALUE: int = 5`, 0))
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — this is a definition, not a use", refs)
 	}
@@ -1156,17 +1173,18 @@ func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
 // is preceded by only whitespace on ITS line — indistinguishable, at a single-
 // line position check, from a genuine statement-start annotation. The caller
 // (ExtractRefs) tracks whether a `{` opened on an earlier line is still
-// unclosed and passes that through as inOpenBrace; when true, a name preceded
-// by whitespace must still be read as a dict key, not a definition.
+// unclosed and threads that in as the context's starting depth; when it is
+// non-zero, a name preceded by whitespace must still be read as a dict key,
+// not a definition.
 func TestAppendConstRefs_MultiLineDictKeyIsAReference(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, true)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, pyCtxFor(`    MAX_VALUE: 5,`, 1))
 	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
 		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
 	}
 
-	// Same line shape, but inOpenBrace=false (true statement-start) — still a
+	// Same line shape, but at depth 0 (a true statement-start) — still a
 	// definition, guarding against the fix over-firing.
-	notInDict := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, false)
+	notInDict := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, pyCtxFor(`    MAX_VALUE: 5,`, 0))
 	if len(notInDict) != 0 {
 		t.Errorf("got %+v, want none — not inside an open brace, this is a definition", notInDict)
 	}
@@ -1191,6 +1209,161 @@ func TestExtractRefs_MultiLineDictKey(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ExtractRefs(%+v) = %+v, want MAX_VALUE reference", lines, refs)
+	}
+}
+
+// TestStripLiteralsBraces_FStringBracesExcludedFromBraceScan pins #291 at the
+// masking layer: an f-string interpolation's braces survive stripping on purpose
+// (so the call inside `f"{Build(x)}"` is still scanned), but they are string
+// syntax, not dict nesting — braceScan, the scan the {}-depth counters read,
+// must not contain them. scan itself must still carry them, or the interpolated
+// call stops being seen.
+func TestStripLiteralsBraces_FStringBracesExcludedFromBraceScan(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		text     string
+		open     string
+		wantScan string // braces the code scan must keep
+	}{
+		{"unterminated interpolation", `msg = f"{compute(`, "", "{"},
+		{"balanced interpolation", `msg = f"{compute(a)}"`, "", "{}"},
+		{"triple-quoted f-string", `msg = f"""{compute(`, "", "{"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scan, braceScan, _ := stripLiteralsBraces(LangPython, tc.text, tc.open)
+			if got := onlyBraces(scan); got != tc.wantScan {
+				t.Errorf("scan braces = %q, want %q (scan=%q)", got, tc.wantScan, scan)
+			}
+			if got := onlyBraces(braceScan); got != "" {
+				t.Errorf("braceScan braces = %q, want none (braceScan=%q)", got, braceScan)
+			}
+			if len(scan) != len(tc.text) || len(braceScan) != len(tc.text) {
+				t.Errorf("length not preserved: scan=%d braceScan=%d, want %d", len(scan), len(braceScan), len(tc.text))
+			}
+		})
+	}
+
+	// A real dict literal on an f-string line keeps its braces in braceScan —
+	// only the interpolation's are neutralized.
+	_, braceScan, _ := stripLiteralsBraces(LangPython, `d = {"k": f"{v}"}`, "")
+	if got := onlyBraces(braceScan); got != "{}" {
+		t.Errorf("braceScan braces = %q, want the dict's own pair (braceScan=%q)", got, braceScan)
+	}
+}
+
+func onlyBraces(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '{' || s[i] == '}' {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// TestExtractDefs_FStringInterpolationDoesNotLeakBraceDepth is #291's end-to-end
+// pin. A call spanning lines inside an f-string interpolation leaves its `{` on
+// the opening line while the matching `}` lands on a continuation line that the
+// propagated open-quote state blanks wholesale. Counting braces on the code scan
+// therefore adds a `+1` that never comes back down, and every later constant in
+// the run is misread as a dict key — a false positive on a real, in-hunk
+// definition.
+func TestExtractDefs_FStringInterpolationDoesNotLeakBraceDepth(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `msg = f"{compute(`},
+		{LineNo: 2, Text: `    a, b`},
+		{LineNo: 3, Text: `)}"`},
+		{LineNo: 4, Text: `MAX_RETRIES = 5`},
+	}
+	defs := ExtractDefs(LangPython, lines)
+	if !containsName(defs, "MAX_RETRIES") {
+		t.Errorf("ExtractDefs = %v, want MAX_RETRIES — the f-string's brace is not dict nesting", defs)
+	}
+	// The reference side must agree: MAX_RETRIES is a definition here, so it is
+	// not emitted as a use.
+	for _, r := range ExtractRefs(LangPython, lines) {
+		if r.Name == "MAX_RETRIES" {
+			t.Errorf("ExtractRefs emitted MAX_RETRIES as a reference; it is a definition")
+		}
+	}
+}
+
+// TestConstAfterDictCloseOnSameLine pins #292: a dict literal's closing `}` and
+// a fresh top-level constant definition can share one physical line
+// (`}; MAX_TIMEOUT = 30`). The brace state that matters is the one at the NAME's
+// own offset — after the close — not the line-start snapshot, and rePyConstDef's
+// `^` anchor has to be applied per top-level `;`-separated statement to see the
+// definition at all. Both passes must agree, or a later use of the constant is
+// flagged unresolved on an edit that invented nothing.
+func TestConstAfterDictCloseOnSameLine(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `cfg = {`},
+		{LineNo: 2, Text: `    "a": 1,`},
+		{LineNo: 3, Text: `}; MAX_TIMEOUT = 30`},
+		{LineNo: 4, Text: `use(MAX_TIMEOUT)`},
+	}
+	defs := ExtractDefs(LangPython, lines)
+	if !containsName(defs, "MAX_TIMEOUT") {
+		t.Errorf("ExtractDefs = %v, want MAX_TIMEOUT — it is defined after the dict closes", defs)
+	}
+	// Pass 2 must not emit the definition line itself as a reference. The later
+	// bare use (line 4) legitimately is one, and resolves against the defs above.
+	for _, r := range ExtractRefs(LangPython, lines) {
+		if r.Name == "MAX_TIMEOUT" && r.LineNo == 3 {
+			t.Errorf("ExtractRefs emitted MAX_TIMEOUT at line 3 as a reference; that line defines it")
+		}
+	}
+
+	// The neighbouring shape must not regress: a key inside the still-open dict
+	// is a reference, and a `;` inside the literal does not start a statement.
+	inDict := ExtractRefs(LangPython, []AddedLine{
+		{LineNo: 1, Text: `cfg = {`},
+		{LineNo: 2, Text: `    MAX_VALUE: 5,`},
+		{LineNo: 3, Text: `}`},
+	})
+	if !containsRef(inDict, "MAX_VALUE") {
+		t.Errorf("ExtractRefs = %+v, want MAX_VALUE reference — still inside the open dict", inDict)
+	}
+}
+
+func containsRef(refs []Ref, want string) bool {
+	for _, r := range refs {
+		if r.Name == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPyBraceStateAt covers the positional walk both #291 and #292 rest on,
+// independent of the plumbing above it: depth at an offset, the progressive
+// clamp on a stray close, and where a statement is considered to start.
+func TestPyBraceStateAt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		scan      string
+		base      int
+		pos       int
+		depth     int
+		stmtStart bool
+	}{
+		{"line start", "MAX = 5", 0, 0, 0, true},
+		{"leading indent keeps stmt start", "    MAX = 5", 0, 4, 0, true},
+		{"inside inline dict", `x = {MAX: 5}`, 0, 5, 1, false},
+		{"inside multi-line dict", `    MAX: 5,`, 1, 4, 1, true},
+		{"after close on same line", `}; MAX = 30`, 1, 3, 0, true},
+		{"after close, no separator", `} MAX = 30`, 1, 2, 0, false},
+		{"semicolon inside dict does not restart", `{"a": 1; MAX`, 0, 9, 1, false},
+		{"stray close clamps at zero", `} {`, 0, 3, 1, false},
+		{"pos past end is clamped", "MAX = {", 0, 99, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			depth, stmtStart := pyBraceStateAt(tc.scan, tc.base, tc.pos)
+			if depth != tc.depth || stmtStart != tc.stmtStart {
+				t.Errorf("pyBraceStateAt(%q, %d, %d) = (%d, %t), want (%d, %t)",
+					tc.scan, tc.base, tc.pos, depth, stmtStart, tc.depth, tc.stmtStart)
+			}
+		})
 	}
 }
 
@@ -1254,11 +1427,11 @@ func TestPyBraceDepthBefore(t *testing.T) {
 // list sharing the same shape (`foo(MAX_VALUE, OTHER_VALUE)`) must still be
 // treated as two genuine references.
 func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil, nil, false)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil, nil, pyCtxFor(`MAX_VALUE, OTHER_VALUE = 5, 10`, 0))
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — both names are tuple-assignment targets", refs)
 	}
-	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil, nil, false)
+	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil, nil, pyCtxFor(`foo(MAX_VALUE, OTHER_VALUE)`, 0))
 	if len(callRefs) != 2 {
 		t.Errorf("got %+v, want 2 references (call arguments)", callRefs)
 	}
@@ -1269,7 +1442,7 @@ func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
 // function/arrow value on each side of the comma, and a Python chained
 // assignment — and defNames must return all of them, not only the first.
 func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
-	js := defNames(LangJS, "const a = () => {}, b = () => {}")
+	js := defNamesNoContext(LangJS, "const a = () => {}, b = () => {}")
 	if _, ok := js["a"]; !ok {
 		t.Errorf("js defNames missing a: %v", js)
 	}
@@ -1277,7 +1450,7 @@ func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
 		t.Errorf("js defNames missing b: %v", js)
 	}
 
-	py := defNames(LangPython, "MAX_A = OTHER_B = 5")
+	py := defNamesNoContext(LangPython, "MAX_A = OTHER_B = 5")
 	if _, ok := py["MAX_A"]; !ok {
 		t.Errorf("py defNames missing MAX_A: %v", py)
 	}
@@ -1286,7 +1459,7 @@ func TestDefNames_MultipleDeclaratorsPerLine(t *testing.T) {
 	}
 
 	// A comparison must not be misread as a chained assignment.
-	cmp := defNames(LangPython, "x = MAX_A == OTHER_B")
+	cmp := defNamesNoContext(LangPython, "x = MAX_A == OTHER_B")
 	if len(cmp) != 0 {
 		t.Errorf("py defNames(%q) = %v, want none — this is a comparison", "x = MAX_A == OTHER_B", cmp)
 	}
@@ -1305,7 +1478,7 @@ func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
 		{"MAX_A = OTHER_B = THIRD_C = 5", []string{"MAX_A", "OTHER_B", "THIRD_C"}},
 		{"A_A = B_B = C_C = D_D = 5", []string{"A_A", "B_B", "C_C", "D_D"}},
 	} {
-		got := defNames(LangPython, tc.text)
+		got := defNamesNoContext(LangPython, tc.text)
 		for _, want := range tc.names {
 			if _, ok := got[want]; !ok {
 				t.Errorf("defNames(%q) = %v, missing %s", tc.text, got, want)
@@ -1323,8 +1496,8 @@ func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
 // the real caller in ExtractRefs threads its own defNames result through.
 func TestAppendConstRefs_ChainedAssignmentTargetsNotReferences(t *testing.T) {
 	text := "MAX_A = OTHER_B = 5"
-	defs := defNames(LangPython, text)
-	refs := appendConstRefs(nil, map[string]struct{}{}, text, 1, nil, defs, false)
+	defs := defNamesNoContext(LangPython, text)
+	refs := appendConstRefs(nil, map[string]struct{}{}, text, 1, nil, defs, pyCtxFor(text, 0))
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — both names are chained-assignment targets", refs)
 	}

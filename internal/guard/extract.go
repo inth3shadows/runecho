@@ -236,23 +236,19 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 				defs = append(defs, m[1])
 			}
 		case LangPython:
-			for name := range defNamesInContext(lang, l.Text, pyBraceDepth > 0) {
+			// Brace counting uses the literal-stripped scan (a `{` inside a string
+			// on this same line must not count) with f-string interpolation braces
+			// additionally neutralized (#291). Masking happens BEFORE the name
+			// extraction below because the context it produces is what decides
+			// ref-vs-definition; pyBraceDepth advances only afterwards, so the ctx
+			// carries the depth at the START of the line.
+			var braceScan string
+			_, braceScan, pyOpen = stripLiteralsBraces(LangPython, l.Text, pyOpen)
+			ctx := pyLineCtx{scan: braceScan, base: pyBraceDepth}
+			for name := range defNamesInContext(lang, l.Text, ctx) {
 				defs = append(defs, name)
 			}
-			// Brace counting uses the literal-stripped scan (a `{` inside a string
-			// on this same line must not count).
-			var scan string
-			scan, pyOpen = stripLiteralsStateful(LangPython, l.Text, pyOpen)
-			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
-			if pyBraceDepth < 0 {
-				// A stray unmatched `}` earlier in this run (closing something
-				// genuinely opened in unseeded/unchanged context) must not leave
-				// depth negative — a real dict opened a few lines later would then
-				// read as depth 0 and reopen the exact #289 false negative this
-				// tracking exists to close. Mirrors PyDeclaredNames' own bracket
-				// counter in this file, which clamps for the identical reason.
-				pyBraceDepth = 0
-			}
+			pyBraceDepth = ctx.depthAtEnd()
 		case LangJS:
 			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
@@ -953,17 +949,16 @@ var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A
 // disambiguation, tuple-assignment target spans).
 //
 // A `:` or `=` is only read as introducing a definition when the name is at
-// statement-start position (nothing but whitespace precedes it on the line) —
-// `{MAX: 5}` has MAX preceded by `{`, so it is a dict KEY (a genuine reference),
-// not a type annotation, even though the text after it looks identical to one.
-// inOpenBrace covers the same case when the `{` is on a previous line (a
-// multi-line dict literal): the caller threads whether an unclosed `{` is
-// still open at the START of this line, since a name preceded by only
-// whitespace there is just as much a dict key as one preceded by `{` inline
-// (#289). Tuple-assignment targets are identified separately
+// statement-start position and outside any open `{}` literal — `{MAX: 5}` has
+// MAX inside a dict, so it is a KEY (a genuine reference), not a type
+// annotation, even though the text after it looks identical to one. ctx answers
+// both at the name's own offset, which covers the inline case above, the
+// multi-line one where the `{` sits on an earlier line (#289), and the mixed one
+// where a dict closes and a new statement begins on the same physical line
+// (#292). Tuple-assignment targets are identified separately
 // (rePyTupleAssignTargets) since a name anywhere in `MAX, OTHER = 5, 10`'s
 // target list — not only the first — is being defined, not used.
-func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}, inOpenBrace bool) []Ref {
+func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}, ctx pyLineCtx) []Ref {
 	tupleTargetsEnd := -1
 	if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan); m != nil {
 		tupleTargetsEnd = m[3] // end of the captured target-list span (group 1)
@@ -981,7 +976,7 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 			continue // part of a tuple-assignment LHS target list — a definition
 		}
 		rest := strings.TrimLeft(scan[e:], " \t")
-		if strings.TrimSpace(scan[:s]) == "" && !inOpenBrace {
+		if ctx.isDefinitionPos(s) {
 			if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
 				continue // `NAME: type = value` / `NAME = value` — a definition, not a use
 			}
@@ -1121,21 +1116,16 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		// inside them (e.g. `COUNT(` in a SQL string, or prose in a docstring) are
 		// not mistaken for calls. Length is preserved, so match indices and LineNo
 		// stay correct. open threads multi-line string state across lines.
-		scan, newOpen := stripLiteralsStateful(lang, text, open)
+		scan, braceScan, newOpen := stripLiteralsBraces(lang, text, open)
 		open = newOpen
-		// Captured BEFORE this line's own braces are counted: appendConstRefs needs
-		// to know whether a dict literal was already open at the START of this line,
-		// not the depth after this line's own `{`/`}` are applied.
-		pyInOpenBrace := lang == LangPython && pyBraceDepth > 0
+		// pyCtx carries the depth at the START of this line, so every consumer
+		// resolves brace state at the offset of the name it is judging rather than
+		// from one line-start snapshot (#292). braceScan, not scan: an f-string
+		// interpolation's braces are string syntax and must not feed the
+		// cross-line dict counter (#291).
+		pyCtx := pyLineCtx{scan: braceScan, base: pyBraceDepth}
 		if lang == LangPython {
-			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
-			if pyBraceDepth < 0 {
-				// A stray unmatched `}` earlier in this run must not leave depth
-				// negative, or a real dict opened a few lines later reads as depth
-				// 0 and reopens the #289 false negative (round-3 review finding;
-				// mirrors PyDeclaredNames' own bracket-counter clamp).
-				pyBraceDepth = 0
-			}
+			pyBraceDepth = pyCtx.depthAtEnd()
 		}
 		// Go interface bodies hold method signatures, not calls (see inIface). Braces
 		// are counted on the stripped scan (literals blanked, so braces in strings
@@ -1169,7 +1159,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		// definition's own name is a self-match, not a call to validate — but any
 		// OTHER call sharing the line (a one-line function body, a Python default-
 		// arg factory) still is, so we skip per-name rather than the whole line.
-		defs := defNamesInContext(lang, text, pyInOpenBrace)
+		defs := defNamesInContext(lang, text, pyCtx)
 		callRe := reCallIdent
 		switch lang {
 		case LangGo:
@@ -1220,7 +1210,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		if !isImportLine(lang, text) {
 			switch lang {
 			case LangPython:
-				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins, defs, pyInOpenBrace)
+				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins, defs, pyCtx)
 			case LangJS:
 				refs = appendTypeRefs(refs, seen, scan, l.LineNo)
 			}
@@ -1375,16 +1365,125 @@ func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
 	open := ""
 	depth := 0
 	for _, l := range fileLines[:idx] {
-		var scan string
-		scan, open = stripLiteralsStateful(LangPython, l.Text, open)
-		depth += strings.Count(scan, "{") - strings.Count(scan, "}")
-		if depth < 0 {
-			// A stray unmatched `}` must not leave the running depth negative —
-			// see extractRefs' identical clamp for why (round-3 review finding).
-			depth = 0
-		}
+		var braceScan string
+		_, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
+		// Same accounting as extractRefs' own per-line advance, including the
+		// clamp and the f-string neutralization (#291) — a seed computed any other
+		// way would hand the run a depth its own tracking would never produce.
+		depth = pyLineCtx{scan: braceScan, base: depth}.depthAtEnd()
 	}
 	return depth
+}
+
+// pyLineCtx is one Python line's brace/statement context: the literal-stripped,
+// f-string-neutralized scan (braceScan from stripLiteralsBraces — same length as
+// the raw line, so offsets are interchangeable) plus base, the {}-nesting depth
+// in effect at the START of the line.
+//
+// It replaced a plain `inOpenBrace bool` snapshot taken at line start (#289's
+// first cut). That snapshot was applied uniformly to every name on the line, so
+// a name sitting after the line's own closing `}` — `}; MAX_TIMEOUT = 30`, where
+// the dict ends and a fresh statement begins on one physical line — was read
+// with the depth from before the `}` and misfiled as a dict key (#292). Every
+// question is answered at the position of the specific name instead.
+type pyLineCtx struct {
+	scan string
+	base int
+}
+
+// pyBraceStateAt reports the {}-nesting depth in effect at byte offset pos of
+// scan, and whether pos begins a fresh statement — nothing but whitespace since
+// the line start or since the last top-level `;`.
+//
+// Depth clamps at 0 progressively rather than only at end of line: a stray close
+// (whose opener sits in unchanged context this run never saw) must not push the
+// count negative, or a genuine dict opened later on the SAME line reads as depth
+// 0 and reopens the #289 false negative the tracking exists to close.
+func pyBraceStateAt(scan string, base, pos int) (depth int, stmtStart bool) {
+	depth = base
+	stmtStart = true
+	if pos > len(scan) {
+		pos = len(scan)
+	}
+	for i := 0; i < pos; i++ {
+		switch scan[i] {
+		case '{':
+			depth++
+			stmtStart = false
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+			stmtStart = false
+		case ';':
+			// A top-level `;` ends the statement, so what follows starts a fresh
+			// one exactly as the line start does. Inside a literal it is just
+			// punctuation (and inside a string it is already blanked).
+			stmtStart = depth == 0
+		case ' ', '\t':
+			// Leading whitespace does not end statement-start position.
+		default:
+			stmtStart = false
+		}
+	}
+	return depth, stmtStart
+}
+
+// isDefinitionPos reports whether a SCREAMING_SNAKE name starting at byte offset
+// pos sits where `NAME = value` / `NAME: T = value` means a genuine definition
+// rather than a dict key. Both conditions must hold: the name opens a statement,
+// and no `{` literal is open around it.
+func (c pyLineCtx) isDefinitionPos(pos int) bool {
+	depth, stmtStart := pyBraceStateAt(c.scan, c.base, pos)
+	return stmtStart && depth == 0
+}
+
+// depthAtEnd returns the {}-depth this line carries to the next one.
+func (c pyLineCtx) depthAtEnd() int {
+	depth, _ := pyBraceStateAt(c.scan, c.base, len(c.scan))
+	return depth
+}
+
+// stmtStarts returns the byte offsets at which a statement begins on this line:
+// 0, plus the offset after each top-level `;`.
+func (c pyLineCtx) stmtStarts() []int {
+	starts := []int{0}
+	depth := c.base
+	for i := 0; i < len(c.scan); i++ {
+		switch c.scan[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case ';':
+			if depth == 0 && i+1 < len(c.scan) {
+				starts = append(starts, i+1)
+			}
+		}
+	}
+	return starts
+}
+
+// pyConstDefNames returns every SCREAMING_SNAKE name this line DEFINES via a
+// `NAME: T = value` / `NAME = value` statement. rePyConstDef is `^`-anchored, so
+// on its own it can only ever see the first statement on a line; running it once
+// per top-level `;`-separated statement is what lets `}; MAX_TIMEOUT = 30` be
+// recognized as the definition it is (#292). Each candidate is still position-
+// checked, so a dict key never qualifies.
+func pyConstDefNames(ctx pyLineCtx) []string {
+	var names []string
+	for _, start := range ctx.stmtStarts() {
+		m := rePyConstDef.FindStringSubmatchIndex(ctx.scan[start:])
+		if m == nil {
+			continue
+		}
+		if pos := start + m[2]; ctx.isDefinitionPos(pos) {
+			names = append(names, ctx.scan[pos:start+m[3]])
+		}
+	}
+	return names
 }
 
 // stripLiteralsStateful blanks string-literal and trailing-comment content on one
@@ -1399,11 +1498,33 @@ func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
 // An unterminated single-line `"`/`'` string blanks to end-of-line (those do not
 // span lines); a triple-quote or backtick with no close opens multi-line state.
 func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
+	scan, _, newOpen := stripLiteralsBraces(lang, text, open)
+	return scan, newOpen
+}
+
+// stripLiteralsBraces is stripLiteralsStateful plus a second scan — braceScan —
+// in which every `{`/`}` that survives stripping only because it belongs to a
+// Python f-string interpolation is ALSO blanked.
+//
+// The f-string branches below deliberately leave an interpolation's braces (and
+// its interior) intact so a call inside `f"{Build(x)}"` is still seen. Those
+// braces are string syntax, not dict/set nesting, so a caller counting `{`/`}`
+// to track multi-line dict literals (#289's pyBraceDepth) must not see them:
+// when the matching close does not survive on the same line — a call spanning
+// lines inside an interpolation, where the continuation is blanked wholesale by
+// the propagated open-quote state — the depth leaks upward permanently and
+// every later constant definition in that run is misread as a dict key (#291).
+// braceScan is the same string as scan whenever no such brace exists, which is
+// every non-f-string line, so the common path costs no extra allocation.
+func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) {
 	b := []byte(text)
 	n := len(b)
 	out := make([]byte, n)
 	copy(out, b)
 	i := 0
+	// Offsets of braces left intact by an f-string interpolation — blanked in
+	// braceScan only (see finishStrip).
+	var fstrBraces []int
 
 	// Continuation of a multi-line string from a previous line: blank until the
 	// closing delimiter, or the whole line if it does not close here.
@@ -1418,7 +1539,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 			i++
 		}
 		if open != "" {
-			return string(out), open
+			return finishStrip(out, fstrBraces, open)
 		}
 	}
 
@@ -1454,7 +1575,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 				i++
 			}
 			if !closed {
-				return string(out), "*/" // opens multi-line comment state
+				return finishStrip(out, fstrBraces, "*/") // opens multi-line comment state
 			}
 			continue
 		}
@@ -1483,6 +1604,9 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 				if fstr && b[i] == '{' {
 					// Interpolation: leave bytes intact so reCallIdent sees the call.
 					// Track brace depth (dict literals can appear); stop at the delim.
+					// Every brace kept here is f-string syntax, never dict nesting the
+					// cross-line counter should see — record it for braceScan (#291).
+					fstrBraces = append(fstrBraces, i)
 					depth := 1
 					i++
 					for i < n && depth > 0 && !hasAt(b, i, delim) {
@@ -1494,8 +1618,10 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 						}
 						if b[i] == '{' {
 							depth++
+							fstrBraces = append(fstrBraces, i)
 						} else if b[i] == '}' {
 							depth--
+							fstrBraces = append(fstrBraces, i)
 							if depth == 0 {
 								i++
 								break
@@ -1514,7 +1640,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 				// f-string flag, so interpolations on continuation lines of a
 				// multi-line triple f-string are NOT scanned (rare; single-line
 				// triple f-strings are handled above).
-				return string(out), delim
+				return finishStrip(out, fstrBraces, delim)
 			}
 			continue
 		}
@@ -1528,7 +1654,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 			if i < n {
 				i++ // closing backtick on same line
 			} else {
-				return string(out), "`"
+				return finishStrip(out, fstrBraces, "`")
 			}
 			continue
 		}
@@ -1559,7 +1685,12 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 						// Interpolation region: leave bytes intact so the call inside
 						// is seen by reCallIdent. Runs to the matching '}' (no nesting
 						// of '{' inside an interpolation in valid f-strings, but a dict
-						// literal could appear — track brace depth to be safe).
+						// literal could appear — track brace depth to be safe). Every
+						// brace kept here is f-string syntax, never dict nesting the
+						// cross-line counter should see — record it for braceScan
+						// (#291); this is the branch whose unclosed `{` leaks depth
+						// when the interpolation runs past end of line.
+						fstrBraces = append(fstrBraces, i)
 						depth := 1
 						i++ // past the '{'
 						for i < n && depth > 0 && b[i] != quote {
@@ -1575,8 +1706,10 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 							}
 							if b[i] == '{' {
 								depth++
+								fstrBraces = append(fstrBraces, i)
 							} else if b[i] == '}' {
 								depth--
+								fstrBraces = append(fstrBraces, i)
 								if depth == 0 {
 									i++ // past the closing '}'
 									break
@@ -1605,7 +1738,7 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 							// continuation), and rare; a full fix would need open-state
 							// to carry an interpolation-depth counter, not just the
 							// quote byte — deferred.
-							return string(out), string(quote)
+							return finishStrip(out, fstrBraces, string(quote))
 						}
 					default:
 						out[i] = ' '
@@ -1637,7 +1770,22 @@ func stripLiteralsStateful(lang Lang, text, open string) (string, string) {
 		}
 		i++
 	}
-	return string(out), open
+	return finishStrip(out, fstrBraces, open)
+}
+
+// finishStrip builds stripLiteralsBraces' two scans from the one masked buffer:
+// scan as-is, and braceScan with the recorded f-string interpolation braces
+// blanked. out is mutated only after scan has been materialized (string(out)
+// copies), and when there is nothing to blank both results share one allocation.
+func finishStrip(out []byte, fstrBraces []int, open string) (string, string, string) {
+	scan := string(out)
+	if len(fstrBraces) == 0 {
+		return scan, scan, open
+	}
+	for _, p := range fstrBraces {
+		out[p] = ' '
+	}
+	return scan, string(out), open
 }
 
 // isFStringPrefix reports whether the quote at index i opens a Python f-string,
@@ -1763,10 +1911,23 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 	return false
 }
 
-// defNames returns the identifier(s) a line DEFINES (the func/def/class/const
-// name), so a reference to a definition's own name can be skipped as a self-match
-// while genuine calls that share the line are still validated. Empty for a
-// non-definition line. Each def regex captures the declared name in group 1.
+// defNamesInContext returns the identifier(s) a line DEFINES (the
+// func/def/class/const name), so a reference to a definition's own name can be
+// skipped as a self-match while genuine calls that share the line are still
+// validated. Empty for a non-definition line. Each def regex captures the
+// declared name in group 1.
+//
+// ctx supplies Python's cross-line brace state (#289): rePyConstDef's
+// statement-start anchor (`^\s*NAME\s*[:=]`) has no way to see that the `{`
+// opening a multi-line dict literal sits on an earlier line, so a dict key on
+// its own line (`MAX_VALUE: 5,` inside `result = {\n    MAX_VALUE: 5,\n}`) reads
+// identically to a genuine top-level constant definition. The name is
+// position-checked against ctx instead, so a dict key falls through as a
+// reference while a real definition — including one that follows a top-level `;`
+// on the same line as the dict's close (#292) — is still captured. Python
+// callers MUST supply a ctx built from this same line; other languages ignore
+// it. Every caller already masks the line for its own scanning, so ctx is a
+// hand-off of work already done rather than a second pass.
 //
 // captureAll exists alongside capture because a single statement can define more
 // than one name — `const a = () => {}, b = () => {}` (JS, one declarator per
@@ -1781,19 +1942,7 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 // one extra name and silently drops a third+ (confirmed: a 3-way chain lost
 // its last target). pyChainedAssignTargets splits on every top-level bare `=`
 // instead, which has no such limit.
-func defNames(lang Lang, text string) map[string]struct{} {
-	return defNamesInContext(lang, text, false)
-}
-
-// defNamesInContext is defNames, plus the caller's cross-line open-brace state
-// for Python (#289): rePyConstDef's statement-start anchor (`^\s*NAME\s*[:=]`)
-// has no way to see that the `{` opening a multi-line dict literal sits on an
-// earlier line, so a dict key on its own line (`MAX_VALUE: 5,` inside
-// `result = {\n    MAX_VALUE: 5,\n}`) reads identically to a genuine top-level
-// constant definition. inOpenBrace=true skips rePyConstDef so the name falls
-// through as a reference instead — mirrors appendConstRefs' own inOpenBrace
-// check for the same ambiguity.
-func defNamesInContext(lang Lang, text string, inOpenBrace bool) map[string]struct{} {
+func defNamesInContext(lang Lang, text string, ctx pyLineCtx) map[string]struct{} {
 	names := make(map[string]struct{})
 	capture := func(re *regexp.Regexp) {
 		if m := re.FindStringSubmatch(text); m != nil {
@@ -1811,8 +1960,8 @@ func defNamesInContext(lang Lang, text string, inOpenBrace bool) map[string]stru
 	case LangPython:
 		capture(rePyDef)
 		capture(rePyClassDef)
-		if !inOpenBrace {
-			capture(rePyConstDef)
+		for _, n := range pyConstDefNames(ctx) {
+			names[n] = struct{}{}
 		}
 		for _, n := range pyChainedAssignTargets(text) {
 			names[n] = struct{}{}

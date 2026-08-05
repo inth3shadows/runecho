@@ -213,13 +213,22 @@ runecho-ir repo reindex myproject
 Run this after meaningful work if you want later diffs to compare against the
 new state instead of the old one.
 
-> **Auto-fresh index:** when the Claude Code PostToolUse hook is wired (it ships
-> alongside the PreToolUse guard), each edit incrementally re-indexes just the
-> file you touched into a rolling `auto` snapshot. The guard's next check sees
-> symbols you added moments ago, so you no longer get a false "unknown symbol"
-> prompt for a function defined earlier in the same session — and manual
+> **Auto-fresh index:** the Claude Code PostToolUse hook
+> (`runecho-guard --outcome-mode`) incrementally re-indexes just the file you
+> touched into a rolling `auto` snapshot on each edit. The guard's next check
+> sees symbols you added moments ago, so you no longer get a false "unknown
+> symbol" prompt for a function defined earlier in the same session — and manual
 > `repo reindex` becomes optional rather than a chore. Manual snapshots
 > (`reindex`, `session-start`, …) are never touched by the auto-refresh.
+>
+> The plugin and `install.sh --print-hook-config` both wire this hook alongside
+> the PreToolUse guard. If you installed before that was true, or hand-rolled
+> your `settings.json`, check that the `PostToolUse` entry is present —
+> **earlier releases shipped no config that included it**, so those installs run
+> the guard without it. The symptom is quiet: stale-IR false positives keep
+> appearing, and `runecho-ir fpreport` reports every ask as unrated, because the
+> approval rate is computed by joining asks to outcome records this hook is the
+> only source of.
 
 ### Inspect recent history
 

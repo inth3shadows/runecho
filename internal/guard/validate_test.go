@@ -87,6 +87,46 @@ func TestRun_HunkInsideDocstringNotFlagged(t *testing.T) {
 	}
 }
 
+// TestRun_DictKeyEditedInExistingLiteralIsChecked pins the code-review finding
+// on PR #290: the #289 fix's own tests only covered a dict literal wholly
+// contained in the diff. The dominant real-world edit shape is adding/editing ONE
+// key inside an EXISTING multi-line dict — the opening `{` is unchanged context
+// above the hunk and never appears in AddedLines. Without AbsPath seeding
+// pyBraceDepth (the counterpart to the #145 open-string seed), that hunk starts
+// scanning at depth 0 and the key misreads as a top-level definition, never
+// checked as a reference.
+func TestRun_DictKeyEditedInExistingLiteralIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	// Dict opens on line 1 and stays open through the edited key (line 3).
+	content := "result = {\n" +
+		"    \"a\": 1,\n" +
+		"    MAX_VALUE: 5,\n" +
+		"}\n"
+	path := filepath.Join(dir, "runner.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diffs := []FileDiff{{
+		Path:    "runner.py",
+		AbsPath: path,
+		AddedLines: []AddedLine{
+			{LineNo: 3, Text: "    MAX_VALUE: 5,"},
+		},
+	}}
+	v := Run(map[string]struct{}{}, "", diffs)
+	if len(v) != 1 || v[0].Symbol != "MAX_VALUE" {
+		t.Fatalf("MAX_VALUE must be checked as a reference (and flagged, unresolved) via the AbsPath seed, got %+v", v)
+	}
+
+	// Control: without the seed, the same hunk starts scanning at depth 0, so
+	// MAX_VALUE misreads as a definition and is never checked — the exact false
+	// negative this seeding closes.
+	diffs[0].AbsPath = ""
+	if v := Run(map[string]struct{}{}, "", diffs); len(v) != 0 {
+		t.Fatalf("unseeded control should NOT flag MAX_VALUE (misread as a definition); got %+v — test no longer covers seeding", v)
+	}
+}
+
 func TestRun_HallucinatedCall(t *testing.T) {
 	symbols := map[string]struct{}{"ProcessFoo": {}}
 	diffs := []FileDiff{{

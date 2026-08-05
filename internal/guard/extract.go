@@ -184,21 +184,53 @@ var (
 // set, so a reference to something defined elsewhere in the edit/file does not
 // read as a hallucination.
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
+	return extractDefsSeeded(lang, lines, nil)
+}
+
+// extractDefsSeeded is ExtractDefs with an optional braceDepthSeed — Pass 1's
+// counterpart to extractRefs' own pyBraceDepth seeding (code-review finding on PR
+// #290, #289's follow-up). ExtractDefs used to match rePyConstDef directly with
+// no brace-context awareness at all: a multi-line dict key was added to the
+// known set as a DEFINITION regardless of whether it sat inside an open dict
+// literal. That made #289's actual fix (appendConstRefs/defNamesInContext
+// correctly reading the key as a reference) moot in Run's full pipeline — Pass 2
+// checks `known[ref.Name]` first, and Pass 1 had already put the key there. The
+// Python branch now delegates to defNamesInContext (the same brace-context-aware
+// logic appendConstRefs/extractRefs use) instead of re-matching rePyConstDef on
+// its own; this is a strict superset of the old set (it also picks up chained-
+// assignment targets ExtractDefs never captured), which only ever narrows Pass
+// 2's violation surface, never widens it.
+func extractDefsSeeded(lang Lang, lines []AddedLine, braceDepthSeed func(lineNo int) int) []string {
 	var defs []string
-	for _, l := range lines {
+	pyBraceDepth := 0
+	pyOpen := ""
+	prevNo := 0
+	for i, l := range lines {
+		if lang == LangPython && (i == 0 || l.LineNo != prevNo+1) {
+			if braceDepthSeed != nil {
+				pyBraceDepth = braceDepthSeed(l.LineNo)
+			} else {
+				pyBraceDepth = 0
+			}
+			pyOpen = ""
+		}
+		prevNo = l.LineNo
 		switch lang {
 		case LangGo:
 			if m := reGoDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
 			}
 		case LangPython:
-			if m := rePyDef.FindStringSubmatch(l.Text); m != nil {
-				defs = append(defs, m[1])
-			} else if m := rePyClassDef.FindStringSubmatch(l.Text); m != nil {
-				defs = append(defs, m[1])
-			} else if m := rePyConstDef.FindStringSubmatch(l.Text); m != nil {
-				defs = append(defs, m[1])
+			for name := range defNamesInContext(lang, l.Text, pyBraceDepth > 0) {
+				defs = append(defs, name)
 			}
+			// Brace counting uses the literal-stripped scan (a `{` inside a string
+			// on this same line must not count), threading its own local,
+			// unseeded string-open state — ExtractDefs never masked string content
+			// before, so there is nothing to seed there.
+			var scan string
+			scan, pyOpen = stripLiteralsStateful(LangPython, l.Text, pyOpen)
+			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
 		case LangJS:
 			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {
 				defs = append(defs, m[1])
@@ -981,17 +1013,23 @@ type Ref struct {
 // ExtractRefs extracts bare function call targets from the added lines for the
 // given language. Qualified calls (pkg.Foo / obj.Method) are skipped.
 func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
-	return extractRefs(lang, lines, nil)
+	return extractRefs(lang, lines, nil, nil)
 }
 
-// extractRefs is ExtractRefs with an optional openSeed. openSeed(lineNo) returns
-// the unterminated multi-line string delimiter in effect at the START of new-file
-// line lineNo, letting a diff hunk that begins inside a pre-existing string or
-// docstring be scanned in the right (masked) state — the hunk's added lines alone
-// can't reveal it, since the opening delimiter sits in unchanged context above the
-// hunk (issue #145). A nil seed preserves the full-file / hook behavior: every
-// contiguous run starts outside any string.
-func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string) []Ref {
+// extractRefs is ExtractRefs with optional openSeed/braceDepthSeed. openSeed(lineNo)
+// returns the unterminated multi-line string delimiter in effect at the START of
+// new-file line lineNo, letting a diff hunk that begins inside a pre-existing
+// string or docstring be scanned in the right (masked) state — the hunk's added
+// lines alone can't reveal it, since the opening delimiter sits in unchanged
+// context above the hunk (issue #145). braceDepthSeed(lineNo) is the analogous
+// seed for pyBraceDepth: the {}-nesting depth in effect at the START of that line,
+// letting a hunk that begins inside an already-open (unchanged) multi-line dict
+// literal be read correctly instead of assuming depth 0 — the dominant real-world
+// shape of #289 (adding one key to an EXISTING dict, so the opening `{` is
+// unchanged context, not part of the diff). A nil seed preserves the full-file /
+// unseeded behavior for either: every contiguous run starts outside any string /
+// at depth 0.
+func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []Ref {
 	if lang == LangUnknown {
 		return nil
 	}
@@ -1026,8 +1064,8 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 	// line, so a dict key on its own line inside a still-open multi-line dict
 	// literal (`result = {\n    MAX_VALUE: 5,\n}`) looks identical to a genuine
 	// top-level annotation — this is a running counter, not a boolean like
-	// inIface, because dict literals nest arbitrarily (#289). Reset on a
-	// diff-hunk gap alongside open/inIface for the same reason.
+	// inIface, because dict literals nest arbitrarily (#289). Reset (seeded, like
+	// open) on a diff-hunk gap, since brace continuity can't be assumed across one.
 	pyBraceDepth := 0
 	for i, l := range lines {
 		text := l.Text
@@ -1036,14 +1074,21 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 			// reset carried state. Seed the string state from the file context
 			// above the run when a seed is available, so a run that opens inside a
 			// pre-existing docstring is masked instead of scanned as code (#145);
-			// without a seed the run starts outside any string, as before.
+			// without a seed the run starts outside any string, as before. Same
+			// idea for pyBraceDepth via braceDepthSeed (#289): without it, a run
+			// that begins inside an already-open dict literal from unchanged
+			// context above starts wrongly at depth 0.
 			if openSeed != nil {
 				open = openSeed(l.LineNo)
 			} else {
 				open = ""
 			}
+			if braceDepthSeed != nil {
+				pyBraceDepth = braceDepthSeed(l.LineNo)
+			} else {
+				pyBraceDepth = 0
+			}
 			inIface = false
-			pyBraceDepth = 0
 		}
 		prevNo = l.LineNo
 		// Skip whole-line comments (only meaningful when not mid-string).
@@ -1277,6 +1322,35 @@ func OpenStateBefore(lang Lang, fileLines []AddedLine, idx int) string {
 		_, open = stripLiteralsStateful(lang, l.Text, open)
 	}
 	return open
+}
+
+// PyBraceDepthBefore returns the Python {}-brace nesting depth in effect at the
+// START of fileLines[idx] — OpenStateBefore's counterpart for pyBraceDepth (#289).
+// Without it, the hook path's per-block seeding only covered the open-string leak
+// (#145): a block that edits a dict literal without touching its opening `{` line
+// (the opener sits in unchanged context, so it is never among the hook's added
+// lines) started scanning at depth 0 regardless of the file's real state there.
+// Mirrors ExtractRefs' own tracking: `{` minus `}` counted on each line's
+// literal-stripped scan, threading the multi-line string state so braces inside a
+// string/docstring never count. Python-only by construction (like pyBraceDepth
+// itself) — always scanned as LangPython since callers only invoke this for .py
+// files. fileLines must be a whole file's contiguous lines; idx is clamped into
+// range.
+func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
+	if idx <= 0 || len(fileLines) == 0 {
+		return 0
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	depth := 0
+	for _, l := range fileLines[:idx] {
+		var scan string
+		scan, open = stripLiteralsStateful(LangPython, l.Text, open)
+		depth += strings.Count(scan, "{") - strings.Count(scan, "}")
+	}
+	return depth
 }
 
 // stripLiteralsStateful blanks string-literal and trailing-comment content on one

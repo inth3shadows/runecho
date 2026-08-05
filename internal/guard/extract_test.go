@@ -1194,6 +1194,60 @@ func TestExtractRefs_MultiLineDictKey(t *testing.T) {
 	}
 }
 
+// TestPyBraceDepthBefore pins the code-review finding on #290: pyBraceDepth reset
+// to 0 at every contiguous-added-lines boundary with no seeding from the file's
+// actual pre-hunk state, so the dominant real-world edit shape — adding a key to
+// an EXISTING multi-line dict, where the opening `{` is unchanged context and
+// never appears among the added lines — still misread the key as a definition.
+// PyBraceDepthBefore is the seed source (OpenStateBefore's counterpart) that
+// closes this; these cases pin its own arithmetic directly, independent of the
+// seeding plumbing above it.
+func TestPyBraceDepthBefore(t *testing.T) {
+	fileLines := []AddedLine{
+		{LineNo: 1, Text: "result = {"},
+		{LineNo: 2, Text: `    "a": 1,`},
+		{LineNo: 3, Text: "    MAX_VALUE: 5,"},
+		{LineNo: 4, Text: "}"},
+		{LineNo: 5, Text: "other = 1"},
+	}
+	cases := []struct {
+		idx  int
+		want int
+	}{
+		{0, 0}, // before any line: unopened
+		{1, 1}, // start of line 2: dict opened on line 1
+		{2, 1}, // start of line 3 (MAX_VALUE's line): still open
+		{3, 1}, // start of line 4 ("}"): still open — line 4 itself is what closes it
+		{4, 0}, // start of line 5: closed by line 4's `}`
+	}
+	for _, tc := range cases {
+		if got := PyBraceDepthBefore(fileLines, tc.idx); got != tc.want {
+			t.Errorf("PyBraceDepthBefore(fileLines, %d) = %d, want %d", tc.idx, got, tc.want)
+		}
+	}
+
+	// Braces inside a string/docstring must not count — mirrors ExtractRefs'
+	// own literal-stripping via stripLiteralsStateful.
+	withString := []AddedLine{
+		{LineNo: 1, Text: `s = "{ not a dict }"`},
+		{LineNo: 2, Text: "next_line = 1"},
+	}
+	if got := PyBraceDepthBefore(withString, 1); got != 0 {
+		t.Errorf("PyBraceDepthBefore must not count braces inside a string literal, got %d", got)
+	}
+
+	// Out-of-range idx clamps rather than panicking.
+	if got := PyBraceDepthBefore(fileLines, -1); got != 0 {
+		t.Errorf("negative idx should clamp to 0, got %d", got)
+	}
+	if got := PyBraceDepthBefore(fileLines, 999); got != 0 {
+		t.Errorf("idx past the end should clamp to the full-file depth (0, dict closed), got %d", got)
+	}
+	if got := PyBraceDepthBefore(nil, 1); got != 0 {
+		t.Errorf("nil fileLines should return 0, got %d", got)
+	}
+}
+
 // TestAppendConstRefs_TupleAssignTargetsNotReferences pins #278: every name in
 // a tuple/multiple-assignment LHS (`MAX_VALUE, OTHER_VALUE = 5, 10`) is being
 // DEFINED, not used — neither should be added as a reference. A call argument

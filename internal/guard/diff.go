@@ -39,6 +39,16 @@ type FileDiff struct {
 	// the pre-edit file. Missing entries (and a nil map) mean "starts outside any
 	// string", the previous behavior. Consulted only when AbsPath is empty.
 	SeedByLine map[int]string
+	// PyBraceDepthByLine is SeedByLine's counterpart for pyBraceDepth (#289): the
+	// {}-brace nesting depth in effect where a block's synthetic starting LineNo
+	// sits in the pre-edit file, for Python only. Without it, a block that edits a
+	// dict literal's key without touching the opening `{` line — the common
+	// incremental-edit case, since the opener is unchanged context above the
+	// block — is scanned starting at depth 0 regardless of the file's real state,
+	// and a dict key at statement-start position reads as a definition instead of
+	// a reference. Missing entries (and a nil map) mean depth 0, the previous
+	// behavior. Consulted only when AbsPath is empty.
+	PyBraceDepthByLine map[int]int
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

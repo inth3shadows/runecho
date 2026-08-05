@@ -203,3 +203,100 @@ marker_line = 0
 		t.Fatalf("hallucinated zzhalluc() must flag despite ambiguous old_string, got %+v", v)
 	}
 }
+
+// pyDictFile is a pre-edit Python file whose dict literal opens on line 1 and
+// closes on line 4. An Edit that only touches a key line (the common
+// incremental-edit shape) never sees the opening `{`, which sits in untouched
+// context above it — the code-review finding on PR #290 (#289's fix only covered
+// a dict literal wholly contained in the diff).
+var pyDictFile = guard.TextToAddedLines(
+	`result = {
+    "a": 1,
+    "b": 2,
+}
+`)
+
+func TestHookBraceDepthByLine_EditInsideDict(t *testing.T) {
+	old := `    "b": 2,`
+	seeds := hookBraceDepthByLine("Edit", old, nil, pyDictFile, guard.LangPython)
+	if got := seeds[1]; got != 1 {
+		t.Fatalf("block starting inside the open dict literal should seed depth 1, got %d", got)
+	}
+}
+
+// The whole point: with the seed threaded through, guard.Run must read a
+// SCREAMING_SNAKE key added on its own line as a REFERENCE — checked, and
+// flagged when unresolved — not silently as a top-level definition.
+func TestGuardRun_DictKeyAddedToExistingLiteralIsChecked(t *testing.T) {
+	old := `    "b": 2,`
+	newStr := old + "\n    MAX_VALUE: 5,"
+
+	diffs := []guard.FileDiff{{
+		Path:               "m.py",
+		AddedLines:         guard.TextToAddedLines(newStr),
+		PyBraceDepthByLine: hookBraceDepthByLine("Edit", old, nil, pyDictFile, guard.LangPython),
+	}}
+	v := guard.Run(map[string]struct{}{}, "", diffs)
+	if len(v) != 1 || v[0].Symbol != "MAX_VALUE" {
+		t.Fatalf("MAX_VALUE must be checked as a reference and flagged unresolved, got %+v", v)
+	}
+
+	// Control: without the seed, the same block starts scanning at depth 0 and
+	// MAX_VALUE misreads as a top-level definition — the exact false negative
+	// this seeding closes.
+	diffs[0].PyBraceDepthByLine = nil
+	if v := guard.Run(map[string]struct{}{}, "", diffs); len(v) != 0 {
+		t.Fatalf("unseeded control should NOT flag MAX_VALUE (misread as a definition); got %+v — test no longer covers seeding", v)
+	}
+}
+
+// A real call after the dict closes must still be flagged — the brace-depth seed
+// must not blanket-suppress the rest of the block once the literal ends.
+func TestGuardRun_BraceDepthSeedDoesNotMaskCodeAfterClose(t *testing.T) {
+	old := `    "b": 2,`
+	newStr := old + "\n}\nzzqwerty_undefined()"
+
+	diffs := []guard.FileDiff{{
+		Path:               "m.py",
+		AddedLines:         guard.TextToAddedLines(newStr),
+		PyBraceDepthByLine: hookBraceDepthByLine("Edit", old, nil, pyDictFile, guard.LangPython),
+	}}
+	v := guard.Run(map[string]struct{}{}, "", diffs)
+	found := false
+	for _, viol := range v {
+		if viol.Symbol == "zzqwerty_undefined" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("code after the closing brace must still be flagged, got %+v", v)
+	}
+}
+
+func TestHookBraceDepthByLine_NonPythonReturnsNil(t *testing.T) {
+	if s := hookBraceDepthByLine("Edit", `    "b": 2,`, nil, pyDictFile, guard.LangGo); s != nil {
+		t.Fatalf("non-Python languages must never seed pyBraceDepth, got %v", s)
+	}
+}
+
+// MultiEdit seeds must land on the synthetic LineNo that AddedLinesWithGap
+// actually assigns to each block's first line — mirrors
+// TestHookSeedByLine_MultiEditBlockAlignment for the brace-depth seed.
+func TestHookBraceDepthByLine_MultiEditBlockAlignment(t *testing.T) {
+	edits := []editOp{
+		// Block 1: two lines of real code, outside any brace.
+		{OldString: "result = {", NewString: "result = {\nimport os"},
+		// Block 2: one line, inside the dict.
+		{OldString: `    "b": 2,`, NewString: "    MAX_VALUE: 5,"},
+	}
+	seeds := hookBraceDepthByLine("MultiEdit", "", edits, pyDictFile, guard.LangPython)
+
+	lines := hookAddedLines("MultiEdit", "", "", edits)
+	start2 := lines[len(lines)-1].LineNo
+	if seeds[start2] != 1 {
+		t.Fatalf("block 2 (LineNo %d) should carry depth 1, got %d", start2, seeds[start2])
+	}
+	if seeds[1] != 0 {
+		t.Fatalf("block 1 starts outside any brace, got %d", seeds[1])
+	}
+}

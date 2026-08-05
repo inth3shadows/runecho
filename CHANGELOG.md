@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-08-05
+
+### Changed
+- guard: make ExtractDefs' Python order deterministic (#298)
+
 ## [0.28.0] — 2026-08-05
 
 ### Changed

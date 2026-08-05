@@ -10,15 +10,18 @@
 #   bash install.sh            # build all three binaries to $BIN_DIR
 #   bash install.sh --hook     # also install the GIT pre-commit hook in the cwd repo
 #   bash install.sh --hook --force      # overwrite an existing pre-commit hook
-#   bash install.sh --print-hook-config # print the Claude Code PreToolUse snippet
-#                                      # (fallback; the plugin is the preferred wiring)
+#   bash install.sh --print-hook-config # print the Claude Code hook snippet
+#                                      # (PreToolUse + PostToolUse; fallback —
+#                                      #  the plugin is the preferred wiring)
 #   bash install.sh --hook-pre-push     # install the tag-monotonicity pre-push hook
 #                                        # (this repo's own release safety net, #51/#63)
 #
 # Two distinct integrations share the runecho-guard binary:
 #   --hook               installs the git pre-commit variant (fires at `git commit`)
-#   --print-hook-config  emits the Claude Code PreToolUse settings.json snippet
-#                        (--hook-mode; fires on every Edit/Write/MultiEdit). This
+#   --print-hook-config  emits the Claude Code settings.json snippet for BOTH
+#                        events (PreToolUse/--hook-mode decides; PostToolUse/
+#                        --outcome-mode records the outcome and refreshes the
+#                        IR), each firing on every Edit/Write/MultiEdit. This
 #                        is the FALLBACK wiring for the primary, edit-time
 #                        integration. The supported path is the plugin in
 #                        plugins/runecho-guard/, installed with:
@@ -82,22 +85,24 @@ case "${OSTYPE:-}" in
 esac
 [ -n "${WINDIR:-}" ] && EXE=".exe"
 
-# --print-hook-config: emit the Claude Code PreToolUse snippet and exit. This is
-# config-only (no build needed), so it short-circuits before the Go toolchain
-# check — usable even on a box without Go to copy the snippet into settings.json.
-# The matcher (Edit|Write|MultiEdit) and --hook-mode invocation MUST match what
-# cmd/runecho-guard/main.go reads and what TECHNICAL.md documents.
+# --print-hook-config: emit the Claude Code hook snippet (both events) and exit.
+# This is config-only (no build needed), so it short-circuits before the Go
+# toolchain check — usable even on a box without Go to copy into settings.json.
+# The matcher (Edit|Write|MultiEdit) and the --hook-mode / --outcome-mode
+# invocations MUST match what cmd/runecho-guard/main.go reads, what the plugin's
+# hooks.json wires, and what TECHNICAL.md documents.
+# cmd/runecho-guard/hookwiring_test.go enforces that agreement.
 if [ "$PRINT_HOOK_CONFIG" -eq 1 ]; then
   cat <<CFG
-PREFERRED: install the plugin instead — it wires this hook for you, uninstalls
+PREFERRED: install the plugin instead — it wires both hooks for you, uninstalls
 cleanly, and needs no hand-merged JSON:
 
   /plugin marketplace add inth3shadows/runecho
   /plugin install runecho-guard@runecho
 
-Otherwise, add this to your Claude Code settings.json (~/.claude/settings.json)
-to vet every assistant edit at write time via the PreToolUse hook. Merge it into
-any existing "hooks" object rather than replacing the file:
+Otherwise, add this to your Claude Code settings.json (~/.claude/settings.json).
+Merge it into any existing "hooks" object rather than replacing the file. BOTH
+entries matter — see the note below:
 
   {
     "hooks": {
@@ -108,14 +113,30 @@ any existing "hooks" object rather than replacing the file:
             { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --hook-mode" }
           ]
         }
+      ],
+      "PostToolUse": [
+        {
+          "matcher": "Edit|Write|MultiEdit",
+          "hooks": [
+            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --outcome-mode" }
+          ]
+        }
       ]
     }
   }
 
-The guard reads the tool-call JSON on stdin and answers via permissionDecision:
-unresolved symbols → "ask"; a clean check defers to the normal permission flow.
-It never auto-approves and never exits nonzero. Disable per-session with
-RUNECHO_GUARD_SKIP=1.
+PreToolUse is the guard. It reads the tool-call JSON on stdin and answers via
+permissionDecision: unresolved symbols → "ask"; a clean check defers to the
+normal permission flow. It never auto-approves and never exits nonzero. Disable
+per-session with RUNECHO_GUARD_SKIP=1.
+
+PostToolUse is not optional plumbing — omit it and two shipped features go
+silently inert. It records whether you approved an ask, which is the join key
+'runecho-ir fpreport' needs to compute an approval rate at all (without it every
+ask is unrated and the report is empty), and it is also the E6 auto-fresh step
+that re-indexes the file you just edited, so the next check sees symbols you
+added moments ago instead of prompting about them. It never blocks, never alters
+a tool result, and always exits 0.
 CFG
   exit 0
 fi

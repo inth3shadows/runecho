@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/store"
 	"github.com/inth3shadows/runecho/internal/version"
 )
 
@@ -134,25 +135,52 @@ const (
 // below) can attribute the approval to specific symbols without re-joining the
 // log. When the learned-allow feature is enabled, the approval is also folded
 // into the per-repo learned-allow store.
+// The dedupe below is a read-check-write across two calls, and logDecision is
+// deliberately lock-free O_APPEND — so without serialization two hooks firing
+// for the SAME edit can both read "no outcome yet" and both write one. Measured
+// at 5 duplicates in 30 trials with two concurrent --outcome-mode processes,
+// which is exactly the user-settings + project-settings wiring.
+//
+// Same primitive and same reasoning as recordApprovals one function below. The
+// two locks are distinct files and only this function takes both, always in this
+// order, so they cannot deadlock. recordApprovals is called AFTER the lock is
+// released, and only when this process actually wrote the record — otherwise a
+// suppressed duplicate would still train learned-allow, which is the half of the
+// double-count that matters most (it halves the effective approval threshold).
+//
+// Honest scope: store.WithFileLock is fail-open (runs unlocked if the lock can't
+// be taken) and a no-op on non-Unix. So this closes the race on Unix and remains
+// best-effort elsewhere — it is not an absolute guarantee, and the comments and
+// docs must not claim one.
 func logOutcomeForFile(file string) {
 	dir, err := runechoDir()
 	if err != nil {
 		return
 	}
-	ask, ok := recentAsk(filepath.Join(dir, "decisions.jsonl"), file)
-	if !ok {
+
+	var ask decisionRecord
+	var wrote bool
+	store.WithFileLock(filepath.Join(dir, "decisions.jsonl.lock"), func() {
+		rec, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file)
+		if !ok {
+			return
+		}
+		logDecision(decisionRecord{
+			Mode:         "hook",
+			Repo:         rec.Repo,
+			File:         file,
+			Lang:         rec.Lang,
+			Decision:     "outcome",
+			Reason:       "approved",
+			Symbols:      rec.Symbols,
+			LearnSymbols: rec.LearnSymbols,
+		})
+		ask, wrote = rec, true
+	})
+	if !wrote {
 		return
 	}
-	logDecision(decisionRecord{
-		Mode:         "hook",
-		Repo:         ask.Repo,
-		File:         file,
-		Lang:         ask.Lang,
-		Decision:     "outcome",
-		Reason:       "approved",
-		Symbols:      ask.Symbols,
-		LearnSymbols: ask.LearnSymbols,
-	})
+
 	// Train learned-allow only on the hallucination-origin subset — see the
 	// LearnSymbols doc on decisionRecord for why dangling/dropped/duplicate
 	// approvals must not populate the hallucination known-set. Records written
@@ -161,11 +189,42 @@ func logOutcomeForFile(file string) {
 	recordApprovals(dir, ask.Repo, ask.LearnSymbols, time.Now())
 }
 
-// recentAsk returns the MOST RECENT "ask" record for file in decisions.jsonl
-// within the last maxOutcomeAge (and whether one was found). Reads only the tail
-// of the file to keep the hot path fast. The full record is returned (not just a
-// bool) so callers can copy its Symbols/Repo forward onto the outcome record.
-func recentAsk(path, file string) (decisionRecord, bool) {
+// recentUnrecordedAsk returns the MOST RECENT "ask" record for file in
+// decisions.jsonl within the last maxOutcomeAge, and whether one was found that
+// has NOT already had an outcome recorded against it. Reads only the tail of the
+// file to keep the hot path fast. The full record is returned (not just a bool)
+// so callers can copy its Symbols/Repo forward onto the outcome record.
+//
+// The "unrecorded" half exists because a single edit can fire the PostToolUse
+// hook more than once. Claude Code merges hooks from the plugin, the user's
+// settings.json and the project's settings.json, and runs EVERY matching entry;
+// the plugin invokes `guard.sh --outcome-mode` while a hand-merged snippet
+// invokes `runecho-guard --outcome-mode`, so the command strings differ and no
+// dedupe upstream is even possible. Both are documented wirings, so a user with
+// two of them configured is following instructions, not misconfiguring.
+//
+// Without this check each fire appends its own outcome record for one real
+// approval, and both consumers are corrupted rather than merely noisy:
+//
+//   - recordApprovals does e.Count++ per fire, so RUNECHO_GUARD_LEARN reaches
+//     its two-approval threshold on a SINGLE approval — an auto-allow that
+//     trains twice as fast as designed.
+//   - fpreport's `consumed` map is keyed per OUTCOME, not per ask (see the note
+//     at internal/guardstats/fpreport.go:341), so a surplus outcome is claimed
+//     by a later, genuinely-unapproved ask on the same file. The approval rate
+//     comes out INFLATED — silently wrong rather than obviously empty, which is
+//     worse than the missing-recorder bug that made it empty.
+//
+// Deduping here rather than in the configs makes double-wiring harmless however
+// the user arrived at it. It is deliberately keyed on the same (file, window)
+// pair the ask lookup already uses: a second fire for one edit sees the outcome
+// the first fire wrote and no-ops.
+//
+// Ordering is what makes the single pass correct. The log is append-ordered, so
+// resetting the flag on each newly-seen ask means an outcome only suppresses the
+// ask it FOLLOWS — an outcome for a previous edit to the same file cannot mask a
+// genuine new ask.
+func recentUnrecordedAsk(path, file string) (decisionRecord, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return decisionRecord{}, false
@@ -187,24 +246,39 @@ func recentAsk(path, file string) (decisionRecord, bool) {
 	cutoff := time.Now().UTC().Add(-maxOutcomeAge)
 	var match decisionRecord
 	var found bool
+	// recorded tracks whether an outcome has already been written for `match`.
+	// Reset whenever a newer ask supersedes it — see the ordering note above.
+	var recorded bool
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		var rec decisionRecord
 		if json.Unmarshal(sc.Bytes(), &rec) != nil {
 			continue
 		}
-		if rec.Decision != "ask" || rec.File != file {
+		if rec.File != file {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339, rec.TS)
-		if err != nil {
-			continue
+		switch rec.Decision {
+		case "ask":
+			ts, err := time.Parse(time.RFC3339, rec.TS)
+			if err != nil {
+				continue
+			}
+			if ts.After(cutoff) {
+				// Keep scanning: the log is append-ordered, so the last in-window
+				// match is the most recent ask for this file.
+				match, found, recorded = rec, true, false
+			}
+		case "outcome":
+			// An outcome for this file after the ask above means some other
+			// PostToolUse fire already recorded that approval. Not time-filtered
+			// on purpose: it only matters that it came AFTER the ask we matched,
+			// which its position in the append-ordered log already establishes.
+			recorded = true
 		}
-		if ts.After(cutoff) {
-			// Keep scanning: the log is append-ordered, so the last in-window
-			// match is the most recent ask for this file.
-			match, found = rec, true
-		}
+	}
+	if recorded {
+		return decisionRecord{}, false
 	}
 	return match, found
 }

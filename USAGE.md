@@ -213,13 +213,39 @@ runecho-ir repo reindex myproject
 Run this after meaningful work if you want later diffs to compare against the
 new state instead of the old one.
 
-> **Auto-fresh index:** when the Claude Code PostToolUse hook is wired (it ships
-> alongside the PreToolUse guard), each edit incrementally re-indexes just the
-> file you touched into a rolling `auto` snapshot. The guard's next check sees
-> symbols you added moments ago, so you no longer get a false "unknown symbol"
-> prompt for a function defined earlier in the same session — and manual
+> **Auto-fresh index:** the Claude Code PostToolUse hook
+> (`runecho-guard --outcome-mode`) incrementally re-indexes just the file you
+> touched into a rolling `auto` snapshot on each edit. The guard's next check
+> sees symbols you added moments ago, so you no longer get a false "unknown
+> symbol" prompt for a function defined earlier in the same session — and manual
 > `repo reindex` becomes optional rather than a chore. Manual snapshots
 > (`reindex`, `session-start`, …) are never touched by the auto-refresh.
+>
+> **Using the plugin?** It wires this hook for you — do not add a `PostToolUse`
+> entry to `settings.json` as well.
+>
+> **Hand-rolled your `settings.json`?** Check the `PostToolUse` entry is present.
+> **Earlier releases shipped no config that included it**, so an install from
+> that era runs the guard without it, and the symptom is quiet: stale-IR false
+> positives keep appearing, and `runecho-ir fpreport` reports every ask as
+> unrated, because the approval rate is computed by joining asks to outcome
+> records this hook is the only source of. Re-run
+> `install.sh --print-hook-config` for the current snippet.
+>
+> **First edit in a repo can pause.** If the repo has no `.ai/ir.json` yet, this
+> hook builds the whole index once before returning, which on a large tree can
+> take several seconds (it gives up at 30). It is silent while it works. Every
+> edit after that is incremental. Run `runecho-ir repo reindex <name>` once after
+> enrolling to pay that cost up front instead.
+>
+> If you end up with both wired anyway it is handled, not fatal: Claude Code runs
+> every matching hook, so the recorder fires twice, and the second fire sees the
+> outcome the first one wrote and no-ops. That dedupe is what keeps a
+> double-wired install from reporting an *inflated* approval rate instead of an
+> empty one. It serializes the check with an advisory lock, which is best-effort
+> by design — it never blocks an edit, so on a platform without file locking, or
+> if the lock cannot be taken, a rare duplicate is still possible. Prefer wiring
+> the hook once.
 
 ### Inspect recent history
 

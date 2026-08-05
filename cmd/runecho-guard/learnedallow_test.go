@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,7 +152,7 @@ func TestLearnedAllow_PerRepoIsolation(t *testing.T) {
 
 // --- enrich correlation ----------------------------------------------------
 
-func TestRecentAsk_ReturnsSymbolsAndRepo(t *testing.T) {
+func TestRecentUnrecordedAsk_ReturnsSymbolsAndRepo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
 
@@ -166,9 +167,9 @@ func TestRecentAsk_ReturnsSymbolsAndRepo(t *testing.T) {
 		Symbols:  []string{"Foo", "Bar"},
 	})
 
-	rec, ok := recentAsk(filepath.Join(home, "decisions.jsonl"), file)
+	rec, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file)
 	if !ok {
-		t.Fatal("recentAsk should find the ask record")
+		t.Fatal("recentUnrecordedAsk should find the ask record")
 	}
 	if rec.Repo != "r" {
 		t.Errorf("repo = %q, want %q", rec.Repo, "r")
@@ -304,5 +305,133 @@ func TestRecordApprovals_ConcurrentNoLostUpdates(t *testing.T) {
 
 	if got := loadLearnedAllow(home).Repos["r"]["Foo"].Count; got != n {
 		t.Fatalf("Foo count = %d, want %d (lost updates under concurrency)", got, n)
+	}
+}
+
+// --- duplicate-fire suppression (double-wired PostToolUse) -----------------
+
+// A single edit can fire the PostToolUse hook more than once: Claude Code merges
+// hooks from the plugin, user settings.json and project settings.json and runs
+// EVERY match, and the plugin's command string (`guard.sh --outcome-mode`)
+// differs from a hand-merged one (`runecho-guard --outcome-mode`), so nothing
+// upstream can dedupe them. Both are documented wirings.
+//
+// One real approval must still produce exactly ONE outcome record. Two would
+// double-count in both consumers: recordApprovals increments per fire (so
+// learned-allow trains at half the intended threshold) and fpreport's
+// per-outcome `consumed` map lets the surplus be claimed by a later
+// genuinely-unapproved ask, inflating the approval rate.
+func TestLogOutcomeForFile_SecondFireIsSuppressed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	file := "/some/repo/dup.go"
+	logDecision(decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go",
+		Decision: "ask", Reason: "violations",
+		Symbols: []string{"Foo"}, LearnSymbols: []string{"Foo"},
+	})
+
+	logOutcomeForFile(file) // plugin hook
+	logOutcomeForFile(file) // hand-merged settings.json hook, same edit
+
+	if got := countOutcomes(t, home, file); got != 1 {
+		t.Errorf("outcome records = %d, want 1 — a double-wired PostToolUse "+
+			"double-counts one approval", got)
+	}
+}
+
+// The suppression must be scoped to the ask it follows, not to the file
+// forever. A genuine later edit to the same file has to be recordable, or the
+// dedupe silently converts into permanent data loss for that file.
+func TestLogOutcomeForFile_LaterAskIsStillRecorded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	file := "/some/repo/again.go"
+	ask := decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go",
+		Decision: "ask", Reason: "violations",
+		Symbols: []string{"Foo"}, LearnSymbols: []string{"Foo"},
+	}
+
+	logDecision(ask)
+	logOutcomeForFile(file)
+	logOutcomeForFile(file) // duplicate fire, suppressed
+
+	logDecision(ask)        // a second, genuine edit to the same file
+	logOutcomeForFile(file) // must be recorded
+
+	if got := countOutcomes(t, home, file); got != 2 {
+		t.Errorf("outcome records = %d, want 2 (one per genuine ask) — the dedupe "+
+			"is suppressing real approvals, not just duplicate fires", got)
+	}
+}
+
+func countOutcomes(t *testing.T, home, file string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(home, "decisions.jsonl"))
+	if err != nil {
+		t.Fatalf("read decisions.jsonl: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var rec decisionRecord
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec.Decision == "outcome" && rec.File == file {
+			n++
+		}
+	}
+	return n
+}
+
+// Two hooks can fire for one edit genuinely concurrently (user settings.json and
+// project settings.json both invoke the binary directly). The dedupe is a
+// read-check-write and logDecision is lock-free O_APPEND, so without
+// serialization both processes read "no outcome yet" and both write. Measured at
+// 5/30 duplicates before the lock was added.
+//
+// In-process goroutines exercise the same critical section the cross-process
+// flock guards; WithFileLock is advisory and works for both.
+func TestLogOutcomeForFile_ConcurrentFiresWriteOnce(t *testing.T) {
+	// Repeated rounds, because the race window is tiny: the critical section is
+	// an open+stat+seek+scan of a ~200-byte file, and goroutine wakeups from one
+	// close(start) stagger enough that a SINGLE round catches a removed lock only
+	// about 8% of the time (measured: 23 failures in 300 single-round runs). CI
+	// runs -count=1, so a one-round test would wave a dropped lock through ~92%
+	// of the time. 40 rounds puts detection above 95% and still runs in
+	// milliseconds.
+	const rounds = 40
+	for round := 0; round < rounds; round++ {
+		home := t.TempDir()
+		t.Setenv("RUNECHO_HOME", home)
+
+		file := "/some/repo/race.go"
+		logDecision(decisionRecord{
+			Mode: "hook", Repo: "r", File: file, Lang: "go",
+			Decision: "ask", Reason: "violations",
+			Symbols: []string{"Foo"}, LearnSymbols: []string{"Foo"},
+		})
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start // release together to maximise overlap
+				logOutcomeForFile(file)
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if got := countOutcomes(t, home, file); got != 1 {
+			t.Fatalf("round %d: outcome records = %d, want 1 — concurrent PostToolUse "+
+				"fires for one edit are racing the dedupe's read-check-write",
+				round, got)
+		}
 	}
 }

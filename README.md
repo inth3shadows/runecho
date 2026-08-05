@@ -157,9 +157,10 @@ full semantic analysis.
    /plugin marketplace add inth3shadows/runecho
    /plugin install runecho-guard@runecho
    ```
-   The plugin wires the `PreToolUse` hook; it does **not** ship the binary, so
-   step 1 still has to have happened. If the binary is missing the hook defers
-   silently rather than erroring on every edit. Uninstall with
+   The plugin wires both hooks — `PreToolUse` (the guard) and `PostToolUse`
+   (records the outcome and refreshes the index). It does **not** ship the
+   binary, so step 1 still has to have happened. If the binary is missing the
+   hook defers silently rather than erroring on every edit. Uninstall with
    `/plugin uninstall runecho-guard@runecho`.
 
    Without plugin support, print the equivalent `~/.claude/settings.json`

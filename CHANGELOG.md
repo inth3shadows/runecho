@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.29.1] — 2026-08-05
+
+### Changed
+- fix: wire the PostToolUse outcome recorder into every shipped config (#299)
+
 ## [0.29.0] — 2026-08-05
 
 ### Changed

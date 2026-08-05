@@ -273,14 +273,20 @@ func pyBraceDepthSeedFor(absPath string) func(int) int {
 	depth := 0
 	for i, ln := range fileLines {
 		prefix[i] = depth
-		var scan string
-		scan, open = stripLiteralsStateful(LangPython, ln, open)
-		depth += strings.Count(scan, "{") - strings.Count(scan, "}")
-		if depth < 0 {
-			// A stray unmatched `}` must not leave the running depth negative —
-			// see extractRefs' identical clamp for why (round-3 review finding).
-			depth = 0
-		}
+		// pyLineCtx.depthAtEnd is the one accounting function the three DICT-DEPTH
+		// consumers go through — extractRefs' per-line advance, the hook's
+		// PyBraceDepthBefore, and this pre-commit seed. (PyDeclaredNames and
+		// PyParamNames still run their own pyBracketDelta over the CODE scan, so
+		// they keep the pre-#291 f-string exposure — that is #294, not this.) These
+		// three were hand-kept copies, and this one silently kept the old
+		// arithmetic: it counted an
+		// f-string interpolation's braces as dict nesting, so a hunk below a
+		// multi-line interpolation was seeded at depth 1 where the hook seeded 0,
+		// and the pre-commit path still produced the false positive #291 closed
+		// (found by code review on this PR).
+		var braceScan string
+		_, braceScan, open = stripLiteralsBraces(LangPython, ln, open)
+		depth = pyLineCtx{scan: braceScan, base: depth}.depthAtEnd()
 	}
 	prefix[len(fileLines)] = depth
 	return func(lineNo int) int {

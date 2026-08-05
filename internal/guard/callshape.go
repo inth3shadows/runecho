@@ -124,6 +124,17 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 	// blanked (length-preserving) so a paren or `=` inside a string cannot alter
 	// the parse, and a comment cannot close an argument list.
 	scans := make([]string, len(lines))
+	// braceScans is scans with f-string interpolation regions additionally
+	// blanked — the statement-structure view defNamesInContext reads (#291/#292).
+	// Captured in the same masking pass so the per-line lookup below costs no
+	// second strip, and so it carries the run's multi-line string state rather
+	// than re-masking each line from scratch. NOTE: no brace-depth seed is
+	// threaded here, so every ctx starts at depth 0 and a key inside an unchanged
+	// multi-line dict still reads as a definition. That matches the behaviour
+	// this replaced (defNames was equivalent to depth 0) and is not what this
+	// context is here to fix; call-shape has no cross-line brace tracking to
+	// seed from.
+	braceScans := make([]string, len(lines))
 	// runEnd[i] is one past the last line of i's contiguous run. Argument lists are
 	// only followed within a run: a diff hunk's added lines may not be contiguous,
 	// and neither bracket nor string continuity survives a gap.
@@ -151,11 +162,13 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 			// A whole-line comment contributes no code, but it does not break a
 			// run: a call list may legitimately span it.
 			scans[i] = ""
+			braceScans[i] = ""
 			continue
 		}
-		scan, newOpen := stripLiteralsStateful(lang, l.Text, open)
+		scan, braceScan, newOpen := stripLiteralsBraces(lang, l.Text, open)
 		open = newOpen
 		scans[i] = scan
+		braceScans[i] = braceScan
 	}
 	for j := runFrom; j < len(lines); j++ {
 		runEnd[j] = len(lines)
@@ -198,7 +211,7 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 		// argument — reading it as a call would invent a caller that does not
 		// exist. Skipping per-name (not per-line) keeps a genuine call sharing the
 		// line, e.g. `def f(x=g(y=1))`.
-		defs := defNames(lang, l.Text)
+		defs := defNamesInContext(lang, l.Text, pyLineCtx{scan: braceScans[i]})
 
 		for _, idx := range reCallIdent.FindAllStringSubmatchIndex(scan, -1) {
 			fullStart := idx[0]

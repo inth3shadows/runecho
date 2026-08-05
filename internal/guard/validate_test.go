@@ -87,6 +87,118 @@ func TestRun_HunkInsideDocstringNotFlagged(t *testing.T) {
 	}
 }
 
+// TestRun_DictKeyEditedInExistingLiteralIsChecked pins the code-review finding
+// on PR #290: the #289 fix's own tests only covered a dict literal wholly
+// contained in the diff. The dominant real-world edit shape is adding/editing ONE
+// key inside an EXISTING multi-line dict — the opening `{` is unchanged context
+// above the hunk and never appears in AddedLines. Without AbsPath seeding
+// pyBraceDepth (the counterpart to the #145 open-string seed), that hunk starts
+// scanning at depth 0 and the key misreads as a top-level definition, never
+// checked as a reference.
+func TestRun_DictKeyEditedInExistingLiteralIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	// Dict opens on line 1 and stays open through the edited key (line 3).
+	content := "result = {\n" +
+		"    \"a\": 1,\n" +
+		"    MAX_VALUE: 5,\n" +
+		"}\n"
+	path := filepath.Join(dir, "runner.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diffs := []FileDiff{{
+		Path:    "runner.py",
+		AbsPath: path,
+		AddedLines: []AddedLine{
+			{LineNo: 3, Text: "    MAX_VALUE: 5,"},
+		},
+	}}
+	v := Run(map[string]struct{}{}, "", diffs)
+	if len(v) != 1 || v[0].Symbol != "MAX_VALUE" {
+		t.Fatalf("MAX_VALUE must be checked as a reference (and flagged, unresolved) via the AbsPath seed, got %+v", v)
+	}
+
+	// Control: without the seed, the same hunk starts scanning at depth 0, so
+	// MAX_VALUE misreads as a definition and is never checked — the exact false
+	// negative this seeding closes.
+	diffs[0].AbsPath = ""
+	if v := Run(map[string]struct{}{}, "", diffs); len(v) != 0 {
+		t.Fatalf("unseeded control should NOT flag MAX_VALUE (misread as a definition); got %+v — test no longer covers seeding", v)
+	}
+}
+
+// TestRun_DocstringSeedThreadedIntoPass1 pins a round-3 code-review finding on
+// PR #290: Pass 1 (extractDefsSeeded) got braceDepthSeed but not openSeed, so its
+// own local string-open tracker started unseeded at each hunk while Pass 2's
+// (extractRefs) started correctly seeded from context above. On a hunk that
+// begins INSIDE a pre-existing docstring, that desync meant Pass 1 read the
+// docstring's own closing `"""` as OPENING a new string, and a `{` in the prose
+// above it (never really code) as a genuine dict-open — driving Pass 1's brace
+// count to 1 by the time the hunk reaches TIMEOUT_S, which reads as a dict key
+// and gets dropped from `known`, even though it is really a same-hunk top-level
+// definition after the docstring closes. Pass 2 always flags TIMEOUT_S as a
+// reference (line 5's `sleep(TIMEOUT_S)` argument doesn't depend on brace depth
+// at all), so the desync alone turns a real definition into a false positive.
+func TestRun_DocstringSeedThreadedIntoPass1(t *testing.T) {
+	added := []AddedLine{
+		{LineNo: 1, Text: `    Example JSON: {`},
+		{LineNo: 2, Text: `    more prose here`},
+		{LineNo: 3, Text: `    """`},
+		{LineNo: 4, Text: `    TIMEOUT_S = 30`},
+		{LineNo: 5, Text: `    return sleep(TIMEOUT_S)`},
+	}
+	diffs := []FileDiff{{
+		Path:       "m.py",
+		AddedLines: added,
+		// The hunk starts on line 1, already INSIDE an open docstring.
+		SeedByLine: map[int]string{1: `"""`},
+	}}
+	v := Run(map[string]struct{}{"sleep": {}}, "", diffs)
+	if len(v) != 0 {
+		t.Fatalf("TIMEOUT_S is a genuine same-hunk definition once the docstring (masked, seeded) closes on line 3; Pass 1 must not desync from Pass 2's masking, got %+v", v)
+	}
+}
+
+// TestExtractRefs_StrayCloseBraceDoesNotDesyncLaterDict and its ExtractDefs
+// counterpart below pin a round-3 code-review finding on PR #290: pyBraceDepth
+// was never floor-clamped at 0, unlike PyDeclaredNames' own bracket counter in
+// this file (which clamps for the identical reason). A stray unmatched `}`
+// earlier in the same added-line run — closing something opened in unseeded/
+// unchanged context — drove depth negative, so a REAL dict opened a few lines
+// later read as depth 0 and reopened the exact #289 false negative this whole
+// seeding mechanism exists to close.
+func TestExtractRefs_StrayCloseBraceDoesNotDesyncLaterDict(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `    "b": 2,`},
+		{LineNo: 2, Text: "}"},
+		{LineNo: 3, Text: "cfg2 = {"},
+		{LineNo: 4, Text: "    MAX_VALUE: 5,"},
+		{LineNo: 5, Text: "}"},
+	}
+	refs := ExtractRefs(LangPython, lines)
+	for _, r := range refs {
+		if r.Name == "MAX_VALUE" {
+			return
+		}
+	}
+	t.Errorf("ExtractRefs(%+v) = %+v, want a MAX_VALUE reference — a stray unmatched `}` earlier in the run must not leave depth negative", lines, refs)
+}
+
+func TestExtractDefs_StrayCloseBraceDoesNotDesyncLaterDict(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `    "b": 2,`},
+		{LineNo: 2, Text: "}"},
+		{LineNo: 3, Text: "cfg2 = {"},
+		{LineNo: 4, Text: "    MAX_VALUE: 5,"},
+		{LineNo: 5, Text: "}"},
+	}
+	for _, d := range ExtractDefs(LangPython, lines) {
+		if d == "MAX_VALUE" {
+			t.Fatalf("ExtractDefs(%+v) must NOT read MAX_VALUE as a definition — it is a dict key inside cfg2's open literal, and a stray unmatched `}` earlier in the run must not leave depth negative", lines)
+		}
+	}
+}
+
 func TestRun_HallucinatedCall(t *testing.T) {
 	symbols := map[string]struct{}{"ProcessFoo": {}}
 	diffs := []FileDiff{{

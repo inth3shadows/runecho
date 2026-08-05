@@ -47,6 +47,23 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		}
 	}
 
+	// openSeeds/braceSeeds are computed once per diff, up front, and reused across
+	// both passes below. Pass 1 (extractDefsSeeded) needs BOTH, not just
+	// braceSeed: without the same openSeed Pass 2 uses, Pass 1's own local
+	// string-open tracking would start unseeded at each hunk, so a hunk beginning
+	// inside a pre-existing docstring has its closing `"""` misread as OPENING a
+	// new string — desyncing Pass 1's brace count from Pass 2's correctly-masked
+	// one (round-3 review finding on PR #290). Hoisting also means openSeedFor and
+	// pyBraceDepthSeedFor each read a Python fd's AbsPath file only once, shared
+	// by both passes, rather than once per pass.
+	openSeeds := make([]func(lineNo int) string, len(diffs))
+	braceSeeds := make([]func(lineNo int) int, len(diffs))
+	for i, fd := range diffs {
+		lang := LangFor(fd.Path)
+		openSeeds[i] = seedFunc(lang, fd)
+		braceSeeds[i] = braceDepthSeedFunc(lang, fd)
+	}
+
 	// Pass 1: collect all new definitions AND imported names across the entire
 	// diff and add to known. An imported name (`from pathlib import Path`,
 	// `import {Foo} from './m'`) is a real, bound symbol — a bare call to it is
@@ -57,9 +74,13 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// the indexed IR: generator.go indexes each file's bound import names under the
 	// "import_name" symbol kind, so SymbolsForLatestSnapshot already carries them
 	// into `symbols` here — the deeper half of #76/#80, closed by PR #82.
-	for _, fd := range diffs {
+	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
-		for _, def := range ExtractDefs(lang, fd.AddedLines) {
+		// Seeded so a dict key added to an EXISTING multi-line literal (opener
+		// unchanged, outside the diff) is not added to known as a definition here
+		// — which would silently suppress Pass 2's now-correct read of it as a
+		// reference. See extractDefsSeeded.
+		for _, def := range extractDefsSeeded(lang, fd.AddedLines, openSeeds[i], braceSeeds[i]) {
 			known[def] = struct{}{}
 		}
 		for _, imp := range ExtractImports(lang, fd.AddedLines) {
@@ -113,7 +134,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// Dedupe by (file, symbol) — report first line only.
 	seen := make(map[string]struct{})
 	var violations []Violation
-	for _, fd := range diffs {
+	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		if lang == LangUnknown {
 			continue
@@ -121,8 +142,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
-		openSeed := seedFunc(lang, fd)
-		for _, ref := range extractRefs(lang, fd.AddedLines, openSeed) {
+		for _, ref := range extractRefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i]) {
 			if _, ok := known[ref.Name]; ok {
 				continue
 			}
@@ -201,6 +221,69 @@ func openSeedFor(lang Lang, absPath string) func(int) string {
 	}
 	prefix[len(fileLines)] = open
 	return func(lineNo int) string {
+		idx := lineNo - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(prefix) {
+			idx = len(prefix) - 1
+		}
+		return prefix[idx]
+	}
+}
+
+// braceDepthSeedFunc is braceDepthSeed's counterpart to seedFunc: returns the
+// pyBraceDepth seed for a diff, mapping a line number to the {}-nesting depth in
+// effect at the START of that line (0 when no seed is available — unseeded
+// scanning, depth always starts at 0). Python-only: pyBraceDepth is never
+// consulted for any other language, so there is nothing to seed.
+func braceDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
+	if lang != LangPython {
+		return nil
+	}
+	if fd.AbsPath != "" {
+		return pyBraceDepthSeedFor(fd.AbsPath)
+	}
+	if len(fd.PyBraceDepthByLine) > 0 {
+		seeds := fd.PyBraceDepthByLine
+		return func(lineNo int) int { return seeds[lineNo] }
+	}
+	return nil
+}
+
+// pyBraceDepthSeedFor reads absPath and returns a function mapping a 1-based
+// new-file line number to the {}-brace nesting depth in effect at the START of
+// that line — openSeedFor's counterpart for pyBraceDepth (#289): a hunk that
+// begins inside an already-open (unchanged) multi-line dict literal starts
+// scanning at depth 0 without this, the same class of leak openSeedFor closes for
+// multi-line strings. Returns nil (no seeding) on the same conditions openSeedFor
+// does. A second, independent read of absPath from openSeedFor's — acceptable
+// here since this only runs on the pre-commit path (not the hook's latency
+// budget) and stays under the same maxSeedFileBytes cap.
+func pyBraceDepthSeedFor(absPath string) func(int) int {
+	data, err := os.ReadFile(absPath)
+	if err != nil || len(data) > maxSeedFileBytes {
+		return nil
+	}
+	fileLines := strings.Split(string(data), "\n")
+	// prefix[k] is the brace depth at the START of 1-based line k+1, threaded the
+	// same way openSeedFor threads open-string state.
+	prefix := make([]int, len(fileLines)+1)
+	open := ""
+	depth := 0
+	for i, ln := range fileLines {
+		prefix[i] = depth
+		var scan string
+		scan, open = stripLiteralsStateful(LangPython, ln, open)
+		depth += strings.Count(scan, "{") - strings.Count(scan, "}")
+		if depth < 0 {
+			// A stray unmatched `}` must not leave the running depth negative —
+			// see extractRefs' identical clamp for why (round-3 review finding).
+			depth = 0
+		}
+	}
+	prefix[len(fileLines)] = depth
+	return func(lineNo int) int {
 		idx := lineNo - 1
 		if idx < 0 {
 			idx = 0

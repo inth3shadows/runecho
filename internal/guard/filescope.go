@@ -87,10 +87,22 @@ func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnow
 		return nil
 	}
 
-	scope := pyFileScope(wholeFile)
+	// wholeFile is one contiguous run from line 1, so ExtractDefs' own tracking
+	// computes correctly on it unseeded — the opening `{` of any dict literal is
+	// already IN wholeFile. addedLines is not: it's just the hunk, so a key added
+	// to an EXISTING dict (opener in unchanged context, outside the hunk) needs
+	// the same open-string AND brace-depth seeds extractRefs uses below — without
+	// BOTH, ExtractDefs misreads the key as a definition (missing braceSeed) or
+	// desyncs from extractRefs' masking on a hunk beginning inside a docstring
+	// (missing openSeed) and pyFileScope wrongly binds it into scope, suppressing
+	// the exact file-scope violation this check exists to catch (code-review
+	// findings on PR #290, rounds 2 and 3).
+	openSeed := seedFunc(lang, fd)
+	braceSeed := braceDepthSeedFunc(lang, fd)
+	scope := pyFileScope(wholeFile, nil, nil)
 	// The edit itself binds names too — a def or import introduced by this very
 	// hunk must resolve, or every newly-added helper would flag on its first use.
-	for name := range pyFileScope(addedLines) {
+	for name := range pyFileScope(addedLines, openSeed, braceSeed) {
 		scope[name] = struct{}{}
 	}
 
@@ -99,7 +111,7 @@ func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnow
 	// string/comment content, and dedupes by name (first occurrence wins) — so the
 	// extraction surface here is IDENTICAL to the additive check's, seed included.
 	// The only thing this check changes is which set the name is resolved against.
-	for _, ref := range extractRefs(lang, addedLines, seedFunc(lang, fd)) {
+	for _, ref := range extractRefs(lang, addedLines, openSeed, braceSeed) {
 		if _, inRepo := repoKnown[ref.Name]; !inRepo {
 			continue // the firewall: invented symbols belong to the additive check
 		}
@@ -137,13 +149,18 @@ func abstainsFileScope(lines []AddedLine) bool {
 // assignment targets, loop/with/except targets, parameters, and global/nonlocal
 // declarations. It reuses the same primitives the additive check and the
 // dropped-import check already rely on, so the binding rules stay consistent
-// across every guard check rather than drifting per-feature.
-func pyFileScope(lines []AddedLine) map[string]struct{} {
+// across every guard check rather than drifting per-feature. openSeed/
+// braceDepthSeed are threaded straight to extractDefsSeeded — nil,nil is correct
+// for a self-contained, contiguous-from-line-1 slice (wholeFile); a hunk slice
+// (addedLines) needs the caller's real seeds (BOTH — see extractDefsSeeded's own
+// doc for why openSeed alone missing desyncs it from extractRefs), or a dict key
+// added to an existing literal misreads as a definition (see FileScopeViolations).
+func pyFileScope(lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) map[string]struct{} {
 	scope := make(map[string]struct{})
 	for _, n := range ExtractImports(LangPython, lines) {
 		scope[n] = struct{}{}
 	}
-	for _, n := range ExtractDefs(LangPython, lines) {
+	for _, n := range extractDefsSeeded(LangPython, lines, openSeed, braceDepthSeed) {
 		scope[n] = struct{}{}
 	}
 	for n := range LocallyBoundNames(LangPython, lines) {

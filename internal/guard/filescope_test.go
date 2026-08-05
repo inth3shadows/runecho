@@ -378,3 +378,35 @@ func TestFileScope_DocstringSeedIsHonored(t *testing.T) {
 		t.Errorf("control must flag without a seed, else the seeded assertion is vacuous; got %v", flaggedNames(got))
 	}
 }
+
+// TestFileScope_BraceDepthSeedIsHonored pins the code-review finding on PR #290:
+// pyFileScope(addedLines) called ExtractDefs with no brace-depth seed at all, so a
+// SCREAMING_SNAKE key added to an EXISTING multi-line dict literal — whose opener
+// sits in unchanged context above the hunk — was folded into `scope` as a
+// DEFINITION, suppressing the exact file-scope violation this check exists to
+// catch (a real repo symbol used in a file that never bound it).
+func TestFileScope_BraceDepthSeedIsHonored(t *testing.T) {
+	whole := linesOf(
+		`import pytest`,
+		``,
+		`def go():`,
+		`    result = {`,
+		`        "a": 1,`,
+		`    }`,
+	)
+	block := []AddedLine{{LineNo: 1, Text: "        MAX_VALUE: 5,"}}
+	repo := repoKnown("MAX_VALUE", "pytest")
+
+	// Hook path: the caller's seed says this block starts inside an open `{`.
+	seeded := FileDiff{AddedLines: block, PyBraceDepthByLine: map[int]int{1: 1}}
+	if got := FileScopeViolations(LangPython, whole, seeded, repo); len(got) != 1 || got[0].Symbol != "MAX_VALUE" {
+		t.Errorf("MAX_VALUE must be checked as a reference and flagged out-of-scope, got %v", flaggedNames(got))
+	}
+
+	// Control: same block, no seed → misread as a top-level const definition and
+	// folded into scope, silently suppressing the violation.
+	unseeded := FileDiff{AddedLines: block}
+	if got := FileScopeViolations(LangPython, whole, unseeded, repo); len(got) != 0 {
+		t.Errorf("unseeded control should NOT flag (misread as a definition); got %v — test no longer covers seeding", flaggedNames(got))
+	}
+}

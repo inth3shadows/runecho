@@ -712,6 +712,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// file, so an Edit landing inside a docstring or string literal is masked
 		// instead of scanned as code. fileLines is the read already done above.
 		SeedByLine: hookSeedByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, fileLines, lang),
+		// Same idea for pyBraceDepth (#289): an Edit that adds a dict key without
+		// touching the literal's opening `{` line — the opener is unchanged context
+		// above the block — must not start scanning at depth 0 regardless of the
+		// file's real state there, or the key reads as a definition instead of a
+		// reference. Python-only; hookBraceDepthByLine returns nil for other langs.
+		PyBraceDepthByLine: hookBraceDepthByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, fileLines, lang),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -1122,16 +1128,40 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 // behavior, so a bad match degrades to today's noise rather than to a missed
 // hallucination.
 func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
-	if len(fileLines) == 0 {
+	indices := hookBlockIndices(toolName, oldString, edits, fileLines)
+	if len(indices) == 0 {
 		return nil
 	}
 	seeds := make(map[int]string)
+	for start, idx := range indices {
+		if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
+			seeds[start] = open
+		}
+	}
+	if len(seeds) == 0 {
+		return nil
+	}
+	return seeds
+}
+
+// hookBlockIndices resolves, per added-line block, the 0-based index in
+// fileLines where that block's PRE-EDIT text sits — the position both
+// hookSeedByLine and hookBraceDepthByLine need. Shared here (code-review finding
+// on PR #290's brace-depth-seeding follow-up) rather than each independently
+// running blockStartLine plus the MultiEdit line arithmetic: two copies of that
+// arithmetic could silently diverge on a future edit to one but not the other,
+// misaligning which synthetic LineNo carries which seed — exactly the drift risk
+// this consolidation removes. See hookSeedByLine's doc for the matching rationale
+// (fail-open on an unmatched or ambiguous block).
+func hookBlockIndices(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine) map[int]int {
+	if len(fileLines) == 0 {
+		return nil
+	}
+	indices := make(map[int]int)
 	switch toolName {
 	case "Edit":
 		if idx := blockStartLine(fileLines, oldString); idx >= 0 {
-			if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
-				seeds[1] = open
-			}
+			indices[1] = idx
 		}
 	case "MultiEdit":
 		// Mirror hookAddedLines' block selection AND AddedLinesWithGap's line
@@ -1150,10 +1180,40 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 			no += len(strings.Split(e.NewString, "\n"))
 			first = false
 			if idx := blockStartLine(fileLines, e.OldString); idx >= 0 {
-				if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
-					seeds[start] = open
-				}
+				indices[start] = idx
 			}
+		}
+	}
+	if len(indices) == 0 {
+		return nil
+	}
+	return indices
+}
+
+// hookBraceDepthByLine is hookSeedByLine's counterpart for pyBraceDepth (#289):
+// computes, per added-line block, the {}-brace nesting depth in effect where that
+// block sits in the PRE-EDIT file. Without it, an Edit that adds a dict key
+// without touching the literal's opening `{` line — the opener is unchanged
+// context above the block, so it is never among the hook's added lines — starts
+// scanning at depth 0 regardless of the file's real state, and the key at
+// statement-start position reads as a definition rather than a reference. Shares
+// hookSeedByLine's block-position resolution via hookBlockIndices, so the two
+// seeds always land on the same block boundaries by construction rather than by
+// two hand-kept-in-sync copies; only the per-line state read off fileLines
+// differs (PyBraceDepthBefore instead of OpenStateBefore). Python-only: returns
+// nil for every other language, since pyBraceDepth is never consulted there.
+func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
+	if lang != guard.LangPython {
+		return nil
+	}
+	indices := hookBlockIndices(toolName, oldString, edits, fileLines)
+	if len(indices) == 0 {
+		return nil
+	}
+	seeds := make(map[int]int)
+	for start, idx := range indices {
+		if depth := guard.PyBraceDepthBefore(fileLines, idx); depth != 0 {
+			seeds[start] = depth
 		}
 	}
 	if len(seeds) == 0 {

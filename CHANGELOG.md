@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-08-05
+
+### Changed
+- guard: fix multi-line dict-key false negative in appendConstRefs/defNames (#290)
+
 ## [0.26.0] — 2026-08-04
 
 ### Changed

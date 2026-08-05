@@ -1134,7 +1134,7 @@ func TestParseJSBindingTarget_NestedObjectDestructure(t *testing.T) {
 // looks identical to one. The distinguishing signal is position: MAX_VALUE is
 // preceded by `{`, not by only whitespace back to the start of the line.
 func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `result = {MAX_VALUE: 5}`, 1, nil, nil, false)
 	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
 		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
 	}
@@ -1145,9 +1145,52 @@ func TestAppendConstRefs_DictKeyIsAReference(t *testing.T) {
 // statement-start type annotation (`MAX_VALUE: int = 5`) is still a
 // definition, not a use.
 func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE: int = 5`, 1, nil, nil, false)
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — this is a definition, not a use", refs)
+	}
+}
+
+// TestAppendConstRefs_MultiLineDictKeyIsAReference pins #289: a dict key on
+// its own line inside a multi-line literal (`result = {\n    MAX_VALUE: 5,\n}`)
+// is preceded by only whitespace on ITS line — indistinguishable, at a single-
+// line position check, from a genuine statement-start annotation. The caller
+// (ExtractRefs) tracks whether a `{` opened on an earlier line is still
+// unclosed and passes that through as inOpenBrace; when true, a name preceded
+// by whitespace must still be read as a dict key, not a definition.
+func TestAppendConstRefs_MultiLineDictKeyIsAReference(t *testing.T) {
+	refs := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, true)
+	if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
+		t.Errorf("got %+v, want a single MAX_VALUE reference", refs)
+	}
+
+	// Same line shape, but inOpenBrace=false (true statement-start) — still a
+	// definition, guarding against the fix over-firing.
+	notInDict := appendConstRefs(nil, map[string]struct{}{}, `    MAX_VALUE: 5,`, 2, nil, nil, false)
+	if len(notInDict) != 0 {
+		t.Errorf("got %+v, want none — not inside an open brace, this is a definition", notInDict)
+	}
+}
+
+// TestExtractRefs_MultiLineDictKey is the end-to-end pin for #289: a real
+// multi-line dict literal fed through the full ExtractRefs pipeline (which is
+// what threads the cross-line brace-depth state) must flag the key as a
+// reference.
+func TestExtractRefs_MultiLineDictKey(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: "result = {"},
+		{LineNo: 2, Text: "    MAX_VALUE: 5,"},
+		{LineNo: 3, Text: "}"},
+	}
+	refs := ExtractRefs(LangPython, lines)
+	found := false
+	for _, r := range refs {
+		if r.Name == "MAX_VALUE" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ExtractRefs(%+v) = %+v, want MAX_VALUE reference", lines, refs)
 	}
 }
 
@@ -1157,11 +1200,11 @@ func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
 // list sharing the same shape (`foo(MAX_VALUE, OTHER_VALUE)`) must still be
 // treated as two genuine references.
 func TestAppendConstRefs_TupleAssignTargetsNotReferences(t *testing.T) {
-	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil, nil)
+	refs := appendConstRefs(nil, map[string]struct{}{}, `MAX_VALUE, OTHER_VALUE = 5, 10`, 1, nil, nil, false)
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — both names are tuple-assignment targets", refs)
 	}
-	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil, nil)
+	callRefs := appendConstRefs(nil, map[string]struct{}{}, `foo(MAX_VALUE, OTHER_VALUE)`, 1, nil, nil, false)
 	if len(callRefs) != 2 {
 		t.Errorf("got %+v, want 2 references (call arguments)", callRefs)
 	}
@@ -1227,7 +1270,7 @@ func TestDefNames_ChainedAssignmentAnyLength(t *testing.T) {
 func TestAppendConstRefs_ChainedAssignmentTargetsNotReferences(t *testing.T) {
 	text := "MAX_A = OTHER_B = 5"
 	defs := defNames(LangPython, text)
-	refs := appendConstRefs(nil, map[string]struct{}{}, text, 1, nil, defs)
+	refs := appendConstRefs(nil, map[string]struct{}{}, text, 1, nil, defs, false)
 	if len(refs) != 0 {
 		t.Errorf("got %+v, want none — both names are chained-assignment targets", refs)
 	}

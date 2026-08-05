@@ -902,10 +902,14 @@ var rePyTupleAssignTargets = regexp.MustCompile(`^\s*((?:[A-Za-z_]\w*\s*,\s*)+[A
 // statement-start position (nothing but whitespace precedes it on the line) —
 // `{MAX: 5}` has MAX preceded by `{`, so it is a dict KEY (a genuine reference),
 // not a type annotation, even though the text after it looks identical to one.
-// Tuple-assignment targets are identified separately (rePyTupleAssignTargets)
-// since a name anywhere in `MAX, OTHER = 5, 10`'s target list — not only the
-// first — is being defined, not used.
-func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}) []Ref {
+// inOpenBrace covers the same case when the `{` is on a previous line (a
+// multi-line dict literal): the caller threads whether an unclosed `{` is
+// still open at the START of this line, since a name preceded by only
+// whitespace there is just as much a dict key as one preceded by `{` inline
+// (#289). Tuple-assignment targets are identified separately
+// (rePyTupleAssignTargets) since a name anywhere in `MAX, OTHER = 5, 10`'s
+// target list — not only the first — is being defined, not used.
+func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo int, builtins map[string]struct{}, defs map[string]struct{}, inOpenBrace bool) []Ref {
 	tupleTargetsEnd := -1
 	if m := rePyTupleAssignTargets.FindStringSubmatchIndex(scan); m != nil {
 		tupleTargetsEnd = m[3] // end of the captured target-list span (group 1)
@@ -923,7 +927,7 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 			continue // part of a tuple-assignment LHS target list — a definition
 		}
 		rest := strings.TrimLeft(scan[e:], " \t")
-		if strings.TrimSpace(scan[:s]) == "" {
+		if strings.TrimSpace(scan[:s]) == "" && !inOpenBrace {
 			if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
 				continue // `NAME: type = value` / `NAME = value` — a definition, not a use
 			}
@@ -1017,6 +1021,14 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 	// sufficient and safe. Reset on a diff-hunk gap alongside `open`, since brace
 	// continuity can't be assumed across a gap.
 	inIface := false
+	// pyBraceDepth counts unclosed `{`/`}` nesting carried across lines, for
+	// Python only. appendConstRefs' statement-start check can't see past its own
+	// line, so a dict key on its own line inside a still-open multi-line dict
+	// literal (`result = {\n    MAX_VALUE: 5,\n}`) looks identical to a genuine
+	// top-level annotation — this is a running counter, not a boolean like
+	// inIface, because dict literals nest arbitrarily (#289). Reset on a
+	// diff-hunk gap alongside open/inIface for the same reason.
+	pyBraceDepth := 0
 	for i, l := range lines {
 		text := l.Text
 		if i == 0 || l.LineNo != prevNo+1 {
@@ -1031,6 +1043,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 				open = ""
 			}
 			inIface = false
+			pyBraceDepth = 0
 		}
 		prevNo = l.LineNo
 		// Skip whole-line comments (only meaningful when not mid-string).
@@ -1043,6 +1056,13 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 		// stay correct. open threads multi-line string state across lines.
 		scan, newOpen := stripLiteralsStateful(lang, text, open)
 		open = newOpen
+		// Captured BEFORE this line's own braces are counted: appendConstRefs needs
+		// to know whether a dict literal was already open at the START of this line,
+		// not the depth after this line's own `{`/`}` are applied.
+		pyInOpenBrace := lang == LangPython && pyBraceDepth > 0
+		if lang == LangPython {
+			pyBraceDepth += strings.Count(scan, "{") - strings.Count(scan, "}")
+		}
 		// Go interface bodies hold method signatures, not calls (see inIface). Braces
 		// are counted on the stripped scan (literals blanked, so braces in strings
 		// don't count).
@@ -1075,7 +1095,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 		// definition's own name is a self-match, not a call to validate — but any
 		// OTHER call sharing the line (a one-line function body, a Python default-
 		// arg factory) still is, so we skip per-name rather than the whole line.
-		defs := defNames(lang, text)
+		defs := defNamesInContext(lang, text, pyInOpenBrace)
 		callRe := reCallIdent
 		switch lang {
 		case LangGo:
@@ -1126,7 +1146,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string)
 		if !isImportLine(lang, text) {
 			switch lang {
 			case LangPython:
-				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins, defs)
+				refs = appendConstRefs(refs, seen, scan, l.LineNo, builtins, defs, pyInOpenBrace)
 			case LangJS:
 				refs = appendTypeRefs(refs, seen, scan, l.LineNo)
 			}
@@ -1654,6 +1674,18 @@ func isInlineCommentAt(lang Lang, b []byte, i int) bool {
 // its last target). pyChainedAssignTargets splits on every top-level bare `=`
 // instead, which has no such limit.
 func defNames(lang Lang, text string) map[string]struct{} {
+	return defNamesInContext(lang, text, false)
+}
+
+// defNamesInContext is defNames, plus the caller's cross-line open-brace state
+// for Python (#289): rePyConstDef's statement-start anchor (`^\s*NAME\s*[:=]`)
+// has no way to see that the `{` opening a multi-line dict literal sits on an
+// earlier line, so a dict key on its own line (`MAX_VALUE: 5,` inside
+// `result = {\n    MAX_VALUE: 5,\n}`) reads identically to a genuine top-level
+// constant definition. inOpenBrace=true skips rePyConstDef so the name falls
+// through as a reference instead — mirrors appendConstRefs' own inOpenBrace
+// check for the same ambiguity.
+func defNamesInContext(lang Lang, text string, inOpenBrace bool) map[string]struct{} {
 	names := make(map[string]struct{})
 	capture := func(re *regexp.Regexp) {
 		if m := re.FindStringSubmatch(text); m != nil {
@@ -1671,7 +1703,9 @@ func defNames(lang Lang, text string) map[string]struct{} {
 	case LangPython:
 		capture(rePyDef)
 		capture(rePyClassDef)
-		capture(rePyConstDef)
+		if !inOpenBrace {
+			capture(rePyConstDef)
+		}
 		for _, n := range pyChainedAssignTargets(text) {
 			names[n] = struct{}{}
 		}

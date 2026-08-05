@@ -2,6 +2,7 @@ package guard
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1762,5 +1763,35 @@ func BenchmarkAppendConstRefsWideLine(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ExtractRefs(LangPython, lines)
+	}
+}
+
+// TestExtractDefs_PythonOrderIsDeterministic pins #296. The Python branch
+// collects into a map, and Go deliberately randomizes map iteration order, so
+// a line defining more than one name returned a different order across runs.
+// Every in-tree caller folds the result into a set and could not see it, but
+// ExtractDefs is exported with no ordering caveat: a golden-output test or any
+// order-sensitive consumer would have flaked about half the time.
+//
+// Repeating the call is what makes this a real pin rather than a coincidence —
+// a single call passes ~50% of the time on the unfixed code.
+func TestExtractDefs_PythonOrderIsDeterministic(t *testing.T) {
+	lines := []AddedLine{
+		{LineNo: 1, Text: `MAX_A = OTHER_B = THIRD_C = 5`},
+		{LineNo: 2, Text: `ZED_A, ALPHA_B = 1, 2`},
+		{LineNo: 3, Text: `def handler(x):`},
+	}
+	first := ExtractDefs(LangPython, lines)
+	for i := 0; i < 64; i++ {
+		if got := ExtractDefs(LangPython, lines); !slices.Equal(got, first) {
+			t.Fatalf("run %d returned %v, first run returned %v — order must not vary", i, got, first)
+		}
+	}
+
+	// Line order is preserved; only names WITHIN a line are sorted, since line
+	// order is the half of the ordering that carries meaning.
+	want := []string{"MAX_A", "OTHER_B", "THIRD_C", "ALPHA_B", "ZED_A", "handler"}
+	if !slices.Equal(first, want) {
+		t.Errorf("ExtractDefs = %v, want %v", first, want)
 	}
 }

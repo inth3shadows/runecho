@@ -1,7 +1,9 @@
 package guard
 
 import (
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -182,10 +184,16 @@ var (
 // methods, and — for Python/TS — classes, module constants, and type-level
 // declarations). Used in pass 1 to include same-commit definitions in the known
 // set, so a reference to something defined elsewhere in the edit/file does not
-// read as a hallucination. Order is NOT deterministic when a single Python line
-// defines more than one name (e.g. a chained assignment) — the Python branch
-// ranges over a map. Every current caller folds the result into a set, so this
-// is unobserved today; a future order-sensitive consumer should sort first (#296).
+// read as a hallucination.
+//
+// Order is deterministic: names appear in line order, and alphabetically within
+// a line that defines more than one (a chained assignment, a tuple target list).
+// The Python branch collects into a map, whose iteration order Go deliberately
+// randomizes, so this needs the explicit sort below — without it the function
+// returned a different order across runs on any multi-name line. Every in-tree
+// caller folds the result into a set and so could not see it, but ExtractDefs is
+// exported: a golden-output test or any order-sensitive consumer would have
+// flaked about half the time (#296).
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
 	return extractDefsSeeded(lang, lines, nil, nil)
 }
@@ -245,9 +253,10 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 			var braceScan string
 			_, braceScan, pyOpen = stripLiteralsBraces(LangPython, l.Text, pyOpen)
 			ctx := pyLineCtx{scan: braceScan, base: pyBraceDepth}
-			for name := range defNamesInContext(lang, l.Text, ctx) {
-				defs = append(defs, name)
-			}
+			// Sorted, not raw map order — see ExtractDefs' contract (#296). Sorting
+			// per line rather than over the whole result keeps line order intact,
+			// which is the half of the ordering that carries meaning.
+			defs = append(defs, slices.Sorted(maps.Keys(defNamesInContext(lang, l.Text, ctx)))...)
 			pyBraceDepth = ctx.depthAtEnd()
 		case LangJS:
 			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {

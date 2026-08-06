@@ -130,9 +130,18 @@ func declPatterns(lang, sym string) []string {
 			`^[[:space:]]*(export[[:space:]]+)?(default[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]*\*?[[:space:]]*` + q + `\b`,
 			`^[[:space:]]*(export[[:space:]]+)?(abstract[[:space:]]+)?class[[:space:]]+` + q + `\b`,
 			`^[[:space:]]*(export[[:space:]]+)?(declare[[:space:]]+)?(type|interface|enum|namespace)[[:space:]]+` + q + `\b`,
-			// A top-level const/let/var is module scope and importable when
-			// exported; column-0 anchored for the same reason as Python.
-			`^(export[[:space:]]+)?(declare[[:space:]]+)?(const|let|var)[[:space:]]+` + q + `\b`,
+			// `export` is REQUIRED here, unlike Python where module scope is
+			// importable by itself. internal/parser/js.go indexes a
+			// variable_declarator only when it is a function/arrow/class
+			// expression or carries `export`, so a module-private top-level
+			// `const config = …` is genuinely absent from the guard's known set
+			// and the guard is right to flag it. Treating it as a repo-wide
+			// declaration scored common names (`config`, `router`, `path`,
+			// `data`) as resolver bugs — the exact failure the decl-vs-binding
+			// split above exists to prevent, re-entering by the other door. A
+			// non-exported top-level const still binds inside its OWN file, which
+			// bindPatterns covers.
+			`^export[[:space:]]+(declare[[:space:]]+)?(const|let|var)[[:space:]]+` + q + `\b`,
 		}
 	case "sh":
 		return []string{
@@ -183,7 +192,12 @@ func bindPatterns(lang, sym string, inImportBlock bool) []string {
 	case "py":
 		pats := []string{
 			`^[[:space:]]*` + q + `[[:space:]]*(:[^=]*)?=`,
-			`^[[:space:]]*(from[[:space:]].*)?import[[:space:]].*\b` + q + `\b`,
+			// Names come AFTER the import keyword. The old form also matched the
+			// module path, so `import mypkg.widgetlib` bound `widgetlib`, which
+			// Python does not.
+			`^[[:space:]]*from[[:space:]].*[[:space:]]import[[:space:]].*\b` + q + `\b`,
+			`^[[:space:]]*import[[:space:]]+` + q + `([[:space:]]*[,.]|[[:space:]]*$)`,
+			`^[[:space:]]*import[[:space:]].*[[:space:]]as[[:space:]]+` + q + `[[:space:]]*,?[[:space:]]*$`,
 			// A parameter, which binds the name for the whole function body.
 			`^[[:space:]]*(async[[:space:]]+)?def[[:space:]].*[(,][[:space:]]*\*{0,2}` + q + `[[:space:]]*[:,)=]`,
 		}
@@ -193,11 +207,33 @@ func bindPatterns(lang, sym string, inImportBlock bool) []string {
 		}
 		return pats
 	case "js":
+		// Every pattern here anchors the symbol to the position that BINDS it.
+		// The looser forms these replace matched the symbol anywhere on a
+		// declaration or import line, which let the guard's own flagged
+		// reference bind itself: `const seed = hashToSeed(value)` reported
+		// hashToSeed as defined, so a symbol that never existed scored premature
+		// — and fp on any re-ask after the commit. The instrument was reading
+		// the very line it was supposed to be judging.
 		pats := []string{
-			`^[[:space:]]*(const|let|var)[[:space:]].*\b` + q + `\b`,
-			// Class/object member shorthand: `name(args) {`, `name = () =>`.
-			`^[[:space:]]*(static[[:space:]]+)?(async[[:space:]]+)?` + q + `[[:space:]]*[(=]`,
-			`\bimport[[:space:]].*\b` + q + `\b`,
+			// Declarator LHS. `[^=]*` keeps a destructure match left of the `=`.
+			`^[[:space:]]*(export[[:space:]]+)?(declare[[:space:]]+)?(const|let|var)[[:space:]]+` + q + `\b`,
+			// Destructure. No closing-bracket class: POSIX bracket expressions
+			// take no backslash escapes, so `[}\]]` parses as {`}`,`\`} plus a
+			// stray `]` and silently breaks the pattern. `[^=]*=` already pins
+			// the symbol to the left of the assignment, which is the whole claim.
+			`^[[:space:]]*(export[[:space:]]+)?(const|let|var)[[:space:]]*[{[][^=]*\b` + q + `\b[^=]*=`,
+			// A class/object method HAS A BODY. Without the trailing brace this
+			// matched a bare call statement — `renderThing(seed);` at line start.
+			`^[[:space:]]*(static[[:space:]]+)?(async[[:space:]]+)?` + q + `[[:space:]]*\(.*\)[[:space:]]*\{[[:space:]]*$`,
+			// Assignment, never a comparison.
+			`^[[:space:]]*(static[[:space:]]+)?` + q + `[[:space:]]*=[^=]`,
+			// Import BINDINGS only, never the module specifier. The old
+			// `\bimport .*\bSYM\b` matched the PATH, so any symbol sharing a name
+			// with a path segment (`./parser`, `./router`, `./config`) read as
+			// bound; barrel layouts make that routine.
+			`^[[:space:]]*import[[:space:]]+` + q + `\b`,
+			`^[[:space:]]*import[[:space:]]*(type[[:space:]]+)?\{[^}]*\b` + q + `\b`,
+			`^[[:space:]]*import[[:space:]].*[[:space:]]as[[:space:]]+` + q + `\b`,
 			`\bfunction[[:space:]].*[(,][[:space:]]*` + q + `[[:space:]]*[:,)=]`,
 		}
 		if inImportBlock {
@@ -358,8 +394,29 @@ func (g GitOracle) knowsPath(worktree, rel string) bool {
 // that governs identRe above.
 func literalPathspec(rel string) string { return ":(literal)" + rel }
 
-// Head returns the current HEAD commit.
+// Head returns the commit that answers "is this symbol defined NOW".
+//
+// It prefers the repo's default branch over the checked-out HEAD, because the
+// worktree answering may not be the one the edit happened in. Worktree adopts a
+// sibling when the recorded one is gone, choosing the first by name — and
+// claudew puts every session worktree on its own `claude-<ts>` branch, which
+// sorts before `master`. An abandoned session worktree would otherwise supply
+// the "now" tree, so a symbol merged to mainline after that session ended reads
+// as never-defined and a correct VerdictPremature is downgraded to
+// VerdictStands.
+//
+// Falls back to HEAD when there is no remote default (a local-only repo, a
+// fresh clone with no origin/HEAD). A symbol living only on an unmerged branch
+// still reads as undefined — the flattering direction, consistent with the rest
+// of this file's stated bias.
 func (g GitOracle) Head(worktree string) (string, error) {
+	for _, ref := range []string{"origin/HEAD", "origin/master", "origin/main"} {
+		if out, err := g.git(worktree, "rev-parse", "--verify", "--quiet", ref); err == nil {
+			if r := strings.TrimSpace(out); r != "" {
+				return r, nil
+			}
+		}
+	}
 	out, err := g.git(worktree, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("rev-parse HEAD in %s: %w", worktree, err)

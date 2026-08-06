@@ -217,7 +217,7 @@ not general-purpose code intelligence.
 
 | Path | Purpose |
 |---|---|
-| `cmd/runecho-ir/` | The CLI: snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, repo, backup, install — plus indexing, which is the no-subcommand default (`runecho-ir <path>`), not an `index` subcommand |
+| `cmd/runecho-ir/` | The CLI: snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, fpaudit, repo, backup, install — plus indexing, which is the no-subcommand default (`runecho-ir <path>`), not an `index` subcommand |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
 | `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode, plus the opt-in checks |
 | `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell/Rust/Ruby) |
@@ -227,7 +227,7 @@ not general-purpose code intelligence.
 | `internal/guard/` | Diff parsing, symbol extraction, validation, did-you-mean |
 | `internal/contract/` | Edit-scope contract format and parsing |
 | `internal/depindex/` | Memoized export sets for Go dependencies (qualified-call checks) |
-| `internal/guardstats/` | `guard-stats` and `fpreport` analysis over `decisions.jsonl` |
+| `internal/guardstats/` | `guard-stats`, `fpreport` and `fpaudit` analysis over `decisions.jsonl` (`fpaudit` judges flagged symbols against git history rather than approvals) |
 | `internal/claims/` | Symbol-reference extraction from prose (`validate-claims`, `truth-trail --text`) |
 | `internal/gitutil/` | Canonical git-common-dir resolution (worktree identity) |
 | `install.sh` | Builds all three binaries; `--hook` installs the pre-commit guard |

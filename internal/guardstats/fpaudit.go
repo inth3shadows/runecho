@@ -202,6 +202,17 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		err  error
 	}
 	wts := map[string]*wtState{}
+	// RevAt is per (root, ask timestamp), not per symbol. Without this every
+	// symbol on an ask spawned its own `git rev-list` — ~150 redundant processes
+	// on the reference window, each carrying the full git timeout.
+	type revKey struct {
+		root string
+		ts   time.Time
+	}
+	revs := map[revKey]struct {
+		rev string
+		err error
+	}{}
 	// Cache Defined answers: the same symbol is re-flagged across many asks in a
 	// session (hashToSeed alone accounts for eight records in one morning).
 	defs := map[defKey]bool{}
@@ -251,7 +262,13 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 			case st.err != nil:
 				f.Verdict, f.Note = VerdictUnknown, st.err.Error()
 			default:
-				f.Verdict, f.Note = classify(o, st.root, st.rel, st.head, d, sym, defs)
+				rk := revKey{st.root, d.TS}
+				r, seen := revs[rk]
+				if !seen {
+					r.rev, r.err = o.RevAt(st.root, d.TS)
+					revs[rk] = r
+				}
+				f.Verdict, f.Note = classify(o, st.root, st.rel, st.head, r.rev, r.err, d, sym, defs)
 			}
 			stats.Symbols++
 			stats.Counts[f.Verdict]++
@@ -293,10 +310,9 @@ func dedupeStrings(in []string) []string {
 // is true, whether the symbol also exists now tells us nothing. Asking HEAD
 // first and treating "defined now" as the FP signal is the mistake that made
 // hashToSeed read as a false positive for weeks.
-func classify(o Oracle, root, rel, head string, d *Decision, sym string, defs map[defKey]bool) (AuditVerdict, string) {
-	revAt, err := o.RevAt(root, d.TS)
-	if err != nil {
-		return VerdictUnknown, "no commit at or before ask time: " + err.Error()
+func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision, sym string, defs map[defKey]bool) (AuditVerdict, string) {
+	if revErr != nil {
+		return VerdictUnknown, "no commit at or before ask time: " + revErr.Error()
 	}
 
 	lookup := func(rev string) (bool, error) {
@@ -390,7 +406,7 @@ func FormatAudit(s AuditStats) string {
 	}
 
 	fmt.Fprintf(&b, "%d ask event(s), %d flagged symbol(s), %d rated.\n", s.Asks, s.Symbols, s.Rated())
-	fmt.Fprintf(&b, "(%d n/a — only the hallucination check asserts a name does not resolve;\n"+
+	fmt.Fprintf(&b, "(%d n/a — outside the hallucination-origin subset the guard records;\n"+
 		" %d unanswerable by the oracle.)\n\n", s.Counts[VerdictNA], s.Counts[VerdictUnknown])
 
 	rows := []struct {
@@ -410,7 +426,7 @@ func FormatAudit(s AuditStats) string {
 			VerdictUnknown, u)
 	}
 	if n := s.Counts[VerdictNA]; n > 0 {
-		fmt.Fprintf(&b, "  %-10s %5d      -    not a resolution claim (duplicate-symbol, dangling, ...)\n",
+		fmt.Fprintf(&b, "  %-10s %5d      -    outside learn_symbols — see the n/a note below\n",
 			VerdictNA, n)
 	}
 
@@ -419,6 +435,11 @@ func FormatAudit(s AuditStats) string {
 	b.WriteString("\nBy language:\n")
 	writeVerdictTable(&b, s.ByLang)
 
+	b.WriteString("\nn/a is NOT all 'not a resolution claim'. duplicate-symbol and dangling flag\n")
+	b.WriteString("names that ARE defined, so the question does not apply to them. But file-scope,\n")
+	b.WriteString("qualified and contract+violations asks land here too, because the guard does not\n")
+	b.WriteString("record them in learn_symbols — those ARE resolution claims this oracle simply\n")
+	b.WriteString("cannot judge, so read their n/a as missing coverage, not as out of scope.\n")
 	b.WriteString("\nA high 'premature' share is not a resolver bug. It means the check fires at\n")
 	b.WriteString("the wrong moment — an agent writing a caller before its callee — and the fix\n")
 	b.WriteString("is to move the check later, not to widen the known-symbol set.\n")

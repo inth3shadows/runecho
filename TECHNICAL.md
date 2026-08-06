@@ -118,14 +118,15 @@ is fully finished.
 | `internal/guard/depqualified_go.go` | Go external/stdlib package export sets, for qualified-call validation | `depindex` |
 | `internal/depindex/` | Memoized export sets for Go module-cache dependencies (`$RUNECHO_HOME/depcache`) | — |
 | `internal/contract/contract.go` | Edit-scope contract format + parsing (#12 D1) | — |
-| `internal/guardstats/` | `guard-stats` aggregation and `fpreport` approval-rate analysis over `decisions.jsonl` | — |
+| `internal/guardstats/` | `guard-stats` aggregation, `fpreport` approval-rate analysis, and `fpaudit` git-history verdicts over `decisions.jsonl` | — |
 | `internal/claims/claims.go` | Extract code-symbol references from prose for `validate-claims` and `truth-trail --text` | — |
 | `internal/gitutil/gitutil.go` | Canonical git-common-dir resolution — the V4 repo-lookup key | — |
 | `internal/store/dir.go` | Single source of truth for `$RUNECHO_HOME` / `~/.runecho` | — |
 | `internal/store/atomicwrite.go`, `lock.go` | Temp-file-then-rename writes; cross-process advisory `flock` | — |
 | `cmd/runecho-ir/main.go` | CLI entrypoint and subcommand dispatch | `ir`, `snapshot` |
 | `cmd/runecho-ir/contract.go` | `contract list\|show\|activate\|deactivate\|check` | `contract`, `snapshot` |
-| `cmd/runecho-ir/fpreport.go` | `fpreport` — observed guard false-positive (approval) rate | `guardstats` |
+| `cmd/runecho-ir/fpreport.go` | `fpreport` — approval rate (see the caveat in USAGE.md; approvals carry no variance on the reference log) | `guardstats` |
+| `cmd/runecho-ir/fpaudit.go` | `fpaudit` — three-way verdict (fp / premature / stands) judged against git history, no human in the loop | `guardstats` |
 | `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
@@ -422,6 +423,7 @@ runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
 runecho-ir repo list                              # enrolled repos + index state
 runecho-ir guard-stats                            # guard ask volume from decisions.jsonl
 runecho-ir fpreport --gv <version>                # approval rate, scoped to one guard build
+runecho-ir fpaudit --days 30                      # was the guard right? fp / premature / stands
 ```
 
 Fuzz targets: `FuzzGoParser`, `FuzzJSParser`, `FuzzPythonParser`,

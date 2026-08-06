@@ -483,3 +483,110 @@ func TestGitOracleGoStructFieldIsNotADeclaration(t *testing.T) {
 		t.Logf("grouped var MaxRetries now resolves (%v) — check struct fields still do not", got)
 	}
 }
+
+// The instrument must not read the very line it is judging. The guard flags a
+// reference; in JS that reference most often appears as `const x = SYM(...)`,
+// and a binding pattern that matched the symbol anywhere on a const line bound
+// it from its own flagged use. A symbol that never existed then scored
+// premature — and fp on any re-ask after the commit.
+func TestGitOracleJSReferenceDoesNotBindItself(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "src/a.ts", "const seed = hashToSeed(value);\n")
+	write(t, root, "src/b.ts", "renderThing(seed);\n")
+	write(t, root, "src/other.ts", "const config = { a: 1 };\n")
+	write(t, root, "src/victim.ts", "doThing(config);\n")
+	write(t, root, "src/c.ts", "import { Foo } from \"./widgetlib\";\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, c := range []struct{ sym, rel, why string }{
+		{"hashToSeed", "src/a.ts", "a call on a const's RIGHT-hand side is a reference, not a binding"},
+		{"renderThing", "src/b.ts", "a bare call statement is not a method definition"},
+		{"config", "src/victim.ts", "a module-private top-level const in another file is not repo-wide"},
+		{"widgetlib", "src/c.ts", "an import's module path is not an imported name"},
+	} {
+		got, err := g.Defined(root, rev, "js", c.sym, c.rel)
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", c.sym, err)
+		}
+		if got {
+			t.Errorf("Defined(%q, %s) = true; %s", c.sym, c.rel, c.why)
+		}
+	}
+}
+
+// The complement: the binding forms those patterns exist for must still resolve.
+func TestGitOracleJSRealBindingsStillResolve(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "src/a.ts", ""+
+		"import defaultThing from './d';\n"+
+		"import { named } from './n';\n"+
+		"import * as nsThing from './ns';\n"+
+		"const plain = 1;\n"+
+		"const { destructured } = obj;\n"+
+		"let mutable = 2;\n")
+	write(t, root, "src/cls.ts", "class C {\n  methodName(a, b) {\n    return a;\n  }\n}\n")
+	write(t, root, "src/exp.ts", "export const exported = 3;\n")
+	write(t, root, "src/user.ts", "use(exported);\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, c := range []struct{ sym, rel string }{
+		{"defaultThing", "src/a.ts"}, {"named", "src/a.ts"}, {"nsThing", "src/a.ts"},
+		{"plain", "src/a.ts"}, {"destructured", "src/a.ts"}, {"mutable", "src/a.ts"},
+		{"methodName", "src/cls.ts"},
+		// An EXPORTED top-level const is repo-wide, so it resolves from another file.
+		{"exported", "src/user.ts"},
+	} {
+		got, err := g.Defined(root, rev, "js", c.sym, c.rel)
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", c.sym, err)
+		}
+		if !got {
+			t.Errorf("Defined(%q, %s) = false; this is a real binding", c.sym, c.rel)
+		}
+	}
+}
+
+// Python: `import a.b` binds `a`, not `b`, so the module path must not bind.
+func TestGitOraclePyImportPathDoesNotBind(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "pkg/a.py", "import mypkg.widgetlib\nfrom other.deep import thing as aliased\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, sym := range []string{"widgetlib", "deep"} {
+		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py"); err != nil || got {
+			t.Errorf("Defined(%q) = %v (err %v); a module path segment is not a bound name", sym, got, err)
+		}
+	}
+	for _, sym := range []string{"mypkg", "aliased"} {
+		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py"); err != nil || !got {
+			t.Errorf("Defined(%q) = %v (err %v); this IS bound by the import", sym, got, err)
+		}
+	}
+}
+
+// "Defined now" must come from the repo's mainline, not from whichever sibling
+// worktree Worktree happened to adopt — claudew branches sort before master, so
+// an abandoned session worktree would otherwise supply the answer.
+func TestGitOracleHeadPrefersDefaultBranch(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "a.py", "x = 1\n")
+	mainRev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	// Fake an origin/master pointing at the mainline commit, then move HEAD on.
+	if out, err := exec.Command("git", "-C", root, "update-ref", "refs/remotes/origin/master", mainRev).CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+	write(t, root, "b.py", "def only_on_this_branch():\n    pass\n")
+	commit(t, root, "two", time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	head, err := g.Head(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != mainRev {
+		t.Errorf("Head = %s, want origin/master %s", head, mainRev)
+	}
+}

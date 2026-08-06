@@ -851,3 +851,137 @@ func TestPayloadFP_LoudestReposSplitsRatedAndUnrated(t *testing.T) {
 			sumAsks, overall["asks"])
 	}
 }
+
+// #316: friction's time-to-decision term.
+
+func TestLatencyStats_Empty(t *testing.T) {
+	got := latencyStats(nil)
+	if got.N != 0 || got.MedianS != 0 {
+		t.Errorf("empty input should be the zero value, got %+v", got)
+	}
+}
+
+func TestLatencyStats_OddAndEvenMedian(t *testing.T) {
+	odd := latencyStats([]time.Duration{1 * time.Minute, 3 * time.Minute, 2 * time.Minute})
+	if odd.N != 3 || odd.MedianS != 120 {
+		t.Errorf("odd-N median = %+v, want N=3 median=120s", odd)
+	}
+	if odd.MinS != 60 || odd.MaxS != 180 {
+		t.Errorf("odd-N min/max = %+v, want 60/180", odd)
+	}
+	even := latencyStats([]time.Duration{1 * time.Minute, 2 * time.Minute, 3 * time.Minute, 4 * time.Minute})
+	// (2m + 3m) / 2 = 150s
+	if even.N != 4 || even.MedianS != 150 {
+		t.Errorf("even-N median = %+v, want N=4 median=150s", even)
+	}
+	if even.MeanS != 150 {
+		t.Errorf("even-N mean = %+v, want 150s", even)
+	}
+}
+
+// The join key is (file, symbols) — latency must be measured from the ASK's
+// own timestamp to the outcome's, not from some other pair's, even when
+// several asks are in flight across different files at once.
+func TestFPReport_LatencyMeasuresTheMatchedPair(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "py", "r", "a.py", 0, "foo"),
+		outcome("a.py", 4, "foo"), // 4 min after its own ask
+		ask("violations", "py", "r", "b.py", 100, "bar"),
+		outcome("b.py", 101, "bar"), // 1 min after ITS ask, not a.py's
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Latency.N != 2 {
+		t.Fatalf("latency N = %d, want 2", s.Window.Latency.N)
+	}
+	// median of {4min, 1min} = 2.5min = 150s
+	if s.Window.Latency.MedianS != 150 {
+		t.Errorf("window median = %.0fs, want 150s (median of 240s and 60s)", s.Window.Latency.MedianS)
+	}
+	if s.Window.Latency.MinS != 60 || s.Window.Latency.MaxS != 240 {
+		t.Errorf("window min/max = %+v, want 60/240", s.Window.Latency)
+	}
+}
+
+// An ask with no matching approval must not silently borrow another ask's
+// latency sample — it has none, and the bucket's N must reflect that.
+func TestFPReport_UnmatchedAskContributesNoLatency(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "py", "r", "a.py", 0, "foo"),
+		outcome("a.py", 2, "foo"),
+		ask("violations", "py", "r", "b.py", 10, "bar"), // never approved
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 || s.Window.Latency.N != 1 {
+		t.Errorf("asks=%d latency.N=%d, want 2/1 (only the matched ask has a sample)",
+			s.Window.Asks, s.Window.Latency.N)
+	}
+}
+
+// Latency must be broken out per check, mirroring Approved — a slow
+// duplicate-symbol decision must not blend into violations' number.
+func TestFPReport_LatencyByCheck(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"),
+		outcome("a.go", 1, "foo"), // 1 min
+		ask("duplicate-symbol", "go", "r", "b.go", 0, "bar"),
+		outcome("b.go", 4, "bar"), // 4 min — inside the 5-min join window
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if got := s.ByCheck["violations"].Latency; got.N != 1 || got.MedianS != 60 {
+		t.Errorf("violations latency = %+v, want N=1 median=60s", got)
+	}
+	if got := s.ByCheck["duplicate-symbol"].Latency; got.N != 1 || got.MedianS != 240 {
+		t.Errorf("duplicate-symbol latency = %+v, want N=1 median=240s", got)
+	}
+}
+
+func TestPayloadFP_LatencyIsNullNotZeroWhenUnmatched(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"), // never approved
+	}
+	p := PayloadFP(FPReport(decs, ts(-1000), 10))
+	overall := p["overall"].(map[string]any)
+	if overall["latency"] != nil {
+		t.Errorf("latency = %v, want nil (no matched ask to measure)", overall["latency"])
+	}
+}
+
+func TestPayloadFP_LatencyPresentWhenMatched(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"),
+		outcome("a.go", 2, "foo"),
+	}
+	p := PayloadFP(FPReport(decs, ts(-1000), 10))
+	overall := p["overall"].(map[string]any)
+	lat, ok := overall["latency"].(map[string]any)
+	if !ok {
+		t.Fatalf("latency = %#v, want a populated map", overall["latency"])
+	}
+	if lat["n"] != 1 || lat["median_s"] != 120.0 {
+		t.Errorf("latency = %+v, want n=1 median_s=120", lat)
+	}
+}
+
+func TestFormatFP_PrintsMedianLatencyWhenMatched(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"),
+		outcome("a.go", 2, "foo"),
+	}
+	out := FormatFP(FPReport(decs, ts(-1000), 10))
+	if !strings.Contains(out, "median time to decision") {
+		t.Errorf("overall line should report median latency:\n%s", out)
+	}
+	if !strings.Contains(out, "(median 2m0s)") {
+		t.Errorf("per-check row should report median latency:\n%s", out)
+	}
+}
+
+func TestFormatFP_OmitsLatencyWhenNothingMatched(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"), // never approved
+	}
+	out := FormatFP(FPReport(decs, ts(-1000), 10))
+	if strings.Contains(out, "median time to decision") || strings.Contains(out, "median") {
+		t.Errorf("no matched ask means no latency claim to print:\n%s", out)
+	}
+}

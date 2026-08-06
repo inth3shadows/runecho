@@ -31,10 +31,19 @@ func FoldInFileDefs(symbols map[string]struct{}, fileLines []AddedLine, lang Lan
 	// line (e.g. a useState destructure) usually sits OUTSIDE the edited hunk, which
 	// the hunk-scoped diff never sees. JSDeclaredNames (not the over-inclusive
 	// LocallyBoundNames) keeps a param type annotation from leaking a type name and
-	// masking a real undefined reference. JS-only: Go skips bare lowercase refs
-	// already, and Python's locals are out of scope for this pass.
+	// masking a real undefined reference. JS-specific: Go and Python have their
+	// own extractors below, each shaped by that language's binding forms.
 	if lang == LangJS {
 		for _, name := range JSDeclaredNames(fileLines) {
+			symbols[name] = struct{}{}
+		}
+	}
+	// Go: locals, parameters, named returns, range and type-switch bindings. A
+	// bare `foo()` in Go resolves to any of these without a package-level
+	// declaration existing, so folding them is what makes checking unexported Go
+	// references safe at all — see godeclared.go.
+	if lang == LangGo {
+		for _, name := range GoDeclaredNames(fileLines) {
 			symbols[name] = struct{}{}
 		}
 	}

@@ -41,10 +41,15 @@ var goBuiltins = setOf(
 	"len", "cap", "make", "append", "copy", "new", "delete",
 	"panic", "recover", "close", "complex", "real", "imag",
 	"print", "println",
+	// Go 1.21 builtins. Their absence was invisible while unexported Go
+	// references were skipped wholesale — the compiler-oracle differential
+	// surfaced `min` as a proven false positive the moment that skip was lifted.
+	"min", "max", "clear",
 	// basic type names used in conversion position
 	"string", "int", "int8", "int16", "int32", "int64",
 	"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
-	"float32", "float64", "bool", "byte", "rune", "error", "any",
+	"float32", "float64", "complex64", "complex128",
+	"bool", "byte", "rune", "error", "any",
 	// all Go keywords (can appear in call-like positions or before '(')
 	"break", "case", "chan", "const", "continue", "default",
 	"defer", "else", "fallthrough", "for", "func", "go", "goto",
@@ -1204,11 +1209,14 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			if _, ok := builtins[name]; ok {
 				continue
 			}
-			// For Go, skip unexported (lowercase) refs — the IR only indexes exported
-			// symbols, so there is nothing to validate unexported calls against.
-			if lang == LangGo && (name[0] < 'A' || name[0] > 'Z') {
-				continue
-			}
+			// Unexported Go references used to be skipped outright, because the IR
+			// indexed only exported symbols and there was nothing to validate them
+			// against. The Go parser now records unexported top-level declarations
+			// under the "unexported" symbol kind, so that premise no longer holds
+			// and the check covers them — closing the largest measured blind spot
+			// in the guard's Go reach (0/29 caught, per the compiler-oracle
+			// differential). Locals and parameters, which the IR will never hold,
+			// are folded in by FoldInFileDefs via GoDeclaredNames.
 			// Skip the definition's own name (self-reference on a def line).
 			if _, isDef := defs[name]; isDef {
 				continue

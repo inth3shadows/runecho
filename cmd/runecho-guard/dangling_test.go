@@ -343,7 +343,10 @@ func TestDangling_RedefinedInPlace_Defers(t *testing.T) {
 
 	file := filepath.Join(top, "known.go")
 	// Same name in old and new → in-place edit, not a deletion.
-	in := payloadOld(t, "Edit", file, "func DoThing() { a() }", "func DoThing() { b() }", "", nil)
+	// The bodies call a builtin rather than arbitrary `a()`/`b()` filler: with
+	// unexported Go references now checked, an invented lowercase call is a real
+	// violation and would make this test fail for a reason unrelated to dangling.
+	in := payloadOld(t, "Edit", file, "func DoThing() { println(1) }", "func DoThing() { println(2) }", "", nil)
 	_, _, d := runHook(t, in)
 
 	if d.Hook.PermissionDec == "ask" {

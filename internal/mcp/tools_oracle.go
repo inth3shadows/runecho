@@ -293,14 +293,19 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	files := make(map[string]any, len(paths))
 	for _, p := range paths {
 		f := irData.Files[p]
-		symCount += len(f.Symbols)
+		// Internal kinds (unexported declarations, struct fields) are indexed for
+		// resolution, not for description — see ir.InternalKinds. Emitting them
+		// here would multiply this payload for every Go repo without answering the
+		// question `structure` is asked.
+		visible := ir.VisibleSymbols(f.Symbols)
+		symCount += len(visible)
 		switch detail {
 		case "tree":
-			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(f.Symbols)}
+			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(visible)}
 		case "symbols":
-			files[p] = symbolFile(f, withoutSymbolHashes(f.Symbols))
+			files[p] = symbolFile(f, withoutSymbolHashes(visible))
 		case "hashes":
-			files[p] = symbolFile(f, f.Symbols)
+			files[p] = symbolFile(f, visible)
 		case "full":
 			files[p] = f // FileIR.MarshalJSON -> legacy arrays + symbols
 		}

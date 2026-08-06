@@ -94,10 +94,25 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// param type annotation can't leak a type name and mask a real undefined ref.
 		// This sees only the added lines here; the hook path additionally folds
 		// whole-file bindings via addInFileDefs for pre-existing binding lines.
-		// JS-only: Go/Python also use `const`/`var`, and Go already skips bare
-		// lowercase refs, so this fold belongs to JS/TS alone.
 		if lang == LangJS {
 			for _, name := range JSDeclaredNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
+		}
+		// Go's sibling gap, and it is not optional. This branch used to be absent
+		// with the note "Go already skips bare lowercase refs, so this fold belongs
+		// to JS/TS alone" — true until unexported Go references started being
+		// checked, and false the moment they were.
+		//
+		// The whole-file fold in FoldInFileDefs runs over the PRE-EDIT file, which
+		// by definition cannot contain a binding this edit is adding. So a hunk
+		// that binds and calls in the same breath — `handler := makeHandler()` then
+		// `handler(it)`, the shape a model produces whenever it writes a new
+		// function — had no binding anywhere in the known set. Two default-on paths
+		// were affected: every Edit hunk, and every Write creating a new Go file
+		// (where readFileLines returns nil and nothing is folded at all).
+		if lang == LangGo {
+			for _, name := range GoDeclaredNames(fd.AddedLines) {
 				known[name] = struct{}{}
 			}
 		}

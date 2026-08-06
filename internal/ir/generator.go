@@ -529,6 +529,16 @@ func symbolsFromStructure(s parser.FileStructure, path, src string) []Symbol {
 	add(s.Classes, "class")
 	add(s.Exports, "export")
 	add(s.Imports, "import")
+	// Unexported top-level declarations (Go). Same mechanism as "import_name"
+	// above and for the same reason: SymbolsForLatestSnapshot reads names
+	// regardless of kind, so a distinct kind makes these resolvable at edit time
+	// while leaving every exported-API-surface consumer — which filters on
+	// function/class — showing exactly what it showed before.
+	add(s.Unexported, "unexported")
+	// Struct fields, receiver-qualified. Same kind mechanism again; needed because
+	// a func-typed field is called exactly like a method, so the receiver-method
+	// check cannot tell an invented member from a real field without them.
+	add(s.Fields, "field")
 	add(importedNames(path, src), "import_name")
 	// Module specifiers behind a bare `export * from './mod'` re-export
 	// (JS/TS). The names that re-export actually binds aren't enumerable from

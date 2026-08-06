@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.29.2] — 2026-08-06
+
+### Changed
+- feat(guardstats): fpaudit — replace approval telemetry with a git-history verdict (#303)
+
 ## [0.29.1] — 2026-08-05
 
 ### Changed

@@ -69,8 +69,6 @@ the watch list rather than in the positioning.
 |---|---|---|---|
 | **anti-halu** (`emilyoprog`, Python, 0★, no license, single commit 2026-07-10) | **The tool that falsified the old claim.** A `PreToolUse` hook (`Write\|Edit\|MultiEdit\|apply_patch`) that parses the *pending* Python content with `ast`, resolves each name bound by an import, then **imports the module and checks `hasattr`** — `math.square_root` is denied before the write lands. Second check: every non-stdlib top-level import is looked up on PyPI (import-root → distribution metadata, so `cv2`→`opencv-python`). Fails open on any verifier exception, 800 ms budget per distribution. Conservative by construction: skips `import *`, dynamic `importlib`/`getattr`, relative imports, and any name that is reassigned, shadowed by a parameter, or monkeypatched. | **Pre-write (PreToolUse), denies** — `pre_write_check.py` exits 2 with the reason on stderr | **YES for the old claim — the first tool on record to satisfy all four conjuncts.** 1: PreToolUse. 2: exit 2 is a deny, not a warning. 3: it decides on symbol existence. 4: `ast` + `importlib`, no model anywhere. **No for the narrowed claim:** it resolves only names reaching the file through an import, so it cannot see a symbol the repo itself is supposed to define — relative imports are explicitly skipped, and a bare call to an undefined local function is invisible to it. Python-only. **Not a momentum story** (one commit, dormant since), but substance is the test here, not stars — see the packaging note below, which is the part worth stealing. |
 | **Gortex** (`zzet/gortex`, 1090★, Apache-2.0, 257 languages) | **The largest actor in this space by three orders of magnitude of reach, and the shortest path to falsification on record.** A code-intelligence engine (CLI + MCP + API, local) that already owns a full symbol graph with reference resolution. Critically, `internal/mcp/parse_gate.go` **already holds candidate bytes pre-write and parses them with tree-sitter before the atomic swap** — the hard part of the architecture is built and shipped. | Pre-write, on its own MCP write tools | **No — today, and only on a technicality.** Its gate's predicate is `parseErrorCount`: it asks whether the pending bytes *parse*, never whether the symbols they reference *resolve* — so conjunct 3 fails. But it already has the graph to answer that, and swapping the predicate is a contained change. Two further concessions that will not last: it guards only its own MCP write tools (its PreToolUse hook predicate is file-path-only, so edits made with the agent's native tools bypass it), and it is bypassable via `allow_parse_errors=true`. **Reach makes this the one to watch** — 1090★ and pushed the day of this survey. |
-| **Roam** | Has the resolver, but fires on a **Stop hook, after the bytes have landed**. Python-only and env-gated. | Post-write (Stop) | **No.** Fails conjuncts 1 and 2 — second-shortest path to falsification after Gortex, since the analysis half already exists. |
-| **Snag / Plumbline / agent-guard / Neurcode** | Four separate small entrants in the same niche, run through the four conjuncts in the 2026-08-04 pass by reading their actual hook wiring rather than their marketing. None satisfies all four. | Various | **No.** Recorded for completeness and to stop re-adjudication. Note the momentum signal rather than the capability one: Snag, Plumbline and agent-guard each **published every release on a single day and never shipped again**. Abandoned, but they existed — which is the point of the entry. |
 | **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. Now at v0.5.0 (PyPI, released 2026-04-24; up from v0.4.1) — adds condensed fact-force denials for long sessions on top of the earlier opt-in bughunt gate. Behavior re-confirmed this pass directly from the PyPI project page: it still demands evidence-gathering (importers, schemas, instruction quotes via grep/read), never symbol existence. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails, unchanged by the version bump. |
 | **Anti-Hallucination-MCP** (`Akunimal`) | The nearest neighbour on *substance* — and the first tool found that checks the same thing RunEcho checks. Deterministic, model-free symbol existence: AST extraction via `@ast-grep/napi` for JS/TS/TSX, regex fallback for ~15 more languages, symbols persisted to `.wisdom/symbols.json`, confidence-scored with fuzzy typo matching. Ships a Claude Code hook that its own setup script installs. Also bundles command-output compression (dedup/grouping) — so one repo overlaps both RunEcho *and* terse. | **Post-write** — the installed hook is `PostToolUse` on `Write`/`Edit`; it "warns after every edit", writing to stderr *after* the write has landed | **No — but it is the closest miss on record.** Satisfies conjuncts 3 (symbol existence) and 4 (deterministic, no LLM) outright. Fails 1 and 2: the edit is already on disk when it fires, so it advises rather than denies. Two further concessions RunEcho does not make: a persisted registry that *can* go stale (mitigated by an opt-in `watch_project` watcher, not by re-parsing), and an `ANTIHALL_AUTOFIX=1` mode that rewrites the identifier in place — a repair posture, not a gate. **Its falsification path is one line of JSON** (see watch list). |
 | **Cursor hooks** | Hook surface enumerated in the docs: `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` can allow/deny; `afterFileEdit` / `afterTabFileEdit` are observational only. Re-checked this pass against <https://cursor.com/docs/hooks.md> directly: still no `beforeFileEdit` or equivalent pre-edit-for-native-edits event. | `beforeReadFile` pre-read; native edits **post-write only** | **No — and structurally can't today.** There is no `beforeFileEdit` event, so an edit made with Cursor's *native* edit tool cannot be gated before it lands. (Also relevant to issue #174: a Cursor port could only cover edits routed through shell or an MCP filesystem server, via `beforeShellExecution` / `beforeMCPExecution` — that is partial coverage of the thing agents actually do, not a port.) |
@@ -91,12 +89,12 @@ So the position moved twice at once:
 - **The general pre-write symbol gate is no longer unclaimed.** One tool holds
   all four conjuncts. It is dormant and Python-only, but the square is occupied
   and the positioning must stop saying otherwise.
-- **And the field is far larger than any single pass had seen.** This pass also
-  folds in six rivals verified elsewhere and never recorded here — including
-  **Gortex** (1090★), which already holds candidate bytes pre-write and parses
-  them before the atomic swap, and fails only on *which predicate* it applies.
-  See "three surveys, three disjoint sets" below; the completeness of any pass
-  is now itself in question.
+- **And the field is larger than any single pass had seen.** This pass also adds
+  **Gortex** (1090★), found in a separate strategy pass and never recorded here,
+  which already holds candidate bytes pre-write and parses them before the
+  atomic swap, and fails only on *which predicate* it applies. See "three
+  surveys, three disjoint sets" below; the completeness of any pass is now
+  itself in question.
 - **The in-repo pre-write symbol gate is still unclaimed.** `anti-halu` resolves
   only what arrives through an import; it never asks whether the codebase under
   edit defines the thing being called. Nothing surveyed does. That is the
@@ -144,7 +142,7 @@ provenance and must not move with the survey stamps.)
 | Pass | Method | Found |
 |---|---|---|
 | July 2026 | product docs, changelogs, web, one repo query | GateGuard, Anti-Hallucination-MCP, Cursor hooks, pyright-lsp, Serena, Aider, Cline/Continue/Cody, Shipmoor |
-| Early August 2026 | separate strategy pass, primary-source verified | Gortex, Roam, Snag, Plumbline, agent-guard, Neurcode, KrowForge (+4) — **eleven products, none overlapping the row above** |
+| Early August 2026 | separate strategy pass | **Gortex** — plus ten further products reported as verified but recorded only by bare product name, none of which resolves today (see note below). **None overlapped the row above.** |
 | This pass | six-query raw repo sweep | `anti-halu` — **overlapping neither**, and the one that falsified the claim |
 
 The intuitive reading is "the search protocol is unstable, so search harder."
@@ -161,15 +159,27 @@ State that limitation wherever the claim is printed. A claim that cannot be
 verified should not be printed as though it had been, even on the passes where
 it happens to be true.
 
-> **Provenance for the 2026-08-04 cohort** (no full date in this note on purpose
-> — fixed provenance, not a survey stamp): Gortex, Roam, Snag, Plumbline,
-> agent-guard and Neurcode were verified in a separate strategy pass against
-> primary sources, by reading their actual hook wiring rather than their
-> marketing, and were run through the four conjuncts there. They were never
-> written into this file, which is why a survey dated two days later could omit a
-> 1090★ rival. Gortex was re-verified directly for this pass (stars, license,
-> and the presence of `internal/mcp/parse_gate.go`); the other five are carried
-> across on that pass's verification, not re-checked here.
+> **Why that middle row names only one product** (no full date in this note on
+> purpose — fixed provenance, not a survey stamp). The early-August pass
+> reported eleven verified competitors, but recorded them **by bare product name
+> only**. Just one, Gortex, could be re-verified; it was checked directly for
+> this pass (stars, licence, and the presence of `internal/mcp/parse_gate.go`)
+> and has a full row above.
+>
+> The rest were **removed rather than carried**. Their names do not resolve to
+> anything in this niche — on PyPI the reported names belong to a file
+> downloader, a nested-dict helper, a DEM-comparison tool and a CrewAI
+> monitoring library, and one is absent entirely; on GitHub one name alone
+> matches two unrelated plausible candidates. An entry that cannot be resolved
+> to a specific project cannot be re-checked, cannot be falsified, and would sit
+> in the table implying a verification this file cannot point at. That is worse
+> than an honest gap, so it is not kept.
+>
+> **The lesson is procedural: a survey row must carry a resolvable identifier —
+> repo slug, PyPI package, or URL — recorded at the moment the verdict is
+> written.** A product name alone is not a citation. It was sufficient for the
+> pass that wrote it and worthless two days later, which cost this file ten
+> entries.
 
 ### Distribution, not just capability
 
@@ -316,6 +326,13 @@ Quarterly, or immediately if a major harness announces new hook events.
    watch-list entry, not a falsification. For conjunct 3, record explicitly
    whether it resolves **in-repo** symbols or only imported third-party ones —
    that distinction is now what separates a watch-list entry from a rival.
+
+   **Every row must carry a resolvable identifier** — repo slug, PyPI package
+   name, or URL — written down at the same time as the verdict. A bare product
+   name is not a citation. Five rows in this file are marked ⚠️ precisely
+   because a prior pass recorded verdicts against names that could not later be
+   resolved to any specific project, and the verification is therefore
+   unrecoverable without the original author's machine.
 4. Update the table **and every dated string in both files** — there are more of
    them than is obvious, and a survey date left behind in one place is exactly the
    silent staleness this file exists to prevent. Find them mechanically rather

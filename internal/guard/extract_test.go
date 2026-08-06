@@ -921,6 +921,68 @@ func TestExtractImports_JS(t *testing.T) {
 	}
 }
 
+// TestExtractImports_JSMultiLine pins #304: a multi-line named-import block is
+// the dominant style in any real TS codebase, and ExtractImports previously
+// returned nothing for it — a bare call to a multi-line-imported name then read
+// as a hallucination. Repro is the exact shape from the issue.
+func TestExtractImports_JSMultiLine(t *testing.T) {
+	ls := lines(
+		`import {`,
+		`  makeSeededRandom,`,
+		`  depthFor,`,
+		`} from './track-b-core';`,
+		``,
+		`import { alpha, beta } from './x';`,
+		``,
+		`const r = makeSeededRandom(1);`,
+	)
+	got := ExtractImports(LangJS, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	for _, want := range []string{"makeSeededRandom", "depthFor", "alpha", "beta"} {
+		if !gotSet[want] {
+			t.Errorf("expected multi-line JS import %q bound, got %v", want, got)
+		}
+	}
+}
+
+// A default-plus-named multi-line import (`import Default, {\n  a,\n} from 'm'`)
+// must bind both the default export and the named members.
+func TestExtractImports_JSMultiLineDefaultPlusNamed(t *testing.T) {
+	ls := lines(
+		`import React, {`,
+		`  useState,`,
+		`  useEffect,`,
+		`} from 'react';`,
+	)
+	got := ExtractImports(LangJS, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	for _, want := range []string{"React", "useState", "useEffect"} {
+		if !gotSet[want] {
+			t.Errorf("expected %q bound, got %v", want, got)
+		}
+	}
+}
+
+// A multi-line import block split across a diff-hunk gap must not leak its
+// continuation state into unrelated code (mirrors the Python paren-reset test).
+func TestExtractImports_JSMultiLineStateResetsOnLineGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: `import {`},
+		{LineNo: 50, Text: `  notAnImport,`}, // far away → multi-line state reset
+	}
+	for _, n := range ExtractImports(LangJS, ls) {
+		if n == "notAnImport" {
+			t.Errorf("multi-line import state should reset across a line gap; bound %q", n)
+		}
+	}
+}
+
 func TestExtractRefs_ImportedNameResolvesViaInFileContext(t *testing.T) {
 	// When the import binding is in the line set (as it is when the whole file is
 	// scanned), a bare call to the imported name is not flagged. Simulated here by

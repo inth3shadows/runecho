@@ -348,18 +348,47 @@ behavior.
 
 ### Measure how often the guard is wrong
 
-Every guard decision is logged to `~/.runecho/decisions.jsonl`. Two commands read
-it back:
+Every guard decision is logged to `~/.runecho/decisions.jsonl`. Three commands
+read it back:
 
 ```bash
 runecho-ir guard-stats            # ask/defer VOLUME: how loud is the guard, where
-runecho-ir fpreport               # ask APPROVAL RATE: how often was it wrong
+runecho-ir fpaudit                # was the guard RIGHT: judged against git history
+runecho-ir fpreport               # ask approval rate: see the warning below first
 ```
+
+**Start with `fpaudit`.** It asks two dated questions of git about every flagged
+symbol — was it defined when the guard complained, is it defined now — and splits
+the answer three ways:
+
+| verdict | meaning | what to fix |
+|---|---|---|
+| `fp` | already defined at ask time | a resolver bug — the guard's cheap path missed it |
+| `premature` | defined only afterwards | nothing in the resolver. The guard was **right**; it fired while the agent was writing a caller before its callee. Move the check later |
+| `stands` | never came to resolve | the guard caught a real unbacked reference |
+
+```bash
+runecho-ir fpaudit --days 30             # trailing-30-day audit
+runecho-ir fpaudit --gv v0.29.1 --json   # one build, machine-readable per-symbol verdicts
+```
+
+It is read-only — `rev-list`, `rev-parse` and `grep` against commits. Nothing is
+checked out and nothing is written. Its oracle is regex-over-source, chosen to be
+*independent* of the guard's own extractors rather than better than them, and it
+reports what it could not answer rather than dropping it.
+
+> **`fpreport`'s approval rate is not a false-positive rate.** It measures how
+> often the agent proceeded anyway — which is only informative if approvals vary.
+> On the author's 30-day log, joined to the Claude Code transcripts that record
+> what actually happened, **308 ask-gated edits produced 308 approvals and 0
+> denials**. A constant cannot rank anything, so the per-check and per-language
+> spreads `fpreport` prints describe the join's failure modes, not the guard's
+> precision. Read it for volume and for the shape of the log; read `fpaudit` for
+> whether the guard was right.
 
 `fpreport` joins each ask to its outcome — a symbol-exact match, not a time-window
 guess — and reports the fraction the agent approved anyway, broken down by check
-and language, with the most-approved symbols (your false-positive suspects) and
-the loudest repos:
+and language, with the most-approved symbols and the loudest repos:
 
 ```bash
 runecho-ir fpreport --days 30            # trailing-30-day report

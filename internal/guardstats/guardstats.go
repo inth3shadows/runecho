@@ -33,21 +33,30 @@ type Decision struct {
 	Decision string
 	Reason   string
 	Symbols  []string
+	// LearnSymbols is the HALLUCINATION-ORIGIN subset of Symbols, as written by
+	// the guard (see declog.go's decisionRecord). It is the only subset for which
+	// "does this name resolve?" is the question the check actually asked: a
+	// duplicate-symbol or dangling-ref ask flags a name that is DEFINED — twice,
+	// or about to lose its definition — so resolving it says nothing about
+	// whether the guard was right. Records written before the field existed
+	// carry nil, which consumers must treat as unknown rather than empty.
+	LearnSymbols []string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
 // import — see package doc). Keep in sync with declog.go's decisionRecord.
 type rawDecision struct {
-	V        int      `json:"v"`
-	GV       string   `json:"gv,omitempty"`
-	TS       string   `json:"ts"`
-	Mode     string   `json:"mode"`
-	Repo     string   `json:"repo,omitempty"`
-	File     string   `json:"file,omitempty"`
-	Lang     string   `json:"lang,omitempty"`
-	Decision string   `json:"decision"`
-	Reason   string   `json:"reason"`
-	Symbols  []string `json:"symbols,omitempty"`
+	V            int      `json:"v"`
+	GV           string   `json:"gv,omitempty"`
+	TS           string   `json:"ts"`
+	Mode         string   `json:"mode"`
+	Repo         string   `json:"repo,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Lang         string   `json:"lang,omitempty"`
+	Decision     string   `json:"decision"`
+	Reason       string   `json:"reason"`
+	Symbols      []string `json:"symbols,omitempty"`
+	LearnSymbols []string `json:"learn_symbols,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -72,15 +81,16 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 			if err := json.Unmarshal([]byte(line), &raw); err == nil {
 				if ts, err := time.Parse(time.RFC3339, raw.TS); err == nil {
 					out = append(out, Decision{
-						TS:       ts,
-						GV:       raw.GV,
-						Mode:     raw.Mode,
-						Repo:     raw.Repo,
-						File:     raw.File,
-						Lang:     raw.Lang,
-						Decision: raw.Decision,
-						Reason:   raw.Reason,
-						Symbols:  raw.Symbols,
+						TS:           ts,
+						GV:           raw.GV,
+						Mode:         raw.Mode,
+						Repo:         raw.Repo,
+						File:         raw.File,
+						Lang:         raw.Lang,
+						Decision:     raw.Decision,
+						Reason:       raw.Reason,
+						Symbols:      raw.Symbols,
+						LearnSymbols: raw.LearnSymbols,
 					})
 				}
 			}

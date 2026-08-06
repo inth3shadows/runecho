@@ -208,6 +208,7 @@ change date is only valid for combinations that involve none of them.
 | Dependency qualified | `RUNECHO_GUARD_DEPS_GO` | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
 | Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
+| Receiver method | `RUNECHO_GUARD_RECVMETHOD` | (Go) `r.Foo()` inside `func (r *T)` where `T` has no member `Foo`. The receiver is the one value in Go whose type is written lexically, so this needs no type inference. Five gates keep it precision-first, the last being an embedding backstop: it fires only on a name the repository has never seen in any form |
 | Call-shape agreement | `RUNECHO_GUARD_CALLSHAPE` | (Python) A keyword argument the callee's declaration does not accept — the name resolves, the call does not match it (#243). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot (#261) |
 
 C3 **learned-allow** (`RUNECHO_GUARD_LEARN`) is not a check but a suppressor:
@@ -243,6 +244,38 @@ Residual false positives are intrinsic to shallow static analysis
 (dynamically-assigned callables, locals): measured ~0% for Go, ~0.5% for JS,
 ~5% for Python across the guard test corpus (`internal/guard/testdata/corpus/*.json`)
 — which is why hook mode asks instead of denying.
+
+### The compiler-oracle differential
+
+The corpus above shares its author's assumptions, so for Go the guard is also
+adjudicated by `go build` itself (`internal/guard/resolve_differential_test.go`,
+#308). A package that compiles proves every identifier in it resolves, so any
+flag there is a **proven** false positive; rewriting a use site to a name absent
+from the package makes the compiler report `undefined:`, so guard silence there
+is a **proven** false negative. No human judgement, no labelled corpus.
+
+The false-negative direction is the point: a corpus contains only violations
+someone already thought of, and `fpaudit` sees only decisions the guard already
+emitted, so nothing else here can measure a miss.
+
+```
+RUNECHO_ORACLE_CORPUS=<module> RUNECHO_ORACLE_MUTATIONS=240 \
+  go test ./internal/guard -run TestGoResolve -v
+```
+
+Latest: **0 proven false positives** over 468,675 lines of `golang.org/x/text`,
+across three edit postures. Reach by reference shape — `Foo()` 14/14,
+`pkg.Foo()` 59/60, `foo()` 31/31, `v.Method()` 3/60. That last row is the
+remaining Go gap: resolving a method on an arbitrary value needs the value's
+type, which no check has.
+
+The postures matter more than the corpus size. An earlier cut of this harness
+passed the whole file as both the added text and the fold source, so the known
+set always already contained every declaration in the file — a condition neither
+the hook (which folds the *pre-edit* file) nor pre-commit ever satisfies. It
+reported zero false positives while two default-on paths were broken. It now
+measures whole-file Write, Write-creating-a-file (no fold), and Edit-hunk (one
+function as the hunk, the rest as the fold).
 
 ## Storage Schema
 
@@ -448,7 +481,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 
 | Language | Extensions | Definitions captured | Methods | Altitude | Backend |
 |---|---|---|---|---|---|
-| **Go** | `.go` | Top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports) — exported names only | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures | `go/ast` (stdlib) |
+| **Go** | `.go` | Exported top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports). Unexported top-level declarations → Unexported; struct fields → Fields (see below) | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures + fields | `go/ast` (stdlib) |
 | **JS/TS/JSX/TSX** | `.js`, `.mjs`, `.cjs`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via AST, regex fallback when the grammar is unavailable | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
 | **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 | **Shell** | `.sh`, `.bash` | Top-level function definitions (`name() { … }` and `function name { … }`) → Functions, body-hashed (name through the matching brace) so a body edit shows as `modified`; no imports (`source` binds no named symbols), no classes/exports | None (shell has no methods) | Function defs found + bodies delimited on a masked view — strings, `$(…)`/`` `…` ``, `${…}`, comments, and heredoc bodies (incl. quoted/`<<-`/stacked delimiters) are blanked so a brace/def inside them never counts | masking scan (regex + state) |
@@ -468,6 +501,32 @@ than a house style.
 > still be **inert in the shipped binary** if its tag is missing — that was a
 > real defect for Rust and Ruby, fixed in v0.12.2 (#199) and now pinned by
 > `internal/parser/grammar_subset_test.go`.
+
+### Internal symbol kinds (`unexported`, `field`)
+
+Two Go kinds are indexed for **edit-time resolution only** (v0.31.0, #310).
+`unexported` carries unexported top-level declarations — funcs bare, methods
+receiver-qualified (`Reader.parse`), plus types, consts and vars. `field` carries
+struct fields, receiver-qualified (`Reader.buf`), exported and unexported alike.
+
+They exist because the guard cannot judge what the index does not hold. Before
+them, a bare `foo()` was skipped outright — the compiler-oracle differential
+measured that shape at **0/29 caught**. Neither is padding: a Go bare call can be
+a type conversion (`myType(x)`) or a call through a func-typed package var
+(`handler()`), and a func-typed struct field is called exactly like a method
+(`rb.flushF(rb)`).
+
+They are deliberately **absent** from the surfaces that describe a codebase to a
+reader — `structure` and the snapshot diff — via `ir.InternalKinds`. Those answer
+"what is this package" and "what changed in it", whose answers did not include a
+struct field or an unexported helper before these kinds existed. A *named* lookup
+(`locate`, the claims check) does search them: there the question is "does this
+name exist", where a match is the truthful answer regardless of kind.
+
+Adding them bumped `IRVersion` 6 → 7. Any new field or kind requires the bump:
+`Update` reuses unchanged-file entries verbatim, so without it every untouched Go
+file would keep a symbol list with no unexported entries while the guard, in the
+same release, validated unexported references against it.
 
 Symbol keys are `kind:qualifiedName` (e.g. `function:Widget.render`) and are
 consistent across parsers. Functions/methods are body-hashed over their full

@@ -501,7 +501,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		return 0
 	}
 
-	text := hookText(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits)
+	// One value for the tool call, so the checks below and the extracted phases
+	// read the same five fields by name instead of re-spelling the payload path.
+	edit := hookEdit{
+		ToolName:  payload.ToolName,
+		NewString: payload.ToolInput.NewString,
+		OldString: payload.ToolInput.OldString,
+		Content:   payload.ToolInput.Content,
+		Edits:     payload.ToolInput.Edits,
+	}
+	text := hookText(edit.ToolName, edit.NewString, edit.Content, edit.Edits)
 	filePath := payload.ToolInput.FilePath
 	// removedText is the Edit/MultiEdit text being deleted (cheap, no IO). It is
 	// captured before the empty-input guard so a pure-deletion edit (empty
@@ -517,7 +526,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// positive (see resolveDeclShape).
 	var removedText string
 	if danglingEnabled() || droppedImportEnabled() || callShapeEnabled() {
-		removedText = hookOldText(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits)
+		removedText = hookOldText(edit.ToolName, edit.OldString, edit.Edits)
 	}
 	// A full-file-deletion Write (empty content) has text=="" and — since Write
 	// carries no old_string — removedText=="" too, so it would trip the empty-input
@@ -529,7 +538,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// already-empty file (nothing to delete) keeps the fast early-return instead of
 	// paying a DB open + two file reads on the ~12ms hook budget.
 	emptyInput := text == "" && removedText == ""
-	if emptyInput && payload.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
+	if emptyInput && edit.ToolName == "Write" && (danglingEnabled() || droppedImportEnabled()) {
 		if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
 			emptyInput = false
 		}
@@ -588,81 +597,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	res := lookupSymbolsFor(filepath.Dir(filePath), filePath, payload.SessionID)
 	cw := res.Contract
 	if !res.OK {
-		// A contract binding resolves off the repo row alone, so it survives the
-		// one degraded state that still resolves a repo: enrolled but with no
-		// usable snapshot. Answer it rather than defer — the user declared a
-		// scope this session and the answer does not depend on the index.
-		//
-		// It does NOT survive the other two, but call-shape does, and that is why
-		// the contract binding is no longer the only thing answered here (#261).
-		// res.NoRepo means an unenrolled tree, which cannot hold a binding, and
-		// res.Warn (schema-newer) returns before ResolveRepo ever runs because
-		// the binary cannot read the store at all — cw is nil in both by
-		// construction. Call-shape has no store dependency at all: it resolves a
-		// call against declarations in the file in front of it, so those are
-		// precisely the states where it still answers correctly and was silent.
-		//
-		// Gated on the flag AND on Python so the default path pays nothing. An
-		// unenrolled tree is the common case for a globally installed hook, and
-		// charging every edit there a file read for a check nobody switched on is
-		// the trade this gate exists to refuse — the alternative considered was
-		// hoisting readFileLines above the store gate unconditionally.
-		//
-		// res.Warn is excluded deliberately. Schema-newer means this binary cannot
-		// read the store at all, and that advisory is surfaced ALWAYS, strict or
-		// not, because the fix is "reinstall" and nothing else the guard says
-		// matters until it happens. An ask returns before the switch below, so
-		// answering call-shape there would trade a loud "your binary is stale" for
-		// a quiet keyword finding, and log reason "call-shape" in place of
-		// "schema-newer" — deleting the exact signal #207's gv stamp exists to
-		// preserve. The other two degraded arms lose nothing: NoRepo is silent by
-		// design, and the strict store-degraded advisory rides along on the ask.
-		var degradedShapes []guard.CallShapeMismatch
-		if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
-			// Same construction as the main path below. Duplicated rather than
-			// hoisted because the two are mutually exclusive — this branch
-			// returns — so hoisting would charge every ENROLLED edit for a read
-			// it already does further down, to save a read this branch only
-			// makes when the flag is on.
-			preLines := readFileLines(filePath)
-			fd := guard.FileDiff{
-				Path:       filePath,
-				AddedLines: hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits),
-				SeedByLine: hookSeedByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, preLines, lang),
-			}
-			degradedShapes = callShapeMismatches(lang, preLines, fd, payload.ToolName, removedText)
-		}
-		// Under strict, a store-degraded edit gets an advisory saying symbol
-		// validation is off. An ask returns before that switch, so the advisory
-		// rides along on the ask rather than being dropped: the finding and the
-		// fact that coverage was incomplete are both true, and the user needs
-		// both. NoRepo is silent by design and contributes nothing here.
-		var advisory string
-		if !res.NoRepo && strictMode() {
-			advisory = strictStoreDegradedAdvisory
-		}
-		if askWithoutIndex(out, cw, degradedShapes, filePath, lang, res.RepoName, advisory) {
-			return 0
-		}
-		switch {
-		case res.Warn != "":
-			// Schema-newer: already loud regardless of strict — surfaced always.
-			hookDeferContext(out, res.Warn)
-			logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
-		case res.NoRepo:
-			// Not enrolled — silent skip; strict does not change this.
-			hookDefer()
-			logDecision(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"})
-		default:
-			// Store accessible but degraded (no snapshot, no symbols, etc.).
-			// Under strict, surface an advisory so the user knows validation is off.
-			if strictMode() {
-				hookDeferContext(out, strictStoreDegradedAdvisory)
-			} else {
-				hookDefer()
-			}
-			logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
-		}
+		answerDegradedStore(out, res, edit, filePath, lang, removedText)
 		return 0
 	}
 	// Destructure into the locals the rest of the flow already uses.
@@ -704,20 +639,20 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// MultiEdit so stateful scanners reset open-string state at each boundary.
 	// Shared by the additive check and the dropped-import check below so both see
 	// the same (leak-free) view of a MultiEdit rather than a flat "\n"-join.
-	newLines := hookAddedLines(payload.ToolName, payload.ToolInput.NewString, payload.ToolInput.Content, payload.ToolInput.Edits)
+	newLines := hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits)
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
 		AddedLines: newLines,
 		// Seed each block's open-string state from where it sits in the pre-edit
 		// file, so an Edit landing inside a docstring or string literal is masked
 		// instead of scanned as code. fileLines is the read already done above.
-		SeedByLine: hookSeedByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, fileLines, lang),
+		SeedByLine: hookSeedByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
 		// Same idea for pyBraceDepth (#289): an Edit that adds a dict key without
 		// touching the literal's opening `{` line — the opener is unchanged context
 		// above the block — must not start scanning at depth 0 regardless of the
 		// file's real state there, or the key reads as a definition instead of a
 		// reference. Python-only; hookBraceDepthByLine returns nil for other langs.
-		PyBraceDepthByLine: hookBraceDepthByLine(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, fileLines, lang),
+		PyBraceDepthByLine: hookBraceDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -778,7 +713,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// dangling and duplicate do. Store-free: it resolves against the same file's own
 	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
 	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
-	callShapes := callShapeMismatches(lang, fileLines, diffs[0], payload.ToolName, removedText)
+	callShapes := callShapeMismatches(lang, fileLines, diffs[0], edit.ToolName, removedText)
 
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
@@ -803,7 +738,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// text and silently find nothing, so they are skipped and the single
 		// cause counted once in degraded.
 		wholeOld, wholeDefinitive := "", true
-		if payload.ToolName == "Write" || duplicateEnabled() {
+		if edit.ToolName == "Write" || duplicateEnabled() {
 			wholeOld, wholeDefinitive = wholeFileText(filePath)
 		}
 		if !wholeDefinitive {
@@ -811,7 +746,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 		oldText := removedText
 		oldTextDefinitive := true
-		if payload.ToolName == "Write" {
+		if edit.ToolName == "Write" {
 			oldText, oldTextDefinitive = wholeOld, wholeDefinitive
 		}
 		// E1: does this edit remove a definition that *other* files still reference?
@@ -826,7 +761,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
 		if droppedImportEnabled() && oldTextDefinitive {
-			oldLines := hookOldLines(payload.ToolName, payload.ToolInput.OldString, payload.ToolInput.Edits, oldText)
+			oldLines := hookOldLines(edit.ToolName, edit.OldString, edit.Edits, oldText)
 			// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
 			// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
 			// addInFileDefs folds whole-file defs into the additive check's known
@@ -834,7 +769,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// preBound so such a rebind still suppresses the false positive. Not
 			// needed for Write: its newLines already IS the whole file.
 			var preBound map[string]struct{}
-			if payload.ToolName != "Write" {
+			if edit.ToolName != "Write" {
 				preBound = wholeFileBoundNames(fileLines, lang)
 			}
 			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)

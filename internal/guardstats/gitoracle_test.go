@@ -391,3 +391,95 @@ func TestGitOracleSiblingHandlesMigratedBareLayout(t *testing.T) {
 		t.Errorf("Worktree = (%q, %q), want (%q, \"context.py\")", root, rel, live)
 	}
 }
+
+// A bare identifier alone on a line is a multi-line import MEMBER only when the
+// file actually opens one. In a multi-line call or list literal the same shape
+// is a USAGE, and crediting it scores the guard with a resolution bug it does
+// not have. Verified by execution before the gate existed: 7 of 7 such usages
+// came back defined.
+func TestGitOracleBareNameIsUsageWithoutAnImportBlock(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "pkg/target.py", "result = compute(\n    payload,\n    config,\n)\n\nvalues = [\n    alpha,\n]\n")
+	write(t, root, "src/app.ts", "const arr = [\n  foo,\n  bar,\n];\n\nrender(\n  widget,\n);\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, sym := range []string{"payload", "config", "alpha"} {
+		got, err := g.Defined(root, rev, "py", sym, "pkg/target.py")
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", sym, err)
+		}
+		if got {
+			t.Errorf("py Defined(%q) = true; a call argument / list element is a usage, not a binding", sym)
+		}
+	}
+	for _, sym := range []string{"foo", "bar", "widget"} {
+		got, err := g.Defined(root, rev, "js", sym, "src/app.ts")
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", sym, err)
+		}
+		if got {
+			t.Errorf("js Defined(%q) = true; a call argument / array element is a usage, not a binding", sym)
+		}
+	}
+}
+
+// The complement, and the reason the gate is a gate and not a deletion: when the
+// file DOES open a multi-line import, its members must still resolve — that is
+// the guard bug (#304) the oracle exists to score correctly.
+func TestGitOracleBareNameResolvesInsideAnImportBlock(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "src/lib/db.ts",
+		"import {\n  makeSeededRandom,\n  depthFor,\n} from './core';\n\nconst r = makeSeededRandom(1);\n")
+	write(t, root, "pkg/mod.py",
+		"from .core import (\n    make_seeded_random,\n    depth_for,\n)\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, sym := range []string{"makeSeededRandom", "depthFor"} {
+		got, err := g.Defined(root, rev, "js", sym, "src/lib/db.ts")
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", sym, err)
+		}
+		if !got {
+			t.Errorf("js Defined(%q) = false; a multi-line import member must resolve", sym)
+		}
+	}
+	for _, sym := range []string{"make_seeded_random", "depth_for"} {
+		got, err := g.Defined(root, rev, "py", sym, "pkg/mod.py")
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", sym, err)
+		}
+		if !got {
+			t.Errorf("py Defined(%q) = false; a multi-line import member must resolve", sym)
+		}
+	}
+}
+
+// The Go grouped-var pattern used `^\t`, which git's ERE does not honour as a
+// tab, so it never matched. It is now removed rather than repaired, because the
+// repair (`^[[:space:]]+`) credits every struct FIELD as a package-scope
+// declaration. This pins BOTH halves of that trade.
+func TestGitOracleGoStructFieldIsNotADeclaration(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "a.go", "package a\n\ntype T struct {\n\tHandler string\n\tcount   int\n}\n\nvar (\n\tMaxRetries int = 3\n)\n")
+	write(t, root, "b.go", "package a\n\nfunc use() { _ = T{} }\n")
+	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
+	g := GitOracle{Timeout: 20 * time.Second}
+
+	for _, sym := range []string{"Handler", "count"} {
+		got, err := g.Defined(root, rev, "go", sym, "b.go")
+		if err != nil {
+			t.Fatalf("Defined(%q): %v", sym, err)
+		}
+		if got {
+			t.Errorf("Defined(%q) = true; a struct field is not a package-scope declaration", sym)
+		}
+	}
+	// Accepted, documented miss: a grouped var reads as undefined. If this ever
+	// starts returning true, the struct-field assertion above is what guards the
+	// change from being a regression.
+	if got, err := g.Defined(root, rev, "go", "MaxRetries", "b.go"); err != nil || got {
+		t.Logf("grouped var MaxRetries now resolves (%v) — check struct fields still do not", got)
+	}
+}

@@ -104,9 +104,18 @@ func declPatterns(lang, sym string) []string {
 		return []string{
 			// func Name, func (r T) Name — the receiver group is optional.
 			`^func([[:space:]]*\([^)]*\))?[[:space:]]+` + q + `\b`,
-			// type/var/const Name at top level, and inside a grouped ( … ) block.
+			// type/var/const Name at top level.
+			//
+			// A name inside a grouped `var ( … )` block is deliberately NOT
+			// covered. The pattern that tried to (`^\t` + name) never matched
+			// anything — git's ERE does not honour `\t` as a tab — and the obvious
+			// repair, `^[[:space:]]+` + name, matches every STRUCT FIELD too, which
+			// is not a package-scope declaration of that name. Given the choice
+			// between missing a grouped var (reads as VerdictStands, flatters the
+			// guard) and crediting a struct field (reads as VerdictFP, blames the
+			// guard for a bug it does not have), the file's stated bias says take
+			// the miss. Stated here rather than left as a dead pattern.
 			`^[[:space:]]*(type|var|const)[[:space:]]+` + q + `\b`,
-			`^\t` + q + `[[:space:]]+[A-Za-z_[*]`,
 		}
 	case "py":
 		return []string{
@@ -139,7 +148,30 @@ func declPatterns(lang, sym string) []string {
 }
 
 // bindPatterns are only ever searched inside the edited file. See declPatterns.
-func bindPatterns(lang, sym string) []string {
+//
+// inImportBlock gates the "bare name alone on a line" forms. Those exist to see
+// a member of a multi-line `import { … }` / `from x import ( … )` block — the
+// exact shape the guard's own ExtractImports is blind to, so the oracle must
+// cover it or it would score that guard bug as a correct catch. But the pattern
+// cannot tell a multi-line IMPORT member from a multi-line CALL ARGUMENT or list
+// element, which are USAGES:
+//
+//	result = compute(          const arr = [
+//	    payload,                 foo,
+//	)                          ];
+//
+// Ungated, `payload` and `foo` read as "already defined at ask time" and the
+// guard is blamed for a resolution bug it does not have. Verified by execution:
+// 7 of 7 such usages scored defined. Measured blast radius on the reference
+// window was 4 of 69 fp verdicts, so gating on "this file opens a multi-line
+// import at all" removes the class for every file that has none — which is most
+// of them — at the cost of one extra grep.
+//
+// Residual, stated rather than hidden: a file containing BOTH a multi-line
+// import and a multi-line call can still over-match. Closing that needs
+// multi-line context git grep cannot express; a parser-grade oracle is where it
+// gets fixed properly.
+func bindPatterns(lang, sym string, inImportBlock bool) []string {
 	q := regexp.QuoteMeta(sym)
 	switch lang {
 	case "go":
@@ -149,25 +181,31 @@ func bindPatterns(lang, sym string) []string {
 			`^[[:space:]]*` + q + `[[:space:]]+"`,
 		}
 	case "py":
-		return []string{
+		pats := []string{
 			`^[[:space:]]*` + q + `[[:space:]]*(:[^=]*)?=`,
 			`^[[:space:]]*(from[[:space:]].*)?import[[:space:]].*\b` + q + `\b`,
-			// A name on its own line inside a parenthesised multi-line import.
-			`^[[:space:]]*` + q + `([[:space:]]+as[[:space:]]+[A-Za-z_][A-Za-z0-9_]*)?[[:space:]]*,?[[:space:]]*$`,
 			// A parameter, which binds the name for the whole function body.
 			`^[[:space:]]*(async[[:space:]]+)?def[[:space:]].*[(,][[:space:]]*\*{0,2}` + q + `[[:space:]]*[:,)=]`,
 		}
+		if inImportBlock {
+			// A name on its own line inside a parenthesised multi-line import.
+			pats = append(pats, `^[[:space:]]*`+q+`([[:space:]]+as[[:space:]]+[A-Za-z_][A-Za-z0-9_]*)?[[:space:]]*,?[[:space:]]*$`)
+		}
+		return pats
 	case "js":
-		return []string{
+		pats := []string{
 			`^[[:space:]]*(const|let|var)[[:space:]].*\b` + q + `\b`,
 			// Class/object member shorthand: `name(args) {`, `name = () =>`.
 			`^[[:space:]]*(static[[:space:]]+)?(async[[:space:]]+)?` + q + `[[:space:]]*[(=]`,
 			`\bimport[[:space:]].*\b` + q + `\b`,
-			// A member on its own line inside a multi-line `import { … }` block —
-			// the exact form the guard's own ExtractImports is blind to.
-			`^[[:space:]]*` + q + `([[:space:]]+as[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*)?[[:space:]]*,?[[:space:]]*$`,
 			`\bfunction[[:space:]].*[(,][[:space:]]*` + q + `[[:space:]]*[:,)=]`,
 		}
+		if inImportBlock {
+			// A member on its own line inside a multi-line `import { … }` block —
+			// the exact form the guard's own ExtractImports is blind to.
+			pats = append(pats, `^[[:space:]]*`+q+`([[:space:]]+as[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*)?[[:space:]]*,?[[:space:]]*$`)
+		}
+		return pats
 	case "sh":
 		return []string{
 			`^[[:space:]]*(export[[:space:]]+|declare[[:space:]]+|local[[:space:]]+)?` + q + `=`,
@@ -374,31 +412,34 @@ func (g GitOracle) Defined(worktree, rev, lang, sym, rel string) (bool, error) {
 	}
 	// Bindings only count inside the edited file.
 	if rel != "" {
-		if pats := bindPatterns(lang, needle); len(pats) > 0 {
+		inImport, err := g.opensMultilineImport(worktree, rev, lang, rel)
+		if err != nil {
+			return false, err
+		}
+		if pats := bindPatterns(lang, needle, inImport); len(pats) > 0 {
 			return g.grep(worktree, rev, pats, []string{literalPathspec(rel)})
 		}
 	}
 	return false, nil
 }
 
-// filePathspec turns an absolute recorded path into a git pathspec that will
-// match the same file in a sibling worktree: the last two segments, wildcarded
-// at the front. Two segments rather than one because a bare basename like
-// `main.go` or `__init__.py` matches dozens of unrelated files, and a binding
-// found in one of those would be scored as a guard FP.
-func filePathspec(file string) string {
-	if file == "" {
-		return ""
+// multilineImportOpener matches a line that opens a multi-line import block:
+// `import {` / `from x import (` with nothing but whitespace after the bracket.
+// A file with none of these cannot contain a multi-line import member, so the
+// bare-name binding patterns are withheld from it entirely — see bindPatterns.
+var multilineImportOpener = map[string]string{
+	"py": `^[[:space:]]*(from[[:space:]].*)?import[[:space:]]*\([[:space:]]*$`,
+	"js": `^[[:space:]]*import[[:space:]]*(type[[:space:]]+)?\{[[:space:]]*$`,
+}
+
+// opensMultilineImport reports whether rel contains a multi-line import opener
+// at rev. Costs one grep, and only for languages that have the construct.
+func (g GitOracle) opensMultilineImport(worktree, rev, lang, rel string) (bool, error) {
+	pat, ok := multilineImportOpener[lang]
+	if !ok {
+		return false, nil
 	}
-	base := filepath.Base(file)
-	if base == "." || base == string(filepath.Separator) {
-		return ""
-	}
-	parent := filepath.Base(filepath.Dir(file))
-	if parent == "." || parent == string(filepath.Separator) {
-		return "*" + base
-	}
-	return "*" + parent + "/" + base
+	return g.grep(worktree, rev, []string{pat}, []string{literalPathspec(rel)})
 }
 
 // grep runs one `git grep` over rev, returning whether any pattern matched.

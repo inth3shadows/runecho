@@ -978,51 +978,12 @@ func readFileLines(filePath string) []guard.AddedLine {
 	return guard.TextToAddedLines(string(data))
 }
 
-// addInFileDefs folds every definition the def-extractor finds in fileLines
-// (top-level AND indented/nested defs and local arrow consts, since the def
-// regexes are `^\s*`-anchored) into the known symbol set. This is the P2
-// residual-killer: it makes a hunk-scoped Edit aware of the rest of its own file
-// without re-implementing a scope-tracking parser. It mutates symbols in place (a
-// fresh per-call map). fileLines is nil for a missing/oversized file (see
-// readFileLines), in which case this adds nothing.
+// addInFileDefs folds the current file's own definitions into the known symbol
+// set. The fold itself lives in the guard package (guard.FoldInFileDefs) so the
+// compiler-oracle differential harness can build the exact same known set this
+// hook builds; see that function's doc for why a second copy would be unsafe.
 func addInFileDefs(symbols map[string]struct{}, fileLines []guard.AddedLine, lang guard.Lang) {
-	for _, def := range guard.ExtractDefs(lang, fileLines) {
-		symbols[def] = struct{}{}
-	}
-	// Imported names (`from pathlib import Path`, `import {readFileSync} …`) are
-	// real callables bound elsewhere in the file; fold them in too.
-	for _, imp := range guard.ExtractImports(lang, fileLines) {
-		symbols[imp] = struct{}{}
-	}
-	// JS binds callables by forms the def/import extractors miss — destructuring
-	// (`const [x, setX] = useState()`), object destructure, and computed-assign
-	// (`const fn = handlers[k]`). Fold the whole-file declarator binding targets in
-	// so a bare call to one is not a false hallucination — crucially the binding
-	// line (e.g. a useState destructure) usually sits OUTSIDE the edited hunk, which
-	// the hunk-scoped diff never sees. JSDeclaredNames (not the over-inclusive
-	// LocallyBoundNames) keeps a param type annotation from leaking a type name and
-	// masking a real undefined reference. JS-only: Go skips bare lowercase refs
-	// already, and Python's locals are out of scope for this pass.
-	if lang == guard.LangJS {
-		for _, name := range guard.JSDeclaredNames(fileLines) {
-			symbols[name] = struct{}{}
-		}
-	}
-	// Python sibling: a local callable bound by assignment (`handler =
-	// HANDLERS[key]; handler(payload)`) is not a hallucination. Fold whole-file
-	// assignment targets so a binding on a line outside the edited hunk resolves.
-	if lang == guard.LangPython {
-		for _, name := range guard.PyDeclaredNames(fileLines) {
-			symbols[name] = struct{}{}
-		}
-		// Parameters used as callables are bound by their signature (a
-		// `Callable`-typed param, a lambda arg). Fold the whole file's parameter
-		// names — names only, never their type annotations. This was the last
-		// surviving Python false-positive class in the live decision log.
-		for _, name := range guard.PyParamNames(fileLines) {
-			symbols[name] = struct{}{}
-		}
-	}
+	guard.FoldInFileDefs(symbols, fileLines, lang)
 }
 
 // wholeFileBoundNames returns the union of the file's locally-bound names

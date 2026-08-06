@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.29.3] — 2026-08-06
+
+### Changed
+- Audit fixes: contract CLI tests, runHookMode decomposition, MCP smoke test (#305)
+
 ## [0.29.2] — 2026-08-06
 
 ### Changed

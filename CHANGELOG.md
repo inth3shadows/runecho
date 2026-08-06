@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-08-06
+
+### Changed
+- guard: extract multi-line JS/TS named imports (#304) (#319)
+
 ## [0.31.0] — 2026-08-06
 
 ### Changed

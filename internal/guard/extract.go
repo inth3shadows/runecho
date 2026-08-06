@@ -285,13 +285,21 @@ var (
 	reJSRequire = regexp.MustCompile(`^\s*(?:const|let|var)\s+(.+?)\s*=\s*require\s*\(`)
 	reIdent     = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
 	// reJSImportKeyword matches the start of any `import` statement, single- or
-	// multi-line. Used only to detect a multi-line named-import block that opens
-	// with an unbalanced `{` — reJSImport itself already handles the single-line
-	// case where `from` sits on the same line.
+	// multi-line. Used only to detect a multi-line named-import block —
+	// reJSImport itself already handles the single-line case where `from` sits
+	// on the same line.
 	reJSImportKeyword = regexp.MustCompile(`^\s*import\s`)
+	// reJSImportSideEffect matches a side-effect-only import (`import
+	// './styles.css';`) — starts with `import` and carries no `from` clause, but
+	// binds no names and is never a multi-line opener, unlike a named-import
+	// clause that merely hasn't reached its `from` yet.
+	reJSImportSideEffect = regexp.MustCompile(`^\s*import\s*['"]`)
 	// reJSFromClause matches a standalone `from` token — the line that closes a
 	// multi-line named-import block always carries one (`} from 'm';`). Word-
 	// bounded so an identifier like `fromDate` inside the block never matches.
+	// Callers must match this against masked (stripLiterals) text — see
+	// ExtractImports' LangJS branch — so a comment or string containing the word
+	// "from" cannot be mistaken for the closing clause.
 	reJSFromClause = regexp.MustCompile(`\bfrom\b`)
 	// reJSExportFrom matches an `export ... from ...` re-export at any spacing —
 	// spaced (`export { a } from 'm'`), minified (`export{a}from"m"`), or a
@@ -358,13 +366,17 @@ func ExtractImports(lang Lang, lines []AddedLine) []string {
 		case LangJS:
 			// A multi-line named-import block (`import {\n  a,\n} from 'm'`) splits
 			// the clause reJSImport needs whole across several lines — the dominant
-			// style in any real TS codebase. Accumulate raw text until the closing
-			// `from` clause appears, then parse the joined line exactly as the
-			// single-line case (#304).
+			// style in any real TS codebase. Accumulate the comment/string-MASKED
+			// text (not raw text — a `// pulled from utils` comment line, or a
+			// module-path string containing "from", must never be mistaken for the
+			// closing clause; code review on #319) until the closing `from` clause
+			// appears, then parse the joined line exactly as the single-line case
+			// (#304).
+			masked := stripLiterals(LangJS, text)
 			if inJSImport {
 				jsImportBuf.WriteByte(' ')
-				jsImportBuf.WriteString(text)
-				if reJSFromClause.MatchString(text) {
+				jsImportBuf.WriteString(masked)
+				if reJSFromClause.MatchString(masked) {
 					if m := reJSImport.FindStringSubmatch(jsImportBuf.String()); m != nil {
 						names = append(names, parseJSImportClause(m[1])...)
 					}
@@ -377,10 +389,17 @@ func ExtractImports(lang Lang, lines []AddedLine) []string {
 				names = append(names, parseJSImportClause(m[1])...)
 			} else if m := reJSRequire.FindStringSubmatch(text); m != nil {
 				names = append(names, parseJSBindingTarget(m[1])...)
-			} else if reJSImportKeyword.MatchString(text) && strings.Count(text, "{") > strings.Count(text, "}") {
+			} else if reJSImportKeyword.MatchString(masked) &&
+				!reJSImportSideEffect.MatchString(masked) &&
+				!reJSFromClause.MatchString(masked) {
+				// `import` opened but this is neither a side-effect-only statement
+				// nor already complete on this line — the clause continues on
+				// following lines regardless of whether this line's braces happen to
+				// balance (`import { a, b }\n  from 'm';` balances on line 1 yet
+				// still needs the next line — code review on #319, Bug 2).
 				inJSImport = true
 				jsImportBuf.Reset()
-				jsImportBuf.WriteString(text)
+				jsImportBuf.WriteString(masked)
 			}
 		}
 	}

@@ -969,6 +969,78 @@ func TestExtractImports_JSMultiLineDefaultPlusNamed(t *testing.T) {
 	}
 }
 
+// TestExtractImports_JSMultiLineCommentContainingFrom pins a code-review finding
+// on #319: a comment line inside the block that happens to contain the
+// standalone word "from" (a realistic pattern, e.g. "pulled from utils") must
+// not be mistaken for the closing `from` clause — that misread the block as
+// still-open, the buffer never found a real terminator on a later masked line,
+// and every name in the block was silently dropped (the exact FP class #304 was
+// meant to fix).
+func TestExtractImports_JSMultiLineCommentContainingFrom(t *testing.T) {
+	ls := lines(
+		`import {`,
+		`  // pulled from utils`,
+		`  foo,`,
+		`} from './utils';`,
+		``,
+		`foo(1);`,
+	)
+	got := ExtractImports(LangJS, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	if !gotSet["foo"] {
+		t.Errorf("expected %q bound despite a comment containing \"from\" inside the block, got %v", "foo", got)
+	}
+}
+
+// TestExtractImports_JSMultiLineFromOnOwnLine pins a code-review finding on
+// #319 (Bug 2): a valid style that puts `from` on its own line while the named
+// list is already balanced on the `import` line (`import { a, b, c }\n  from
+// './m';`) was never detected as multi-line by the old unbalanced-brace opener
+// check, so the whole import was silently skipped.
+func TestExtractImports_JSMultiLineFromOnOwnLine(t *testing.T) {
+	ls := lines(
+		`import { a, b, c }`,
+		`  from './m';`,
+		``,
+		`const r = a(1);`,
+	)
+	got := ExtractImports(LangJS, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	for _, want := range []string{"a", "b", "c"} {
+		if !gotSet[want] {
+			t.Errorf("expected %q bound when `from` sits on its own line, got %v", want, got)
+		}
+	}
+}
+
+// A side-effect-only import (`import './styles.css';`) binds no names and must
+// never be mistaken for an unterminated multi-line import opener — it starts
+// with `import` and carries no `from` clause, same as a genuine multi-line
+// opener, but is already a complete statement.
+func TestExtractImports_JSSideEffectImportDoesNotOpenMultiLine(t *testing.T) {
+	ls := lines(
+		`import './styles.css';`,
+		`import { real } from './m';`,
+	)
+	got := ExtractImports(LangJS, ls)
+	gotSet := map[string]bool{}
+	for _, n := range got {
+		gotSet[n] = true
+	}
+	if !gotSet["real"] {
+		t.Errorf("side-effect import must not swallow the next import as a continuation; got %v", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("side-effect import should bind no names of its own, got %v", got)
+	}
+}
+
 // A multi-line import block split across a diff-hunk gap must not leak its
 // continuation state into unrelated code (mirrors the Python paren-reset test).
 func TestExtractImports_JSMultiLineStateResetsOnLineGap(t *testing.T) {

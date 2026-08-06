@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -15,36 +16,45 @@ import (
 	"github.com/inth3shadows/runecho/internal/version"
 )
 
-func main() {
+func main() { os.Exit(run(os.Stdin, os.Stdout, os.Stderr)) }
+
+// run is the testable seam, matching runecho-ir's shape. main() is otherwise
+// unreachable from a test, which is how this binary — one of the three RunEcho
+// ships — went out with zero of them while 29,000 lines of tests sat next to it.
+// The wiring here is exactly what a packaging regression breaks: a store that
+// fails to open, an oracle that is never registered, or a diagnostic written to
+// stdout, which corrupts the stdio JSON-RPC framing for every client.
+func run(stdin io.Reader, stdout, stderr io.Writer) int {
 	dir, err := runechoDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "runecho-mcp: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "runecho-mcp: %v\n", err)
+		return 1
 	}
 	// 0700: keep other local users out of the central store on a shared host (the
 	// dir mode gates traversal to history.db and its sidecars). Matches runecho-ir.
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "runecho-mcp: create %s: %v\n", dir, err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "runecho-mcp: create %s: %v\n", dir, err)
+		return 1
 	}
 	dbPath := filepath.Join(dir, "history.db")
 
 	db, err := snapshot.Open(dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "runecho-mcp: open store: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "runecho-mcp: open store: %v\n", err)
+		return 1
 	}
 	defer db.Close()
 
 	// Diagnostics to stderr; stdout is reserved for JSON-RPC frames (stdio
 	// transport — a stray stdout write corrupts the protocol).
-	server := mcp.NewServer("runecho", version.Version).WithLogWriter(os.Stderr)
+	server := mcp.NewServer("runecho", version.Version).WithLogWriter(stderr)
 	mcp.NewOracle(db, dbPath).Register(server)
 
-	if err := server.Serve(os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "runecho-mcp: serve: %v\n", err)
-		os.Exit(1)
+	if err := server.Serve(stdin, stdout); err != nil {
+		fmt.Fprintf(stderr, "runecho-mcp: serve: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
 // runechoDir delegates to the shared store helper so all entry points use a

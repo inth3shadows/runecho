@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-08-06
+
+### Changed
+- guard: adjudicate resolution verdicts with the Go compiler (#308)
+
 ## [0.29.3] — 2026-08-06
 
 ### Changed

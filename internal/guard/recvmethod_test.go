@@ -103,17 +103,6 @@ func other() {
 			why:   "gate 2: r is also a short variable declaration",
 		},
 		{
-			name: "unexported member",
-			src: `package p
-
-func (r *Reader) Fetch() {
-	r.parse()
-}
-`,
-			known: knownSetOf("Reader.Fetch"),
-			why:   "gate 3: the IR does not index unexported methods",
-		},
-		{
 			name: "type has no indexed methods",
 			src: `package p
 
@@ -187,6 +176,23 @@ func (r *Reader) Fetch() {
 				t.Errorf("want no violation (%s), got %+v", tc.why, got)
 			}
 		})
+	}
+}
+
+func TestGoReceiverMethodCatchesMissingUnexportedSiblingMethod(t *testing.T) {
+	// Gate 3 used to abstain here. Unexported methods are now indexed as
+	// "Reader.parse", so an unexported sibling that does not exist is exactly as
+	// checkable as an exported one — this is the case that lifts the check's
+	// reach from 0.5% of selector sites toward 3.2%.
+	src := `package p
+
+func (r *Reader) Fetch() {
+	r.parse()
+}
+`
+	got := recvViolations(t, src, knownSetOf("Reader.Fetch", "Reader.render"))
+	if len(got) != 1 || got[0].Symbol != "Reader.parse" {
+		t.Fatalf("want Reader.parse violation, got %+v", got)
 	}
 }
 

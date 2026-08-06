@@ -27,8 +27,13 @@ import "regexp"
 //     file using `r` for different types make `r.Foo` unresolvable; abstain.
 //  2. The variable must never be re-bound in the file (`r :=`, `var r`). A
 //     rebinding elsewhere means the name at the call site may not be the receiver.
-//  3. The method name must be exported. The IR indexes only exported methods, so
-//     an unexported one is absent for reasons that say nothing about existence.
+//  3. (LIFTED) This gate previously required an exported method name, because the
+//     IR indexed only exported methods and an unexported one was absent for
+//     reasons that said nothing about existence. The Go parser now records
+//     unexported methods under the "unexported" kind, so the gate is gone. It was
+//     the binding constraint: a population probe put this check's ceiling at 0.5%
+//     of selector sites with it in place, against 3.2% without, because
+//     sibling-method calls are usually to unexported helpers.
 //  4. The receiver type must already have at least one indexed method. Zero means
 //     the parser never recorded a method set for T, so absence proves nothing.
 //  5. The method name must not exist ANYWHERE in the known set — not on another
@@ -179,9 +184,6 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 			typ, ok := recvTypes[q]
 			if !ok {
 				continue // gate 1/2: not an unambiguous, never-rebound receiver
-			}
-			if sym[0] < 'A' || sym[0] > 'Z' {
-				continue // gate 3: unexported methods are not indexed
 			}
 			if _, ok := typesWithMethods[typ]; !ok {
 				continue // gate 4: T has no indexed method set to argue from

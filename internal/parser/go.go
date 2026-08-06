@@ -60,6 +60,10 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	functions := []string{}
 	classes := []string{}
 	exports := []string{}
+	// Unexported is a newer field with no regex-era contract to preserve, so it
+	// stays nil for a file that declares nothing unexported and the IR omits it.
+	var unexported []string
+	var fields []string
 	hashes := make(map[string]string)
 	lines := make(map[string]int)
 	docs := make(map[string]string)
@@ -119,13 +123,25 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
 				name := d.Name.Name
-				if !ast.IsExported(name) {
-					continue
-				}
 				full := name
 				if d.Recv != nil && len(d.Recv.List) > 0 {
 					// Qualify by receiver type: func (r *Reader) Fetch → "Reader.Fetch".
 					full = qualify(receiverTypeName(d.Recv.List[0].Type), name)
+				}
+				if !ast.IsExported(name) {
+					// Unexported: recorded under its own kind, never in Functions.
+					// Functions is the exported-API-surface contract that
+					// `structure`/`map` render, so widening it here would change
+					// what every existing consumer shows. The guard reads names
+					// regardless of kind and is the intended consumer.
+					unexported = append(unexported, full)
+					// Line only, no body hash: hashes drive modified-symbol
+					// diffing, and recording them here would start reporting
+					// unexported functions as "modified" in every diff — a
+					// visible behaviour change well beyond making the name
+					// resolvable. A line is what `locate` needs and costs nothing.
+					recordLine("unexported:"+full, fset.Position(d.Pos()).Line)
+					continue
 				}
 				functions = append(functions, full)
 				key := "function:" + full
@@ -133,7 +149,7 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 				recordLine(key, fset.Position(d.Pos()).Line)
 				recordDoc(key, d.Doc)
 			case *ast.GenDecl:
-				collectGenDecl(d, fset, src, &imports, &functions, &classes, &exports, recordLine, recordHash, recordDoc)
+				collectGenDecl(d, fset, src, &imports, &functions, &classes, &exports, &unexported, &fields, recordLine, recordHash, recordDoc)
 			}
 		}
 	}
@@ -142,6 +158,8 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 	sort.Strings(functions)
 	sort.Strings(classes)
 	sort.Strings(exports)
+	sort.Strings(unexported)
+	sort.Strings(fields)
 
 	// Nil out empty maps so the IR omits them for files with no spanned symbols
 	// (parity with the Python parser and the regex-era nil contract).
@@ -160,18 +178,21 @@ func (p *GoParser) Parse(source string) (FileStructure, error) {
 		Functions:    deduplicate(functions),
 		Classes:      deduplicate(classes),
 		Exports:      deduplicate(exports),
+		Unexported:   deduplicate(unexported),
+		Fields:       deduplicate(fields),
 		SymbolHashes: hashes,
 		SymbolLines:  lines,
 		SymbolDocs:   docs,
 	}, nil
 }
 
-// collectGenDecl extracts imports, exported types, and exported top-level
-// var/const names from a general declaration. Iterating Specs is what fixes the
+// collectGenDecl extracts imports, types, and top-level var/const names from a
+// general declaration, routing each to Classes/Exports or to Unexported by
+// whether the name is exported. Iterating Specs is what fixes the
 // two regex-era bugs for free: `var X, Y = 1, 2` yields both names (a ValueSpec
 // carries all of them), and a `var (...)` / `import (...)` block's boundaries are
 // owned by the AST, so a nested `)` no longer closes the block early.
-func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, functions, classes, exports *[]string, recordLine func(string, int), recordHash func(string, []byte), recordDoc func(string, *ast.CommentGroup)) {
+func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, functions, classes, exports, unexported, fields *[]string, recordLine func(string, int), recordHash func(string, []byte), recordDoc func(string, *ast.CommentGroup)) {
 	// specDoc picks the comment group that documents one spec. A spec's own Doc
 	// wins. Falling back to the GenDecl's is correct ONLY for an unparenthesized
 	// declaration (`// Foo does X` above a bare `type Foo ...`), where the parser
@@ -205,7 +226,16 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 	case token.TYPE:
 		for _, spec := range d.Specs {
 			s, ok := spec.(*ast.TypeSpec)
-			if !ok || !ast.IsExported(s.Name.Name) {
+			if !ok {
+				continue
+			}
+			collectStructFields(s, fields)
+			if !ast.IsExported(s.Name.Name) {
+				// An unexported type is still a callable name at a bare call site
+				// (a conversion, `myType(x)`), so it has to be resolvable even
+				// though it is not part of the public surface Classes describes.
+				*unexported = append(*unexported, s.Name.Name)
+				recordLine("unexported:"+s.Name.Name, fset.Position(s.Pos()).Line)
 				continue
 			}
 			*classes = append(*classes, s.Name.Name)
@@ -249,12 +279,35 @@ func collectGenDecl(d *ast.GenDecl, fset *token.FileSet, src []byte, imports, fu
 			}
 			for _, nm := range s.Names {
 				if !ast.IsExported(nm.Name) {
+					// A package-level unexported var can hold a func value and be
+					// called bare (`handler()`), so it is a resolution target too.
+					*unexported = append(*unexported, nm.Name)
+					recordLine("unexported:"+nm.Name, fset.Position(nm.Pos()).Line)
 					continue
 				}
 				*exports = append(*exports, nm.Name)
 				recordLine("export:"+nm.Name, fset.Position(nm.Pos()).Line)
 				recordDoc("export:"+nm.Name, specDoc(s.Doc))
 			}
+		}
+	}
+}
+
+// collectStructFields appends the named fields of a struct type declaration as
+// "Type.field". Embedded fields carry no Names and are skipped: the names they
+// promote belong to a type this single-file parser cannot resolve, and inventing
+// entries for them would claim knowledge the parser does not have.
+func collectStructFields(s *ast.TypeSpec, fields *[]string) {
+	st, ok := s.Type.(*ast.StructType)
+	if !ok || st.Fields == nil {
+		return
+	}
+	for _, f := range st.Fields.List {
+		for _, name := range f.Names {
+			if name.Name == "_" {
+				continue
+			}
+			*fields = append(*fields, qualify(s.Name.Name, name.Name))
 		}
 	}
 }

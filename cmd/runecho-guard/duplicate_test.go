@@ -227,10 +227,13 @@ func TestDuplicate_RedefinedInPlace_Defers(t *testing.T) {
 	// which mentions only Other) and misfire; the whole-file comparison
 	// correctly sees DoThing was already present in the file and stays silent.
 	file := filepath.Join(top, "known.go")
-	if err := os.WriteFile(file, []byte("package p\nfunc DoThing() { a() }\nfunc Other() {}\n"), 0644); err != nil {
+	// Builtin bodies, not arbitrary `a()`/`c()` filler: unexported Go references
+	// are checked now, so invented lowercase calls would fail this test for a
+	// reason that has nothing to do with duplicate detection.
+	if err := os.WriteFile(file, []byte("package p\nfunc DoThing() { println(1) }\nfunc Other() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	in := payloadOld(t, "Edit", file, "func Other() {}", "func Other() {}\nfunc DoThing() { c() }", "", nil)
+	in := payloadOld(t, "Edit", file, "func Other() {}", "func Other() {}\nfunc DoThing() { println(2) }", "", nil)
 	_, _, d := runHook(t, in)
 
 	if d.Hook.PermissionDec == "ask" {

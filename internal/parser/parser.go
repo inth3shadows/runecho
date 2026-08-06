@@ -17,6 +17,32 @@ type FileStructure struct {
 	// wildcard re-export.
 	WildcardReexports []string
 
+	// Unexported lists a file's unexported top-level declarations (sorted). Go
+	// only today. These are NOT part of the exported API surface, and consumers
+	// that render that surface must keep filtering them out by kind — they are
+	// indexed so that edit-time resolution has something to validate an
+	// unexported reference against, which is a different job from describing a
+	// package's public shape.
+	//
+	// Funcs are bare (`parse`), methods are receiver-qualified (`Reader.parse`),
+	// matching how the exported halves are named. Types, consts and vars are
+	// included and are not optional: a Go bare "call" can be a type conversion
+	// (`myType(x)`) or a call through a package-level func-typed var
+	// (`handler()`), so omitting them would manufacture false positives in
+	// exactly the population this field exists to make checkable.
+	Unexported []string
+
+	// Fields lists struct field names, receiver-qualified (`Reader.buf`), sorted.
+	// Go only today; exported and unexported alike, because this is not an
+	// API-surface list — it exists so that `v.name` resolution can tell an
+	// invented member from a real one. A func-typed field is called exactly like
+	// a method (`rb.flushF(rb)`), so a checker that knows only methods reports
+	// every such call as a hallucination.
+	//
+	// Embedded fields are omitted: they have no name of their own, and the names
+	// they promote come from another type the single-file parser cannot resolve.
+	Fields []string
+
 	// SymbolHashes maps "kind:name" (e.g. "function:Reader.fetch") to a hash of
 	// that symbol's source body, for parsers that extract per-symbol spans (the
 	// AST-backed Python parser). It enables modified-symbol diffing: a symbol

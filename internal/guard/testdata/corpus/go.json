@@ -3,24 +3,36 @@
     "name": "go-tp-hallucinated-call",
     "desc": "bare call to a symbol that exists nowhere must be flagged",
     "file": "service.go",
-    "known": ["SaveUser"],
+    "known": [
+      "SaveUser"
+    ],
     "edit": "func Handle(w http.ResponseWriter) {\n    res := ProcessOrder(w)\n    _ = res\n}\n",
-    "expect": ["ProcessOrder"]
+    "expect": [
+      "ProcessOrder"
+    ]
   },
   {
     "name": "go-tp-typo-with-suggestion",
     "desc": "one-edit typo of a known symbol is flagged with a did-you-mean",
     "file": "profile.go",
-    "known": ["FetchUser"],
+    "known": [
+      "FetchUser"
+    ],
     "edit": "func LoadProfile(ctx context.Context) error {\n    u, err := FetchUserr(ctx)\n    if err != nil {\n        return err\n    }\n    _ = u\n    return nil\n}\n",
-    "expect": ["FetchUserr"],
-    "suggest": {"FetchUserr": "FetchUser"}
+    "expect": [
+      "FetchUserr"
+    ],
+    "suggest": {
+      "FetchUserr": "FetchUser"
+    }
   },
   {
     "name": "go-tn-known-symbol",
     "desc": "calling an IR-known symbol is clean",
     "file": "service.go",
-    "known": ["SaveUser"],
+    "known": [
+      "SaveUser"
+    ],
     "edit": "func Submit(u User) error {\n    return SaveUser(u)\n}\n",
     "expect": []
   },
@@ -39,11 +51,32 @@
     "expect": []
   },
   {
-    "name": "go-tn-unexported-refs-skipped",
-    "desc": "lowercase calls are skipped — the IR only indexes exported symbols",
+    "name": "go-tn-unexported-refs-resolve",
+    "desc": "unexported calls resolve against the indexed unexported symbols \u2014 not flagged",
     "file": "run.go",
+    "known": [
+      "Run",
+      "setup",
+      "teardown"
+    ],
     "edit": "func Run() {\n    setup()\n    defer teardown()\n}\n",
     "expect": []
+  },
+  {
+    "name": "go-tp-unexported-ref-unknown",
+    "desc": "an unexported call that exists nowhere is a hallucination \u2014 this whole class was invisible before unexported Go symbols were indexed",
+    "file": "run.go",
+    "known": [
+      "Run",
+      "setup"
+    ],
+    "edit": "func Run() {\n    setup()\n    setupp()\n}\n",
+    "expect": [
+      "setupp"
+    ],
+    "suggest": {
+      "setupp": "setup"
+    }
   },
   {
     "name": "go-tn-same-edit-definition",
@@ -70,17 +103,23 @@
     "name": "go-tn-comment-mentions-call",
     "desc": "whole-line comments are skipped even when they name a call",
     "file": "reconcile.go",
-    "known": ["Current"],
+    "known": [
+      "Current"
+    ],
     "edit": "// Reconcile calls MergeState() under the hood.\nfunc Reconcile() {\n    state := Current()\n    _ = state\n}\n",
     "expect": []
   },
   {
     "name": "go-tp-star-prefix-wrapped-code",
-    "desc": "FIX: a hallucinated call on a `* `-prefixed line (a wrapped multiplication, NOT inside a block comment) must be flagged (was a silent FN — `* ` prefix was guessed to be a comment)",
+    "desc": "FIX: a hallucinated call on a `* `-prefixed line (a wrapped multiplication, NOT inside a block comment) must be flagged (was a silent FN \u2014 `* ` prefix was guessed to be a comment)",
     "file": "calc.go",
-    "known": ["Scale"],
+    "known": [
+      "Scale"
+    ],
     "edit": "func Total(x int) int {\n    return x\n        * Compute(x)\n}\n",
-    "expect": ["Compute"]
+    "expect": [
+      "Compute"
+    ]
   },
   {
     "name": "go-tn-star-prefix-inside-block-comment",
@@ -93,7 +132,9 @@
     "name": "go-tn-inline-block-comment",
     "desc": "FIX: an inline /* ... */ block comment is blanked but surrounding code is still scanned",
     "file": "inline.go",
-    "known": ["Real"],
+    "known": [
+      "Real"
+    ],
     "edit": "func Use() {\n    _ = /* Hidden() */ Real()\n}\n",
     "expect": []
   }

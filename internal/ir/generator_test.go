@@ -480,8 +480,13 @@ func TestGenerator_Generate_EmptyDirectory(t *testing.T) {
 }
 
 // TestGenerate_RefsExtraction verifies IR v2 indexes bare call targets per file
-// under the guard's extraction rules: qualified calls, builtins, definition
-// lines, and (Go) unexported names are excluded; output is sorted and non-nil.
+// under the guard's extraction rules: qualified calls, builtins and definition
+// lines are excluded; output is sorted and non-nil.
+//
+// Unexported Go names are NOT excluded any more. They were, back when the IR
+// held only exported symbols and an unexported reference had nothing to resolve
+// against; the parser now records unexported top-level declarations, so `helper`
+// is a genuine ref and belongs in the index like any other.
 func TestGenerate_RefsExtraction(t *testing.T) {
 	tmpDir := t.TempDir()
 	goSrc := "package x\n\nfunc Caller() {\n\tDoThing()\n\tfmt.Println(\"x\")\n\thelper()\n\tZebra()\n\tAlpha()\n}\n"
@@ -502,8 +507,8 @@ func TestGenerate_RefsExtraction(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if got, want := result.Files["a.go"].Refs, []string{"Alpha", "DoThing", "Zebra"}; !slices.Equal(got, want) {
-		t.Errorf("a.go refs = %v, want %v (sorted; qualified/unexported/def-line excluded)", got, want)
+	if got, want := result.Files["a.go"].Refs, []string{"Alpha", "DoThing", "Zebra", "helper"}; !slices.Equal(got, want) {
+		t.Errorf("a.go refs = %v, want %v (sorted; qualified/def-line excluded)", got, want)
 	}
 	if got, want := result.Files["b.py"].Refs, []string{"process_order"}; !slices.Equal(got, want) {
 		t.Errorf("b.py refs = %v, want %v (builtins excluded)", got, want)

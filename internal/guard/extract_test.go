@@ -178,18 +178,30 @@ func TestExtractRefs_Go_NestedGenericCall(t *testing.T) {
 	}
 }
 
-// TestExtractRefs_Go_IndexCallNoFalsePositive guards the FP direction: indexing a
-// local (unexported) slice/map of funcs and calling the result — `arr[i](x)` —
-// must NOT be flagged. Go's unexported-name skip already covers the common case;
-// this pins that the generic-call support doesn't introduce a regression.
-func TestExtractRefs_Go_IndexCallNoFalsePositive(t *testing.T) {
-	ls := lines(
-		`arr[i](x)`,
-		`handlers[key](ctx)`,
-	)
-	refs := ExtractRefs(LangGo, ls)
-	if !containsNone(refs, "arr", "handlers") {
-		t.Errorf("unexported index-then-call must not be flagged, got %v", refNames(refs))
+// TestExtractRefs_Go_IndexCallResolvesViaBinding guards the FP direction for
+// indexing a slice/map of funcs and calling the result — `arr[i](x)`.
+//
+// The protection moved. It used to come from the blanket unexported-name skip,
+// which is gone; `arr` and `handlers` are now extracted as the genuine references
+// they are. What keeps them from being flagged is that FoldInFileDefs folds the
+// file's own bindings (GoDeclaredNames) into the known set — so the test asserts
+// the outcome that actually matters, no violation, rather than the mechanism.
+func TestExtractRefs_Go_IndexCallResolvesViaBinding(t *testing.T) {
+	src := `package p
+
+func run(i int, key string, x, ctx any) {
+	arr := handlerList()
+	handlers := handlerMap()
+	arr[i](x)
+	handlers[key](ctx)
+}
+`
+	fileLines := TextToAddedLines(src)
+	known := map[string]struct{}{"handlerList": {}, "handlerMap": {}}
+	FoldInFileDefs(known, fileLines, LangGo)
+	got := Run(known, "", []FileDiff{{Path: "p.go", AddedLines: fileLines}})
+	if len(got) != 0 {
+		t.Errorf("index-then-call on locally bound names must not be flagged, got %+v", got)
 	}
 }
 
@@ -305,15 +317,41 @@ func TestExtractRefs_Go_BuiltinsSkipped(t *testing.T) {
 	}
 }
 
-func TestExtractRefs_Go_UnexportedSkipped(t *testing.T) {
+// TestExtractRefs_Go_UnexportedNowExtracted pins the inversion of the old
+// unexported-skip policy. The skip existed because the IR held only exported Go
+// symbols, so an unexported call had nothing to validate against; the parser now
+// records unexported top-level declarations under the "unexported" kind, and the
+// compiler-oracle differential measured this shape at 0/29 caught before the
+// change and 33/33 after, at zero proven false positives over 468k lines of
+// foreign Go.
+func TestExtractRefs_Go_UnexportedNowExtracted(t *testing.T) {
 	ls := lines(
 		`lookupSymbols()`,
 		`hookApprove()`,
 		`textToAddedLines("x")`,
 	)
 	refs := ExtractRefs(LangGo, ls)
-	if !containsNone(refs, "lookupSymbols", "hookApprove", "textToAddedLines") {
-		t.Errorf("unexported Go refs should be skipped, got %v", refNames(refs))
+	if !containsAll(refs, "lookupSymbols", "hookApprove", "textToAddedLines") {
+		t.Errorf("unexported Go refs must now be extracted, got %v", refNames(refs))
+	}
+}
+
+// TestExtractRefs_Go_BuiltinsNotFlagged pins the builtin exclusions that the
+// unexported skip used to hide. `min`/`max`/`clear` arrived in Go 1.21 and were
+// missing from the table; `complex64`/`complex128` were never there. Both
+// surfaced as proven false positives the moment lowercase refs started being
+// checked, which is precisely the class this test now protects.
+func TestExtractRefs_Go_BuiltinsNotFlagged(t *testing.T) {
+	ls := lines(
+		`n := min(a, b)`,
+		`m := max(a, b)`,
+		`clear(cache)`,
+		`z := complex128(v)`,
+		`w := complex64(v)`,
+	)
+	refs := ExtractRefs(LangGo, ls)
+	if !containsNone(refs, "min", "max", "clear", "complex128", "complex64") {
+		t.Errorf("Go builtins must not be flagged, got %v", refNames(refs))
 	}
 }
 

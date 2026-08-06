@@ -32,6 +32,63 @@ type FPBucket struct {
 	Asks     int `json:"asks"`
 	Approved int `json:"approved"`
 	Unrated  int `json:"unrated"`
+	// Latency is ask→approval latency over this bucket's MATCHED asks only
+	// (the Approved count, not Asks — an ask with no approved outcome
+	// contributes no sample). See LatencyStats.
+	Latency LatencyStats `json:"latency"`
+}
+
+// LatencyStats summarizes ask→approval latency for one bucket, in seconds.
+// It exists to measure the "friction" term of #316's value model
+// (value = P(error) × (recovery_cost − next_turn_cost) − friction): how long
+// an ask sat before the matching approval, as a proxy for how much it
+// actually slowed the session down.
+//
+// Zero value (N==0) means no matched ask in this bucket — the same
+// "nothing to report" convention FPBucket.Rate() uses for Asks==0. This is
+// latency CONDITIONED ON approval: it says nothing about asks that were
+// denied, abandoned, or whose session ended before an outcome was recorded.
+type LatencyStats struct {
+	N       int     `json:"n"`
+	MinS    float64 `json:"min_s"`
+	MedianS float64 `json:"median_s"`
+	MeanS   float64 `json:"mean_s"`
+	MaxS    float64 `json:"max_s"`
+}
+
+// latencyStats computes LatencyStats over ask→approval durations. It sorts a
+// copy and does not mutate durs. An empty input is a valid, zero-value result
+// — not an error — matching latencyStats' callers, which never have a sample
+// for a bucket with zero matched asks.
+func latencyStats(durs []time.Duration) LatencyStats {
+	if len(durs) == 0 {
+		return LatencyStats{}
+	}
+	sorted := append([]time.Duration(nil), durs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	var sum time.Duration
+	for _, d := range sorted {
+		sum += d
+	}
+	median := sorted[len(sorted)/2]
+	if len(sorted)%2 == 0 {
+		median = (sorted[len(sorted)/2-1] + sorted[len(sorted)/2]) / 2
+	}
+	return LatencyStats{
+		N:       len(sorted),
+		MinS:    sorted[0].Seconds(),
+		MedianS: median.Seconds(),
+		MeanS:   (sum / time.Duration(len(sorted))).Seconds(),
+		MaxS:    sorted[len(sorted)-1].Seconds(),
+	}
+}
+
+// formatLatency renders a seconds figure as a compact human string (e.g.
+// "2m14s"), matching time.Duration's own String(). LatencyStats stores
+// float64 seconds rather than a Duration so it marshals to JSON directly;
+// this is the one place that needs the Duration formatting back.
+func formatLatency(seconds float64) string {
+	return time.Duration(seconds * float64(time.Second)).Round(time.Second).String()
 }
 
 // Rate returns Approved/Asks in [0,1], or 0 when there were no asks. It is a
@@ -415,6 +472,16 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	repoAsks := map[string]int{}
 	repoUnrated := map[string]int{}
 
+	// Raw ask→approval durations per dimension, reduced to LatencyStats after
+	// the loop (mirrors every other bucket field: accumulate first, summarize
+	// once every match is in). Keyed identically to s.ByReason/ByCheck/ByLang/
+	// ByVersion so the merge below is a straight lookup.
+	var windowLatency []time.Duration
+	reasonLatency := map[string][]time.Duration{}
+	checkLatency := map[string][]time.Duration{}
+	langLatency := map[string][]time.Duration{}
+	verLatency := map[string][]time.Duration{}
+
 	for _, a := range asks {
 		s.Window.Asks++
 		reasonBucket := s.ByReason[a.Reason]
@@ -456,10 +523,41 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			for _, sym := range a.Symbols {
 				approvedSymbolFreq[sym]++
 			}
+
+			lat := approvedByKey[k][idx].Sub(a.TS)
+			windowLatency = append(windowLatency, lat)
+			reasonLatency[a.Reason] = append(reasonLatency[a.Reason], lat)
+			for _, c := range checks {
+				checkLatency[c] = append(checkLatency[c], lat)
+			}
+			langLatency[a.Lang] = append(langLatency[a.Lang], lat)
+			verLatency[gv] = append(verLatency[gv], lat)
 		}
 		s.ByReason[a.Reason] = reasonBucket
 		s.ByLang[a.Lang] = langBucket
 		s.ByVersion[gv] = verBucket
+	}
+
+	s.Window.Latency = latencyStats(windowLatency)
+	for reason, durs := range reasonLatency {
+		b := s.ByReason[reason]
+		b.Latency = latencyStats(durs)
+		s.ByReason[reason] = b
+	}
+	for check, durs := range checkLatency {
+		b := s.ByCheck[check]
+		b.Latency = latencyStats(durs)
+		s.ByCheck[check] = b
+	}
+	for lang, durs := range langLatency {
+		b := s.ByLang[lang]
+		b.Latency = latencyStats(durs)
+		s.ByLang[lang] = b
+	}
+	for gv, durs := range verLatency {
+		b := s.ByVersion[gv]
+		b.Latency = latencyStats(durs)
+		s.ByVersion[gv] = b
 	}
 
 	// Unrated asks (#254): tallied into every bucket the rateable asks are, but
@@ -594,6 +692,10 @@ func FormatFP(s FPStats) string {
 	} else {
 		fmt.Fprintf(&b, "Overall: %d ask(s), %d approved  →  %.0f%% approval rate\n",
 			s.Window.Asks, s.Window.Approved, 100*s.Window.Rate())
+		if s.Window.Latency.N > 0 {
+			fmt.Fprintf(&b, "         median time to decision: %s (n=%d)\n",
+				formatLatency(s.Window.Latency.MedianS), s.Window.Latency.N)
+		}
 	}
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists
@@ -694,6 +796,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 		fmt.Fprintf(b, "  no rate (no ask here carries a join key)")
 	} else {
 		fmt.Fprintf(b, "%4d approved  %5.0f%%", bkt.Approved, 100*bkt.Rate())
+		if bkt.Latency.N > 0 {
+			fmt.Fprintf(b, "  (median %s)", formatLatency(bkt.Latency.MedianS))
+		}
 	}
 	if bkt.Unrated > 0 {
 		mark := " "
@@ -761,6 +866,7 @@ func PayloadFP(s FPStats) map[string]any {
 		return map[string]any{
 			"asks": b.Asks, "approved": b.Approved, "rate": rate,
 			"unrated": b.Unrated, "total": b.Total(), "coverage": b.Coverage(),
+			"latency": latencyPayload(b.Latency),
 		}
 	}
 	reasons := make([]map[string]any, 0, len(s.ByReason))
@@ -807,6 +913,18 @@ func PayloadFP(s FPStats) map[string]any {
 		"top_symbols":        topSymbols,
 		"loudest_repos":      loudest,
 		"unmatched_outcomes": s.UnmatchedOutcomes,
+	}
+}
+
+// latencyPayload mirrors bucket()'s null-not-zero convention above: no
+// matched ask means no latency to report, not a zero-second one that a
+// consumer could plot as "instant decisions."
+func latencyPayload(l LatencyStats) any {
+	if l.N == 0 {
+		return nil
+	}
+	return map[string]any{
+		"n": l.N, "min_s": l.MinS, "median_s": l.MedianS, "mean_s": l.MeanS, "max_s": l.MaxS,
 	}
 }
 

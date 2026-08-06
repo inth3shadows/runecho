@@ -29,6 +29,7 @@ const (
 //	runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]
 //	runecho-ir guard-stats [--days=30] [--top=10] [--json]
 //	runecho-ir fpreport [--days=30] [--top=15] [--gv=V] [--json] [--max-rate=F]
+//	runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]
 //	runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]
 //	runecho-ir validate-claims --text=<file> [--ir=<path>]
 //	runecho-ir contract list|show|activate|deactivate|check
@@ -75,6 +76,8 @@ func run() int {
 			return runGuardStats(os.Args[2:])
 		case "fpreport":
 			return runFPReport(os.Args[2:])
+		case "fpaudit":
+			return runFPAudit(os.Args[2:])
 		case "repo":
 			return runRepo(os.Args[2:])
 		case "backup":
@@ -117,6 +120,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir guard-stats [--days=30] [--top=10] [--json]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir fpreport [--days=30] [--top=15] [--gv=V] [--json] [--max-rate=F]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic] [--force] [root]")

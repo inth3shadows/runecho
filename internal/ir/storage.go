@@ -21,11 +21,44 @@ const DefaultIRPath = ".ai/ir.json"
 // JSON still emits the legacy functions/classes/exports/imports arrays and the
 // symbol_hashes/symbol_lines maps for backward compatibility (e.g. kb-mcp reads
 // functions/classes), alongside a canonical `symbols` array. v6 adds body hashes
-// for class/struct symbols (previously located but never hashed). A loaded IR
-// with an older version must be fully regenerated, not incrementally updated —
-// Update reuses unchanged-file entries verbatim, which would leave new fields
-// (or, as of v6, newly-populated existing fields) empty/stale forever.
-const IRVersion = 6
+// for class/struct symbols (previously located but never hashed). v7 adds the
+// "unexported" and "field" symbol kinds for Go. A loaded IR with an older
+// version must be fully regenerated, not incrementally updated — Update reuses
+// unchanged-file entries verbatim, which would leave new fields (or, as of v6,
+// newly-populated existing fields) empty/stale forever.
+//
+// v7 is exactly the case that warning describes, and skipping the bump would
+// have been silent and severe rather than merely stale: UpdateCtx reuses any
+// file whose content hash is unchanged, so on upgrade every untouched Go file
+// would keep a symbol list with no unexported entries — while the guard, in the
+// same release, starts validating unexported references against that list. Every
+// such reference would read as a hallucination until someone happened to run a
+// full reindex.
+const IRVersion = 7
+
+// InternalKinds are symbol kinds indexed for edit-time resolution only. They are
+// deliberately absent from the surfaces that describe a codebase to a reader —
+// `structure` and the snapshot diff — because those answer "what is this package"
+// and "what changed in it", questions whose answers did not include a struct
+// field or an unexported helper before these kinds existed and should not start
+// now. `structure` in particular is sold on compact responses, and Go repos carry
+// far more unexported declarations and fields than exported ones.
+//
+// A named lookup (`locate`, the claims check) deliberately DOES search them: the
+// question there is "does this name exist", where a match is the truthful answer
+// regardless of kind.
+var InternalKinds = map[string]bool{"unexported": true, "field": true}
+
+// VisibleSymbols returns syms without the internal kinds, preserving order.
+func VisibleSymbols(syms []Symbol) []Symbol {
+	out := make([]Symbol, 0, len(syms))
+	for _, s := range syms {
+		if !InternalKinds[s.Kind] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // IR represents the complete intermediate representation of a codebase.
 type IR struct {

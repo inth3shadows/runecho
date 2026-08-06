@@ -34,8 +34,9 @@ import "regexp"
 //     the binding constraint: a population probe put this check's ceiling at 0.5%
 //     of selector sites with it in place, against 3.2% without, because
 //     sibling-method calls are usually to unexported helpers.
-//  4. The receiver type must already have at least one indexed method. Zero means
-//     the parser never recorded a method set for T, so absence proves nothing.
+//  4. The receiver type must already have at least one indexed member (method or
+//     field). Zero means the parser never recorded a member set for T, so absence
+//     proves nothing.
 //  5. The method name must not exist ANYWHERE in the known set — not on another
 //     type, not as a function. This is the embedding backstop: a promoted method
 //     from an embedded field is not indexed under T, so requiring the name to be
@@ -58,11 +59,12 @@ import "regexp"
 // recorded.
 var reGoMethodRecv = regexp.MustCompile(`^\s*func\s*\(\s*([A-Za-z_]\w*)\s+\*?\s*([A-Za-z_]\w*)`)
 
-// reGoRebind matches a short variable declaration or `var` binding, used to
-// disqualify a receiver name that is re-bound anywhere in the file. The `:=`
-// alternative allows a multi-assign tail (`r, err := …`) because binding r in a
-// tuple rebinds it just as surely as binding it alone.
-var reGoRebind = regexp.MustCompile(`(^|[^\w.])([A-Za-z_]\w*)\s*(?:,[^=\n]*)?:=|(?:^|[^\w.])var\s+([A-Za-z_]\w*)\b`)
+// reGoVarBinding matches a `var` binding. The `:=` forms are handled by
+// goShortDeclNames instead of a regex: the pattern this replaced rooted its match
+// at the FIRST identifier of the left-hand side and consumed the rest with a
+// greedy class, so `err, r := f()` never disqualified `r` — gate 2 had a hole for
+// any tuple where the receiver name was not first.
+var reGoVarBinding = regexp.MustCompile(`(?:^|[^\w.])var\s+([A-Za-z_]\w*)\b`)
 
 // goReceiverTypes maps a receiver variable name to the type it receives, for the
 // names that are unambiguous and never re-bound in ctx. A name that fails either
@@ -98,12 +100,11 @@ func goReceiverTypes(ctx []AddedLine) map[string]string {
 	for _, l := range ctx {
 		scan, newOpen := stripLiteralsStateful(LangGo, l.Text, open)
 		open = newOpen
-		for _, m := range reGoRebind.FindAllStringSubmatch(scan, -1) {
-			for _, name := range []string{m[2], m[3]} {
-				if name != "" {
-					ambiguous[name] = struct{}{}
-				}
-			}
+		for _, name := range goShortDeclNames(scan) {
+			ambiguous[name] = struct{}{}
+		}
+		for _, m := range reGoVarBinding.FindAllStringSubmatch(scan, -1) {
+			ambiguous[m[1]] = struct{}{}
 		}
 	}
 	for name := range ambiguous {
@@ -116,9 +117,16 @@ func goReceiverTypes(ctx []AddedLine) map[string]string {
 }
 
 // goTypesWithMethods returns the set of receiver type names that have at least
-// one method in known. known holds methods as "Type.Method" (parser/go.go
-// qualifies them), so the prefix before the first '.' is the type.
-func goTypesWithMethods(known map[string]struct{}) map[string]struct{} {
+// one QUALIFIED entry in known — a method or a field. known holds both as
+// "Type.member" (parser/go.go qualifies them), so the prefix before the first
+// '.' is the type.
+//
+// Fields count deliberately. Gate 4 asks "did the parser record a member set for
+// T", and a struct with fields and no methods has a recorded member set; the
+// call being judged is `r.name(...)`, which a func-typed field satisfies just as
+// well as a method. Requiring a method specifically would abstain on precisely
+// the types whose members are all func-typed fields.
+func goTypesWithMembers(known map[string]struct{}) map[string]struct{} {
 	out := make(map[string]struct{})
 	for name := range known {
 		for i := 0; i < len(name); i++ {
@@ -152,7 +160,7 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 	if len(recvTypes) == 0 {
 		return nil
 	}
-	typesWithMethods := goTypesWithMethods(known)
+	typesWithMembers := goTypesWithMembers(known)
 
 	var violations []Violation
 	seen := make(map[string]struct{})
@@ -185,8 +193,8 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 			if !ok {
 				continue // gate 1/2: not an unambiguous, never-rebound receiver
 			}
-			if _, ok := typesWithMethods[typ]; !ok {
-				continue // gate 4: T has no indexed method set to argue from
+			if _, ok := typesWithMembers[typ]; !ok {
+				continue // gate 4: T has no indexed member set to argue from
 			}
 			if _, ok := known[typ+"."+sym]; ok {
 				continue // the method exists on this type

@@ -162,6 +162,14 @@ func checkDuplicateDefs(lang guard.Lang, dir, filePath string, added []string, s
 	}
 
 	for _, a := range added {
+		// `init` is the one Go name a package may legitimately define many times,
+		// in as many files as it likes. It only became reachable here once
+		// unexported declarations entered the index, and the whole premise of this
+		// check — same directory means same package means a compile error — is
+		// exactly false for it.
+		if a == "init" {
+			continue
+		}
 		paths, err := db.DefsOfName(snapID, a)
 		if err != nil {
 			queryErrs++

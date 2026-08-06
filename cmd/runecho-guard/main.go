@@ -46,6 +46,12 @@
 //	                            already defined in a different file (per the
 //	                            latest snapshot's symbol index). Default OFF
 //	                            (dogfood gate); ask-posture, fail-open.
+//	RUNECHO_GUARD_RECVMETHOD=1 enable the Go receiver-method check: ask when a
+//	                            method body calls a sibling method that its own
+//	                            receiver type does not have. The receiver is the
+//	                            one value in Go whose type is written lexically,
+//	                            so this needs no type inference. Default OFF
+//	                            (dogfood gate); ask-posture, fail-open.
 package main
 
 import (
@@ -231,6 +237,21 @@ func runArgs(args []string) int {
 
 	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
 	ignorePath := ignorePathFor(cwd, repoRoot)
+
+	// Fold each staged file's own definitions and bindings, exactly as the hook
+	// path does via addInFileDefs. Without this the pre-commit check judges a
+	// staged hunk against the repo index alone, so a bare call to anything the
+	// file itself declares — a local, a parameter, a sibling helper — reads as a
+	// hallucination. It went unnoticed because Go's unexported references used to
+	// be skipped wholesale, which made the omission invisible for the one language
+	// whose locals are most often called bare.
+	for _, fd := range diffs {
+		lang := guard.LangFor(fd.Path)
+		if lang == guard.LangUnknown {
+			continue
+		}
+		guard.FoldInFileDefs(symbols, readFileLines(fd.AbsPath), lang)
+	}
 
 	if *verbose {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
@@ -681,6 +702,15 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			fired.Qualified = len(qv) > 0
 			violations = append(violations, qv...)
 		}
+	}
+
+	// Go receiver-method check (RUNECHO_GUARD_RECVMETHOD=1, default off). Takes
+	// the pre-edit file plus the added text for the same reason the qualified
+	// check does: a receiver declaration or a rebinding introduced by THIS edit
+	// has to be visible, or the check judges the call against a stale file.
+	if rv := recvMethodViolations(lang, fileLines, newLines, symbols, filePath); len(rv) > 0 {
+		fired.RecvMethod = true
+		violations = append(violations, rv...)
 	}
 
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,

@@ -163,3 +163,64 @@ func BenchmarkGoDeclaredNames(b *testing.B) {
 		_ = GoDeclaredNames(lines)
 	}
 }
+
+// TestGoDeclaredNames_ShortDeclInEveryPosition pins the three binding positions
+// the original line-anchored regexes missed. Each one produced a false positive
+// on ordinary Go: registry dispatch via `if fn, ok := m[k]`, a channel receive in
+// a select, and a bind-then-call inside a one-line func literal.
+func TestGoDeclaredNames_ShortDeclInEveryPosition(t *testing.T) {
+	cases := []struct {
+		name, src, want string
+	}{
+		{"if-init", "package p\n\nfunc f() {\n\tif fn, ok := m[\"k\"]; ok {\n\t\tfn()\n\t}\n}\n", "fn"},
+		{"case-receive", "package p\n\nfunc f() {\n\tselect {\n\tcase fn := <-ch:\n\t\tfn()\n\t}\n}\n", "fn"},
+		{"inline-literal", "package p\n\nfunc f() {\n\tfunc() { g := mk(); g() }()\n}\n", "g"},
+		{"range-clause", "package p\n\nfunc f() {\n\tfor k, v := range m {\n\t\t_, _ = k, v\n\t}\n}\n", "v"},
+		{"type-switch", "package p\n\nfunc f() {\n\tswitch t := x.(type) {\n\tdefault:\n\t\t_ = t\n\t}\n}\n", "t"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := declaredNames(tc.src)
+			if !slices.Contains(got, tc.want) {
+				t.Errorf("%q must bind; got %v", tc.want, got)
+			}
+			// The outcome that matters: no violation from the additive check.
+			lines := TextToAddedLines(tc.src)
+			known := map[string]struct{}{"f": {}, "m": {}, "ch": {}, "mk": {}, "x": {}}
+			FoldInFileDefs(known, lines, LangGo)
+			if v := Run(known, "", []FileDiff{{Path: "p.go", AddedLines: lines}}); len(v) != 0 {
+				t.Errorf("locally bound call must not be flagged, got %+v", v)
+			}
+		})
+	}
+}
+
+// TestGoDeclaredNames_VarBlockWithWrappedCall pins the nested-paren bug. A
+// wrapped call inside a `var (` block closes a paren on an indented line without
+// ending the block, and closing on the first such line dropped every name after
+// it. The parser's AST rewrite fixed exactly this for the exported half; the
+// regex extractor reintroduced it.
+func TestGoDeclaredNames_VarBlockWithWrappedCall(t *testing.T) {
+	src := "package p\n\nvar (\n\ta = compute(\n\t\t1,\n\t)\n\tb = mk\n)\n\nfunc f() { b() }\n"
+	got := declaredNames(src)
+	if missing := hasAll(got, "a", "b"); len(missing) > 0 {
+		t.Errorf("names after a wrapped call in a var block must bind; missed %v\ngot: %v", missing, got)
+	}
+}
+
+// TestGoDeclaredNames_BlockCommentNotFolded is the over-inclusion direction. A
+// `/*` opener carries no quote character, so the literal-strip fast path skipped
+// it and declarations inside commented-out code were folded into the known set —
+// which silently masks real hallucinations.
+func TestGoDeclaredNames_BlockCommentNotFolded(t *testing.T) {
+	src := "package p\n\n/*\nvar handler = 1\n*/\n\nfunc f() { handler() }\n"
+	if got := declaredNames(src); slices.Contains(got, "handler") {
+		t.Errorf("a declaration inside a block comment must not bind; got %v", got)
+	}
+	lines := TextToAddedLines(src)
+	known := map[string]struct{}{"f": {}}
+	FoldInFileDefs(known, lines, LangGo)
+	if v := Run(known, "", []FileDiff{{Path: "p.go", AddedLines: lines}}); len(v) != 1 || v[0].Symbol != "handler" {
+		t.Errorf("a call to a commented-out declaration is a real violation, got %+v", v)
+	}
+}

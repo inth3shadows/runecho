@@ -62,8 +62,15 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 
 	for path, file := range irData.Files {
 		files[path] = file.Hash
+		// Internal kinds are excluded so a diff reports what a reader would call a
+		// change. Before these kinds existed an unexported helper or a struct field
+		// could not appear here at all; including them now would make every diff
+		// noisier without reporting anything the tool previously promised.
 		deltas := make([]SymbolDelta, 0, len(file.Symbols))
 		for _, s := range file.Symbols {
+			if ir.InternalKinds[s.Kind] {
+				continue
+			}
 			deltas = append(deltas, SymbolDelta{Name: s.Name, Kind: s.Kind, Hash: s.Hash})
 		}
 		symbols[path] = deltas

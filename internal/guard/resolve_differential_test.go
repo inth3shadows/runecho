@@ -242,34 +242,128 @@ func knownSet(t *testing.T, root string) map[string]struct{} {
 // in-file definition fold. guard.FoldInFileDefs is the exact function the hook
 // calls (cmd/runecho-guard's addInFileDefs delegates to it), so this known set
 // is the hook's known set rather than a lookalike.
-func runGuardOnFile(known map[string]struct{}, relPath, text string) []attributed {
-	lines := guard.TextToAddedLines(text)
-	symbols := make(map[string]struct{}, len(known)+16)
-	for s := range known {
-		symbols[s] = struct{}{}
-	}
-	guard.FoldInFileDefs(symbols, lines, guard.LangFor(relPath))
+// A posture is one shape of edit the guard is actually asked about. Measuring
+// only one of them is how the first cut of this harness reported "zero false
+// positives" while two default-on paths were broken: it passed the whole file as
+// BOTH the added text and the fold source, so the known set always already
+// contained every declaration in the file — a condition neither the hunk-scoped
+// hook path nor the pre-commit path ever satisfies.
+//
+// The fold source is the variable that matters. In hook mode it is the PRE-EDIT
+// file on disk, which by definition does not contain what this edit is adding.
+type posture struct {
+	name string
+	// fold is the text folded into the known set via FoldInFileDefs — the hook's
+	// pre-edit file. Empty means no fold at all.
+	fold string
+	// added is the text presented as the edit.
+	added string
+}
 
-	var out []attributed
-	for _, v := range guard.Run(symbols, "", []guard.FileDiff{{Path: relPath, AddedLines: lines}}) {
-		out = append(out, attributed{check: "Run", v: v})
+// posturesFor returns the edit shapes to measure for one file.
+func posturesFor(text string, lang guard.Lang) []posture {
+	out := []posture{
+		// A Write of the whole file, where the pre-edit file is the same text.
+		{name: "write-whole", fold: text, added: text},
+		// A Write CREATING the file: readFileLines returns nil, so nothing is
+		// folded. This is also the pre-commit path's posture, which calls
+		// guard.Run with the store's symbols and no fold at all.
+		{name: "write-new", fold: "", added: text},
 	}
-	// The receiver-method check is measured here too, because a check whose
-	// false-positive cost has not been measured on foreign code is not ready to
-	// ship regardless of how many true positives it finds.
-	if guard.LangFor(relPath) == guard.LangGo {
-		for _, v := range guard.GoReceiverMethodViolations(lines, lines, symbols) {
-			out = append(out, attributed{check: "GoReceiverMethod", v: v})
+	if lang != guard.LangGo {
+		return out
+	}
+	// An Edit that inserts a whole function: the hunk is the function, and the
+	// pre-edit file is everything else. Bindings inside the hunk are therefore
+	// absent from the fold — exactly the case a model produces when it writes a
+	// new function, and the one that whole-file measurement cannot see.
+	for _, fn := range goTopLevelFuncs(text) {
+		out = append(out, posture{name: "edit-hunk", fold: fn.rest, added: fn.body})
+	}
+	return out
+}
+
+type goFunc struct{ body, rest string }
+
+// goTopLevelFuncs splits text into each top-level func declaration and the file
+// with that declaration removed. Brace counting on a literal-masked scan; a
+// function whose braces do not balance is skipped rather than guessed at.
+func goTopLevelFuncs(text string) []goFunc {
+	lines := strings.Split(text, "\n")
+	// Literal state at the START of each line. A `func ...` at column zero inside
+	// a backtick raw string is not a declaration — x/text embeds Go templates in
+	// raw strings, and treating one as a function produced a bogus hunk that this
+	// harness then reported as a product false positive. The harness must not
+	// invent the defects it measures.
+	startsOpen := make([]string, len(lines))
+	open := ""
+	for i, l := range lines {
+		startsOpen[i] = open
+		_, open = guard.StripLiteralsForTest(guard.LangGo, l, open)
+	}
+	var out []goFunc
+	for i, l := range lines {
+		if startsOpen[i] != "" {
+			continue
+		}
+		if !strings.HasPrefix(l, "func ") && !strings.HasPrefix(l, "func(") {
+			continue
+		}
+		depth, end := 0, -1
+		open := ""
+		for j := i; j < len(lines); j++ {
+			scan, newOpen := guard.StripLiteralsForTest(guard.LangGo, lines[j], open)
+			open = newOpen
+			depth += strings.Count(scan, "{") - strings.Count(scan, "}")
+			if depth == 0 && strings.ContainsRune(scan, '}') {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			continue
+		}
+		body := strings.Join(lines[i:end+1], "\n")
+		rest := strings.Join(append(append([]string{}, lines[:i]...), lines[end+1:]...), "\n")
+		out = append(out, goFunc{body: body, rest: rest})
+	}
+	return out
+}
+
+func runGuardOnFile(known map[string]struct{}, relPath, text string) []attributed {
+	lang := guard.LangFor(relPath)
+	var out []attributed
+	for _, p := range posturesFor(text, lang) {
+		added := guard.TextToAddedLines(p.added)
+		foldLines := guard.TextToAddedLines(p.fold)
+		symbols := make(map[string]struct{}, len(known)+16)
+		for s := range known {
+			symbols[s] = struct{}{}
+		}
+		if p.fold != "" {
+			guard.FoldInFileDefs(symbols, foldLines, lang)
+		}
+		for _, v := range guard.Run(symbols, "", []guard.FileDiff{{Path: relPath, AddedLines: added}}) {
+			out = append(out, attributed{check: "Run", posture: p.name, v: v})
+		}
+		// The receiver-method check is measured here too, because a check whose
+		// false-positive cost has not been measured on foreign code is not ready to
+		// ship regardless of how many true positives it finds.
+		if lang == guard.LangGo {
+			for _, v := range guard.GoReceiverMethodViolations(foldLines, added, symbols) {
+				out = append(out, attributed{check: "GoReceiverMethod", posture: p.name, v: v})
+			}
 		}
 	}
 	return out
 }
 
-// attributed is a violation plus the check that produced it, so a false positive
-// names its own culprit instead of being pooled across checks.
+// attributed is a violation plus the check and posture that produced it, so a
+// false positive names its own culprit instead of being pooled.
 type attributed struct {
-	check string
-	v     guard.Violation
+	check   string
+	posture string
+	v       guard.Violation
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +379,8 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 	known := knownSet(t, root)
 
 	type fp struct {
-		file, symbol, check string
-		line                int
+		file, symbol, check, posture string
+		line                         int
 	}
 	var fps []fp
 	var filesChecked, linesChecked, pkgsSkipped int
@@ -312,7 +406,7 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 			filesChecked++
 			linesChecked += bytes.Count(data, []byte("\n"))
 			for _, a := range runGuardOnFile(known, rel, string(data)) {
-				fps = append(fps, fp{file: rel, symbol: a.v.Symbol, line: a.v.Line, check: a.check})
+				fps = append(fps, fp{file: rel, symbol: a.v.Symbol, line: a.v.Line, check: a.check, posture: a.posture})
 			}
 		}
 	}
@@ -335,7 +429,7 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 	byName := map[string]int{}
 	for _, f := range fps {
 		byName[f.symbol]++
-		byCheck[f.check]++
+		byCheck[f.check+" / "+f.posture]++
 	}
 	names := make([]string, 0, len(byName))
 	for n := range byName {
@@ -357,7 +451,7 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 	}
 	sort.Strings(checks)
 	for _, c := range checks {
-		fmt.Fprintf(&b, "  by check: %-20s %d\n", c, byCheck[c])
+		fmt.Fprintf(&b, "  by check/posture: %-32s %d\n", c, byCheck[c])
 	}
 	for _, n := range names {
 		fmt.Fprintf(&b, "  %-40s x%d\n", n, byName[n])
@@ -367,7 +461,7 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 		shown = 25
 	}
 	for _, f := range fps[:shown] {
-		fmt.Fprintf(&b, "  [%s] %s:%d  %s\n", f.check, f.file, f.line, f.symbol)
+		fmt.Fprintf(&b, "  [%s/%s] %s:%d  %s\n", f.check, f.posture, f.file, f.line, f.symbol)
 	}
 	if len(fps) > shown {
 		fmt.Fprintf(&b, "  ... %d more sites not shown\n", len(fps)-shown)

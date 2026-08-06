@@ -32,12 +32,6 @@ import (
 // is the same defect from the other direction.
 
 var (
-	// reGoShortDecl matches a short variable declaration, capturing the whole
-	// left-hand side so multi-assign tails (`v, err := f()`) bind every name and
-	// not just the first. Anchored at line start (after indentation) so an `:=`
-	// inside a composite literal value cannot be mistaken for a declaration.
-	reGoShortDecl = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:=`)
-
 	// reGoVarConst matches a single-line `var`/`const`/`type` declaration. The
 	// keyword form carries the same multi-name left-hand side as a short
 	// declaration.
@@ -47,15 +41,6 @@ var (
 	// conversion position (`referralCode(5)`). The compiler-oracle differential
 	// found exactly that as a proven false positive in x/text.
 	reGoVarConst = regexp.MustCompile(`^\s*(?:var|const|type)\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)`)
-
-	// reGoRangeClause matches the bindings of a `for … := range …` clause. The
-	// short-declaration pattern above already covers it when the range sits on
-	// the same line, but `for k, v := range m` starts with `for`, so it needs its
-	// own anchor.
-	reGoRangeClause = regexp.MustCompile(`^\s*for\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:=`)
-
-	// reGoTypeSwitch matches a type-switch binding: `switch v := x.(type)`.
-	reGoTypeSwitch = regexp.MustCompile(`^\s*switch\s+([A-Za-z_]\w*)\s*:=`)
 
 	// reGoFunc matches the `func` keyword as a word. The parenthesised groups
 	// that follow it are collected by goFuncGroups with a balanced scan rather
@@ -89,6 +74,7 @@ func GoDeclaredNames(fileLines []AddedLine) []string {
 	seen := make(map[string]struct{})
 	open := ""
 	inVarBlock := false
+	blockDepth := 0
 	for _, l := range fileLines {
 		// Literal stripping allocates a fresh byte slice per line, and it is the
 		// single largest cost in this pass. A line with no quote character cannot
@@ -96,7 +82,13 @@ func GoDeclaredNames(fileLines []AddedLine) []string {
 		// already open its text is its own scan. Most lines qualify, which is what
 		// takes this pass from 6.75ms to well under 1ms on a 2,200-line file.
 		scan := l.Text
-		if open != "" || strings.ContainsAny(l.Text, "\"'`") {
+		// `/*` is checked alongside the quote characters because a block-comment
+		// opener needs none of them. Without it the stripper never runs on such a
+		// line, the multi-line comment state is never entered, and declarations
+		// inside commented-out code get folded into the known set — over-inclusion,
+		// which masks real hallucinations and is the failure this file's header
+		// calls strictly worse than a false positive.
+		if open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*") {
 			scan, open = stripLiteralsStateful(LangGo, l.Text, open)
 		}
 		if isCommentLine(LangGo, l.Text) {
@@ -108,9 +100,9 @@ func GoDeclaredNames(fileLines []AddedLine) []string {
 		// extractor. Most lines contain neither `:=` nor a declaration keyword nor
 		// `func`, so a substring test skips the regex engine entirely for them.
 		if strings.Contains(scan, ":=") {
-			for _, re := range goShortDeclForms {
-				if m := re.FindStringSubmatch(scan); m != nil {
-					addList(seen, m[1])
+			for _, name := range goShortDeclNames(scan) {
+				if name != "_" {
+					seen[name] = struct{}{}
 				}
 			}
 		}
@@ -125,12 +117,26 @@ func GoDeclaredNames(fileLines []AddedLine) []string {
 		// `var (x = 1)` is already covered by reGoVarConst.
 		if !inVarBlock {
 			if hasGoDeclKeyword(scan) && reGoVarBlockOpen.MatchString(scan) {
-				inVarBlock = true
+				inVarBlock, blockDepth = true, 1
 			}
-		} else if reGoBlockClose.MatchString(scan) {
-			inVarBlock = false
-		} else if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
-			addList(seen, m[1])
+		} else {
+			// Depth, not "the first line starting with ')'". A wrapped call inside
+			// the block — `a = compute(\n  1,\n)` — closes on an indented paren
+			// without ending the block, and treating that as the end dropped every
+			// name declared after it. This is the same nested-paren bug the parser's
+			// AST rewrite fixed for the exported half (internal/parser/go.go), and
+			// it came straight back in a regex extractor.
+			before := blockDepth
+			blockDepth += strings.Count(scan, "(") - strings.Count(scan, ")")
+			if blockDepth <= 0 {
+				inVarBlock = false
+			} else if before == 1 {
+				// Only lines at the block's own depth declare names; deeper lines are
+				// arguments to a wrapped call.
+				if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
+					addList(seen, m[1])
+				}
+			}
 		}
 		// Every balanced group after a `func` keyword: the receiver, the parameter
 		// list, and the named-return list are all `name Type` lists that bind, and
@@ -153,13 +159,55 @@ func GoDeclaredNames(fileLines []AddedLine) []string {
 
 var (
 	reGoVarBlockOpen  = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
-	reGoBlockClose    = regexp.MustCompile(`^\s*\)`)
 	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*(?:[A-Za-z_\[\]*\.]|=)`)
 )
 
-// goShortDeclForms are the binding forms that all hinge on `:=`, so one
-// substring test gates the whole group.
-var goShortDeclForms = []*regexp.Regexp{reGoShortDecl, reGoRangeClause, reGoTypeSwitch}
+// goShortDeclNames returns the identifiers bound by every `:=` on the line,
+// found by walking LEFT from each operator rather than matching a line-anchored
+// pattern.
+//
+// The anchored version handled `x :=`, `for k, v :=` and `switch t :=` and
+// nothing else, so three ordinary Go forms bound nothing and false-positived:
+//
+//	if fn, ok := m[k]; ok { fn() }   // registry dispatch, the canonical idiom
+//	case fn := <-ch:                 // channel receive in a select
+//	func() { g := mk(); g() }()      // bind and call on one line
+//
+// Walking left from `:=` covers every position an operator can appear in, which
+// is the property an enumeration of prefixes cannot have.
+func goShortDeclNames(scan string) []string {
+	var out []string
+	for i := 0; i+1 < len(scan); i++ {
+		if scan[i] != ':' || scan[i+1] != '=' {
+			continue
+		}
+		// Walk left across `name` and `, name` pairs until something that cannot
+		// be part of an identifier list.
+		j := i
+		for j > 0 {
+			k := j
+			for k > 0 && (scan[k-1] == ' ' || scan[k-1] == '\t') {
+				k--
+			}
+			end := k
+			for k > 0 && isWordByte(scan[k-1]) {
+				k--
+			}
+			if k == end {
+				break // no identifier here
+			}
+			out = append(out, scan[k:end])
+			for k > 0 && (scan[k-1] == ' ' || scan[k-1] == '\t') {
+				k--
+			}
+			if k == 0 || scan[k-1] != ',' {
+				break
+			}
+			j = k - 1
+		}
+	}
+	return out
+}
 
 // hasGoDeclKeyword reports whether a line opens with var/const/type after
 // indentation — the only place reGoVarConst and reGoVarBlockOpen can match.

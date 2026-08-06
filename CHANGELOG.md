@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-08-06
+
+### Changed
+- guard: index unexported Go symbols and check bare unexported calls (#310)
+
 ## [0.30.0] — 2026-08-06
 
 ### Changed

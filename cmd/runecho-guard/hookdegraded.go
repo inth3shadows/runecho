@@ -20,8 +20,10 @@ type hookEdit struct {
 
 // answerDegradedStore handles every case where the symbol index could not be
 // read, and reports whether it asked (true) or deferred (false). The caller
-// returns either way — this branch is terminal — but the bool keeps the
-// ask/defer outcome assertable without re-parsing the hook's JSON.
+// returns either way — this branch is terminal — so the bool exists purely to
+// make the classification assertable; hookdegraded_test.go is what asserts it,
+// and without that test the return value would be dead weight claiming to be a
+// seam.
 //
 // Extracted from runHookMode verbatim. It was ~78 lines inside a 489-line
 // function, and it is genuinely separable: it is reached only when res.OK is

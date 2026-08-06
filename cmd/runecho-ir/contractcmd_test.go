@@ -74,6 +74,12 @@ cmd/**
 !internal/legacy/**
 `
 
+// scopedContractNamed is scopedContract under a different `name:` header, for
+// the cases that need the contract name to diverge from its file name.
+func scopedContractNamed(name string) string {
+	return strings.Replace(scopedContract, "name: scoped", "name: "+name, 1)
+}
+
 // ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
@@ -90,31 +96,39 @@ func TestContractList_Empty(t *testing.T) {
 	}
 }
 
-// Sorted by name, and each line carries the description and the pattern count —
+// Sorted by NAME, and each line carries the description and the pattern count —
 // the count is what tells an author their globs actually parsed.
-func TestContractList_SortedWithPatternCounts(t *testing.T) {
+//
+// The file names deliberately oppose the contract names: os.ReadDir yields
+// a-file before z-file, so an unsorted listing prints zebra before apple and the
+// sort is the only thing that can produce the asserted order. A fixture whose
+// file order already matches its name order makes this assertion vacuous —
+// deleting listContracts' sort.Slice then leaves the test green, which is the
+// first version of this test and exactly the defect class this file exists to
+// close.
+func TestContractList_SortedByNameNotFileName(t *testing.T) {
 	root := contractRepo(t, map[string]string{
-		"zeta.contract":  "name: zeta\ninternal/**\n",
-		"alpha.contract": scopedContract,
+		"a-file.contract": "name: zebra\ninternal/**\n",
+		"z-file.contract": scopedContractNamed("apple"),
 	})
 	var code int
 	stdout, _ := captureOutput(func() { code = runContractList([]string{"--dir", root}) })
 	if code != ExitOK {
 		t.Fatalf("code = %d, want ExitOK", code)
 	}
-	iScoped := strings.Index(stdout, "scoped")
-	iZeta := strings.Index(stdout, "zeta")
-	if iScoped < 0 || iZeta < 0 {
+	iApple := strings.Index(stdout, "apple")
+	iZebra := strings.Index(stdout, "zebra")
+	if iApple < 0 || iZebra < 0 {
 		t.Fatalf("stdout missing a contract name: %q", stdout)
 	}
-	if iScoped > iZeta {
-		t.Errorf("listing is not sorted by name:\n%s", stdout)
+	if iApple > iZebra {
+		t.Errorf("listing is ordered by file name, not contract name:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "only the guts") {
 		t.Errorf("description not shown: %q", stdout)
 	}
 	if !strings.Contains(stdout, "3 pattern(s)") {
-		t.Errorf("pattern count wrong or missing for scoped (want 3): %q", stdout)
+		t.Errorf("pattern count wrong or missing (want 3): %q", stdout)
 	}
 }
 

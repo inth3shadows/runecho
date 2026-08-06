@@ -112,11 +112,13 @@ func TestOracleToolsAreRegistered(t *testing.T) {
 }
 
 // Diagnostics must never reach stdout: this is a stdio transport, and one stray
-// write corrupts the frame stream for every client. rpc() already fails on a
-// non-JSON stdout line; this pins the other half — that diagnostics have a place
-// to go and it is stderr.
+// write corrupts the frame stream for every client. rpc() fails on a non-JSON
+// stdout line, which pins that half. This pins the other, and it has to be
+// asserted rather than assumed: routing the log to io.Discard keeps stdout
+// perfectly clean and silently costs the operator the only signal that a client
+// is sending malformed frames.
 func TestDiagnosticsGoToStderrNotStdout(t *testing.T) {
-	resps, _, code := rpc(t, t.TempDir(),
+	resps, stderr, code := rpc(t, t.TempDir(),
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
 		`not json at all`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
@@ -126,6 +128,9 @@ func TestDiagnosticsGoToStderrNotStdout(t *testing.T) {
 	// The malformed line must not have cost the following request its answer.
 	if len(resps) < 2 {
 		t.Fatalf("got %d responses, want at least 2 — a bad frame swallowed a good one: %v", len(resps), resps)
+	}
+	if !strings.Contains(stderr, "parse error") {
+		t.Errorf("stderr does not report the malformed frame, so the operator has no signal: %q", stderr)
 	}
 }
 

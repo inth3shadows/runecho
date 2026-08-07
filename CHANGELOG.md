@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-08-07
+
+### Changed
+- guard: give file-scope/qualified/deps-go their own ask text (#269) (#325)
+
 ## [0.34.0] — 2026-08-07
 
 ### Changed

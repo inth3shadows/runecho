@@ -378,6 +378,20 @@ hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
 reports the approval rate (an upper bound on the true false-positive rate).
 Delete the file freely if you don't want the history.
 
+`edit` (ask and outcome records) is a 12-hex fingerprint of the tool call's
+edit content, added in #300. `join` (outcome records only) records which track
+matched the outcome to its ask: `edit` (the fingerprint) or `window` (the
+original file+time-window guess, still the fallback for records written by an
+older guard). Both exist because a PostToolUse fire only wrote an outcome when
+it landed within 5 minutes of the matching PreToolUse ask — approvals that took
+a human longer to decide (a *considered* approval, not a reflex one) were
+silently dropped, biasing every `fpreport` rate toward the fast-approval
+subset. The edit fingerprint identifies the same tool call regardless of how
+long the decision took, so `fpreport` and `runecho-guard` now join on it first
+(bounded by `KeyedOutcomeJoinWindow`/`maxKeyedOutcomeAge`, 24h — see
+`cmd/runecho-guard/declog.go` and `internal/guardstats/fpreport.go`) and fall
+back to the original 5-minute window only when no fingerprint match exists.
+
 ## Exit Code Contract
 
 Every `runecho-ir` subcommand returns one of three values, defined as constants

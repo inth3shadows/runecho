@@ -41,6 +41,12 @@ type Decision struct {
 	// whether the guard was right. Records written before the field existed
 	// carry nil, which consumers must treat as unknown rather than empty.
 	LearnSymbols []string
+	// Edit is the ask-side edit fingerprint (see cmd/runecho-guard/declog.go's
+	// editFingerprint), present on both ask and outcome records once #300
+	// landed. Empty on records from older guards, on pre-commit asks, and on
+	// outcome records whose PostToolUse fire failed to reproduce the ask's
+	// hash — those fall back to FPReport's window-based join.
+	Edit string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
@@ -57,6 +63,7 @@ type rawDecision struct {
 	Reason       string   `json:"reason"`
 	Symbols      []string `json:"symbols,omitempty"`
 	LearnSymbols []string `json:"learn_symbols,omitempty"`
+	Edit         string   `json:"edit,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -91,6 +98,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Reason:       raw.Reason,
 						Symbols:      raw.Symbols,
 						LearnSymbols: raw.LearnSymbols,
+						Edit:         raw.Edit,
 					})
 				}
 			}

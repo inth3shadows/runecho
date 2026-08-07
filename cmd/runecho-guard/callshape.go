@@ -82,9 +82,11 @@ func callShapeSection(sb *strings.Builder, ms []guard.CallShapeMismatch) []strin
 // With no mismatches it delegates verbatim to askContractOnly rather than
 // re-rendering, so the long-shipped contract-only text and its "contract" log
 // reason are untouched by this path existing.
-func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName, advisory string) bool {
+//
+// editHash is threaded straight through to the ask record — see askContractOnly.
+func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
 	if len(ms) == 0 {
-		return askContractOnly(out, cw, filePath, lang)
+		return askContractOnly(out, cw, filePath, lang, editHash)
 	}
 	var sb strings.Builder
 	// Contract first, matching the full ask's ordering: "should you be editing
@@ -117,6 +119,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		Decision: "ask",
 		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: true})),
 		Symbols:  syms,
+		Edit:     editHash,
 	}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)

@@ -269,7 +269,12 @@ func contractRepoRoot(contractPath string) string {
 //
 // Callers must invoke this INSTEAD OF their defer, not before it: the hook emits
 // exactly one decision.
-func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang) bool {
+//
+// editHash is the fingerprint of the edit this ask is about (see
+// editFingerprint), stamped on the ask record so the matching PostToolUse
+// outcome can be joined precisely (#300). Empty for the pre-commit surface,
+// which has no PostToolUse outcome to join.
+func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {
 	if cw == nil {
 		return false
 	}
@@ -283,6 +288,7 @@ func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang g
 		Reason:       "contract",
 		Contract:     cw.Name,
 		ContractHash: shortHash(cw.ActivatedHash),
+		Edit:         editHash,
 	})
 	return true
 }

@@ -354,8 +354,13 @@ func runArgs(args []string) int {
 // in is explicit (not os.Stdin) so tests can call it without a subprocess.
 func runOutcomeMode(in io.Reader) int {
 	var payload struct {
+		ToolName  string `json:"tool_name"`
 		ToolInput struct {
-			FilePath string `json:"file_path"`
+			FilePath  string   `json:"file_path"`
+			OldString string   `json:"old_string"`
+			NewString string   `json:"new_string"`
+			Content   string   `json:"content"`
+			Edits     []editOp `json:"edits"`
 		} `json:"tool_input"`
 	}
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
@@ -369,7 +374,20 @@ func runOutcomeMode(in io.Reader) int {
 	if strings.ContainsRune(payload.ToolInput.FilePath, 0) || len(payload.ToolInput.FilePath) > 4096 {
 		return 0
 	}
-	logOutcomeForFile(payload.ToolInput.FilePath)
+	// Same fingerprint the PreToolUse ask stamped (#300) — Claude Code passes the
+	// same tool_input shape to Pre and Post for Edit/Write/MultiEdit, so hashing
+	// the same fields here reproduces it exactly and lets logOutcomeForFile join
+	// on it instead of guessing from a time window. If that assumption is ever
+	// wrong for some tool or hook wiring, the hash simply fails to match and the
+	// join falls back to the window track — see recentUnrecordedAsk.
+	editHash := editFingerprint(hookEdit{
+		ToolName:  payload.ToolName,
+		OldString: payload.ToolInput.OldString,
+		NewString: payload.ToolInput.NewString,
+		Content:   payload.ToolInput.Content,
+		Edits:     payload.ToolInput.Edits,
+	})
+	logOutcomeForFile(payload.ToolInput.FilePath, editHash)
 	// E6 auto-fresh IR: reindex the edited file so the NEXT PreToolUse check sees
 	// symbols this edit added — closes the stale-IR false-positive class. Fail-open.
 	refreshIRForFile(payload.ToolInput.FilePath)
@@ -583,7 +601,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// contract at all. This path costs a single store open, only for a
 		// session that named a contract, and leaves the log alone when it
 		// abstains.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath)) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath), editFingerprint(edit)) {
 			return 0
 		}
 		hookDefer()
@@ -607,7 +625,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// pays for its own store open; every other edit picks it up from
 		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
 		// session explicitly activated a contract AND the path fell outside it.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang, editFingerprint(edit)) {
 			return 0
 		}
 		hookDefer()
@@ -834,7 +852,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// touch is precisely the case this check exists for — so it is answered
 		// here, ahead of the degraded and stale advisories, because an ask is a
 		// stronger signal than either and the hook emits only one decision.
-		if askContractOnly(out, cw, filePath, lang) {
+		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit)) {
 			return 0
 		}
 		// Nothing flagged. A degraded deletion-side check means "found nothing"
@@ -917,7 +935,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	syms = append(syms, callShapeSection(&sb, callShapes)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit)}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

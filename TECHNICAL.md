@@ -182,13 +182,13 @@ root). Three reference shapes are checked, all unqualified — `Foo(`, never
 - **SCREAMING_SNAKE constant references** (Python) — uses of module-level
   `UPPER_CASE` names
 
-### Opt-in checks (all default OFF)
+### Opt-in checks
 
 The hallucination check above is the guard's always-on core. Seven further
-checks ship behind env flags, each gated so it can be dogfooded before it
-becomes default behaviour. All use the same ask-posture and fail-open rules; a
-single ask can carry several at once, and the decision log joins their names
-with `+` (`violations+dangling`).
+checks ship behind env flags — six default OFF (dogfood-gated), one
+(same-repo qualified) default ON since #314. All use the same ask-posture and
+fail-open rules; a single ask can carry several at once, and the decision log
+joins their names with `+` (`violations+dangling`).
 
 Each check owns a decision-log term, because `guardstats` and `fpreport` bucket
 on that exact string. Until #268 the file-scope, same-repo-qualified and
@@ -204,8 +204,8 @@ change date is only valid for combinations that involve none of them.
 | E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |
 | Dropped import | `RUNECHO_GUARD_DROPPED_IMPORT` | The edit removes an import that is still used below it |
 | E5 duplicate symbol | `RUNECHO_GUARD_DUPLICATE` | **Go only.** The edit defines a name already defined by another non-test Go file in the *same directory* (= the same package, so a real compile collision). Cross-directory and non-Go matches are not collisions and are skipped. Suppressed when both files carry a build constraint — `//go:build unix` / `!unix`, or a GOOS/GOARCH filename suffix — since the compiler never sees both (#225) |
-| Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
-| Dependency qualified | `RUNECHO_GUARD_DEPS_GO` | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
+| Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` (default **ON**; `=0` disables) | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
+| Dependency qualified | `RUNECHO_GUARD_DEPS_GO` (default off) | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
 | Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
 | Receiver method | `RUNECHO_GUARD_RECVMETHOD` | (Go) `r.Foo()` inside `func (r *T)` where `T` has no member `Foo`. The receiver is the one value in Go whose type is written lexically, so this needs no type inference. Five gates keep it precision-first, the last being an embedding backstop: it fires only on a name the repository has never seen in any form |
@@ -269,6 +269,14 @@ across three edit postures. Reach by reference shape — `Foo()` 14/14,
 remaining Go gap: resolving a method on an arbitrary value needs the value's
 type, which no check has.
 
+That false-positive figure and the reach figures come from *different arms* of
+the harness and must not be read as one claim: `pkg.Foo()`'s 59/60 is the
+false-negative arm's reach (`GoQualified`/`GoDepQualified` catching a proven
+compiler error), but through #313 the false-positive arm ran only `guard.Run`
+and `GoReceiverMethod` — the two qualified checks were never adjudicated for
+precision at all. #314 closed that gap; see the posture note below for the
+numbers.
+
 The postures matter more than the corpus size. An earlier cut of this harness
 passed the whole file as both the added text and the fold source, so the known
 set always already contained every declaration in the file — a condition neither
@@ -276,6 +284,50 @@ the hook (which folds the *pre-edit* file) nor pre-commit ever satisfies. It
 reported zero false positives while two default-on paths were broken. It now
 measures whole-file Write, Write-creating-a-file (no fold), and Edit-hunk (one
 function as the hunk, the rest as the fold).
+
+### Posture: why `GoQualified` is default-on and `GoDepQualified` stays off (#314)
+
+Measured 2026-08-06, `TestGoResolveNoFalsePositivesAgainstCompiler` extended to
+cover both checks (previously false-positive-untested — see the differential
+correction above):
+
+| Corpus | Lines | Proven FPs (both checks) | Same-repo imports | Dep-resolved | Dep-abstained |
+|---|---|---|---|---|---|
+| runecho itself | 26,094 | 0 | 12 | 2 | 2 (`unknown`) |
+| `golang.org/x/text` v0.40.0 | 472,938 | 0 | 36 | 6 | 0 |
+
+Dep-resolved/abstained counts every *unique import path* seen across the
+corpus's packages, resolved once against the same `depindex.Index` the check
+itself consults (stdlib excluded) — a package-level population, not the
+check's own call-site population (which additionally requires the import
+alias to appear only as a `q.` selector, never bare, in that file). It is
+therefore an upper bound on how often `GoDepQualified` could fire, useful for
+"does this check have anything to abstain FROM" rather than an exact
+call-site count.
+
+Warm-cache `Index.Lookup` cost (`BenchmarkGoDepLookup`,
+`internal/depindex/lookup_bench_test.go`): **16.5 ns/op** — a `GoDepQualifiedViolations`
+call does 1-3 lookups per edit (one per qualified package actually touched),
+so this is noise against the guard's ~12ms hook budget. Cold cost (first
+lookup of a given package on a given machine) is the parse, not separately
+re-measured here; it is memoized per package-content-hash in
+`$RUNECHO_HOME/depcache` and shared across every repo on the machine.
+
+Dogfood status, `runecho-ir fpreport` over the live decision log (2026-08-06):
+**zero** ask events ever logged with reason `qualified` or `deps-go` — neither
+flag has been exercised on a real edit. `RUNECHO_GUARD_QUALIFIED` was flipped
+default-on without waiting on this, on the strength of the differential alone:
+it resolves against the *same* flat repo symbol set the always-on
+hallucination check already trusts, so it introduces no new trust dependency
+this repo doesn't already rely on — an FP class here would already be an FP
+class in the always-on check. `GoDepQualified` is a materially different bar:
+its symbol table comes from outside the repo, so it stays **default off**
+until a real dogfood window has produced asks to judge the approve-anyway rate
+on. Closure criterion: ≥20 `deps-go` ask events logged, with an `fpreport`
+approve-anyway rate that doesn't read as reflexive (see
+`gotcha-fpreport-pooled-metrics` — split by guard version, don't pool). Opening
+that window means setting `RUNECHO_GUARD_DEPS_GO=1` somewhere real edits will
+exercise it; not done as part of #314.
 
 ## Storage Schema
 

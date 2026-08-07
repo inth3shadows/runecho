@@ -27,12 +27,20 @@
 //	                            symbol definition that other files still reference
 //	                            (per the latest snapshot's refs index). Default OFF
 //	                            (dogfood gate); ask-posture, fail-open.
+//	RUNECHO_GUARD_QUALIFIED=0  disable same-repo internal-package qualified-call
+//	                            validation for Go: flag a call to a symbol absent
+//	                            from a same-repo package (pkg.NoSuchFunc). Default
+//	                            ON since #314 (0 proven false positives measured
+//	                            across this repo and golang.org/x/text — see
+//	                            TECHNICAL.md's "Opt-in checks" section).
 //	RUNECHO_GUARD_DEPS_GO=1    enable external-dependency validation for Go: flag a
 //	                            call to a symbol absent from an imported external or
 //	                            stdlib package (http.Gett where net/http has Get).
 //	                            Abstains under go.work, behind a replace directive,
 //	                            or when a package is not in the module cache.
-//	                            Default OFF (dogfood gate).
+//	                            Default OFF — unlike RUNECHO_GUARD_QUALIFIED, no
+//	                            real dogfood window has logged an ask for this
+//	                            check yet; see TECHNICAL.md for the closure bar.
 //	RUNECHO_GUARD_CONTRACT=1   enable #12 D2 edit-scope contracts: ask when an edit
 //	                            lands on a path outside the scope declared by the
 //	                            contract this session activated (runecho-ir
@@ -263,10 +271,10 @@ func runArgs(args []string) int {
 	// "violations" (#268).
 	fired := firedChecks{Violations: len(violations) > 0}
 
-	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
-	// default off). Reads each staged Go file's whole current text for import
-	// parsing and the shadow gate; repoRoot anchors the go.mod lookup, resolved
-	// once for the whole commit.
+	// Same-repo internal-package qualified-call check (default on since #314;
+	// RUNECHO_GUARD_QUALIFIED=0 disables it). Reads each staged Go file's whole
+	// current text for import parsing and the shadow gate; repoRoot anchors the
+	// go.mod lookup, resolved once for the whole commit.
 	if qualifiedEnabled() {
 		if modulePath := guard.GoModulePath(repoRoot); modulePath != "" {
 			for _, fd := range diffs {
@@ -710,10 +718,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		learnEligible[v.Symbol] = struct{}{}
 	}
 
-	// Same-repo internal-package qualified-call check (RUNECHO_GUARD_QUALIFIED=1,
-	// default off). fileLines is the pre-edit whole file (read above); newLines is
-	// the proposed added text — passing both lets an in-edit shadow or a newly
-	// added same-repo import be seen. The file's own directory anchors go.mod.
+	// Same-repo internal-package qualified-call check (default on since #314;
+	// RUNECHO_GUARD_QUALIFIED=0 disables it). fileLines is the pre-edit whole
+	// file (read above); newLines is the proposed added text — passing both lets
+	// an in-edit shadow or a newly added same-repo import be seen. The file's
+	// own directory anchors go.mod.
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
 			qv := qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)

@@ -114,6 +114,11 @@ type goPkg struct {
 	ImportPath string
 	GoFiles    []string
 	Incomplete bool
+	// Imports is every package this one imports (stdlib, same-module, and
+	// external), used only by the #314 dependency-resolution accounting below —
+	// not by the false-positive/false-negative adjudication, which works from
+	// GoFiles' own content.
+	Imports []string
 }
 
 // listPackages enumerates the module's buildable packages. A `go list` that
@@ -330,7 +335,11 @@ func goTopLevelFuncs(text string) []goFunc {
 	return out
 }
 
-func runGuardOnFile(known map[string]struct{}, relPath, text string) []attributed {
+// modulePath and depIdx are "" / nil outside the Go false-positive arm (every
+// other caller of runGuardOnFile predates #314 and passes zero values, which
+// disables GoQualifiedViolations/GoDepQualifiedViolations exactly as an empty
+// modulePath already does inside those functions).
+func runGuardOnFile(known map[string]struct{}, relPath, text, modulePath string, depIdx depindex.Index) []attributed {
 	lang := guard.LangFor(relPath)
 	var out []attributed
 	for _, p := range posturesFor(text, lang) {
@@ -346,12 +355,23 @@ func runGuardOnFile(known map[string]struct{}, relPath, text string) []attribute
 		for _, v := range guard.Run(symbols, "", []guard.FileDiff{{Path: relPath, AddedLines: added}}) {
 			out = append(out, attributed{check: "Run", posture: p.name, v: v})
 		}
-		// The receiver-method check is measured here too, because a check whose
-		// false-positive cost has not been measured on foreign code is not ready to
-		// ship regardless of how many true positives it finds.
+		// Every check measured here — receiver-method, and since #314 the two
+		// qualified-call checks — shares the same reasoning: a check whose
+		// false-positive cost has not been measured on foreign code is not ready
+		// to ship regardless of how many true positives it finds.
 		if lang == guard.LangGo {
 			for _, v := range guard.GoReceiverMethodViolations(foldLines, added, symbols) {
 				out = append(out, attributed{check: "GoReceiverMethod", posture: p.name, v: v})
+			}
+			if modulePath != "" {
+				for _, v := range guard.GoQualifiedViolations(foldLines, added, symbols, modulePath) {
+					out = append(out, attributed{check: "GoQualified", posture: p.name, v: v})
+				}
+				if depIdx != nil {
+					for _, v := range guard.GoDepQualifiedViolations(foldLines, added, modulePath, depIdx) {
+						out = append(out, attributed{check: "GoDepQualified", posture: p.name, v: v})
+					}
+				}
 			}
 		}
 	}
@@ -377,6 +397,13 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 		t.Skipf("no buildable Go packages under %s", root)
 	}
 	known := knownSet(t, root)
+	// #314: built once for the whole corpus, exactly as TestGoResolveFalseNegativesAgainstCompiler
+	// does — this is what puts GoQualifiedViolations/GoDepQualifiedViolations under
+	// the same false-positive proof every other check here already has. Before
+	// #314 neither was measured on this arm at all: TECHNICAL.md's "0 proven false
+	// positives" line covered only guard.Run and GoReceiverMethod.
+	modulePath := guard.GoModulePath(root)
+	depIdx := depindex.NewGoIndex(root)
 
 	type fp struct {
 		file, symbol, check, posture string
@@ -384,6 +411,42 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 	}
 	var fps []fp
 	var filesChecked, linesChecked, pkgsSkipped int
+
+	// depAccounting answers #314's other open question — GoDepQualified's
+	// abstention rate — by resolving every package's actual import list against
+	// the same depIdx the check itself consults. This is a PACKAGE-level
+	// population (once per unique import per package), not the check's own
+	// call-site population (which additionally requires an alias to appear only
+	// as a `q.` selector in that file, never bare) — so it is an upper bound on
+	// how often the check could fire, not an exact count of call sites. Still the
+	// right number for "is there anything here for the check to abstain FROM":
+	// a package-level resolve failure means every call-site the check would ever
+	// look at inside that import necessarily abstains too.
+	sameRepo, depResolved, depAbstained := 0, 0, 0
+	abstainReasons := map[string]int{}
+	seenImport := map[string]bool{}
+	for _, p := range pkgs {
+		for _, imp := range p.Imports {
+			if seenImport[imp] {
+				continue
+			}
+			seenImport[imp] = true
+			if modulePath != "" && (imp == modulePath || strings.HasPrefix(imp, modulePath+"/")) {
+				sameRepo++
+				continue
+			}
+			if !strings.Contains(strings.SplitN(imp, "/", 2)[0], ".") {
+				continue // stdlib (no dot in the first path segment) — not GoDepQualified's population
+			}
+			ps := depIdx.Lookup(imp)
+			if ps.Res == depindex.Resolved {
+				depResolved++
+			} else {
+				depAbstained++
+				abstainReasons[ps.Res.String()]++
+			}
+		}
+	}
 
 	for _, p := range pkgs {
 		// A package that does not compile cannot adjudicate anything: some of its
@@ -405,7 +468,7 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 			}
 			filesChecked++
 			linesChecked += bytes.Count(data, []byte("\n"))
-			for _, a := range runGuardOnFile(known, rel, string(data)) {
+			for _, a := range runGuardOnFile(known, rel, string(data), modulePath, depIdx) {
 				fps = append(fps, fp{file: rel, symbol: a.v.Symbol, line: a.v.Line, check: a.check, posture: a.posture})
 			}
 		}
@@ -413,6 +476,8 @@ func TestGoResolveNoFalsePositivesAgainstCompiler(t *testing.T) {
 
 	t.Logf("corpus=%s packages=%d (skipped %d that do not build) files=%d lines=%d",
 		root, len(pkgs), pkgsSkipped, filesChecked, linesChecked)
+	t.Logf("#314 dependency resolution: module=%q same-repo-imports=%d dep-resolved=%d dep-abstained=%d (reasons=%v)",
+		modulePath, sameRepo, depResolved, depAbstained, abstainReasons)
 	if filesChecked == 0 {
 		t.Skip("no cleanly-building Go files to adjudicate")
 	}

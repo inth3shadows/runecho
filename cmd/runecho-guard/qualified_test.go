@@ -35,8 +35,9 @@ func TestQualifiedViolations_FlagGating(t *testing.T) {
 		t.Fatalf("GoModulePath = %q, want github.com/acme/proj", modulePath)
 	}
 
-	// Flag OFF → no-op regardless of content.
-	t.Setenv("RUNECHO_GUARD_QUALIFIED", "")
+	// Flag OFF (default is now ON since #314 — "0" is the explicit opt-out) →
+	// no-op regardless of content.
+	t.Setenv("RUNECHO_GUARD_QUALIFIED", "0")
 	if v := qualifiedViolations(guard.LangGo, whole, added, known, modulePath, "internal/x/x.go"); v != nil {
 		t.Fatalf("flag off must yield no violations, got %+v", v)
 	}

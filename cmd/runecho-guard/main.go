@@ -740,6 +740,15 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		violations = append(violations, rv...)
 	}
 
+	// Go local-variable-type method check (RUNECHO_GUARD_VARTYPE=1, default
+	// off). Same family as the receiver check above and the same reason for
+	// taking both fileLines and newLines; kept as its own flag — see
+	// vartype.go for why it is not folded into RECVMETHOD.
+	if vv := varTypeViolations(lang, fileLines, newLines, symbols, filePath); len(vv) > 0 {
+		fired.VarType = true
+		violations = append(violations, vv...)
+	}
+
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). The edited file's directory anchors go.mod discovery, so a
 	// multi-module repo resolves against the module the file actually belongs to.

@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-08-07
+
 ### Fixed
 - guard: record approvals that take longer than five minutes to arrive, instead of silently dropping the outcome. The PostToolUse recorder and `fpreport` now join an ask to its outcome by an edit-content fingerprint (falling back to the original file+time-window match for records from older guards), instead of requiring the approval to land within a fixed 5-minute window of the ask (#300)
 

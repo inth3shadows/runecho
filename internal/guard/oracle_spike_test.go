@@ -46,6 +46,7 @@ type oracleSite struct {
 	relPath, absPath string
 	line             int // 1-based
 	receiverCol      int // byte offset, original (pre-mutation) line
+	receiverColUTF16 int // UTF-16 code-unit offset of receiverCol, for LSP hover
 	receiverName     string
 	memberName       string
 }
@@ -208,7 +209,8 @@ func TestSpikeGoplsOracleVarType(t *testing.T) {
 			if m[6] == s.col && line[m[6]:m[7]] == s.name {
 				oracleSites = append(oracleSites, oracleSite{
 					relPath: s.relPath, absPath: s.absPath, line: s.line,
-					receiverCol: m[4], receiverName: line[m[4]:m[5]], memberName: s.name,
+					receiverCol: m[4], receiverColUTF16: utf16Offset(line, m[4]),
+					receiverName: line[m[4]:m[5]], memberName: s.name,
 				})
 				found = true
 				break
@@ -259,7 +261,7 @@ func TestSpikeGoplsOracleVarType(t *testing.T) {
 		}
 
 		start := time.Now()
-		resolved, _, err := client.hover(uri, os_.line-1, os_.receiverCol)
+		resolved, _, err := client.hover(uri, os_.line-1, os_.receiverColUTF16)
 		elapsed := time.Since(start)
 		if err != nil {
 			t.Logf("hover %s:%d %s: %v", os_.relPath, os_.line, os_.receiverName, err)

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 )
 
 type rpcResult struct {
@@ -241,10 +242,29 @@ func (c *goplsClient) didOpen(uri, text string) error {
 	})
 }
 
+// utf16Offset converts a byte offset into s (which must land on a rune
+// boundary) into the UTF-16 code-unit offset the LSP position protocol
+// requires. A byte offset used directly would drift on any line with
+// non-ASCII content (e.g. a string literal) before the target column —
+// the corpus this spike runs against is not guaranteed ASCII-only.
+func utf16Offset(s string, byteOffset int) int {
+	off := 0
+	for i, r := range s {
+		if i >= byteOffset {
+			break
+		}
+		if n := utf16.RuneLen(r); n > 0 {
+			off += n
+		} else {
+			off++
+		}
+	}
+	return off
+}
+
 // hover returns whether gopls resolved a non-empty type/symbol description at
 // (line, char) — 0-based, UTF-16-code-unit character offset per the LSP spec.
-// Go identifiers are ASCII, so a byte offset is used directly as a good
-// enough approximation for this spike.
+// Callers must convert byte offsets via utf16Offset before calling this.
 func (c *goplsClient) hover(uri string, line, char int) (resolved bool, raw json.RawMessage, err error) {
 	res, err := c.call("textDocument/hover", map[string]any{
 		"textDocument": map[string]any{"uri": uri},

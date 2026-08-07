@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.35.1] — 2026-08-07
+
+### Changed
+- spike: measure elapsed time from ask to definition for premature findings (#328)
+
 ## [0.35.0] — 2026-08-07
 
 ### Changed

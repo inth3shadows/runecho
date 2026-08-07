@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-08-07
+
+### Changed
+- guard: local-variable-type method check for v.Method() (#312 slice 1) (#321)
+
 ## [0.33.0] — 2026-08-07
 
 ### Fixed

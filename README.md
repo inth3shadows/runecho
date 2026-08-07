@@ -31,6 +31,17 @@ free — its tool schemas cost ~968 tokens at session start, and `structure`
 unscoped is expensive enough to be worth scoping. Every number, including the
 unflattering ones, is in [bench/TOKEN-COST.md](bench/TOKEN-COST.md).
 
+**How often it's wrong, measured against git history, not approvals.** A
+user's approve-anyway rate turned out to have no variance to measure — 308 of
+308 ask-gated edits approved, zero denied, across 30 days of dogfood traffic.
+So `fpaudit` judges each flagged symbol against **dated git history** instead:
+was it defined at ask time, and is it defined now. Live reading across this
+project's own dogfood corpus: **15.3% false-positive, 33.7% premature** (the
+guard was *correct*, just fired before the symbol it flagged existed — an
+agent writing a caller before its callee), **51.0% stands** (a real unbacked
+reference). The full method, and what NOT to conclude from the 51%, is in
+[bench/FPAUDIT.md](bench/FPAUDIT.md).
+
 **The scope, stated up front.** RunEcho reads *unqualified* references — bare
 calls, constant references, and type annotations. Measured against its own
 corpus of real model hallucinations, that catches **4 of 9** (N=15 hand-verified
@@ -237,6 +248,7 @@ not general-purpose code intelligence.
 - [Technical Reference](TECHNICAL.md) — architecture, storage schema, the IR, the MCP tools, maintenance
 - [Usage Guide](USAGE.md) — day-to-day operations: enrolling repos, integrations, reading drift, troubleshooting
 - [Token cost](bench/TOKEN-COST.md) — measured context cost of every surface, including where RunEcho is expensive
+- [False-positive audit](bench/FPAUDIT.md) — the guard's fp/premature/stands rate against git history, and why approval rate isn't a false-positive proxy
 - [Changelog](CHANGELOG.md) — notable changes per release; versioning policy
 
 ## License

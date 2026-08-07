@@ -57,6 +57,11 @@ CATCHES a hallucination, but what each surface COSTS in context tokens. Same
 posture — it corrected a README overclaim and reports RunEcho's most expensive
 call rather than only its cheapest.
 
+[FPAUDIT.md](FPAUDIT.md) measures the guard's false-positive rate against real
+dogfood traffic instead of this file's synthetic corpus — and against dated
+git history rather than user approvals, after approvals turned out to have no
+variance to measure (308 of 308 approved, zero denied over 30 days).
+
 ## Caveats (stated, not buried)
 
 - Synthetic perturbations approximate, but are not, a real model error

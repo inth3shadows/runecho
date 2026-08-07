@@ -395,7 +395,7 @@
     {
       "id": "qualified/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "fired.Qualified = len(qv) > 0",
+      "find": "fired.Qualified = len(qualifiedV) > 0",
       "replace": "fired.Qualified = false",
       "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket"
     },
@@ -423,7 +423,7 @@
     {
       "id": "deps-go/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "fired.DepsGo = len(dv) > 0",
+      "find": "fired.DepsGo = len(depsGoV) > 0",
       "replace": "fired.DepsGo = false",
       "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket"
     },

@@ -243,6 +243,7 @@ type firedChecks struct {
 	Duplicate  bool
 	CallShape  bool
 	RecvMethod bool
+	VarType    bool
 }
 
 // anyNonViolation reports every check EXCEPT the additive one, so the
@@ -272,7 +273,7 @@ type firedChecks struct {
 // its type comment describes.
 func (f firedChecks) anyNonViolation() bool {
 	return f.FileScope || f.Qualified || f.DepsGo ||
-		f.Dangling || f.Dropped || f.Duplicate || f.CallShape || f.RecvMethod
+		f.Dangling || f.Dropped || f.Duplicate || f.CallShape || f.RecvMethod || f.VarType
 }
 
 // askReason names the decision-log reason for an ask so the dogfood stream is
@@ -299,6 +300,7 @@ func askReason(f firedChecks) string {
 		{f.Duplicate, "duplicate-symbol"},
 		{f.CallShape, "call-shape"},
 		{f.RecvMethod, "recv-method"},
+		{f.VarType, "var-type"},
 	} {
 		if e.on {
 			parts = append(parts, e.name)

@@ -363,6 +363,19 @@ func runGuardOnFile(known map[string]struct{}, relPath, text, modulePath string,
 			for _, v := range guard.GoReceiverMethodViolations(foldLines, added, symbols) {
 				out = append(out, attributed{check: "GoReceiverMethod", posture: p.name, v: v})
 			}
+			// wholeFile passed as nil when fold==added (the "write-whole"
+			// posture folds the same text both ways) rather than foldLines
+			// unconditionally: goVarTypes' rebinding gate is text-based dedup,
+			// not occurrence counting, so the duplication itself is handled —
+			// but passing nil here avoids doubling every binding's ctx walk for
+			// no benefit, since foldLines and added would be identical anyway.
+			varTypeWholeFile := foldLines
+			if p.fold == p.added {
+				varTypeWholeFile = nil
+			}
+			for _, v := range guard.GoVarTypeMethodViolations(varTypeWholeFile, added, symbols) {
+				out = append(out, attributed{check: "GoVarType", posture: p.name, v: v})
+			}
 			if modulePath != "" {
 				for _, v := range guard.GoQualifiedViolations(foldLines, added, symbols, modulePath) {
 					out = append(out, attributed{check: "GoQualified", posture: p.name, v: v})
@@ -808,6 +821,9 @@ func whichCheckCatches(known map[string]struct{}, modulePath, relPath, text, fre
 	if len(guardReceiverHits(lines, symbols, fresh)) > 0 {
 		return "GoReceiverMethod"
 	}
+	if len(guardVarTypeHits(lines, symbols, fresh)) > 0 {
+		return "GoVarType"
+	}
 	if depIdx != nil {
 		// External and stdlib qualified calls (`os.Getenv`), validated against the
 		// dependency export index. Without this the selector shape would be scored
@@ -826,6 +842,21 @@ func whichCheckCatches(known map[string]struct{}, modulePath, relPath, text, fre
 func guardReceiverHits(lines []guard.AddedLine, symbols map[string]struct{}, fresh string) []guard.Violation {
 	var out []guard.Violation
 	for _, v := range guard.GoReceiverMethodViolations(lines, lines, symbols) {
+		if v.Symbol == fresh || strings.HasSuffix(v.Symbol, "."+fresh) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// guardVarTypeHits returns the local-variable-type-method violations matching
+// fresh. Unlike guardReceiverHits, lines is passed only as addedLines (nil
+// wholeFile) — not because duplicating it would be unsafe (goVarTypes' gate
+// is text-based dedup, see its doc comment), just because there is nothing to
+// gain here from walking the same ctx twice.
+func guardVarTypeHits(lines []guard.AddedLine, symbols map[string]struct{}, fresh string) []guard.Violation {
+	var out []guard.Violation
+	for _, v := range guard.GoVarTypeMethodViolations(nil, lines, symbols) {
 		if v.Symbol == fresh || strings.HasSuffix(v.Symbol, "."+fresh) {
 			out = append(out, v)
 		}

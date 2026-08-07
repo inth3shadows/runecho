@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.35.2] — 2026-08-07
+
+### Changed
+- spike(#323): measure gopls oracle fallback for GoVarType v.Method() misses (#327)
+
 ## [0.35.1] — 2026-08-07
 
 ### Changed

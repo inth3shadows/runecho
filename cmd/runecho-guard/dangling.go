@@ -225,14 +225,24 @@ func excludeSelf(paths []string, self string) []string {
 
 // firedChecks names which checks produced a finding on one edit. It exists
 // because three checks — file-scope, same-repo qualified and dependency
-// qualified — append into the SAME []Violation slice the additive check fills,
-// so by the time the reason is built the origin is gone. They were therefore all
-// logged as "violations", which made their own false-positive rate unmeasurable
-// by construction and blended up to four checks into the one number the
-// default-on check is judged by (#268).
+// qualified — USED TO append into the SAME []Violation slice the additive
+// check fills, so by the time the reason was built the origin was gone. They
+// were therefore all logged as "violations", which made their own
+// false-positive rate unmeasurable by construction and blended up to four
+// checks into the one number the default-on check is judged by (#268).
 //
-// Populate every field from the per-check result BEFORE it is appended. Reading
-// them back off the merged slice is what this type exists to stop.
+// #269 removed that merge entirely (the shared "not found in the indexed
+// code" / "unresolved symbol(s)" header those three inherited from it was
+// factually false for all of them — see writeCheckSection and its call sites
+// in runHookMode/runArgs). firedChecks stays regardless: it is still the only
+// record that a non-additive check fired, and every downstream consumer
+// (askReason, anyNonViolation below, decision logging) reads it rather than
+// re-deriving provenance from slice membership.
+//
+// Populate every field from the per-check result. recv-method and var-type
+// still DO append into `violations` (their "not found" header is accurate),
+// so reading their flags back off that slice would still be the exact bug
+// this type exists to stop for those two.
 type firedChecks struct {
 	Violations bool // the additive hallucination check (guard.Run)
 	FileScope  bool
@@ -247,30 +257,30 @@ type firedChecks struct {
 }
 
 // anyNonViolation reports every check EXCEPT the additive one, so the
-// clean-path gate can read `len(violations) == 0 && !fired.anyNonViolation()`.
+// clean-path gate can read `len(violations) == 0 && !fired.anyNonViolation()`
+// in both runHookMode and runArgs (pre-commit).
 //
-// The two halves of that gate are not disjoint, and should not be. Four of the
-// seven fields here (dangling, dropped, duplicate, call-shape) are the only
-// record that their check fired — nothing else in the gate can see them. The
-// other three (file-scope, qualified, deps-go) ALSO append into `violations`,
-// so `len(violations)` already covers them and their flags are redundant to the
-// gate. That redundancy is deliberate belt-and-braces, not an oversight: it
-// costs nothing and means the gate survives either half being wrong.
+// Before #269, file-scope/qualified/deps-go ALSO appended into `violations`,
+// so `len(violations)` already covered them and these three flags were
+// redundant to the gate — deliberate belt-and-braces, there to survive either
+// half of the gate being wrong. #269 removed that append (see the type
+// comment above), so as of that change these three are the ONLY record their
+// check fired: `len(violations)` no longer sees them, full stop. Do NOT
+// delete a `fired.FileScope`/`fired.Qualified`/`fired.DepsGo` assignment
+// believing `len(violations)` still has it covered — it does not, and doing
+// so silently turns a real ask into a silent defer for that check. That is
+// not a mislabelled log line — a silently dropped ask is the guard's worst
+// failure mode, which is exactly why these fixtures (and bench/hookmutate's
+// qualified/provenance, deps-go/provenance, filescope/flag-gate entries) pin
+// the flag assignments directly rather than trusting a slice length.
 //
-// Violations is deliberately absent, and the omission is the point. File-scope,
-// qualified and deps-go append INTO `violations` while also setting their own
-// flag here, so a gate of the form `!fired.any()` would rest on bookkeeping
-// rather than on the findings themselves: drop one flag assignment and a slice
-// holding real entries reads as clean, so the hook emits a `defer` where it
-// used to ask. That is not a mislabelled log line — a silently dropped ask is
-// the guard's worst failure mode, and it was gated on two assignments no test
-// pinned (both `fired.Qualified` and `fired.DepsGo` could be deleted with
-// `go test ./cmd/runecho-guard/` fully green; the fixtures added alongside this
-// now pin them).
+// The other four fields here (dangling, dropped, duplicate, call-shape) were
+// never merged into `violations` at all — this has always been their only
+// record.
 //
-// Gating on the merged slice makes that suppression structurally impossible
-// instead of merely tested-for, and leaves firedChecks the pure logging concern
-// its type comment describes.
+// Violations is deliberately absent from this method: it is the one field
+// genuinely redundant with `len(violations)`, since `fired.Violations` is
+// assigned from that same length one line above where firedChecks is built.
 func (f firedChecks) anyNonViolation() bool {
 	return f.FileScope || f.Qualified || f.DepsGo ||
 		f.Dangling || f.Dropped || f.Duplicate || f.CallShape || f.RecvMethod || f.VarType

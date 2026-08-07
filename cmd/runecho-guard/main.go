@@ -266,15 +266,26 @@ func runArgs(args []string) int {
 	}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
-	// Captured BEFORE the three checks below append into the same slice — that
-	// merge is what erased their provenance and made them all log as
-	// "violations" (#268).
+	// fired.Violations is captured here, before any other check runs, so it
+	// names only the additive check's own result. The three checks below used
+	// to append into this same slice, which erased their provenance and made
+	// them all log as "violations" (#268); #269 stopped that merge (see
+	// qualifiedV/depsGoV/fileScopeV below), so today they never touch this
+	// slice at all — fired.Qualified/DepsGo/FileScope are their only record.
 	fired := firedChecks{Violations: len(violations) > 0}
 
 	// Same-repo internal-package qualified-call check (default on since #314;
 	// RUNECHO_GUARD_QUALIFIED=0 disables it). Reads each staged Go file's whole
 	// current text for import parsing and the shadow gate; repoRoot anchors the
 	// go.mod lookup, resolved once for the whole commit.
+	//
+	// qualifiedV/depsGoV/fileScopeV below stay OUT of `violations`, mirroring
+	// runHookMode: a Violation means "this name does not resolve", and all three
+	// checks here found something real — a package, a dependency, a repo-wide
+	// symbol — just not reachable the way the edit reaches it. Merging them made
+	// the shared "unresolved symbol(s)" header false for exactly these findings
+	// (#269's fourth confound). Each gets writeCheckSection below instead.
+	var qualifiedV []guard.Violation
 	if qualifiedEnabled() {
 		if modulePath := guard.GoModulePath(repoRoot); modulePath != "" {
 			for _, fd := range diffs {
@@ -284,7 +295,7 @@ func runArgs(args []string) int {
 				whole := readFileLines(fd.AbsPath)
 				qv := qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)
 				fired.Qualified = fired.Qualified || len(qv) > 0
-				violations = append(violations, qv...)
+				qualifiedV = append(qualifiedV, qv...)
 			}
 		}
 	}
@@ -292,6 +303,7 @@ func runArgs(args []string) int {
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). One index per commit, rooted at repoRoot so go.mod, the
 	// module cache, and any vendor/ or go.work are resolved once.
+	var depsGoV []guard.Violation
 	if goDepIdx := newGoDepIndex(repoRoot); goDepIdx != nil {
 		modulePath := guard.GoModulePath(repoRoot)
 		for _, fd := range diffs {
@@ -301,7 +313,7 @@ func runArgs(args []string) int {
 			whole := readFileLines(fd.AbsPath)
 			dv := goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)
 			fired.DepsGo = fired.DepsGo || len(dv) > 0
-			violations = append(violations, dv...)
+			depsGoV = append(depsGoV, dv...)
 		}
 	}
 
@@ -309,6 +321,7 @@ func runArgs(args []string) int {
 	// the hook path, `symbols` here is never folded with in-file defs or
 	// learned-allow entries, so it is already the repo's own set and needs no
 	// snapshot before being used as the firewall.
+	var fileScopeV []guard.Violation
 	if fileScopeEnabled() {
 		for _, fd := range diffs {
 			if guard.LangFor(fd.Path) != guard.LangPython {
@@ -317,30 +330,43 @@ func runArgs(args []string) int {
 			whole := readFileLines(fd.AbsPath)
 			fv := fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)
 			fired.FileScope = fired.FileScope || len(fv) > 0
-			violations = append(violations, fv...)
+			fileScopeV = append(fileScopeV, fv...)
 		}
 	}
 
-	if len(violations) == 0 {
+	// Gated on anyNonViolation() too, not just len(violations): qualifiedV,
+	// depsGoV and fileScopeV no longer feed `violations`, so without this half
+	// of the gate a commit whose only findings are one of those three would
+	// read as clean and pass silently. See firedChecks.anyNonViolation.
+	if len(violations) == 0 && !fired.anyNonViolation() {
 		if *verbose {
 			infof("all references resolved")
 		}
 		return 0
 	}
 
-	// Report violations.
-	fmt.Fprintf(os.Stderr, "[runecho-guard] %d unresolved symbol(s):\n", len(violations))
-	for _, v := range violations {
-		fmt.Fprintf(os.Stderr, "  %s:%d: %s%s\n", sanitizeReasonPath(v.File), v.Line, v.Symbol, suggestionSuffix(v.Suggestions))
+	// Report violations. syms accumulates across every section below (fail-open:
+	// each section's own header/lines are independent of the others).
+	var syms []string
+	if len(violations) > 0 {
+		fmt.Fprintf(os.Stderr, "[runecho-guard] %d unresolved symbol(s):\n", len(violations))
+		for _, v := range violations {
+			fmt.Fprintf(os.Stderr, "  %s:%d: %s%s\n", sanitizeReasonPath(v.File), v.Line, v.Symbol, suggestionSuffix(v.Suggestions))
+			syms = append(syms, v.Symbol)
+		}
 	}
+	// path:line, not hook mode's hunk-relative "snippet line N": pre-commit scans
+	// the whole staged diff, potentially across many files, so v.File matters.
+	pathLineFmt := func(v guard.Violation) string {
+		return fmt.Sprintf("%s:%d: %s", sanitizeReasonPath(v.File), v.Line, v.Symbol)
+	}
+	writeCheckSection(os.Stderr, &syms, fileScopeAskHeader, fileScopeV, pathLineFmt)
+	writeCheckSection(os.Stderr, &syms, qualifiedAskHeader, qualifiedV, pathLineFmt)
+	writeCheckSection(os.Stderr, &syms, depsGoAskHeader, depsGoV, pathLineFmt)
 	fmt.Fprintf(os.Stderr, "\nNote: only bare calls are checked (method calls x.Foo() are skipped).\n")
 	fmt.Fprintf(os.Stderr, "Add false positives to .runechoguardignore, or bypass with RUNECHO_GUARD_SKIP=1.\n")
 
 	// Log after the stderr report — fail-open: log errors are silently discarded.
-	syms := make([]string, len(violations))
-	for i, v := range violations {
-		syms[i] = v.Symbol
-	}
 	logDecision(decisionRecord{
 		Mode:     "precommit",
 		Repo:     repo.Name,
@@ -523,6 +549,40 @@ func refreshIRForFile(filePath string) (outcome string) {
 	return outcome
 }
 
+// Ask headers for the three checks that find a symbol which DOES resolve —
+// just not here, not on this selector, or not as exported — as opposed to the
+// additive check's "not found in the indexed code" (#269's fourth confound:
+// reusing that header for these three was factually false and made an
+// approve-anyway ambiguous between "wrong finding" and "right finding, wrong
+// explanation"). Shared as constants, not inlined per call site, because each
+// is used from both runHookMode and runArgs (pre-commit); a literal repeated
+// four times is exactly the kind of drift a future wording tweak would only
+// catch in some of its copies.
+const (
+	fileScopeAskHeader = "symbol(s) resolve elsewhere in the repo but not in this file's scope — missing import or qualifier?:"
+	qualifiedAskHeader = "call(s) to a same-repo package whose exports don't include this selector:"
+	depsGoAskHeader    = "call(s) to an imported dependency whose exports don't include this selector:"
+)
+
+// writeCheckSection prints one "[runecho-guard] N <header>" line followed by
+// one line per violation, for a check whose findings are NOT folded into the
+// additive `violations` slice (file-scope, qualified, deps-go). Appends each
+// violation's symbol to *syms so call sites don't repeat that bookkeeping.
+// lineFmt renders one violation's location — hook mode uses the hunk-relative
+// "snippet line N" every other hook-mode section uses; pre-commit uses the
+// absolute "path:line" the additive report already uses at that call site.
+// No-ops on an empty slice so callers can call it unconditionally.
+func writeCheckSection(w io.Writer, syms *[]string, header string, vs []guard.Violation, lineFmt func(guard.Violation) string) {
+	if len(vs) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "[runecho-guard] %d %s\n", len(vs), header)
+	for _, v := range vs {
+		fmt.Fprintf(w, "  %s\n", lineFmt(v))
+		*syms = append(*syms, v.Symbol)
+	}
+}
+
 // runHookMode handles --hook-mode (Claude Code PreToolUse). It reads the tool
 // edit out from under the user's permission prompts. Exits 0 unconditionally —
 // the decision is communicated through the JSON written to out (or its absence).
@@ -703,16 +763,19 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
-	// See firedChecks: captured before the three merging checks below append.
+	// See firedChecks: captured before recv-method/var-type below append (the
+	// only two checks still merging into `violations` — qualified/deps-go/
+	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
 	fired := firedChecks{Violations: len(violations) > 0}
 	// learnEligible is the additive check's OWN finding set, captured here for the
-	// same reason firedChecks is: the three checks below append into `violations`,
-	// and reading learn-eligibility back off the merged slice is the bug this
-	// pattern exists to stop. LearnSymbols must stay the hallucination-origin
-	// subset (see declog.go) because learned-allow feeds guard.Run's known-set —
-	// approving a file-scope ask on `render` (a real symbol, not imported here)
-	// would otherwise teach the guard that `render` resolves, and keep it silent
-	// on a genuine hallucination of that name until the TTL expires.
+	// same reason firedChecks is: recv-method and var-type below append into
+	// `violations` too, and reading learn-eligibility back off the merged slice
+	// is the bug this pattern exists to stop. LearnSymbols must stay the
+	// hallucination-origin subset (see declog.go) because learned-allow feeds
+	// guard.Run's known-set — approving a file-scope ask on `render` (a real
+	// symbol, not imported here) would otherwise teach the guard that `render`
+	// resolves, and keep it silent on a genuine hallucination of that name until
+	// the TTL expires.
 	learnEligible := make(map[string]struct{}, len(violations))
 	for _, v := range violations {
 		learnEligible[v.Symbol] = struct{}{}
@@ -723,11 +786,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// file (read above); newLines is the proposed added text — passing both lets
 	// an in-edit shadow or a newly added same-repo import be seen. The file's
 	// own directory anchors go.mod.
+	//
+	// qualifiedV is kept OUT of `violations` on purpose (see #269's message-text
+	// finding): a Violation means "this name does not resolve", and pkg.Foo here
+	// means the opposite — pkg resolves and Foo does not exist as one of its
+	// exports. Folding it into the additive check's merged slice made the ask's
+	// shared header ("not found in the indexed code") false for this finding.
+	// It gets its own section below, like dangling and duplicate do.
+	var qualifiedV []guard.Violation
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
-			qv := qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
-			fired.Qualified = len(qv) > 0
-			violations = append(violations, qv...)
+			qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
+			fired.Qualified = len(qualifiedV) > 0
 		}
 	}
 
@@ -752,12 +822,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). The edited file's directory anchors go.mod discovery, so a
 	// multi-module repo resolves against the module the file actually belongs to.
+	//
+	// depsGoV stays out of `violations` for the same reason qualifiedV does above:
+	// the dependency package resolves and IS imported — only the specific selector
+	// is absent from its exports, which is not what "not found in the indexed
+	// code" says. Own section below.
+	var depsGoV []guard.Violation
 	if lang == guard.LangGo {
 		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
-			dv := goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
-			fired.DepsGo = len(dv) > 0
-			violations = append(violations, dv...)
+			depsGoV = goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
+			fired.DepsGo = len(depsGoV) > 0
 		}
 	}
 
@@ -767,9 +842,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// the pre-edit whole file, newLines the proposed text; both are needed so a
 	// binding introduced by this very edit still resolves. repoSymbols is the
 	// pre-fold snapshot taken above.
+	//
+	// fsv stays out of `violations` too: the symbol resolves repo-wide, just not
+	// in this file's scope — the opposite of "not found in the indexed code".
+	// Own section below.
 	fsv := fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)
 	fired.FileScope = len(fsv) > 0
-	violations = append(violations, fsv...)
 
 	// Call-shape agreement (RUNECHO_GUARD_CALLSHAPE=1, default off): a keyword
 	// argument the declaration does not accept. Kept out of `violations` on purpose
@@ -860,10 +938,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	fired.Duplicate = len(duplicates) > 0
 	fired.CallShape = len(callShapes) > 0
 
-	// Gated on the merged slice, NOT on fired.any(): three checks above append
-	// into `violations` while separately setting their own flag, so reading the
-	// gate off the flags alone would let a dropped assignment turn a findings
-	// slice with real entries into a `defer`. See firedChecks.anyNonViolation.
+	// Gated on BOTH len(violations) and fired.anyNonViolation(): violations
+	// covers additive/recv-method/var-type (still merged into that slice), and
+	// anyNonViolation covers everything else — file-scope, qualified, deps-go,
+	// dangling, dropped, duplicate, call-shape all report through their own
+	// slice/flag and were never (or, since #269, are no longer) visible to
+	// len(violations) alone. Dropping either half of this condition would let a
+	// real finding from the half it drops read as clean. See
+	// firedChecks.anyNonViolation for the full history of why.
 	if len(violations) == 0 && !fired.anyNonViolation() {
 		// Every FACT check passed. The contract question is independent of all of
 		// them — a perfectly correct edit to a file the session said it would not
@@ -929,6 +1011,19 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			}
 		}
 	}
+	// file-scope, qualified and deps-go each get their own header instead of
+	// folding into the block above: the symbol above genuinely does not exist
+	// anywhere the guard knows about, but these three found something real and
+	// are only flagging where/how it's reachable (#269's fourth confound —
+	// reusing "not found in the indexed code" for these was factually false and
+	// made an approve-anyway ambiguous between "wrong finding" and "right finding,
+	// wrong explanation"). snippetLineFmt matches every other hook-mode section:
+	// hook mode scans the edit's own hunk, so the line number is relative to the
+	// snippet, not the file.
+	snippetLineFmt := func(v guard.Violation) string { return fmt.Sprintf("snippet line %d: %s", v.Line, v.Symbol) }
+	writeCheckSection(&sb, &syms, fileScopeAskHeader, fsv, snippetLineFmt)
+	writeCheckSection(&sb, &syms, qualifiedAskHeader, qualifiedV, snippetLineFmt)
+	writeCheckSection(&sb, &syms, depsGoAskHeader, depsGoV, snippetLineFmt)
 	if len(dangling) > 0 {
 		fmt.Fprintf(&sb, "[runecho-guard] %d symbol(s) being removed are still referenced elsewhere — deleting may break callers:\n", len(dangling))
 		for _, d := range dangling {

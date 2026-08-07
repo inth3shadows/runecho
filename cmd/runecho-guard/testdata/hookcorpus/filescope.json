@@ -16,7 +16,8 @@
     "new": "import pytest\n\n\ndef test_digest():\n    out = render(digest)\n    assert out\n",
     "expect_ask": true,
     "expect_symbols": [
-      "render"
+      "render",
+      "not in this file's scope"
     ],
     "enrolled_defs": {
       "render": 1
@@ -63,7 +64,8 @@
     "edit_new": "    out = render(digest)\n    assert out",
     "expect_ask": true,
     "expect_symbols": [
-      "render"
+      "render",
+      "not in this file's scope"
     ],
     "enrolled_defs": {
       "render": 1

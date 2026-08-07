@@ -9,11 +9,18 @@ import (
 	"github.com/inth3shadows/runecho/internal/guard"
 )
 
-// guardConfig selects which guard checks the harness runs. The shipped binary
-// gates the qualified-call checks behind default-off env flags
-// (RUNECHO_GUARD_QUALIFIED, RUNECHO_GUARD_DEPS_GO), so the corpus must be able to
-// score BOTH states: the baseline is what a user gets today, the enhanced state
-// is what promoting the flags would catch. The delta is the promotion evidence.
+// guardConfig selects which guard checks the harness runs. `qualified` is a
+// single toggle over BOTH Go qualified-call checks (same-repo #176 and
+// external-dep #175) together — this harness has never scored them
+// independently. As of #314 that pairing is stale: RUNECHO_GUARD_QUALIFIED
+// (same-repo) shipped default-on, RUNECHO_GUARD_DEPS_GO (external-dep) is
+// still default-off. baselineConfig below is therefore no longer "what a user
+// gets today" for the same-repo half — read it as "both extra checks off",
+// the measurement point for scoring what promoting RUNECHO_GUARD_DEPS_GO
+// alone would still add on top of the now-shipped default. Splitting the two
+// into independent flags would make this harness track the real defaults
+// again; not done here (#314 was a guard-binary change, not a bench-harness
+// one) — worth doing before this harness is next used to argue a promotion.
 type guardConfig struct {
 	// qualified enables the Go qualified-call checks (same-repo #176 and
 	// external-dep #175). They require whole-file context and are no-ops on cases
@@ -21,8 +28,8 @@ type guardConfig struct {
 	qualified bool
 }
 
-// baselineConfig mirrors the shipped default: qualified checks off. It is what
-// the existing scorecards report, so ScoreCaptured/Score keep their old numbers.
+// baselineConfig: both qualified-call checks off. See the guardConfig doc —
+// this no longer mirrors the shipped default for the same-repo check (#314).
 var baselineConfig = guardConfig{}
 
 // enhancedConfig turns the qualified checks on — the "if we promoted the flags"

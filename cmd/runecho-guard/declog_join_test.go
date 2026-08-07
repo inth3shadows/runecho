@@ -180,6 +180,39 @@ func TestRecentUnrecordedAsk_OversizedLineDoesNotAbortScan(t *testing.T) {
 	}
 }
 
+// TestRecentUnrecordedAsk_UnattributedOutcomeDoesNotCloseADifferentHash pins a
+// bug found by review: the hash track used to accept ANY same-file outcome
+// with an empty Edit as proof the currently hash-matched ask was answered.
+// With two different-hash asks for the same file, an unrelated (or
+// legacy/unattributable) empty-Edit outcome would falsely close whichever ask
+// the hash track had matched — silently dropping its real, later approval.
+func TestRecentUnrecordedAsk_UnattributedOutcomeDoesNotCloseADifferentHash(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	file := "/some/repo/main.go"
+	writeAskEntryAt(t, file, time.Now().Add(-30*time.Minute), "hash-a", []string{"A"})
+	writeAskEntryAt(t, file, time.Now().Add(-20*time.Minute), "hash-b", []string{"B"})
+	// An unattributed outcome (no Edit) for this file — e.g. a legacy guard, or
+	// genuinely unrelated to either ask above.
+	logDecision(decisionRecord{
+		TS:   time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+		Mode: "hook", Repo: "r", File: file,
+		Decision: "outcome", Reason: "approved",
+	})
+
+	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "hash-b")
+	if !ok {
+		t.Fatal("ask B must still be findable — an unattributed outcome must not falsely close it")
+	}
+	if join != "edit" {
+		t.Errorf("join = %q, want %q", join, "edit")
+	}
+	if len(rec.Symbols) != 1 || rec.Symbols[0] != "B" {
+		t.Errorf("symbols = %v, want [B]", rec.Symbols)
+	}
+}
+
 // TestDeclogWindowConstants_StayInSyncWithGuardstats pins the cross-package
 // invariant the #300 fix depends on: fpreport joins on
 // guardstats.KeyedOutcomeJoinWindow, the guard writes outcomes bounded by

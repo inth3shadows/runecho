@@ -130,7 +130,7 @@ is fully finished.
 | `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
-| `cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (all default OFF — see Configuration) | `guard` |
+| `cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (default OFF except `qualified`, default ON since #314 — see Configuration) | `guard` |
 | `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) | — |
 | `cmd/runecho-guard/learnedallow.go` | C3 learned-allow store with count threshold + TTL decay | `store` |
 
@@ -381,15 +381,16 @@ newer-than-supported database.
 | `RUNECHO_GENERATE_TIMEOUT` | `30s` | CLI-only override of the IR-generation wall-clock bound. A Go duration (`5m`), or `off`/`none`/`0` to disable. The MCP server keeps the fixed 30s budget |
 | `RUNECHO_DEBUG` | — | Set to `1` to trace the E6 auto-refresh branch into `decisions.jsonl` (`mode:"e6"`). Off by default so the hot path writes nothing extra |
 
-Opt-in guard checks — all default OFF, each a dogfood gate. See
-[Opt-in checks](#opt-in-checks-all-default-off) for what each one asks about.
+Opt-in guard checks — each a dogfood gate, one (`RUNECHO_GUARD_QUALIFIED`)
+default ON since #314, the rest default OFF. See [Opt-in
+checks](#opt-in-checks) for what each one asks about.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `RUNECHO_GUARD_DANGLING` | — | `1` enables E1 dangling-refs |
 | `RUNECHO_GUARD_DROPPED_IMPORT` | — | `1` enables the dropped-import check |
 | `RUNECHO_GUARD_DUPLICATE` | — | `1` enables E5 duplicate-symbol |
-| `RUNECHO_GUARD_QUALIFIED` | — | `1` enables same-repo internal-package qualified calls (Go) |
+| `RUNECHO_GUARD_QUALIFIED` | **on** | `0` disables same-repo internal-package qualified calls (Go) |
 | `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
 | `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
 | `RUNECHO_GUARD_CONTRACT` | — | `1` enables the edit-scope contract check |

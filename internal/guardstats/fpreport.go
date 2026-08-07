@@ -481,7 +481,17 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			k := symbolKey(d.File, d.Symbols)
 			approvedByKey[k] = append(approvedByKey[k], idx)
 			if d.Edit != "" {
-				approvedByEdit[d.Edit] = append(approvedByEdit[d.Edit], idx)
+				// Scoped by FILE too, not just the fingerprint: the fingerprint hashes
+				// only the tool call's edit content (declog.go's editFingerprint), so
+				// two different files patched with byte-identical text — the same
+				// one-line fix applied twice, a generated boilerplate block — collide
+				// on the same hash. Without the file component here, file A's ask could
+				// be credited with file B's approval (and vice versa), corrupting
+				// exactly the approve-anyway rate #314's dogfood-gating decisions read.
+				// declog.go's own hash track does not need this: it already filters to
+				// `cur.File == file` before ever comparing Edit.
+				ek := d.File + "\x00" + d.Edit
+				approvedByEdit[ek] = append(approvedByEdit[ek], idx)
 			}
 		}
 	}
@@ -557,7 +567,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		// it was.
 		matchIdx := -1
 		if a.Edit != "" {
-			matchIdx = matchOutcome(allApproved, approvedByEdit[a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow)
+			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow)
 		}
 		if matchIdx < 0 {
 			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow)

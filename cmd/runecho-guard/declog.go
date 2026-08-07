@@ -101,7 +101,10 @@ func editFingerprint(e hookEdit) string {
 		h.Write([]byte(op.NewString))
 		h.Write([]byte{0})
 	}
-	return hex.EncodeToString(h.Sum(nil))[:12]
+	// shortHash (contract.go) is the same 12-char truncation convention this
+	// repo already uses for a display hash — reusing it keeps "12 is the
+	// truncation length" defined in one place instead of two that could drift.
+	return shortHash(hex.EncodeToString(h.Sum(nil)))
 }
 
 // logDecision appends one JSONL line to <storeDir>/decisions.jsonl.
@@ -292,11 +295,20 @@ func logOutcomeForFile(file, editHash string) {
 //     comes out INFLATED — silently wrong rather than obviously empty, which is
 //     worse than the missing-recorder bug that made it empty.
 //
-// The hash track's "already recorded" check accepts an outcome whose Edit is
-// editHash OR empty as proof this ask was already answered — an unattributable
-// outcome (older guard, or a caller that passed no editHash) must be assumed to
-// be ours. The failure direction that matters is under-recording (a lost
-// outcome, same as before #300), never double-counting recordApprovals.
+// The hash track's "already recorded" check requires an EXACT Edit match, not
+// "editHash or empty" — an earlier version treated any same-file outcome with
+// no Edit as proof of that, on the reasoning that an unattributable outcome
+// (older guard, or a caller that passed no editHash) must be assumed to be
+// ours. That reasoning holds for a SINGLE ask in flight, but breaks the moment
+// two asks for the same file carry different hashes within the read window: an
+// unrelated empty-Edit outcome (meant for the OTHER ask, or genuinely
+// unattributable) would falsely close whichever ask is currently hash-matched,
+// silently dropping its real, later approval — exactly the #300 failure this
+// function exists to fix. A genuine double-fire for the SAME edit always
+// recomputes the SAME non-empty hash (editFingerprint is deterministic over
+// the same tool_input), so requiring an exact match still dedupes it; it is
+// the window track, unchanged below, that remains the fallback for records an
+// older guard wrote with no Edit at all.
 //
 // Ordering is what makes the single pass correct for each track independently.
 // The log is append-ordered, so resetting a track's recorded flag on each
@@ -364,7 +376,7 @@ func recentUnrecordedAsk(path, file, editHash string) (rec decisionRecord, join 
 					}
 				}
 			case "outcome":
-				if editHash != "" && (cur.Edit == editHash || cur.Edit == "") {
+				if editHash != "" && cur.Edit == editHash {
 					hashRecorded = true
 				}
 				winRecorded = true

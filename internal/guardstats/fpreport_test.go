@@ -1025,3 +1025,38 @@ func TestFPReport_LegacyPairBeyondWindowStillUnjoined(t *testing.T) {
 		t.Errorf("unmatched = %d, want 1", s.UnmatchedOutcomes)
 	}
 }
+
+// TestFPReport_EditHashScopedByFile pins a bug found by review: the edit-hash
+// join key was the fingerprint alone, with no file component. Two different
+// files edited with byte-identical content (the same one-line fix applied
+// twice) hash to the same fingerprint — without file-scoping, file A's ask
+// could be credited with file B's approval.
+func TestFPReport_EditHashScopedByFile(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "same-hash"},
+		{TS: ts(1), Mode: "hook", Repo: "r", File: "b.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"bar"}, Edit: "same-hash"},
+		// Only b.go's edit was actually approved.
+		{TS: ts(2), Mode: "hook", File: "b.go",
+			Decision: "outcome", Reason: "approved", Symbols: []string{"bar"}, Edit: "same-hash"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 || s.Window.Approved != 1 {
+		t.Fatalf("asks=%d approved=%d, want 2/1", s.Window.Asks, s.Window.Approved)
+	}
+	for _, sym := range s.TopSymbols {
+		if sym.Name == "foo" {
+			t.Errorf("a.go's ask (never approved) was credited with b.go's approval: %+v", s.TopSymbols)
+		}
+	}
+	found := false
+	for _, sym := range s.TopSymbols {
+		if sym.Name == "bar" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("b.go's real approval should appear in TopSymbols, got %+v", s.TopSymbols)
+	}
+}

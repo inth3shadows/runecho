@@ -13,20 +13,42 @@
 // those two pictures is true is guessing at the one parameter — the deferral
 // window — that decides whether the feature works at all.
 //
-// METHOD. Reuses Audit's own VerdictPremature findings unchanged (same
-// Oracle, same window, same classify() rules — nothing about the audit itself
-// is touched), then for each one walks forward from the ask-time commit to
-// HEAD via git log + bisection (assuming definedness is monotonic across the
-// window — a spike-quality approximation, not a guarantee: a symbol
-// introduced, deleted, then reintroduced would misattribute the LATER
-// introduction) to find the commit that first satisfies Defined, and buckets
-// (that commit's date) - (the ask's timestamp).
+// METHOD, v2 — corrected after a real measurement artifact. v1 walked
+// revAt..head on a single branch (effectively `master`) via bisection. That
+// is wrong for a repo that squash-merges PRs (this one does, routinely):
+// a squash-merge creates a BRAND-NEW commit at merge time, so the "defining
+// commit" v1 found was usually the merge, not the original fix — the
+// bucketed elapsed time was measuring PR review-to-merge latency, not agent
+// fix latency. Caught via the same discipline KB principle #71 names: check
+// whether the measurement instrument shares state with the system under
+// test. Here it did — the same squash-merge process runs on both sides.
 //
-// KNOWN GAP, surfaced by this spike rather than hidden: Decision (declog.go)
-// carries no session or task id, so "resolved within the same agent session"
-// cannot be measured directly — only elapsed wall-clock time can. A short
-// elapsed time is consistent with same-session resolution but is not proof of
-// it; a long one is stronger evidence the agent's task had already ended.
+// v2 instead searches `git log --all` (every reachable ref, not just one
+// branch — a still-live short-lived claudew/codexw feature branch is a
+// separate ref and IS included) for the EARLIEST commit BY AUTHOR DATE (not
+// committer date, which squash resets to merge time) where Defined flips
+// true, scanning candidates oldest-first and stopping at the first hit. This
+// is a linear scan, not a bisection: monotonicity cannot be assumed across
+// branches the way it can within one. Capped at maxLatencyScan commits per
+// finding to bound worst-case runtime; a finding that hits the cap is
+// reported as capped, not silently folded into "unresolved".
+//
+// RESIDUAL LIMITATION, not solved by v2: once a feature branch is deleted
+// (this repo's own aftercare flow offers exactly that after a merge) and its
+// commits are garbage-collected, only the squash-merge commit remains
+// reachable at all — v2 then falls back to the same merge-latency number v1
+// always produced, correctly but unavoidably. The reported bucket counts
+// should be read as a mix of "true fix latency" (branch still alive) and
+// "merge latency" (branch gone), not a clean measurement of either.
+//
+// KNOWN GAP, unrelated to the above and still unresolved: Decision
+// (declog.go) carries no session or task id, so "resolved within the same
+// agent session" cannot be measured directly even with a correct commit
+// timestamp — only elapsed wall-clock time can. Given this project's own
+// workflow (short claudew/codexw sessions, often well under an hour), two
+// SEPARATE short sessions on the same repo can easily land inside the same
+// elapsed-time bucket as one continuous session would — so even a clean
+// timestamp does not by itself prove same-task self-correction.
 //
 // Env-gated, zero CI impact, reads real ~/.runecho/decisions.jsonl.
 package guardstats
@@ -86,7 +108,7 @@ func TestSpikePrematureLatency(t *testing.T) {
 	}
 
 	counts := map[string]int{}
-	var resolved, unresolved, anomalies int
+	var resolved, unresolved, capped int
 	var examples []string
 	var elapsedList []time.Duration
 
@@ -96,30 +118,16 @@ func TestSpikePrematureLatency(t *testing.T) {
 			unresolved++
 			continue
 		}
-		revAt, err := oracle.RevAt(root, f.TS)
-		if err != nil {
-			unresolved++
+		sha, definedAt, status := findDefiningCommit(oracle, root, rel, f.Lang, f.Symbol, f.TS)
+		switch status {
+		case scanCapped:
+			capped++
 			continue
-		}
-		head, err := oracle.Head(root)
-		if err != nil {
-			unresolved++
-			continue
-		}
-		sha, definedAt, ok := findDefiningCommit(oracle, root, rel, f.Lang, f.Symbol, revAt, head)
-		if !ok {
+		case scanNotFound:
 			unresolved++
 			continue
 		}
 		elapsed := definedAt.Sub(f.TS)
-		if elapsed < 0 {
-			// The defining commit predates the ask — inconsistent with classify()
-			// having already proven "not defined at ask time" via the same Oracle.
-			// Likely a pathspec/worktree mismatch between the two calls rather
-			// than a real time-travel; logged, not silently bucketed.
-			anomalies++
-			continue
-		}
 		resolved++
 		elapsedList = append(elapsedList, elapsed)
 		counts[bucketFor(elapsed)]++
@@ -130,11 +138,11 @@ func TestSpikePrematureLatency(t *testing.T) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n=== premature-latency spike ===\n")
-	fmt.Fprintf(&b, "premature findings: %d total, %d resolved (defining commit found), %d unresolved (oracle/git could not answer), %d anomalies (defined-before-ask)\n",
-		len(premature), resolved, unresolved, anomalies)
+	fmt.Fprintf(&b, "\n=== premature-latency spike (v2: author-date, all-refs) ===\n")
+	fmt.Fprintf(&b, "premature findings: %d total, %d resolved, %d unresolved (no matching commit found on any live ref), %d capped (scan limit hit)\n",
+		len(premature), resolved, unresolved, capped)
 	if resolved > 0 {
-		order := []string{"<2min", "<30min", "<1h", "<1day", "<1week", ">=1week"}
+		order := []string{"<2min", "<30min", "<1h", "<5h", "<1day", "<1week", ">=1week"}
 		for _, k := range order {
 			if n := counts[k]; n > 0 {
 				fmt.Fprintf(&b, "  %-8s %4d  %5.1f%%\n", k, n, 100*float64(n)/float64(resolved))
@@ -142,8 +150,22 @@ func TestSpikePrematureLatency(t *testing.T) {
 		}
 		sort.Slice(elapsedList, func(i, j int) bool { return elapsedList[i] < elapsedList[j] })
 		fmt.Fprintf(&b, "median elapsed: %v\n", elapsedList[len(elapsedList)/2].Round(time.Second))
+
+		within1h, within5h := 0, 0
+		for _, e := range elapsedList {
+			if e <= time.Hour {
+				within1h++
+			}
+			if e <= 5*time.Hour {
+				within5h++
+			}
+		}
+		fmt.Fprintf(&b, "practical-session proxy: resolved within 1h = %d/%d (%.1f%%), within 5h = %d/%d (%.1f%%)\n",
+			within1h, resolved, 100*float64(within1h)/float64(resolved),
+			within5h, resolved, 100*float64(within5h)/float64(resolved))
 	}
-	fmt.Fprintf(&b, "KNOWN GAP: elapsed wall-clock only — Decision carries no session id, so this is a proxy for \"resolved within the same task,\" not proof of it.\n")
+	fmt.Fprintf(&b, "KNOWN GAP: elapsed wall-clock only — Decision carries no session id, so this is a proxy for \"resolved within the same task,\" not proof of it. Two separate short sessions can land in the same bucket as one continuous one.\n")
+	fmt.Fprintf(&b, "RESIDUAL LIMITATION: once a feature branch is deleted post-merge, only the squash-merge commit remains reachable, so its entry reflects merge latency, not fix latency — see file header.\n")
 	for _, e := range examples {
 		fmt.Fprintf(&b, "  %s\n", e)
 	}
@@ -158,6 +180,8 @@ func bucketFor(elapsed time.Duration) string {
 		return "<30min"
 	case elapsed < time.Hour:
 		return "<1h"
+	case elapsed < 5*time.Hour:
+		return "<5h"
 	case elapsed < 24*time.Hour:
 		return "<1day"
 	case elapsed < 7*24*time.Hour:
@@ -167,16 +191,38 @@ func bucketFor(elapsed time.Duration) string {
 	}
 }
 
-// findDefiningCommit bisects the commit range (revAt, head] for the first
-// commit where Defined(sym) is true, assuming monotonic definedness across
-// the range (see file header). Returns ok=false if the walk cannot be
-// completed (no commits in range, a git error, or head itself disagrees with
-// Audit's own already-proven "defined at head" verdict — a same-run
-// consistency check, not a new claim).
-func findDefiningCommit(o GitOracle, root, rel, lang, sym, revAt, head string) (sha string, definedAt time.Time, ok bool) {
-	out, err := o.git(root, "log", "--reverse", "--format=%H%x09%cI", revAt+".."+head)
+// maxLatencyScan bounds how many candidate commits findDefiningCommit will
+// call Defined against for one finding. A repo with many active branches
+// since askTS can otherwise turn one finding into hundreds of `git grep`
+// calls; this is a spike, not a service, so a finding that would need more
+// than this is reported as capped rather than left to run unbounded.
+const maxLatencyScan = 500
+
+type scanStatus int
+
+const (
+	scanFound scanStatus = iota
+	scanNotFound
+	scanCapped
+)
+
+// findDefiningCommit searches every commit reachable from ANY ref (`git log
+// --all`) authored at or after askTS, oldest AUTHOR DATE first, for the
+// first one where Defined(sym) is true. Author date, not committer date,
+// because a squash-merge stamps committer date at merge time regardless of
+// when the original fix was written — see the file header for why this
+// replaced a single-branch bisection. --all rather than one branch so a
+// still-live short-lived feature branch (a separate ref) is searched too,
+// not just whatever root's default branch happens to be.
+//
+// This is a linear scan, not a bisection: with commits drawn from multiple
+// branches, "defined" is not guaranteed monotonic across the scan order the
+// way it is within one branch's own history.
+func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Time) (sha string, definedAt time.Time, status scanStatus) {
+	since := askTS.Add(-time.Minute).UTC().Format(time.RFC3339)
+	out, err := o.git(root, "log", "--all", "--since="+since, "--format=%H%x09%aI")
 	if err != nil {
-		return "", time.Time{}, false
+		return "", time.Time{}, scanNotFound
 	}
 	type commitInfo struct {
 		sha string
@@ -192,32 +238,33 @@ func findDefiningCommit(o GitOracle, root, rel, lang, sym, revAt, head string) (
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339, parts[1])
-		if err != nil {
-			continue
+		if err != nil || ts.Before(askTS) {
+			continue // author date can predate the --since committer-date cutoff
 		}
 		commits = append(commits, commitInfo{sha: parts[0], ts: ts})
 	}
 	if len(commits) == 0 {
-		return "", time.Time{}, false
+		return "", time.Time{}, scanNotFound
 	}
+	sort.Slice(commits, func(i, j int) bool { return commits[i].ts.Before(commits[j].ts) })
 
-	hi := len(commits) - 1
-	if defined, err := o.Defined(root, commits[hi].sha, lang, sym, rel); err != nil || !defined {
-		return "", time.Time{}, false // disagrees with Audit's own head verdict — skip rather than guess
+	limit := len(commits)
+	wasCapped := false
+	if limit > maxLatencyScan {
+		limit = maxLatencyScan
+		wasCapped = true
 	}
-	lo := 0
-	for lo < hi {
-		mid := (lo + hi) / 2
-		defined, err := o.Defined(root, commits[mid].sha, lang, sym, rel)
+	for i := 0; i < limit; i++ {
+		defined, err := o.Defined(root, commits[i].sha, lang, sym, rel)
 		if err != nil {
-			lo = mid + 1 // treat an oracle error as "not yet defined", search later half
-			continue
+			continue // this commit's answer is unavailable; keep scanning forward
 		}
 		if defined {
-			hi = mid
-		} else {
-			lo = mid + 1
+			return commits[i].sha, commits[i].ts, scanFound
 		}
 	}
-	return commits[lo].sha, commits[lo].ts, true
+	if wasCapped {
+		return "", time.Time{}, scanCapped
+	}
+	return "", time.Time{}, scanNotFound
 }

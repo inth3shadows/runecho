@@ -148,8 +148,9 @@ func TestSpikePrematureLatency(t *testing.T) {
 				fmt.Fprintf(&b, "  %-8s %4d  %5.1f%%\n", k, n, 100*float64(n)/float64(resolved))
 			}
 		}
-		sort.Slice(elapsedList, func(i, j int) bool { return elapsedList[i] < elapsedList[j] })
-		fmt.Fprintf(&b, "median elapsed: %v\n", elapsedList[len(elapsedList)/2].Round(time.Second))
+		ls := latencyStats(elapsedList)
+		fmt.Fprintf(&b, "elapsed: min=%s median=%s mean=%s max=%s (n=%d)\n",
+			formatLatency(ls.MinS), formatLatency(ls.MedianS), formatLatency(ls.MeanS), formatLatency(ls.MaxS), ls.N)
 
 		within1h, within5h := 0, 0
 		for _, e := range elapsedList {
@@ -219,8 +220,14 @@ const (
 // branches, "defined" is not guaranteed monotonic across the scan order the
 // way it is within one branch's own history.
 func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Time) (sha string, definedAt time.Time, status scanStatus) {
-	since := askTS.Add(-time.Minute).UTC().Format(time.RFC3339)
-	out, err := o.git(root, "log", "--all", "--since="+since, "--format=%H%x09%aI")
+	// No --since here, deliberately: git's --since prunes the graph walk based
+	// on an assumption of chronological order down each branch, and can stop
+	// early (silently dropping a later-dated commit) when a descendant has an
+	// earlier committer date than an ancestor on the same path — reproduced in
+	// a scratch repo during review. The date filter below is the sole
+	// correctness gate; --since would only have been a prefetch optimization,
+	// and an incorrect one.
+	out, err := o.git(root, "log", "--all", "--format=%H%x09%aI")
 	if err != nil {
 		return "", time.Time{}, scanNotFound
 	}
@@ -239,7 +246,7 @@ func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Tim
 		}
 		ts, err := time.Parse(time.RFC3339, parts[1])
 		if err != nil || ts.Before(askTS) {
-			continue // author date can predate the --since committer-date cutoff
+			continue // the only date filter — see the no-`--since` note above
 		}
 		commits = append(commits, commitInfo{sha: parts[0], ts: ts})
 	}

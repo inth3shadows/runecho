@@ -723,11 +723,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// file (read above); newLines is the proposed added text — passing both lets
 	// an in-edit shadow or a newly added same-repo import be seen. The file's
 	// own directory anchors go.mod.
+	//
+	// qualifiedV is kept OUT of `violations` on purpose (see #269's message-text
+	// finding): a Violation means "this name does not resolve", and pkg.Foo here
+	// means the opposite — pkg resolves and Foo does not exist as one of its
+	// exports. Folding it into the additive check's merged slice made the ask's
+	// shared header ("not found in the indexed code") false for this finding.
+	// It gets its own section below, like dangling and duplicate do.
+	var qualifiedV []guard.Violation
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
-			qv := qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
-			fired.Qualified = len(qv) > 0
-			violations = append(violations, qv...)
+			qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
+			fired.Qualified = len(qualifiedV) > 0
 		}
 	}
 
@@ -752,12 +759,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). The edited file's directory anchors go.mod discovery, so a
 	// multi-module repo resolves against the module the file actually belongs to.
+	//
+	// depsGoV stays out of `violations` for the same reason qualifiedV does above:
+	// the dependency package resolves and IS imported — only the specific selector
+	// is absent from its exports, which is not what "not found in the indexed
+	// code" says. Own section below.
+	var depsGoV []guard.Violation
 	if lang == guard.LangGo {
 		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
-			dv := goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
-			fired.DepsGo = len(dv) > 0
-			violations = append(violations, dv...)
+			depsGoV = goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
+			fired.DepsGo = len(depsGoV) > 0
 		}
 	}
 
@@ -767,9 +779,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// the pre-edit whole file, newLines the proposed text; both are needed so a
 	// binding introduced by this very edit still resolves. repoSymbols is the
 	// pre-fold snapshot taken above.
+	//
+	// fsv stays out of `violations` too: the symbol resolves repo-wide, just not
+	// in this file's scope — the opposite of "not found in the indexed code".
+	// Own section below.
 	fsv := fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)
 	fired.FileScope = len(fsv) > 0
-	violations = append(violations, fsv...)
 
 	// Call-shape agreement (RUNECHO_GUARD_CALLSHAPE=1, default off): a keyword
 	// argument the declaration does not accept. Kept out of `violations` on purpose
@@ -927,6 +942,34 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			if _, additive := learnEligible[v.Symbol]; cw == nil && additive {
 				learnSyms = append(learnSyms, v.Symbol)
 			}
+		}
+	}
+	// file-scope, qualified and deps-go each get their own header instead of
+	// folding into the block above: the symbol above genuinely does not exist
+	// anywhere the guard knows about, but these three found something real and
+	// are only flagging where/how it's reachable (#269's fourth confound —
+	// reusing "not found in the indexed code" for these was factually false and
+	// made an approve-anyway ambiguous between "wrong finding" and "right finding,
+	// wrong explanation").
+	if len(fsv) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d symbol(s) resolve elsewhere in the repo but not in this file's scope — missing import or qualifier?:\n", len(fsv))
+		for _, v := range fsv {
+			fmt.Fprintf(&sb, "  snippet line %d: %s\n", v.Line, v.Symbol)
+			syms = append(syms, v.Symbol)
+		}
+	}
+	if len(qualifiedV) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d call(s) to a same-repo package whose exports don't include this selector:\n", len(qualifiedV))
+		for _, v := range qualifiedV {
+			fmt.Fprintf(&sb, "  snippet line %d: %s\n", v.Line, v.Symbol)
+			syms = append(syms, v.Symbol)
+		}
+	}
+	if len(depsGoV) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d call(s) to an imported dependency whose exports don't include this selector:\n", len(depsGoV))
+		for _, v := range depsGoV {
+			fmt.Fprintf(&sb, "  snippet line %d: %s\n", v.Line, v.Symbol)
+			syms = append(syms, v.Symbol)
 		}
 	}
 	if len(dangling) > 0 {

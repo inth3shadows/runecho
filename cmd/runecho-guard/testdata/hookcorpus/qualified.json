@@ -19,7 +19,8 @@
     "new": "package api\n\nimport (\n\t\"example.com/app/internal/store\"\n)\n\nfunc Handle() {\n\trows := store.FetchAll()\n\t_ = rows\n}\n",
     "expect_ask": true,
     "expect_symbols": [
-      "store.FetchAll"
+      "store.FetchAll",
+      "same-repo package whose exports don't include this selector"
     ],
     "enrolled_defs": {
       "Fetch": 1,

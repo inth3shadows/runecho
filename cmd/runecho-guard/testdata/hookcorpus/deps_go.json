@@ -21,7 +21,8 @@
     "new": "package api\n\nimport (\n\t\"example.com/lib/text\"\n)\n\nfunc Norm(s string) string {\n\treturn text.Lower(s)\n}\n",
     "expect_ask": true,
     "expect_symbols": [
-      "text.Lower"
+      "text.Lower",
+      "imported dependency whose exports don't include this selector"
     ],
     "enrolled_defs": {
       "Lower": 0

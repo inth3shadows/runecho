@@ -83,7 +83,7 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 	if !res.NoRepo && strictMode() {
 		advisory = strictStoreDegradedAdvisory
 	}
-	if askWithoutIndex(out, res.Contract, degradedShapes, filePath, lang, res.RepoName, advisory) {
+	if askWithoutIndex(out, res.Contract, degradedShapes, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
 		return true
 	}
 	switch {

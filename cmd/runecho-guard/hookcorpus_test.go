@@ -504,13 +504,29 @@ func flagController(t *testing.T, flags []string) func(on bool) {
 	})
 	return func(on bool) {
 		for _, p := range parsed {
-			if on {
+			switch {
+			case on:
 				os.Setenv(p.k, p.v)
-			} else {
+			case defaultOnFlags[p.k]:
+				// Unsetting would leave this flag at its true default — ON, since
+				// #314 — so the isolation probe below would see the check still
+				// fire and misread that as "the fixture doesn't isolate this
+				// check". The explicit opt-out value is what "off" means for a
+				// default-on flag.
+				os.Setenv(p.k, "0")
+			default:
 				os.Unsetenv(p.k)
 			}
 		}
 	}
+}
+
+// defaultOnFlags names every gating env var whose enabled() reads "!= 0"
+// rather than "== 1" — i.e. checks that ship on by default and are disabled by
+// an explicit opt-out. Keep in sync with cmd/runecho-guard's *Enabled functions;
+// a flag missing from here would make flagController(false) a no-op for it.
+var defaultOnFlags = map[string]bool{
+	"RUNECHO_GUARD_QUALIFIED": true,
 }
 
 // enrollSnapshot stands up a temp central store ($RUNECHO_HOME) and saves one

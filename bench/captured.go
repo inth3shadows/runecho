@@ -167,10 +167,11 @@ type CapturedReport struct {
 	N          int
 }
 
-// ScoreCaptured replays each case at the shipped baseline configuration
-// (qualified checks off) and tallies counts per stratum, language, and reference
-// position. This is the quotable number and the one existing callers expect;
-// ScoreCapturedDual adds the flags-on comparison.
+// ScoreCaptured replays each case with both qualified-call checks off and
+// tallies counts per stratum, language, and reference position. This is the
+// quotable number and the one existing callers expect; ScoreCapturedDual adds
+// the flags-on comparison. See guardConfig's doc: as of #314 "both off" is no
+// longer the shipped default for the same-repo half.
 func ScoreCaptured(cases []CapturedCase) CapturedReport {
 	return scoreCapturedWith(cases, baselineConfig)
 }
@@ -194,14 +195,15 @@ func scoreCapturedWith(cases []CapturedCase, cfg guardConfig) CapturedReport {
 	return r
 }
 
-// DualCapturedReport pairs the shipped-default score with the qualified-checks-on
-// score over the SAME corpus. The two are never pooled into one headline: the
-// baseline is what a user gets today, the enhanced number is the promotion case,
-// and their delta on the observed hallucinated stratum is the evidence for or
-// against flipping RUNECHO_GUARD_QUALIFIED / RUNECHO_GUARD_DEPS_GO on by default.
+// DualCapturedReport pairs the both-off score with the both-on score over the
+// SAME corpus. The two are never pooled into one headline. As of #314,
+// RUNECHO_GUARD_QUALIFIED (same-repo) ships default-on and RUNECHO_GUARD_DEPS_GO
+// (external-dep) stays default-off — see guardConfig's doc — so Baseline is no
+// longer literally "what a user gets today"; it is the measurement point for
+// scoring what promoting RUNECHO_GUARD_DEPS_GO alone would still add.
 type DualCapturedReport struct {
-	Baseline CapturedReport // qualified checks off (shipped default)
-	Enhanced CapturedReport // qualified checks on
+	Baseline CapturedReport // both qualified-call checks off
+	Enhanced CapturedReport // both qualified-call checks on
 }
 
 // ScoreCapturedDual scores the corpus twice and returns both reports.
@@ -215,7 +217,7 @@ func ScoreCapturedDual(cases []CapturedCase) DualCapturedReport {
 // Format renders both configurations and the observed-stratum delta between them.
 func (d DualCapturedReport) Format() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "=== BASELINE (shipped default: qualified checks off) ===\n")
+	fmt.Fprintf(&b, "=== BASELINE (both qualified-call checks off — no longer the shipped default for RUNECHO_GUARD_QUALIFIED, see #314) ===\n")
 	fmt.Fprintf(&b, "%s", d.Baseline.Format())
 	fmt.Fprintf(&b, "\n=== ENHANCED (RUNECHO_GUARD_QUALIFIED + DEPS_GO on) ===\n")
 	fmt.Fprintf(&b, "%s", d.Enhanced.Format())

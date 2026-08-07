@@ -52,7 +52,7 @@ func TestLogOutcome_StampsGuardVersion(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "a.py")
 	logDecision(decisionRecord{Mode: "hook", File: file, Lang: "py",
 		Decision: "ask", Reason: "violations", Symbols: []string{"foo"}})
-	logOutcomeForFile(file)
+	logOutcomeForFile(file, "")
 
 	rec := lastDecisionRecord(t, home)
 	if rec["decision"] != "outcome" {

@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/store"
@@ -58,6 +61,50 @@ type decisionRecord struct {
 	// analogue here on purpose (a scope that trains itself wider is not a scope).
 	Contract     string `json:"contract,omitempty"`
 	ContractHash string `json:"contract_hash,omitempty"`
+	// Edit is a fingerprint of the tool call's edit content (see
+	// editFingerprint), stamped on ask records so the matching PostToolUse
+	// outcome can be joined precisely instead of by a (file, time-window) guess
+	// — see #300 and the join-basis comment on recentUnrecordedAsk. Empty on
+	// records written by older guards and on pre-commit asks, which have no
+	// outcome to join.
+	Edit string `json:"edit,omitempty"`
+	// Join records which track matched an outcome to its ask: "edit" (fingerprint,
+	// precise) or "window" (file+time fallback, the pre-#300 behavior). Outcome
+	// records only. This is a diagnostic, not a policy input — its only purpose is
+	// making a silent regression to the fallback path observable via
+	// `jq -r 'select(.decision=="outcome")|.join'` rather than invisible.
+	Join string `json:"join,omitempty"`
+}
+
+// editFingerprint returns a 12-hex-character fingerprint of a tool call's edit
+// content, hashing the extracted hookEdit fields rather than raw JSON bytes so
+// the same edit fingerprints identically whether it was parsed from the
+// PreToolUse payload (ask side) or the differently-shaped PostToolUse payload
+// (outcome side) — key order and whitespace are not stable across the two.
+// Empty ToolName (no edit content at all, e.g. a pre-commit ask) returns "".
+func editFingerprint(e hookEdit) string {
+	if e.ToolName == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(e.ToolName))
+	h.Write([]byte{0})
+	h.Write([]byte(e.OldString))
+	h.Write([]byte{0})
+	h.Write([]byte(e.NewString))
+	h.Write([]byte{0})
+	h.Write([]byte(e.Content))
+	h.Write([]byte{0})
+	for _, op := range e.Edits {
+		h.Write([]byte(op.OldString))
+		h.Write([]byte{0})
+		h.Write([]byte(op.NewString))
+		h.Write([]byte{0})
+	}
+	// shortHash (contract.go) is the same 12-char truncation convention this
+	// repo already uses for a display hash — reusing it keeps "12 is the
+	// truncation length" defined in one place instead of two that could drift.
+	return shortHash(hex.EncodeToString(h.Sum(nil)))
 }
 
 // logDecision appends one JSONL line to <storeDir>/decisions.jsonl.
@@ -122,8 +169,24 @@ func e6debug(file, outcome string) {
 }
 
 const (
-	maxOutcomeAge       = 5 * time.Minute
-	maxOutcomeReadBytes = int64(64 * 1024) // 64 KiB — covers ~500 recent entries
+	maxOutcomeAge = 5 * time.Minute
+	// maxKeyedOutcomeAge bounds the fingerprint-join track (#300). It exists only
+	// to bound hash reuse (an agent re-issuing a byte-identical edit days apart);
+	// the fingerprint itself carries the precision, unlike the window track's
+	// (file, time) guess. 24h is a judgment call, not a measured optimum: the one
+	// real case that motivated this (#300) was 1h45m, and the ask-to-outcome
+	// latency distribution observed on the live log is censored at the OLD
+	// maxOutcomeAge-derived read window, so any number derived from current data
+	// is a lower bound by construction. Keep this equal to
+	// guardstats.KeyedOutcomeJoinWindow — declog_window_test.go asserts it.
+	maxKeyedOutcomeAge = 24 * time.Hour
+	// maxOutcomeReadBytes bounds how far back recentUnrecordedAsk reads. 1 MiB is
+	// ~4,700 records — hours at peak logged volume, days at median — versus the
+	// old 64 KiB (~500 records, ~15 min at peak: too narrow to ever reach a
+	// maxKeyedOutcomeAge-old ask on a busy log). A busy-enough log can still miss
+	// an ask older than this window; that is now a bounded, documented gap
+	// instead of a silent 5-minute cliff.
+	maxOutcomeReadBytes = int64(1 << 20)
 )
 
 // logOutcomeForFile appends an approved-outcome record if a recent "ask"
@@ -152,7 +215,7 @@ const (
 // be taken) and a no-op on non-Unix. So this closes the race on Unix and remains
 // best-effort elsewhere — it is not an absolute guarantee, and the comments and
 // docs must not claim one.
-func logOutcomeForFile(file string) {
+func logOutcomeForFile(file, editHash string) {
 	dir, err := runechoDir()
 	if err != nil {
 		return
@@ -161,7 +224,7 @@ func logOutcomeForFile(file string) {
 	var ask decisionRecord
 	var wrote bool
 	store.WithFileLock(filepath.Join(dir, "decisions.jsonl.lock"), func() {
-		rec, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file)
+		rec, join, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file, editHash)
 		if !ok {
 			return
 		}
@@ -174,6 +237,8 @@ func logOutcomeForFile(file string) {
 			Reason:       "approved",
 			Symbols:      rec.Symbols,
 			LearnSymbols: rec.LearnSymbols,
+			Edit:         editHash,
+			Join:         join,
 		})
 		ask, wrote = rec, true
 	})
@@ -190,18 +255,33 @@ func logOutcomeForFile(file string) {
 }
 
 // recentUnrecordedAsk returns the MOST RECENT "ask" record for file in
-// decisions.jsonl within the last maxOutcomeAge, and whether one was found that
-// has NOT already had an outcome recorded against it. Reads only the tail of the
-// file to keep the hot path fast. The full record is returned (not just a bool)
-// so callers can copy its Symbols/Repo forward onto the outcome record.
+// decisions.jsonl that has NOT already had an outcome recorded against it, plus
+// which join basis found it ("edit" or "window", for the Join field). Reads
+// only the tail of the file to keep the hot path fast. The full record is
+// returned (not just a bool) so callers can copy its Symbols/Repo forward onto
+// the outcome record.
 //
-// The "unrecorded" half exists because a single edit can fire the PostToolUse
-// hook more than once. Claude Code merges hooks from the plugin, the user's
-// settings.json and the project's settings.json, and runs EVERY matching entry;
-// the plugin invokes `guard.sh --outcome-mode` while a hand-merged snippet
-// invokes `runecho-guard --outcome-mode`, so the command strings differ and no
-// dedupe upstream is even possible. Both are documented wirings, so a user with
-// two of them configured is following instructions, not misconfiguring.
+// Two join tracks run in the same pass, and the hash track always wins when it
+// finds anything (#300):
+//
+//   - hash track — the latest ask whose Edit fingerprint equals editHash,
+//     within maxKeyedOutcomeAge. Precise: it identifies THIS edit regardless of
+//     how long the human took to decide, which is the whole point — a
+//     5-minute cutoff was silently discarding every outcome recorded after a
+//     considered (rather than reflex) approval.
+//   - window track — the pre-#300 behavior unchanged: latest ask for this file
+//     within maxOutcomeAge, no fingerprint involved. This is what a record
+//     written by an older guard (no Edit field) or a caller with no editHash
+//     (editHash == "") falls back to.
+//
+// The "unrecorded" half of each track exists because a single edit can fire the
+// PostToolUse hook more than once. Claude Code merges hooks from the plugin,
+// the user's settings.json and the project's settings.json, and runs EVERY
+// matching entry; the plugin invokes `guard.sh --outcome-mode` while a
+// hand-merged snippet invokes `runecho-guard --outcome-mode`, so the command
+// strings differ and no dedupe upstream is even possible. Both are documented
+// wirings, so a user with two of them configured is following instructions,
+// not misconfiguring.
 //
 // Without this check each fire appends its own outcome record for one real
 // approval, and both consumers are corrupted rather than merely noisy:
@@ -215,70 +295,106 @@ func logOutcomeForFile(file string) {
 //     comes out INFLATED — silently wrong rather than obviously empty, which is
 //     worse than the missing-recorder bug that made it empty.
 //
-// Deduping here rather than in the configs makes double-wiring harmless however
-// the user arrived at it. It is deliberately keyed on the same (file, window)
-// pair the ask lookup already uses: a second fire for one edit sees the outcome
-// the first fire wrote and no-ops.
+// The hash track's "already recorded" check requires an EXACT Edit match, not
+// "editHash or empty" — an earlier version treated any same-file outcome with
+// no Edit as proof of that, on the reasoning that an unattributable outcome
+// (older guard, or a caller that passed no editHash) must be assumed to be
+// ours. That reasoning holds for a SINGLE ask in flight, but breaks the moment
+// two asks for the same file carry different hashes within the read window: an
+// unrelated empty-Edit outcome (meant for the OTHER ask, or genuinely
+// unattributable) would falsely close whichever ask is currently hash-matched,
+// silently dropping its real, later approval — exactly the #300 failure this
+// function exists to fix. A genuine double-fire for the SAME edit always
+// recomputes the SAME non-empty hash (editFingerprint is deterministic over
+// the same tool_input), so requiring an exact match still dedupes it; it is
+// the window track, unchanged below, that remains the fallback for records an
+// older guard wrote with no Edit at all.
 //
-// Ordering is what makes the single pass correct. The log is append-ordered, so
-// resetting the flag on each newly-seen ask means an outcome only suppresses the
-// ask it FOLLOWS — an outcome for a previous edit to the same file cannot mask a
-// genuine new ask.
-func recentUnrecordedAsk(path, file string) (decisionRecord, bool) {
+// Ordering is what makes the single pass correct for each track independently.
+// The log is append-ordered, so resetting a track's recorded flag on each
+// newly-seen matching ask means an outcome only suppresses the ask it FOLLOWS —
+// an outcome for a previous edit cannot mask a genuine new ask.
+func recentUnrecordedAsk(path, file, editHash string) (rec decisionRecord, join string, found bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return decisionRecord{}, false
+		return decisionRecord{}, "", false
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return decisionRecord{}, false
+		return decisionRecord{}, "", false
 	}
 	offset := stat.Size() - maxOutcomeReadBytes
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return decisionRecord{}, false
+		return decisionRecord{}, "", false
 	}
 
-	cutoff := time.Now().UTC().Add(-maxOutcomeAge)
-	var match decisionRecord
-	var found bool
-	// recorded tracks whether an outcome has already been written for `match`.
-	// Reset whenever a newer ask supersedes it — see the ordering note above.
-	var recorded bool
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var rec decisionRecord
-		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+	windowCutoff := time.Now().UTC().Add(-maxOutcomeAge)
+	keyedCutoff := time.Now().UTC().Add(-maxKeyedOutcomeAge)
+
+	var hashMatch, winMatch decisionRecord
+	var hashFound, winFound, hashRecorded, winRecorded bool
+
+	// needle is the JSON-encoded form of file, so the prefilter below matches
+	// exactly what rec.File would decode to without unmarshalling every line —
+	// this repo's decision log runs to hundreds of records at peak volume per
+	// hour, and most lines are for other files.
+	needleBytes, _ := json.Marshal(file)
+	needle := string(needleBytes)
+
+	r := bufio.NewReader(f)
+	for {
+		// bufio.Reader.ReadString, not bufio.Scanner: a single oversized line
+		// (a pre-commit ask can carry hundreds of symbols) makes Scanner.Scan
+		// return false forever and silently truncates every record after it —
+		// see internal/guardstats/guardstats.go for the same fix applied there,
+		// and docs/focus-hunt-2026-07-04-candidate-bugs.md for the hazard. The
+		// 16x wider read window here makes hitting it 16x likelier, so it must
+		// be fixed in the same change that widens maxOutcomeReadBytes.
+		line, readErr := r.ReadString('\n')
+		if len(line) > 0 && !strings.Contains(line, needle) {
+			if readErr != nil {
+				break
+			}
 			continue
 		}
-		if rec.File != file {
-			continue
+		var cur decisionRecord
+		if len(line) > 0 && json.Unmarshal([]byte(line), &cur) == nil && cur.File == file {
+			switch cur.Decision {
+			case "ask":
+				ts, tsErr := time.Parse(time.RFC3339, cur.TS)
+				if tsErr == nil {
+					if editHash != "" && cur.Edit == editHash && ts.After(keyedCutoff) {
+						hashMatch, hashFound, hashRecorded = cur, true, false
+					}
+					if ts.After(windowCutoff) {
+						winMatch, winFound, winRecorded = cur, true, false
+					}
+				}
+			case "outcome":
+				if editHash != "" && cur.Edit == editHash {
+					hashRecorded = true
+				}
+				winRecorded = true
+			}
 		}
-		switch rec.Decision {
-		case "ask":
-			ts, err := time.Parse(time.RFC3339, rec.TS)
-			if err != nil {
-				continue
-			}
-			if ts.After(cutoff) {
-				// Keep scanning: the log is append-ordered, so the last in-window
-				// match is the most recent ask for this file.
-				match, found, recorded = rec, true, false
-			}
-		case "outcome":
-			// An outcome for this file after the ask above means some other
-			// PostToolUse fire already recorded that approval. Not time-filtered
-			// on purpose: it only matters that it came AFTER the ask we matched,
-			// which its position in the append-ordered log already establishes.
-			recorded = true
+		if readErr != nil {
+			break
 		}
 	}
-	if recorded {
-		return decisionRecord{}, false
+
+	if hashFound {
+		if hashRecorded {
+			return decisionRecord{}, "", false
+		}
+		return hashMatch, "edit", true
 	}
-	return match, found
+	if winRecorded {
+		return decisionRecord{}, "", false
+	}
+	return winMatch, "window", winFound
 }

@@ -17,6 +17,18 @@ import (
 // wider one here would pair an ask with an unrelated later approval.
 const OutcomeJoinWindow = 5 * time.Minute
 
+// KeyedOutcomeJoinWindow bounds the edit-fingerprint join track (#300): an
+// outcome whose Edit field matches an ask's Edit field is joined to it directly,
+// bypassing the symbol+time-window guess OutcomeJoinWindow exists for. It is
+// wider than OutcomeJoinWindow on purpose — the fingerprint already carries the
+// precision, so this only bounds fingerprint REUSE (an agent re-issuing a
+// byte-identical edit long after the first), not human deliberation time, which
+// is exactly the term OutcomeJoinWindow was silently truncating.
+//
+// Must equal cmd/runecho-guard's maxKeyedOutcomeAge (declog.go) —
+// cmd/runecho-guard/declog_window_test.go asserts the two stay in sync.
+const KeyedOutcomeJoinWindow = 24 * time.Hour
+
 // FPBucket is an ask/approved tally for one grouping key (a reason or a
 // language). Approved is the count of asks that were followed by a
 // symbol-exact "approved" outcome for the same file within OutcomeJoinWindow.
@@ -267,6 +279,16 @@ func (s FPStats) MixedVersions() bool {
 	return n > 1
 }
 
+// approvedOutcome is one physical approved-outcome record. Both join tracks
+// (symbol+window and, since #300, edit-fingerprint) index into one flat
+// []approvedOutcome slice by position rather than keeping separate per-track
+// stamp lists, so a single outcome consumed via either track cannot also be
+// claimed by the other — see the shared `consumed` map in FPReport.
+type approvedOutcome struct {
+	ts   time.Time
+	edit string
+}
+
 // symbolKey is the join key: the file plus the ask's symbol set, order-
 // independent. The outcome recorder copies the ask's symbols forward verbatim,
 // so an exact set match on the same file is a precise pairing — far tighter than
@@ -342,8 +364,9 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	// counting symbol-less asks (#254) is safe only because no symbol-less
 	// outcome is ever indexed for them to pair with. Lifting this drop without
 	// giving both sides a real key re-creates exactly that collision.
-	type stamp = time.Time
-	approvedByKey := map[string][]stamp{}
+	var allApproved []approvedOutcome
+	approvedByKey := map[string][]int{}  // symbolKey -> indices into allApproved
+	approvedByEdit := map[string][]int{} // edit fingerprint -> indices into allApproved
 	var asks []Decision
 	// unratedAsks are hook asks with no symbols: counted everywhere asks are
 	// counted, joined nowhere. Kept in a second slice rather than flagged in
@@ -440,16 +463,46 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			}
 			asks = append(asks, d)
 		case "outcome":
+			// Same eligibility gate as before #300: a symbol-less outcome (a
+			// contract-only approval — see the note above unratedAsks) has no
+			// symbolKey signal and is dropped outright, exactly as it always was.
+			// It is NOT given an edit-hash entry either, even though it may carry
+			// one now: no rateable ask (the only asks matchOutcome ever consults)
+			// can share its edit hash by construction — one hook fire emits
+			// exactly one ask decision, so a contract-only ask's fingerprint never
+			// coincides with a violations ask's. Indexing it would only grow
+			// totalOutcomes with an entry nothing can ever match, inflating
+			// UnmatchedOutcomes for a population this report was never rating.
 			if d.Reason != "approved" || len(d.Symbols) == 0 {
 				continue
 			}
+			idx := len(allApproved)
+			allApproved = append(allApproved, approvedOutcome{ts: d.TS, edit: d.Edit})
 			k := symbolKey(d.File, d.Symbols)
-			approvedByKey[k] = append(approvedByKey[k], d.TS)
+			approvedByKey[k] = append(approvedByKey[k], idx)
+			if d.Edit != "" {
+				// Scoped by FILE too, not just the fingerprint: the fingerprint hashes
+				// only the tool call's edit content (declog.go's editFingerprint), so
+				// two different files patched with byte-identical text — the same
+				// one-line fix applied twice, a generated boilerplate block — collide
+				// on the same hash. Without the file component here, file A's ask could
+				// be credited with file B's approval (and vice versa), corrupting
+				// exactly the approve-anyway rate #314's dogfood-gating decisions read.
+				// declog.go's own hash track does not need this: it already filters to
+				// `cur.File == file` before ever comparing Edit.
+				ek := d.File + "\x00" + d.Edit
+				approvedByEdit[ek] = append(approvedByEdit[ek], idx)
+			}
 		}
 	}
 	for k := range approvedByKey {
 		sort.Slice(approvedByKey[k], func(i, j int) bool {
-			return approvedByKey[k][i].Before(approvedByKey[k][j])
+			return allApproved[approvedByKey[k][i]].ts.Before(allApproved[approvedByKey[k][j]].ts)
+		})
+	}
+	for k := range approvedByEdit {
+		sort.Slice(approvedByEdit[k], func(i, j int) bool {
+			return allApproved[approvedByEdit[k][i]].ts.Before(allApproved[approvedByEdit[k][j]].ts)
 		})
 	}
 
@@ -464,9 +517,10 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		return asks[i].TS.Before(asks[j].TS)
 	})
 
-	// consumed marks an (key,index) outcome already paired, so two asks with the
-	// same file+symbols don't both claim one approval.
-	consumed := map[string]map[int]bool{}
+	// consumed marks an allApproved INDEX already paired, so two asks — whether
+	// they matched via the same symbolKey or the edit and window tracks
+	// respectively finding the same physical outcome — can't both claim it.
+	consumed := map[int]bool{}
 	usedOutcomes := 0
 	approvedSymbolFreq := map[string]int{}
 	repoAsks := map[string]int{}
@@ -505,11 +559,21 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		repoAsks[a.Repo]++
 
 		k := symbolKey(a.File, a.Symbols)
-		if idx := matchOutcome(approvedByKey[k], consumed[k], a.TS); idx >= 0 {
-			if consumed[k] == nil {
-				consumed[k] = map[int]bool{}
-			}
-			consumed[k][idx] = true
+		// Edit-fingerprint track first (#300): it identifies THIS edit precisely,
+		// however long the human took to decide, so it must win whenever it finds
+		// anything. Falling back to the symbol+window guess only when it doesn't —
+		// an ask from a pre-#300 guard (no Edit) or whose matching outcome fell
+		// outside KeyedOutcomeJoinWindow — keeps every existing pairing exactly as
+		// it was.
+		matchIdx := -1
+		if a.Edit != "" {
+			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow)
+		}
+		if matchIdx < 0 {
+			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow)
+		}
+		if matchIdx >= 0 {
+			consumed[matchIdx] = true
 			usedOutcomes++
 			s.Window.Approved++
 			reasonBucket.Approved++
@@ -524,7 +588,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 				approvedSymbolFreq[sym]++
 			}
 
-			lat := approvedByKey[k][idx].Sub(a.TS)
+			lat := allApproved[matchIdx].ts.Sub(a.TS)
 			windowLatency = append(windowLatency, lat)
 			reasonLatency[a.Reason] = append(reasonLatency[a.Reason], lat)
 			for _, c := range checks {
@@ -593,11 +657,9 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	}
 
 	// Any approved outcome not consumed by an ask had no in-window ask to pair to.
-	totalOutcomes := 0
-	for _, stamps := range approvedByKey {
-		totalOutcomes += len(stamps)
-	}
-	s.UnmatchedOutcomes = totalOutcomes - usedOutcomes
+	// allApproved is the flat, deduplicated population (#300) — summing per-track
+	// index lists here would double-count an outcome present in both.
+	s.UnmatchedOutcomes = len(allApproved) - usedOutcomes
 
 	s.TopSymbols = topSymbolCounts(approvedSymbolFreq, topN)
 	s.LoudestRepos = topRepoCounts(repoAsks, repoUnrated, topN)
@@ -610,24 +672,26 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	return s
 }
 
-// matchOutcome returns the index of the earliest unconsumed outcome stamp that
-// is at or after askTS and STRICTLY within OutcomeJoinWindow of it, or -1 if
-// none. stamps is sorted ascending. The bound is strict (< window, not <=) to
-// mirror the recorder: cmd/runecho-guard writes an outcome only when now-ask <
-// maxOutcomeAge (declog.go's ts.After(cutoff)), so it never emits a record at
-// exactly the window edge, and the join must not admit one either.
-func matchOutcome(stamps []time.Time, used map[int]bool, askTS time.Time) int {
-	for i, ts := range stamps {
-		if used[i] {
+// matchOutcome returns the allApproved index of the earliest unconsumed
+// candidate outcome that is at or after askTS and STRICTLY within window of it,
+// or -1 if none. candidates holds indices into all, sorted ascending by
+// all[idx].ts. The bound is strict (< window, not <=) to mirror the recorder:
+// cmd/runecho-guard writes an outcome only when now-ask < maxOutcomeAge or
+// maxKeyedOutcomeAge (declog.go), so it never emits a record at exactly the
+// window edge, and the join must not admit one either.
+func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration) int {
+	for _, idx := range candidates {
+		if consumed[idx] {
 			continue
 		}
+		ts := all[idx].ts
 		if ts.Before(askTS) {
 			continue
 		}
-		if ts.Sub(askTS) >= OutcomeJoinWindow {
-			break // sorted: no later stamp is closer
+		if ts.Sub(askTS) >= window {
+			break // sorted: no later candidate is closer
 		}
-		return i
+		return idx
 	}
 	return -1
 }

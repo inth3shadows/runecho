@@ -985,3 +985,78 @@ func TestFormatFP_OmitsLatencyWhenNothingMatched(t *testing.T) {
 		t.Errorf("no matched ask means no latency claim to print:\n%s", out)
 	}
 }
+
+// TestFPReport_JoinsLateApprovalByEditHash is the #300 regression pin at the
+// fpreport level: an ask and its approval 90 minutes apart — well past
+// OutcomeJoinWindow (5 min), comfortably inside KeyedOutcomeJoinWindow (24h) —
+// must still join when both carry the same Edit fingerprint, and the latency
+// sample must reflect the true 90-minute gap rather than being dropped.
+func TestFPReport_JoinsLateApprovalByEditHash(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h1"},
+		{TS: ts(90), Mode: "hook", File: "a.go",
+			Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h1"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 1 || s.Window.Approved != 1 {
+		t.Fatalf("asks=%d approved=%d, want 1/1 (edit-hash join across 90 min)", s.Window.Asks, s.Window.Approved)
+	}
+	if s.Window.Latency.N != 1 || s.Window.Latency.MedianS != 90*60 {
+		t.Errorf("latency = %+v, want n=1 median_s=%d", s.Window.Latency, 90*60)
+	}
+}
+
+// TestFPReport_LegacyPairBeyondWindowStillUnjoined pins the OTHER half of
+// #300: a pre-#300 ask/outcome pair (no Edit field on either side) 90 minutes
+// apart must NOT join — the edit-hash track only activates when the ask
+// itself carries a fingerprint, so a record from an older guard falls back to
+// exactly today's OutcomeJoinWindow behavior, unchanged.
+func TestFPReport_LegacyPairBeyondWindowStillUnjoined(t *testing.T) {
+	decs := []Decision{
+		ask("violations", "go", "r", "a.go", 0, "foo"),
+		outcome("a.go", 90, "foo"),
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Approved != 0 {
+		t.Errorf("approved = %d, want 0 (legacy pair 90 min apart must stay unjoined)", s.Window.Approved)
+	}
+	if s.UnmatchedOutcomes != 1 {
+		t.Errorf("unmatched = %d, want 1", s.UnmatchedOutcomes)
+	}
+}
+
+// TestFPReport_EditHashScopedByFile pins a bug found by review: the edit-hash
+// join key was the fingerprint alone, with no file component. Two different
+// files edited with byte-identical content (the same one-line fix applied
+// twice) hash to the same fingerprint — without file-scoping, file A's ask
+// could be credited with file B's approval.
+func TestFPReport_EditHashScopedByFile(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "same-hash"},
+		{TS: ts(1), Mode: "hook", Repo: "r", File: "b.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"bar"}, Edit: "same-hash"},
+		// Only b.go's edit was actually approved.
+		{TS: ts(2), Mode: "hook", File: "b.go",
+			Decision: "outcome", Reason: "approved", Symbols: []string{"bar"}, Edit: "same-hash"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 || s.Window.Approved != 1 {
+		t.Fatalf("asks=%d approved=%d, want 2/1", s.Window.Asks, s.Window.Approved)
+	}
+	for _, sym := range s.TopSymbols {
+		if sym.Name == "foo" {
+			t.Errorf("a.go's ask (never approved) was credited with b.go's approval: %+v", s.TopSymbols)
+		}
+	}
+	found := false
+	for _, sym := range s.TopSymbols {
+		if sym.Name == "bar" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("b.go's real approval should appear in TopSymbols, got %+v", s.TopSymbols)
+	}
+}

@@ -7,13 +7,20 @@ import (
 )
 
 // qualifiedEnabled reports whether same-repo internal-package qualified-call
-// checking is on (RUNECHO_GUARD_QUALIFIED=1). Default OFF, dogfood-first — like
-// the other experimental guard surfaces (E1 dangling, E5 duplicate, learned-
-// allow) — because qualified-reference validation is the most false-positive-
-// delicate check the guard has (see internal/guard/qualified.go for the gate
-// stack that keeps it zero-FP). It only covers Go same-repo internal packages;
-// external deps, stdlib, and object-instance method calls are never flagged.
-func qualifiedEnabled() bool { return os.Getenv("RUNECHO_GUARD_QUALIFIED") == "1" }
+// checking is on. Default ON as of #314 — RUNECHO_GUARD_QUALIFIED=0 disables it.
+//
+// It shipped default-off, dogfood-first, alongside the guard's other
+// experimental surfaces (E1 dangling, E5 duplicate, learned-allow), because
+// qualified-reference validation is the most false-positive-delicate check the
+// guard has (see internal/guard/qualified.go for the gate stack that keeps it
+// zero-FP). #314 promoted it: the compiler-oracle differential
+// (TestGoResolveNoFalsePositivesAgainstCompiler) now measures it directly —
+// 0 proven false positives over this repo (26k lines) and golang.org/x/text
+// (473k lines) — and it resolves against the SAME flat repo symbol set the
+// always-on hallucination check already trusts, so it introduces no new trust
+// dependency. See TECHNICAL.md's "Opt-in checks" section for the full
+// evidence and the reasoning that kept GoDepQualified (external deps) off.
+func qualifiedEnabled() bool { return os.Getenv("RUNECHO_GUARD_QUALIFIED") != "0" }
 
 // qualifiedViolations runs the Go same-repo qualified-call check for one file and
 // stamps each violation's File field. wholeFileLines is the current on-disk file

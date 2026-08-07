@@ -389,7 +389,7 @@
       "id": "qualified/flag-gate",
       "file": "cmd/runecho-guard/qualified.go",
       "find": "func qualifiedEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_QUALIFIED\") != \"0\" }",
-      "replace": "func qualifiedEnabled() bool { return true }",
+      "replace": "func qualifiedEnabled() bool { _ = os.Getenv(\"RUNECHO_GUARD_QUALIFIED\"); return true }",
       "desc": "the explicit RUNECHO_GUARD_QUALIFIED=0 opt-out no longer disables the check (#314: default flipped from off/\"1\" to on/!=\"0\")"
     },
     {

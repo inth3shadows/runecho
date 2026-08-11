@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/guard"
 )
 
 // lintEnabled gates the pre-write ruff lint substrate (RUNECHO_GUARD_LINT=1,
@@ -26,6 +29,21 @@ func lintEnabled() bool { return os.Getenv("RUNECHO_GUARD_LINT") == "1" }
 // same reason guardTimeout is one: tests shrink it instead of sleeping the
 // real value.
 var lintTimeout = 2 * time.Second
+
+// lintSelect is ruff's --select argument, and lintSelectedRules is the same
+// set as a membership test for filtering its output. ONE source of truth
+// deliberately: --select does not actually bound what ruff reports (see the
+// filter in lintFindingsWithReason), so the two must agree or the ask header
+// and the reported findings drift apart.
+const lintSelect = "F821,F811"
+
+var lintSelectedRules = func() map[string]struct{} {
+	m := make(map[string]struct{})
+	for _, r := range strings.Split(lintSelect, ",") {
+		m[r] = struct{}{}
+	}
+	return m
+}()
 
 // lintFinding is one ruff F821/F811 result, with a TRUE file line number
 // (via --stdin-filename) rather than the "snippet line N" hunk-relative
@@ -56,6 +74,65 @@ func lintSymbolFromMessage(msg string) string {
 	return msg[start+1 : start+1+end]
 }
 
+// lintSection renders the lint findings into the ask and returns the symbols
+// to record, mirroring callShapeSection. Shared by the enrolled path
+// (runHookMode) and the degraded/unenrolled one (askWithoutIndex) so the two
+// cannot drift — the header names the selected rules, which is only true
+// because lintFindingsWithReason filters ruff's output to them.
+//
+// Falls back to the rule code when Symbol did not parse out of the message:
+// decisionRecord.Symbols must not silently lose an entry, and a rule code is a
+// worse but honest label. Kept as a fallback rather than a panic because a
+// future ruff reformatting its message text is a degrade, not a crash.
+func lintSection(sb *strings.Builder, findings []lintFinding) []string {
+	if len(findings) == 0 {
+		return nil
+	}
+	fmt.Fprintf(sb, "[runecho-guard] %d ruff finding(s) (%s):\n", len(findings), lintSelect)
+	syms := make([]string, 0, len(findings))
+	for _, f := range findings {
+		fmt.Fprintf(sb, "  line %d: %s %s\n", f.Line, f.Rule, f.Message)
+		if f.Symbol != "" {
+			syms = append(syms, f.Symbol)
+		} else {
+			syms = append(syms, f.Rule)
+		}
+	}
+	return syms
+}
+
+// suppressAlreadyReported drops lint findings whose symbol the additive
+// hallucination check (guard.Run) already flagged for this same edit. The two
+// checks genuinely overlap — F821 "undefined name" and "not found in the
+// indexed code" are the same question asked two ways — so without this a real
+// hallucination is printed under two headers and counted twice in
+// decisionRecord.Symbols.
+//
+// Compares on Symbol, not Message: the additive check's Violation carries a
+// bare name, which is what lintSymbolFromMessage extracts too. A finding whose
+// Symbol failed to parse out ("") is never suppressed — an unparsed message
+// cannot be proven to be a duplicate, and dropping it would silently lose a
+// real finding.
+func suppressAlreadyReported(findings []lintFinding, violations []guard.Violation) []lintFinding {
+	if len(findings) == 0 || len(violations) == 0 {
+		return findings
+	}
+	reported := make(map[string]struct{}, len(violations))
+	for _, v := range violations {
+		reported[v.Symbol] = struct{}{}
+	}
+	out := findings[:0]
+	for _, f := range findings {
+		if f.Symbol != "" {
+			if _, dup := reported[f.Symbol]; dup {
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // lintFindingsWithReason runs ruff against content (a Write payload's full
 // proposed file) and returns findings plus an abstain reason (empty means it
 // ran to completion). Mirrors the *WithReason naming #330 established
@@ -77,7 +154,7 @@ func lintFindingsWithReason(filePath, content string) ([]lintFinding, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), lintTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ruff", "check", "--no-cache", "--isolated",
-		"--select", "F821,F811", "--stdin-filename", filePath, "--output-format", "json", "-")
+		"--select", lintSelect, "--stdin-filename", filePath, "--output-format", "json", "-")
 	cmd.Stdin = strings.NewReader(content)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -104,6 +181,20 @@ func lintFindingsWithReason(filePath, content string) ([]lintFinding, string) {
 	}
 	findings := make([]lintFinding, 0, len(raw))
 	for _, r := range raw {
+		// --select does NOT bound what ruff reports: since 0.12 it emits
+		// `invalid-syntax` diagnostics unconditionally, ignoring the rule
+		// selection entirely (verified against 0.16.1). Those are NOT the two
+		// questions this check asks, and letting them through breaks two
+		// contracts at once: the ask header states "(F821/F811)", and
+		// lintSymbolFromMessage would pull punctuation out of a parser message
+		// ("Expected `)`, found newline" → ")") straight into
+		// decisionRecord.Symbols, which guardstats buckets per-symbol and
+		// fpaudit dedups on. A file the interpreter cannot even parse is also
+		// not a resolution question — it fails loudly at runtime with or
+		// without the guard — so it is dropped rather than relabelled.
+		if _, ok := lintSelectedRules[r.Code]; !ok {
+			continue
+		}
 		findings = append(findings, lintFinding{Line: r.Location.Row, Rule: r.Code, Symbol: lintSymbolFromMessage(r.Message), Message: r.Message})
 	}
 	return findings, ""

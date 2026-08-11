@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,14 +14,14 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Eight checks
+// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Nine checks
 // — dangling-refs, dropped-import, duplicate-symbol, file-scope, contract,
-// call-shape, qualified, deps-go — need old-vs-new edit text PLUS an enrolled
-// snapshot store or an on-disk module, and are reachable ONLY through the hook
-// entry point (runHookMode). The published corpus in internal/guard drives
-// guard.Run in-process, which cannot reach them, so the catch-rate it reports
-// describes one check of nine (#227). This harness closes that gap by replaying
-// such cases as data through runHookMode.
+// call-shape, qualified, deps-go, lint — need old-vs-new edit text PLUS an
+// enrolled snapshot store, an on-disk module, or a third-party binary, and are
+// reachable ONLY through the hook entry point (runHookMode). The published
+// corpus in internal/guard drives guard.Run in-process, which cannot reach
+// them, so the catch-rate it reports describes one check of ten (#227). This
+// harness closes that gap by replaying such cases as data through runHookMode.
 //
 // Keep that count honest when a check is added. It is this corpus's own claim
 // about what it covers, and the whole thesis here is that unmeasured coverage is
@@ -208,6 +209,19 @@ func TestHookCorpus(t *testing.T) {
 func runHookCase(t *testing.T, c hookCase) {
 	if len(c.Flags) == 0 {
 		t.Fatalf("%s: no gating flags — a hook fixture that runs with the check off proves nothing", c.Name)
+	}
+	// The lint check is the only one whose answer depends on a THIRD-PARTY
+	// binary rather than on this repo's own code, and it fails open when that
+	// binary is absent — so without ruff its ask fixtures defer and fail for
+	// a reason that says nothing about the guard. Every other lint test guards
+	// the same way (lint_test.go). Skipped, not failed: a contributor on a
+	// clean checkout must be able to run `go test ./...` green. CI installs
+	// ruff explicitly (.github/workflows/ci.yml) so the coverage is not
+	// silently lost where it counts.
+	if c.Check == "lint" {
+		if _, err := exec.LookPath("ruff"); err != nil {
+			t.Skip("ruff not on PATH — the lint check fails open without it, so its fixtures cannot be exercised")
+		}
 	}
 
 	// A temp repo with the edited file on disk holding its PRE-edit content:

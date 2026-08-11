@@ -954,6 +954,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		} else {
 			var reason string
 			lintFindingsList, reason = lintFindingsWithReason(filePath, text)
+			// Firewall against the additive check, the same shape file-scope
+			// got in #269 and for the same reason: lint and guard.Run ask
+			// overlapping questions (F821 IS "this name does not resolve"), so
+			// a genuine hallucination is found by BOTH. Without this the ask
+			// prints the name twice under two different headers and
+			// decisionRecord.Symbols carries it twice — double-counting one
+			// finding in the very telemetry the un-gating decision reads.
+			// The additive check wins because it is the default-on one whose
+			// false-positive rate is being measured; lint keeps only what the
+			// additive check did NOT already report, which is exactly the
+			// increment this substrate is meant to demonstrate.
+			lintFindingsList = suppressAlreadyReported(lintFindingsList, violations)
 			lintResult = classifyResult("lint", len(lintFindingsList) > 0, reason)
 		}
 	}
@@ -1170,17 +1182,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 	}
 	syms = append(syms, callShapeSection(&sb, callShapes)...)
-	if len(lintFindingsList) > 0 {
-		fmt.Fprintf(&sb, "[runecho-guard] %d ruff finding(s) (F821/F811):\n", len(lintFindingsList))
-		for _, f := range lintFindingsList {
-			fmt.Fprintf(&sb, "  line %d: %s %s\n", f.Line, f.Rule, f.Message)
-			if f.Symbol != "" {
-				syms = append(syms, f.Symbol)
-			} else {
-				syms = append(syms, f.Rule)
-			}
-		}
-	}
+	syms = append(syms, lintSection(&sb, lintFindingsList)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit)}

@@ -67,8 +67,12 @@ anyone with write access to the repo can add a line to suppress a warning.
 
 With `RUNECHO_GUARD_LINT=1` (default off) a third-party binary — `ruff`,
 resolved from `PATH` — runs as a subprocess on every gated Python `Write`,
-against the proposed file content on stdin (#333). This is deliberately the
-first process the guard spawns on this path. `--isolated` is not optional: it
+against the proposed file content on stdin (#333). The guard already spawns
+`git` on every hook invocation (`gitutil.Command`, for repo resolution), but
+`ruff` is the first **third-party** binary it runs — one it does not ship,
+pin, or control the version of, resolved from whatever `PATH` the agent
+happens to have. That is what makes the hardening below mandatory rather
+than defensive. `--isolated` is not optional: it
 refuses `pyproject.toml`/`ruff.toml` discovery, which would otherwise let a
 config file in an untrusted tree reach the subprocess and silence a real
 finding — the same class of defense `gitutil.Command`'s

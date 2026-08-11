@@ -9,21 +9,28 @@ import (
 	"time"
 )
 
-// stubRuff writes a fake `ruff` (a bash script) to a temp bin dir and points
-// PATH at it — bash's own directory must stay on PATH too, or the shebang
-// can't resolve an interpreter and the stub never runs its body (the same
-// pitfall TestGuardShimSurvivesStaleBinary documents). Returns a restore func.
+// stubRuff writes a fake `ruff` (a bash script) to a temp bin dir and PREPENDS
+// that dir to PATH, so the stub shadows any real ruff while everything else the
+// guard shells out to still resolves.
+//
+// Prepending rather than replacing is load-bearing. An earlier cut set PATH to
+// just the stub dir plus bash's dir, which happens to work on Debian/Ubuntu
+// only because bash and git share /usr/bin. Anywhere they don't (macOS: /bin/bash
+// vs /usr/bin/git or /opt/homebrew/bin/git) that strips `git`, so gitutil fails,
+// lookupSymbolsFor returns !OK, and a test that means to pin the lint timeout
+// path silently exercises answerDegradedStore instead — passing or failing for
+// a reason unrelated to what it claims to test. t.Setenv restores PATH at test
+// end, so no explicit restore func is needed.
 func stubRuff(t *testing.T, script string) {
 	t.Helper()
-	bashPath, err := exec.LookPath("bash")
-	if err != nil {
+	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
 	}
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "ruff"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write ruff stub: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+filepath.Dir(bashPath))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestLintFindingsWithReason_HappyPath(t *testing.T) {
@@ -82,6 +89,142 @@ func TestLintFindingsWithReason_UnparseableOutput(t *testing.T) {
 	if reason != "lint-unparseable-output" {
 		t.Fatalf("reason = %q, want %q", reason, "lint-unparseable-output")
 	}
+}
+
+// TestLintFindingsWithReason_SyntaxErrorNotReported pins that ruff's
+// unconditional `invalid-syntax` diagnostics are dropped. --select does NOT
+// suppress them (verified against ruff 0.16.1), so without the explicit
+// filter the ask header would claim "(F821/F811)" over a parser error and
+// lintSymbolFromMessage would put punctuation — ")" out of "Expected `)`,
+// found newline" — into decisionRecord.Symbols, the field guardstats buckets
+// on and fpaudit dedups on.
+func TestLintFindingsWithReason_SyntaxErrorNotReported(t *testing.T) {
+	if _, err := exec.LookPath("ruff"); err != nil {
+		t.Skip("ruff not on PATH")
+	}
+	findings, reason := lintFindingsWithReason("client.py", "def go(:\n    return 1\n")
+	if reason != "" {
+		t.Fatalf("reason = %q, want empty (ruff ran fine; the input is what's broken)", reason)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("findings = %+v, want none — invalid-syntax is not one of this check's two rules", findings)
+	}
+}
+
+// TestRunHookMode_Lint_NoDoubleReport pins the firewall against the additive
+// check. A genuine hallucination trips BOTH checks (F821 and "not found in
+// the indexed code" are the same question), and before the firewall the ask
+// named it under two headers while decisionRecord.Symbols carried it twice —
+// double-counting one finding in the telemetry the un-gating decision reads.
+// Every hookcorpus lint fixture dodges this by enrolling the symbol
+// elsewhere, so the overlap is only reachable from here.
+func TestRunHookMode_Lint_NoDoubleReport(t *testing.T) {
+	if _, err := exec.LookPath("ruff"); err != nil {
+		t.Skip("ruff not on PATH")
+	}
+	root := t.TempDir()
+	gitInit(t, root)
+	enrolledStore(t, root, []string{"KnownFunc"})
+	py := filepath.Join(root, "client.py")
+
+	t.Setenv("RUNECHO_GUARD_LINT", "1")
+	// totally_made_up resolves nowhere: not in the snapshot, not in the file.
+	_, raw, d := runHook(t, payload(t, "Write", py, "", "def go():\n    return totally_made_up(1)\n", nil))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("expected an ask, got %q\n%s", d.Hook.PermissionDec, raw)
+	}
+	if n := strings.Count(d.Hook.PermissionReason, "totally_made_up"); n != 1 {
+		t.Errorf("ask names totally_made_up %d times, want exactly 1 — lint must not restate the additive check's finding:\n%s",
+			n, d.Hook.PermissionReason)
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("no decision logged")
+	}
+	syms, _ := rec["symbols"].([]any)
+	if len(syms) != 1 || syms[0] != "totally_made_up" {
+		t.Errorf("decision-log symbols = %v, want exactly [\"totally_made_up\"] — a duplicate double-counts one finding", rec["symbols"])
+	}
+	// The additive check owns this finding, so the bucket must stay
+	// "violations" — attributing it to lint would move a default-on check's
+	// finding into a gated check's false-positive rate.
+	if got := rec["reason"]; got != "violations" {
+		t.Errorf("decision-log reason = %v, want \"violations\" — the additive check found it first", got)
+	}
+}
+
+// TestLint_UnenrolledTree mirrors TestCallShape_UnenrolledTree (#261): lint
+// resolves entirely from the Write payload, so it must answer on a tree the
+// store knows nothing about — the common case for a globally installed hook,
+// and the one TECHNICAL.md's "needs no index" claim is about. Before this it
+// sat after the !res.OK bail and silently did nothing there.
+//
+// The three cases are a set: flag-on asks, flag-off defers (so the ask is
+// attributable to lint and not to some other always-on check), and clean
+// content defers (so the check compares rather than firing on any Python).
+func TestLint_UnenrolledTree(t *testing.T) {
+	if _, err := exec.LookPath("ruff"); err != nil {
+		t.Skip("ruff not on PATH")
+	}
+	// A REAL store with a real enrolled repo, then an edit to a file in a
+	// DIFFERENT tree — that is what produces res.NoRepo (the store opens, the
+	// lookup finds no row). Pointing RUNECHO_HOME at an empty dir instead
+	// lands in the store-degraded arm, a different state.
+	setup := func(t *testing.T) string {
+		t.Helper()
+		enrolled := t.TempDir()
+		gitInit(t, enrolled)
+		enrolledStore(t, enrolled, []string{"KnownFunc"})
+		return filepath.Join(t.TempDir(), "client.py")
+	}
+	// Same-file redefinition (F811): isolates lint even where an index exists.
+	const dirty = "def fetch():\n    return 1\n\ndef fetch():\n    return 2\n"
+
+	t.Run("flag on asks on an unenrolled tree", func(t *testing.T) {
+		py := setup(t)
+		t.Setenv("RUNECHO_GUARD_LINT", "1")
+		_, raw, d := runHook(t, payload(t, "Write", py, "", dirty, nil))
+		if d.Hook.PermissionDec != "ask" {
+			t.Fatalf("expected an ask on an unenrolled tree, got %q\n%s", d.Hook.PermissionDec, raw)
+		}
+		if !strings.Contains(d.Hook.PermissionReason, "F811") {
+			t.Fatalf("ask does not name the rule:\n%s", d.Hook.PermissionReason)
+		}
+		rec := readLastDecisionLog(t)
+		if rec == nil {
+			t.Fatal("no decision logged")
+		}
+		// "lint", not "violations": askReason falls back to "violations" when
+		// no flag is set, which would file this into the hallucination bucket
+		// the un-gating decision reads.
+		if got := rec["reason"]; got != "lint" {
+			t.Errorf("reason = %v, want lint", got)
+		}
+		syms, _ := rec["symbols"].([]any)
+		if len(syms) != 1 || syms[0] != "fetch" {
+			t.Errorf("symbols = %v, want [\"fetch\"]", rec["symbols"])
+		}
+	})
+
+	t.Run("flag off still defers", func(t *testing.T) {
+		py := setup(t)
+		_, _, d := runHook(t, payload(t, "Write", py, "", dirty, nil))
+		if d.Hook.PermissionDec == "ask" {
+			t.Fatalf("flag-off asked (%q) — the ask above is not attributable to lint", d.Hook.PermissionReason)
+		}
+		if rec := readLastDecisionLog(t); rec != nil && rec["reason"] != "no-repo" {
+			t.Errorf("reason = %v, want no-repo — the pre-gate must not change the unenrolled defer when the check abstains", rec["reason"])
+		}
+	})
+
+	t.Run("clean content defers with the flag on", func(t *testing.T) {
+		py := setup(t)
+		t.Setenv("RUNECHO_GUARD_LINT", "1")
+		_, _, d := runHook(t, payload(t, "Write", py, "", "def fetch():\n    return 1\n", nil))
+		if d.Hook.PermissionDec == "ask" {
+			t.Fatalf("asked on clean content (%q) — the check degenerated to firing on any Python", d.Hook.PermissionReason)
+		}
+	})
 }
 
 // TestRunHookMode_Lint covers the gating shape (flag/tool/lang) and the true

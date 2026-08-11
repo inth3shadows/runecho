@@ -465,9 +465,23 @@
     {
       "id": "lint/isolated-flag",
       "file": "cmd/runecho-guard/lint.go",
-      "find": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\", \"--isolated\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
-      "replace": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "find": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\", \"--isolated\",\n\t\t\"--select\", lintSelect, \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "replace": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\",\n\t\t\"--select\", lintSelect, \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
       "desc": "config discovery (pyproject.toml/ruff.toml) is no longer refused, so an attacker-controlled config in the tree can silence a real finding"
+    },
+    {
+      "id": "lint/selected-rule-filter",
+      "file": "cmd/runecho-guard/lint.go",
+      "find": "\t\tif _, ok := lintSelectedRules[r.Code]; !ok {\n\t\t\tcontinue\n\t\t}",
+      "replace": "\t\tif _, ok := lintSelectedRules[r.Code]; !ok && false {\n\t\t\tcontinue\n\t\t}",
+      "desc": "ruff's unconditional invalid-syntax diagnostics leak through --select into the ask header and decisionRecord.Symbols"
+    },
+    {
+      "id": "lint/additive-firewall",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "\t\t\tlintFindingsList = suppressAlreadyReported(lintFindingsList, violations)",
+      "replace": "\t\t\t_ = suppressAlreadyReported",
+      "desc": "a hallucination the always-on additive check already reported is restated by lint, double-counting one finding in the decision log"
     },
     {
       "id": "gate/merged-slice-hook",

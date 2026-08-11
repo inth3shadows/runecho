@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os/exec"
 
 	"github.com/inth3shadows/runecho/internal/guard"
 )
@@ -74,6 +75,26 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 		}
 		degradedShapes = callShapeMismatches(lang, preLines, fd, edit.ToolName, removedText)
 	}
+	// Lint answers here for exactly the same reason call-shape does (#261): it
+	// has no store dependency at all — ruff reads the Write payload's own
+	// content and nothing else — so an unenrolled tree, the common case for a
+	// globally installed hook, is precisely where the flag would otherwise be
+	// advertised ("needs no index", TECHNICAL.md) and silently do nothing.
+	// res.Warn is excluded on the same grounds as above: the schema-newer
+	// advisory must not be traded for a quiet finding.
+	//
+	// No suppressAlreadyReported call here, deliberately: guard.Run never ran
+	// on this path (that IS the degraded state), so there are no additive
+	// findings for a lint finding to duplicate.
+	var degradedLint []lintFinding
+	if res.Warn == "" && lintEnabled() && edit.ToolName == "Write" && lang == guard.LangPython {
+		if _, err := exec.LookPath("ruff"); err == nil {
+			// Abstain reason is discarded rather than surfaced: this branch is
+			// ALREADY degraded and says so through its own advisory, and there
+			// is no per-check results slice here to carry a Verdict.
+			degradedLint, _ = lintFindingsWithReason(filePath, hookText(edit.ToolName, edit.NewString, edit.Content, edit.Edits))
+		}
+	}
 	// Under strict, a store-degraded edit gets an advisory saying symbol
 	// validation is off. An ask returns before that switch, so the advisory
 	// rides along on the ask rather than being dropped: the finding and the
@@ -83,7 +104,7 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 	if !res.NoRepo && strictMode() {
 		advisory = strictStoreDegradedAdvisory
 	}
-	if askWithoutIndex(out, res.Contract, degradedShapes, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
+	if askWithoutIndex(out, res.Contract, degradedShapes, degradedLint, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
 		return true
 	}
 	switch {

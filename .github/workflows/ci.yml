@@ -26,6 +26,16 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+      # Test dependency for RUNECHO_GUARD_LINT (#333): the guard shells out to
+      # `ruff` on PATH, and lint.go fails OPEN (stays Skipped) when it is
+      # absent -- so an un-installed ruff does not fail the build, it silently
+      # drops coverage of the ask path, which is what the hookcorpus fixtures
+      # (testdata/hookcorpus/lint.json) exist to prove doesn't happen. pipx
+      # (preinstalled on this runner image) sidesteps Ubuntu 24.04's PEP 668
+      # externally-managed-environment restriction on a plain `pip install`.
+      # Version pinned to what lint.go's design was measured against.
+      - name: Install ruff (RUNECHO_GUARD_LINT test dependency, #333)
+        run: pipx install ruff==0.16.1
       - name: Test (race + coverage, includes guard corpus gate)
         run: go test ./... -race -cover
       - name: Installer syntax

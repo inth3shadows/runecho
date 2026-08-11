@@ -373,7 +373,7 @@ newer-than-supported database.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RUNECHO_HOME` | `~/.runecho` | Directory for `history.db` and backups (isolation / testing seam) |
+| `RUNECHO_HOME` | `~/.runecho` | Directory for `history.db`, `decisions.jsonl`, and backups. Scopes the **store only** — it does NOT isolate git hooks. `repo add`/`install` write hook bodies into the repo's own `$(git rev-parse --git-common-dir)/hooks`, shared by every worktree, regardless of `RUNECHO_HOME` (#301) |
 | `RUNECHO_BIN_DIR` | `~/.local/bin` | Install target used by `install.sh` |
 | `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |

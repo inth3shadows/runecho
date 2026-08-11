@@ -99,10 +99,19 @@ func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnow
 	// findings on PR #290, rounds 2 and 3).
 	openSeed := seedFunc(lang, fd)
 	braceSeed := braceDepthSeedFunc(lang, fd)
-	scope := pyFileScope(wholeFile, nil, nil)
+	// bracketSeed is PyDeclaredNames' own seed (#294); defSigSeed is
+	// LocallyBoundNames'; paramSigSeed is PyParamNames' own (a DIFFERENT
+	// rule from defSigSeed — see PyParamSigDepthBefore's doc). Same
+	// rationale as openSeed/braceSeed: a hunk-only addedLines slice needs
+	// them or a kwarg/parameter added mid-signature misreads as unbound and
+	// this check wrongly flags it as out-of-scope.
+	bracketSeed := bracketDepthSeedFunc(lang, fd)
+	defSigSeed := defSigDepthSeedFunc(lang, fd)
+	paramSigSeed := paramSigDepthSeedFunc(lang, fd)
+	scope := pyFileScope(wholeFile, nil, nil, nil, nil, nil)
 	// The edit itself binds names too — a def or import introduced by this very
 	// hunk must resolve, or every newly-added helper would flag on its first use.
-	for name := range pyFileScope(addedLines, openSeed, braceSeed) {
+	for name := range pyFileScope(addedLines, openSeed, braceSeed, bracketSeed, defSigSeed, paramSigSeed) {
 		scope[name] = struct{}{}
 	}
 
@@ -155,7 +164,12 @@ func abstainsFileScope(lines []AddedLine) bool {
 // (addedLines) needs the caller's real seeds (BOTH — see extractDefsSeeded's own
 // doc for why openSeed alone missing desyncs it from extractRefs), or a dict key
 // added to an existing literal misreads as a definition (see FileScopeViolations).
-func pyFileScope(lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) map[string]struct{} {
+// bracketDepthSeed/defSigDepthSeed/paramSigDepthSeed are PyDeclaredNames/
+// LocallyBoundNames/PyParamNames' own seeds (#294) respectively — defSigDepthSeed
+// and paramSigDepthSeed are DIFFERENT rules (see PyParamSigDepthBefore's
+// doc), not interchangeable. Same nil-for-wholeFile /
+// caller's-real-seed-for-addedLines rule as openSeed/braceDepthSeed.
+func pyFileScope(lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, bracketDepthSeed func(lineNo int) int, defSigDepthSeed func(lineNo int) int, paramSigDepthSeed func(lineNo int) int) map[string]struct{} {
 	scope := make(map[string]struct{})
 	for _, n := range ExtractImports(LangPython, lines) {
 		scope[n] = struct{}{}
@@ -163,13 +177,13 @@ func pyFileScope(lines []AddedLine, openSeed func(lineNo int) string, braceDepth
 	for _, n := range extractDefsSeeded(LangPython, lines, openSeed, braceDepthSeed) {
 		scope[n] = struct{}{}
 	}
-	for n := range LocallyBoundNames(LangPython, lines) {
+	for n := range LocallyBoundNames(LangPython, lines, defSigDepthSeed) {
 		scope[n] = struct{}{}
 	}
-	for _, n := range PyDeclaredNames(lines) {
+	for _, n := range PyDeclaredNames(lines, bracketDepthSeed) {
 		scope[n] = struct{}{}
 	}
-	for _, n := range PyParamNames(lines) {
+	for _, n := range PyParamNames(lines, paramSigDepthSeed) {
 		scope[n] = struct{}{}
 	}
 	for _, l := range lines {

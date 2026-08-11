@@ -72,7 +72,7 @@ func TestPyDeclaredNames(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := PyDeclaredNames(lines(c.src...))
+			got := PyDeclaredNames(lines(c.src...), nil)
 			set := make(map[string]struct{}, len(got))
 			for _, n := range got {
 				set[n] = struct{}{}

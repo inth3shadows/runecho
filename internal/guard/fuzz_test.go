@@ -109,7 +109,7 @@ func FuzzPyParamNames(f *testing.F) {
 		for i, s := range splitFuzzLines(src) {
 			lines = append(lines, AddedLine{LineNo: i + 1, Text: s})
 		}
-		_ = PyParamNames(lines) // must not panic
+		_ = PyParamNames(lines, nil) // must not panic
 	})
 }
 

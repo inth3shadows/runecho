@@ -60,7 +60,7 @@ func replayCase(c corpusCase) []Violation {
 		// Mirror addInFileDefs: Python folds whole-file assignment targets so a
 		// local callable bound outside the edited hunk resolves.
 		if lang == LangPython {
-			for _, name := range PyDeclaredNames(lines) {
+			for _, name := range PyDeclaredNames(lines, nil) {
 				known[name] = struct{}{}
 			}
 		}

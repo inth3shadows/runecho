@@ -49,6 +49,31 @@ type FileDiff struct {
 	// a reference. Missing entries (and a nil map) mean depth 0, the previous
 	// behavior. Consulted only when AbsPath is empty.
 	PyBraceDepthByLine map[int]int
+	// PyBracketDepthByLine is PyBraceDepthByLine's counterpart for the general
+	// ()/[]/{}-bracket depth PyDeclaredNames tracks (#294). Without it, a
+	// block that adds a kwarg-style line inside a pre-existing multi-line
+	// call/list/dict (opener unchanged context above the block) is scanned
+	// starting at depth 0, misreading it as a top-level assignment. Missing
+	// entries (and a nil map) mean depth 0, the previous behavior. Consulted
+	// only when AbsPath is empty.
+	PyBracketDepthByLine map[int]int
+	// PyDefSigDepthByLine is PyBraceDepthByLine's counterpart for the
+	// def-signature-specific PAREN-ONLY depth LocallyBoundNames tracks
+	// (#294). Without it, a block beginning partway through a multi-line def
+	// signature (opener unchanged context above the block) is scanned as if
+	// no signature were open, so a parameter added on the block's own lines
+	// is never bound. LocallyBoundNames ONLY — see PyParamSigDepthBefore's
+	// doc for why PyParamNames needs PyParamSigDepthByLine below instead,
+	// not this field. Missing entries (and a nil map) mean depth 0, the
+	// previous behavior. Consulted only when AbsPath is empty.
+	PyDefSigDepthByLine map[int]int
+	// PyParamSigDepthByLine is PyDefSigDepthByLine's counterpart for
+	// PyParamNames' OWN def-signature depth rule (#294) — ALL of ()/[]/{},
+	// not parens alone (a multi-line default value's own bracket must stay
+	// "open" from the signature's point of view too). Missing entries (and a
+	// nil map) mean depth 0, the previous behavior. Consulted only when
+	// AbsPath is empty.
+	PyParamSigDepthByLine map[int]int
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

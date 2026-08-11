@@ -665,16 +665,30 @@ func jsTopLevelColon(s string) int {
 // Known limitation (accepted, FP-suppression side): a chained assignment
 // (`a = b = c = 0`) binds only the first target — under-capture, never a false
 // alarm.
-func PyDeclaredNames(lines []AddedLine) []string {
+//
+// bracketDepthSeed supplies the ()/[]/{}-nesting depth in effect at the START
+// of the given line — PyBracketDepthBefore's caller-facing form (#294). Nil
+// (or a gap with no seed) starts at depth 0, the previous unseeded behavior.
+// Without it, a hunk beginning inside a pre-existing multi-line call (opener
+// unchanged context above the hunk) misreads a kwarg like `timeout=30,` as a
+// genuine top-level assignment and folds `timeout` into the declared-names
+// set, silently suppressing a later genuinely unresolved `timeout(...)` call.
+func PyDeclaredNames(lines []AddedLine, bracketDepthSeed func(lineNo int) int) []string {
 	var out []string
 	depth := 0
 	prevNo := 0
 	first := true
-	scanStripped(LangPython, lines, func(s string, l AddedLine) {
+	scanStrippedBraces(LangPython, lines, func(s, braceScan string, l AddedLine) {
 		// A diff hunk's added lines may be non-contiguous; bracket continuity
-		// can't be assumed across a gap (mirrors the open-string reset elsewhere).
-		if !first && l.LineNo != prevNo+1 {
-			depth = 0
+		// can't be assumed across a gap (mirrors the open-string reset
+		// elsewhere) — reseed from the real file state at THIS line rather than
+		// resetting to 0, mirroring extractDefsSeeded's own gap handling.
+		if first || l.LineNo != prevNo+1 {
+			if bracketDepthSeed != nil {
+				depth = bracketDepthSeed(l.LineNo)
+			} else {
+				depth = 0
+			}
 		}
 		first = false
 		prevNo = l.LineNo
@@ -685,7 +699,13 @@ func PyDeclaredNames(lines []AddedLine) []string {
 				out = append(out, pyBindTargets(lhs)...)
 			}
 		}
-		depth += pyBracketDelta(s)
+		// Depth advances on the f-string-neutralized braceScan, not the plain
+		// code scan: an f-string interpolation's own brackets
+		// (f"{compute(a, b)}") are string syntax, not real call/list/dict
+		// nesting, and counting them desyncs this tracker from
+		// PyBracketDepthBefore's seed the same way #291 desynced pyBraceDepth
+		// before that fix.
+		depth += pyBracketDelta(braceScan)
 		if depth < 0 {
 			depth = 0
 		}
@@ -778,7 +798,35 @@ var rePyDefParamOpen = regexp.MustCompile(`^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s
 // own continuation line (`    watchdog_starter: Callable[[], T] = _start,`) is
 // captured. `lambda` is single-line: its params run from `lambda` to the first
 // top-level `:` (lambda params take no annotations, so the colon is unambiguous).
-func PyParamNames(lines []AddedLine) []string {
+//
+// paramSigDepthSeed supplies the def-signature nesting depth in effect at
+// the START of the given line — PyParamSigDepthBefore's caller-facing form
+// (#294). Nil (or a gap with no seed) starts at depth 0, the previous
+// unseeded behavior: a hunk whose FIRST line sits mid-signature (opener in
+// unchanged context above the hunk) is then recognized as a continuation
+// instead of being scanned as if no signature were open. This still cannot
+// recover a signature whose CLOSE also sits outside the hunk — there is no
+// added text to bind in that case, an inherent limit of a hunk-only
+// scanner, not something seeding alone can fix.
+//
+// This is PyParamNames' OWN seed, not LocallyBoundNames'/
+// PyDefSigDepthBefore's: the depth below tracks ALL of ()/[]/{} (via
+// pyBracketDelta, matching the continuation branch's own advance), not
+// parens alone — see PyParamSigDepthBefore's doc for why the two must not
+// share a seed.
+//
+// Only a seed of EXACTLY 1 is trusted to resume accumulation. sig
+// accumulates raw text and hands it to pyParseParamList, which tracks its
+// OWN depth from 0 assuming that 0 IS the signature's own paren level — true
+// when the hunk begins directly inside the signature (seed 1) and its own
+// +=pyBracketDelta advance stays consistent with that from then on, but NOT
+// true when the hunk begins already nested one level deeper (seed 2+, e.g.
+// mid-way through a multi-line list/dict default value): pyParseParamList
+// would then read the nested literal's own closing bracket as the
+// signature's, truncating (and potentially misparsing) the accumulated
+// text. A seed of 2+ is deliberately treated as unseedable (falls back to
+// depth 0, the pre-#294 miss — safe, never a wrong parse) rather than risked.
+func PyParamNames(lines []AddedLine, paramSigDepthSeed func(lineNo int) int) []string {
 	var out []string
 	// sigDepth > 0 means we are inside a def signature's parens spanning lines;
 	// sig accumulates the stripped parameter-list text across them.
@@ -786,31 +834,52 @@ func PyParamNames(lines []AddedLine) []string {
 	var sig strings.Builder
 	prevNo := 0
 	first := true
-	scanStripped(LangPython, lines, func(s string, l AddedLine) {
+	scanStrippedBraces(LangPython, lines, func(s, braceScan string, l AddedLine) {
 		// A diff hunk's added lines may be non-contiguous; a signature cannot be
-		// assumed to continue across a gap (mirrors PyDeclaredNames' depth reset).
-		if !first && l.LineNo != prevNo+1 {
+		// assumed to continue across a gap. Reseed from the real file state at
+		// THIS line (mirrors PyDeclaredNames' own reseed) rather than always
+		// resetting to 0 — a seed of exactly 1 means a signature genuinely IS
+		// open here at a depth pyParseParamList can safely resume from, so the
+		// branch below treats this line as its continuation. A deeper seed
+		// (2+) is not safely resumable (see the doc above) and falls back to 0.
+		if first || l.LineNo != prevNo+1 {
 			sigDepth = 0
+			if paramSigDepthSeed != nil {
+				if seed := paramSigDepthSeed(l.LineNo); seed == 1 {
+					sigDepth = 1
+				}
+			}
 			sig.Reset()
 		}
 		first = false
 		prevNo = l.LineNo
 
-		// Continuation of a multi-line def signature already in progress.
+		// Continuation of a multi-line def signature already in progress
+		// (either genuinely opened earlier in this scan, or seeded above).
 		if sigDepth > 0 {
 			sig.WriteByte(' ')
 			sig.WriteString(s)
-			sigDepth += pyBracketDelta(s)
+			// Advances on the f-string-neutralized braceScan, not the plain
+			// code scan (#294): a default value's f-string interpolation
+			// brackets (`x=f"{g(a,b)}"`) are string syntax, not signature
+			// nesting, and counting them would close the signature early or
+			// late depending on the interpolation's own bracket balance.
+			sigDepth += pyBracketDelta(braceScan)
 			if sigDepth <= 0 {
 				out = append(out, pyParseParamList(sig.String())...)
 				sigDepth = 0
 				sig.Reset()
 			}
-		} else if m := rePyDefParamOpen.FindStringSubmatch(s); m != nil {
-			// A def signature opened on this line. Depth starts at 1 for the paren
-			// the regex consumed, plus the net brackets in the captured tail.
-			rest := m[1]
-			sigDepth = 1 + pyBracketDelta(rest)
+		} else if loc := rePyDefParamOpen.FindStringSubmatchIndex(s); loc != nil {
+			// A def signature opened on this line. Depth starts at 1 for the
+			// paren the regex consumed, plus the net brackets in the captured
+			// tail. loc[2]:loc[3] is capture group 1's byte span in s; braceScan
+			// is byte-offset aligned with s (same length, same source buffer —
+			// see scanStrippedBraces), so the identical span slices the
+			// f-string-safe text for the depth count.
+			rest := s[loc[2]:loc[3]]
+			restBrace := braceScan[loc[2]:loc[3]]
+			sigDepth = 1 + pyBracketDelta(restBrace)
 			sig.Reset()
 			sig.WriteString(rest)
 			if sigDepth <= 0 {
@@ -826,6 +895,49 @@ func PyParamNames(lines []AddedLine) []string {
 		out = append(out, pyLambdaParams(s)...)
 	})
 	return out
+}
+
+// PyParamSigDepthBefore returns the def-signature nesting depth PyParamNames
+// itself tracks — in effect at the START of fileLines[idx], 0 if no
+// signature is open there (#294).
+//
+// NOT PyDefSigDepthBefore: that function (dropped_import.go) tracks parens
+// alone via pyConsumeParens, matching LocallyBoundNames' own pre-existing
+// rule. PyParamNames' live continuation branch tracks ALL of ()/[]/{} via
+// pyBracketDelta(braceScan) instead — a multi-line default value's own `[`
+// or `{` must stay "open" from the signature's point of view too:
+// `b=[\n 1, 2,\n],` only truly closes the signature at its OUTER `)`, not at
+// the list's `]`. Seeding PyParamNames from PyDefSigDepthBefore's parens-only
+// count desyncs the two the moment a default value spans a bracket the
+// parens-only rule doesn't count — a nested list/dict/set literal reads as
+// closing the signature early, silently dropping every parameter after it.
+// This function mirrors PyParamNames' own rule exactly instead.
+func PyParamSigDepthBefore(fileLines []AddedLine, idx int) int {
+	if idx <= 0 || len(fileLines) == 0 {
+		return 0
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	depth := 0
+	for _, l := range fileLines[:idx] {
+		var scan, braceScan string
+		scan, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
+		if depth > 0 {
+			depth += pyBracketDelta(braceScan)
+			if depth <= 0 {
+				depth = 0
+			}
+		} else if loc := rePyDefParamOpen.FindStringSubmatchIndex(scan); loc != nil {
+			rest := braceScan[loc[2]:loc[3]]
+			depth = 1 + pyBracketDelta(rest)
+			if depth <= 0 {
+				depth = 0
+			}
+		}
+	}
+	return depth
 }
 
 // pyParseParamList extracts the bound parameter names from the text of a def
@@ -1400,6 +1512,30 @@ func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine
 	}
 }
 
+// scanStrippedBraces is scanStripped's counterpart for a caller that also needs
+// the f-string-neutralized braceScan (#291) — PyDeclaredNames and PyParamNames'
+// own bracket-depth tracking, which used to run pyBracketDelta over the plain
+// code scan and so counted an f-string interpolation's `()/[]/{}` as real
+// nesting (#294). scan and braceScan are byte-offset aligned (same length,
+// same underlying buffer — see stripLiteralsBraces/finishStrip), so a caller
+// that locates a match in scan (FindStringSubmatchIndex) can slice braceScan
+// with the identical offsets. Same literal-stripping and gap-reset behavior as
+// scanStripped, computed in one pass via stripLiteralsBraces instead of
+// stripLiteralsStateful's discard of the second scan.
+func scanStrippedBraces(lang Lang, lines []AddedLine, fn func(scan, braceScan string, l AddedLine)) {
+	open := ""
+	prevNo := 0
+	for i, l := range lines {
+		if i > 0 && l.LineNo != prevNo+1 {
+			open = ""
+		}
+		prevNo = l.LineNo
+		var scan, braceScan string
+		scan, braceScan, open = stripLiteralsBraces(lang, l.Text, open)
+		fn(scan, braceScan, l)
+	}
+}
+
 // OpenStateBefore returns the unterminated multi-line string delimiter in effect
 // at the START of fileLines[idx] — the seed a scanner needs to read a block
 // beginning at that line in the right (masked) state. fileLines must be a whole
@@ -1452,6 +1588,40 @@ func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
 		// clamp and the f-string neutralization (#291) — a seed computed any other
 		// way would hand the run a depth its own tracking would never produce.
 		depth = pyLineCtx{scan: braceScan, base: depth}.depthAtEnd()
+	}
+	return depth
+}
+
+// PyBracketDepthBefore returns the Python ()/[]/{}-bracket nesting depth in
+// effect at the START of fileLines[idx] — PyBraceDepthBefore's counterpart for
+// PyDeclaredNames/PyParamNames' own tracking (#294). Without it, a hunk that
+// adds a kwarg-style line (`    timeout=30,`) inside a pre-existing multi-line
+// call/list/dict whose opener sits in unchanged context above the hunk starts
+// scanning at depth 0, misreading the line as a genuine top-level assignment or
+// a fresh def signature rather than a continuation deep inside one.
+//
+// Uses the same f-string-neutralized braceScan PyBraceDepthBefore uses (#291):
+// an f-string interpolation's own brackets are string syntax, not real
+// nesting, and would otherwise desync this seed from what PyDeclaredNames' own
+// per-line advance (once threaded through the same braceScan) produces.
+// Python-only by construction; fileLines must be a whole file's contiguous
+// lines; idx is clamped into range.
+func PyBracketDepthBefore(fileLines []AddedLine, idx int) int {
+	if idx <= 0 || len(fileLines) == 0 {
+		return 0
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	depth := 0
+	for _, l := range fileLines[:idx] {
+		var braceScan string
+		_, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
+		depth += pyBracketDelta(braceScan)
+		if depth < 0 {
+			depth = 0
+		}
 	}
 	return depth
 }

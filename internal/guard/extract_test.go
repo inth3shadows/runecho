@@ -1762,6 +1762,159 @@ func TestPyBraceDepthBefore(t *testing.T) {
 	}
 }
 
+// TestPyBracketDepthBefore mirrors TestPyBraceDepthBefore for the general
+// ()/[]/{}-bracket depth PyDeclaredNames/PyParamNames seed from (#294) — a
+// call/list/dict, not specifically a dict literal.
+func TestPyBracketDepthBefore(t *testing.T) {
+	fileLines := []AddedLine{
+		{LineNo: 1, Text: "connect("},
+		{LineNo: 2, Text: `    host="x",`},
+		{LineNo: 3, Text: "    timeout=30,"},
+		{LineNo: 4, Text: ")"},
+		{LineNo: 5, Text: "other = 1"},
+	}
+	cases := []struct {
+		idx  int
+		want int
+	}{
+		{0, 0}, // before any line: unopened
+		{1, 1}, // start of line 2: call opened on line 1
+		{2, 1}, // start of line 3 (timeout's line): still open
+		{3, 1}, // start of line 4 (")"): still open — line 4 itself closes it
+		{4, 0}, // start of line 5: closed by line 4's ")"
+	}
+	for _, tc := range cases {
+		if got := PyBracketDepthBefore(fileLines, tc.idx); got != tc.want {
+			t.Errorf("PyBracketDepthBefore(fileLines, %d) = %d, want %d", tc.idx, got, tc.want)
+		}
+	}
+
+	// An f-string interpolation's own brackets must not count (#294, the same
+	// class #291 fixed for PyBraceDepthBefore) — a call inside f"{compute(a,
+	// b)}" is balanced within itself and must not leak into the outer count.
+	withFString := []AddedLine{
+		{LineNo: 1, Text: `s = f"{compute(a, b)}"`},
+		{LineNo: 2, Text: "next_line = 1"},
+	}
+	if got := PyBracketDepthBefore(withFString, 1); got != 0 {
+		t.Errorf("PyBracketDepthBefore must not count an f-string interpolation's own brackets, got %d", got)
+	}
+
+	// Brackets inside a plain string must not count either.
+	withString := []AddedLine{
+		{LineNo: 1, Text: `s = "(not a call"`},
+		{LineNo: 2, Text: "next_line = 1"},
+	}
+	if got := PyBracketDepthBefore(withString, 1); got != 0 {
+		t.Errorf("PyBracketDepthBefore must not count brackets inside a string literal, got %d", got)
+	}
+
+	// Out-of-range idx clamps rather than panicking.
+	if got := PyBracketDepthBefore(fileLines, -1); got != 0 {
+		t.Errorf("negative idx should clamp to 0, got %d", got)
+	}
+	if got := PyBracketDepthBefore(fileLines, 999); got != 0 {
+		t.Errorf("idx past the end should clamp to the full-file depth (0, call closed), got %d", got)
+	}
+	if got := PyBracketDepthBefore(nil, 1); got != 0 {
+		t.Errorf("nil fileLines should return 0, got %d", got)
+	}
+}
+
+// TestPyDeclaredNames_Seeded exercises PyDeclaredNames' bracketDepthSeed
+// parameter directly (#294) — the same scenario
+// TestRun_KwargEditedInExistingCallIsChecked pins end-to-end through Run,
+// isolated to the extractor itself.
+func TestPyDeclaredNames_Seeded(t *testing.T) {
+	hunk := []AddedLine{{LineNo: 3, Text: "    timeout=30,"}}
+
+	// Unseeded (nil): starts at depth 0, misreads the kwarg as a top-level
+	// assignment — the previous (buggy) behavior, preserved for callers that
+	// have no seed available.
+	if got := PyDeclaredNames(hunk, nil); len(got) != 1 || got[0] != "timeout" {
+		t.Errorf("unseeded PyDeclaredNames = %v, want [timeout] (control: reproduces the pre-fix misread)", got)
+	}
+
+	// Seeded at depth 1 (inside the call): the kwarg must NOT be read as a
+	// declaration.
+	seed := func(lineNo int) int { return 1 }
+	if got := PyDeclaredNames(hunk, seed); len(got) != 0 {
+		t.Errorf("seeded PyDeclaredNames = %v, want none — depth 1 means this line is a kwarg, not an assignment", got)
+	}
+
+	// A gap within the same lines slice re-seeds from the line-specific
+	// value rather than resetting to 0 — mirrors extractDefsSeeded's own gap
+	// handling.
+	twoBlocks := []AddedLine{
+		{LineNo: 3, Text: "    timeout=30,"},
+		{LineNo: 10, Text: "    retries=3,"}, // non-contiguous: a gap
+	}
+	seedByLine := map[int]int{3: 1, 10: 1}
+	seedFn := func(lineNo int) int { return seedByLine[lineNo] }
+	if got := PyDeclaredNames(twoBlocks, seedFn); len(got) != 0 {
+		t.Errorf("both blocks are seeded depth 1; got %v, want none", got)
+	}
+
+	// An f-string interpolation's own brackets in a line BEFORE the depth-0
+	// assignment must not desync the tracker (#294, the #291 class).
+	fstringThenAssign := []AddedLine{
+		{LineNo: 1, Text: `label = f"{compute(a, b)}"`},
+		{LineNo: 2, Text: "total = 1"},
+	}
+	got := PyDeclaredNames(fstringThenAssign, nil)
+	want := map[string]bool{"label": true, "total": true}
+	if len(got) != 2 || !want[got[0]] || !want[got[1]] {
+		t.Errorf("PyDeclaredNames(fstringThenAssign) = %v, want both label and total (f-string interpolation brackets must not desync depth)", got)
+	}
+}
+
+// TestPyParamSigDepthBefore mirrors TestPyDefSigDepthBefore (dropped_import_test.go)
+// for PyParamNames' OWN def-signature depth rule (#294) — tracks ALL of
+// ()/[]/{}, not parens alone, so a nested list/dict/set default value stays
+// counted as still-open until IT closes.
+func TestPyParamSigDepthBefore(t *testing.T) {
+	fileLines := []AddedLine{
+		{LineNo: 1, Text: "def f("},
+		{LineNo: 2, Text: " a,"},
+		{LineNo: 3, Text: " b=["},
+		{LineNo: 4, Text: "  1, 2,"},
+		{LineNo: 5, Text: " ],"},
+		{LineNo: 6, Text: " c,"},
+		{LineNo: 7, Text: "):"},
+	}
+	cases := []struct {
+		idx  int
+		want int
+	}{
+		{0, 0}, // before any line: no signature open
+		{1, 1}, // start of line 2 (a,): signature opened on line 1
+		{2, 1}, // start of line 3 (b=[): still just the signature's own paren
+		{3, 2}, // start of line 4 (nested list content): now inside the list too
+		{4, 2}, // start of line 5 (],): still inside the list — it closes THIS line
+		{5, 1}, // start of line 6 (c,): list closed, back to the signature's own depth
+		{6, 1}, // start of line 7 ("):"): still open — this line closes the signature
+		{7, 0}, // start of line 8 (past the end): signature closed
+	}
+	for _, tc := range cases {
+		if got := PyParamSigDepthBefore(fileLines, tc.idx); got != tc.want {
+			t.Errorf("PyParamSigDepthBefore(fileLines, %d) = %d, want %d", tc.idx, got, tc.want)
+		}
+	}
+
+	// A plain call is not a def signature — must read 0.
+	plainCall := []AddedLine{
+		{LineNo: 1, Text: "connect("},
+		{LineNo: 2, Text: "    timeout=30,"},
+	}
+	if got := PyParamSigDepthBefore(plainCall, 1); got != 0 {
+		t.Errorf("a plain call must not read as an open def signature, got %d", got)
+	}
+
+	if got := PyParamSigDepthBefore(nil, 1); got != 0 {
+		t.Errorf("nil fileLines should return 0, got %d", got)
+	}
+}
+
 // TestAppendConstRefs_TupleAssignTargetsNotReferences pins #278: every name in
 // a tuple/multiple-assignment LHS (`MAX_VALUE, OTHER_VALUE = 5, 10`) is being
 // DEFINED, not used — neither should be added as a reference. A call argument

@@ -1,0 +1,76 @@
+[
+  {
+    "name": "python-lint-undefined-name-asks",
+    "desc": "`helper` is enrolled as a REPO-WIDE known symbol (defined in a different file), so the additive hallucination check resolves it and stays silent — isolating this ask to lint alone, the same way callshape.json's fixtures isolate call-shape from the additive check. Ruff, unlike the additive check, has no cross-file knowledge: it sees `helper` used with no local def/import and flags F821. Proves the ask reports a true file line number (2), not the hunk-relative 'snippet line N' every other hook-mode check carries.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "enroll": {
+      "pkg/other.py": [
+        "helper"
+      ]
+    },
+    "file": "pkg/client.py",
+    "no_pre_edit_file": true,
+    "new": "def go():\n    return helper(1)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "F821",
+      "helper",
+      "line 2"
+    ],
+    "expect_log_reason": "lint"
+  },
+  {
+    "name": "python-lint-edit-tool-clean",
+    "desc": "Same isolating shape as the ask fixture (a same-file redefinition, so nothing else fires), replayed as an Edit hunk. Lint is Write-only in v1: an Edit hunk alone ('    return 1\\n\\ndef fetch():...' with no enclosing def) is not valid standalone Python, so if the tool-gate were ever removed this would ask for the wrong reason (a ruff invalid-syntax finding on a fragment) rather than staying silent — which is exactly why Write-only matters, not an incidental detail of this fixture.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "file": "pkg/edit_client.py",
+    "old": "def fetch():\n    return 1\n",
+    "tool": "Edit",
+    "edit_old": "    return 1\n",
+    "edit_new": "    return 1\n\ndef fetch():\n    return 2\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-lint-non-python-clean",
+    "desc": "Same shape as the ask fixture's gate, in a .go file lint never runs against. Deliberately valid Go with no unresolved symbols and no qualified-call sites, so no OTHER default-on Go check (RUNECHO_GUARD_QUALIFIED is on by default) reads it as a finding either — the fixture is clean because nothing fires, not because it happens to be ignored.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "file": "pkg/client.go",
+    "no_pre_edit_file": true,
+    "new": "package main\n\nfunc fetch() int {\n\treturn 1\n}\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-lint-isolated-config-still-asks",
+    "desc": "Proves --isolated is actually applied. Uses `[tool.ruff.lint.per-file-ignores]` rather than a plain `ignore = [...]`: measured directly against this repo's installed ruff (0.16.1), an explicit CLI `--select F821,F811` already overrides a config's top-level `ignore` regardless of --isolated, which would make a plain-ignore fixture pass for the wrong reason (vacuously, since neither flags/no-flags nor isolated/not-isolated would move it). per-file-ignores is the mechanism CLI --select does NOT override — confirmed empirically: without --isolated this same config silences the F821 finding below; with --isolated (what lint.go always passes) it does not, so the ask still fires.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "enroll": {
+      "pkg/other.py": [
+        "helper"
+      ]
+    },
+    "files": {
+      "pyproject.toml": "[tool.ruff.lint.per-file-ignores]\n\"pkg/client.py\" = [\"F821\"]\n"
+    },
+    "file": "pkg/client.py",
+    "no_pre_edit_file": true,
+    "new": "def go():\n    return helper(1)\n",
+    "expect_ask": true,
+    "expect_symbols": [
+      "F821",
+      "helper"
+    ],
+    "expect_log_reason": "lint"
+  }
+]

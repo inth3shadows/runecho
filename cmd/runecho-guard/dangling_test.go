@@ -70,6 +70,7 @@ func TestAskReason(t *testing.T) {
 		{firedChecks{Dropped: true}, "dropped-import"},
 		{firedChecks{Duplicate: true}, "duplicate-symbol"},
 		{firedChecks{CallShape: true}, "call-shape"},
+		{firedChecks{Lint: true}, "lint"},
 		// #268: these three used to be indistinguishable from Violations, which
 		// is what made their own false-positive rate unmeasurable.
 		{firedChecks{FileScope: true}, "file-scope"},
@@ -85,6 +86,10 @@ func TestAskReason(t *testing.T) {
 		// the ones that involve a new term.
 		{firedChecks{Violations: true, Dangling: true, Dropped: true, Duplicate: true, CallShape: true},
 			"violations+dangling+dropped-import+duplicate-symbol+call-shape"},
+		// Lint is appended last (it postdates every combination above) — a
+		// combined case proves it joins onto the tail rather than disturbing
+		// any pre-existing ordering.
+		{firedChecks{Violations: true, CallShape: true, Lint: true}, "violations+call-shape+lint"},
 		// The new terms sit between violations and dangling, same family first.
 		{firedChecks{Violations: true, FileScope: true, Dangling: true}, "violations+file-scope+dangling"},
 		{firedChecks{FileScope: true, Qualified: true, DepsGo: true}, "file-scope+qualified+deps-go"},
@@ -511,7 +516,7 @@ func TestDangling_WriteOversizedOldFile_StrictAdvisory(t *testing.T) {
 	// "could not run to completion" is the stable substring every
 	// check-degraded advisory contains, regardless of WHICH check(s) went
 	// Unknown (#330 widened this from a deletion-side-only count to any of
-	// the ten checks — see checkresult.go's countUnknown).
+	// the eleven checks — see checkresult.go's countUnknown).
 	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
 		t.Errorf("strict mode should surface a degraded-coverage advisory, got context %q", d.Hook.AdditionalContext)
 	}

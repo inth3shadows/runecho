@@ -210,6 +210,7 @@ change date is only valid for combinations that involve none of them.
 | Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
 | Receiver method | `RUNECHO_GUARD_RECVMETHOD` | (Go) `r.Foo()` inside `func (r *T)` where `T` has no member `Foo`. The receiver is the one value in Go whose type is written lexically, so this needs no type inference. Five gates keep it precision-first, the last being an embedding backstop: it fires only on a name the repository has never seen in any form |
 | Call-shape agreement | `RUNECHO_GUARD_CALLSHAPE` | (Python) A keyword argument the callee's declaration does not accept — the name resolves, the call does not match it (#243). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot (#261) |
+| Pre-write lint substrate | `RUNECHO_GUARD_LINT` | (Python, **Write only**) A trusted whole-file linter (`ruff`, rules F821/F811) run against the proposed file content before it reaches disk (#333). Needs no index. Reports true file line numbers, not the hunk-relative "snippet line N" every other hook-mode check carries. Edit/MultiEdit is an explicit non-goal for v1 — see the lint call site's comment in `runHookMode` (`cmd/runecho-guard/main.go`) for why |
 
 C3 **learned-allow** (`RUNECHO_GUARD_LEARN`) is not a check but a suppressor:
 after a symbol is approved `RUNECHO_GUARD_LEARN_N` times (default 2) it stops
@@ -402,6 +403,7 @@ checks](#opt-in-checks) for what each one asks about.
 | `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
 | `RUNECHO_GUARD_CONTRACT` | — | `1` enables the edit-scope contract check |
 | `RUNECHO_GUARD_CALLSHAPE` | — | `1` enables call-shape agreement (Python) |
+| `RUNECHO_GUARD_LINT` | — | `1` enables the gated pre-write ruff lint substrate (Python, Write-only, F821/F811) |
 | `RUNECHO_GUARD_LEARN` | — | `1` enables C3 learned-allow suppression |
 | `RUNECHO_GUARD_LEARN_N` | `2` | Approvals before a symbol is trusted |
 | `RUNECHO_GUARD_LEARN_TTL_DAYS` | `14` | Days an entry survives without re-approval |

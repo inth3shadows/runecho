@@ -28,6 +28,7 @@ func TestFiredChecksFrom_MatchesFieldByField(t *testing.T) {
 		"CallShape":  "call-shape",
 		"RecvMethod": "recv-method",
 		"VarType":    "var-type",
+		"Lint":       "lint",
 	}
 	fields := firedCheckFields(t)
 	if len(fields) != len(fieldToCheck) {
@@ -63,7 +64,7 @@ func TestFiredChecksFrom_NonViolationVerdictsDoNotFire(t *testing.T) {
 }
 
 // TestFiredChecksFrom_UnrecognizedCheckIsIgnored: a Check name outside
-// checkOrder's ten is a caller bug (see checkresult.go's doc) — it must not
+// checkOrder's eleven is a caller bug (see checkresult.go's doc) — it must not
 // panic on every hook invocation, and it must not silently promote to some
 // other field.
 func TestFiredChecksFrom_UnrecognizedCheckIsIgnored(t *testing.T) {

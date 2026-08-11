@@ -442,6 +442,34 @@
       "desc": "an unresolvable package reads as an empty one, so every call into it is a violation"
     },
     {
+      "id": "lint/flag-gate",
+      "file": "cmd/runecho-guard/lint.go",
+      "find": "func lintEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_LINT\") == \"1\" }",
+      "replace": "func lintEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_LINT\") != \"0\" }",
+      "desc": "default-off gate inverted"
+    },
+    {
+      "id": "lint/tool-gate",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "if lintEnabled() && edit.ToolName == \"Write\" && lang == guard.LangPython {",
+      "replace": "if lintEnabled() && lang == guard.LangPython {",
+      "desc": "lint runs against an Edit/MultiEdit hunk instead of staying Write-only"
+    },
+    {
+      "id": "lint/lang-gate",
+      "file": "cmd/runecho-guard/main.go",
+      "find": "if lintEnabled() && edit.ToolName == \"Write\" && lang == guard.LangPython {",
+      "replace": "if lintEnabled() && edit.ToolName == \"Write\" {",
+      "desc": "lint runs against a non-Python file"
+    },
+    {
+      "id": "lint/isolated-flag",
+      "file": "cmd/runecho-guard/lint.go",
+      "find": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\", \"--isolated\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "replace": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "desc": "config discovery (pyproject.toml/ruff.toml) is no longer refused, so an attacker-controlled config in the tree can silence a real finding"
+    },
+    {
       "id": "gate/merged-slice-hook",
       "file": "cmd/runecho-guard/main.go",
       "find": "firedChecks.anyNonViolation for the full history of why.\n\tif len(violations) == 0 && !fired.anyNonViolation() {",

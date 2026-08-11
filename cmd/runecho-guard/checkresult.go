@@ -21,11 +21,11 @@ const (
 )
 
 // CheckResult is one check's verdict for one edit. Check is one of
-// checkOrder's ten names — the same vocabulary askReason already speaks.
+// checkOrder's eleven names — the same vocabulary askReason already speaks.
 //
 // Deliberately does NOT carry the check's own findings (contrast the sketch in
 // #330's issue body, which shows a `Violations []guard.Violation` field). Four
-// of the ten checks — dangling, dropped-import, duplicate, call-shape — already
+// of the eleven checks — dangling, dropped-import, duplicate, call-shape — already
 // carry richer, non-guard.Violation-shaped finding types (danglingWarning,
 // guard.DroppedImport, duplicateWarning, guard.CallShapeMismatch) into the
 // existing ask-rendering code in runHookMode/runArgs, and forcing them into a
@@ -48,6 +48,7 @@ type CheckResult struct {
 var checkOrder = []string{
 	"violations", "file-scope", "qualified", "deps-go", "dangling",
 	"dropped-import", "duplicate-symbol", "call-shape", "recv-method", "var-type",
+	"lint",
 }
 
 // firedChecksFrom projects a fully-populated (one entry per checkOrder name)
@@ -63,7 +64,7 @@ var checkOrder = []string{
 // needs verifying is this mapping (Verdict == VerdictViolation → the matching
 // bool field), a much smaller surface than askReason's own string-joining.
 //
-// A result whose Check name is not one of checkOrder's ten is ignored rather
+// A result whose Check name is not one of checkOrder's eleven is ignored rather
 // than erroring: this stays a pure projection, and an unrecognized name is a
 // caller bug that unit tests (not a panic on every hook invocation) should
 // catch.
@@ -94,6 +95,8 @@ func firedChecksFrom(results []CheckResult) firedChecks {
 			f.RecvMethod = true
 		case "var-type":
 			f.VarType = true
+		case "lint":
+			f.Lint = true
 		}
 	}
 	return f
@@ -133,7 +136,7 @@ func storeQueryReason(queryErrs int) string {
 // countUnknown replaces the hand-rolled `degraded int` runHookMode used to
 // accumulate from exactly three sources (an unreadable/oversized pre-edit
 // file, a dangling-check store-query error, a duplicate-check store-query
-// error). This counts a VerdictUnknown from ANY of the ten checks — see the
+// error). This counts a VerdictUnknown from ANY of the eleven checks — see the
 // #330 PR description for why that widening is the point of the change, not
 // a side effect of it.
 func countUnknown(results []CheckResult) int {

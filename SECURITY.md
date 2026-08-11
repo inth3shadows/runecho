@@ -65,6 +65,17 @@ to, and it will step aside rather than block a workflow it can't cleanly
 evaluate. Similarly, `.runechoguardignore` is a plain, repo-local text file:
 anyone with write access to the repo can add a line to suppress a warning.
 
+With `RUNECHO_GUARD_LINT=1` (default off) a third-party binary — `ruff`,
+resolved from `PATH` — runs as a subprocess on every gated Python `Write`,
+against the proposed file content on stdin (#333). This is deliberately the
+first process the guard spawns on this path. `--isolated` is not optional: it
+refuses `pyproject.toml`/`ruff.toml` discovery, which would otherwise let a
+config file in an untrusted tree reach the subprocess and silence a real
+finding — the same class of defense `gitutil.Command`'s
+`core.fsmonitor=false` exists for. A bounded per-check timeout
+(`lintTimeout`, `cmd/runecho-guard/lint.go`) keeps a hung or malicious `ruff`
+from blocking the edit past its own deadline, independent of `guardTimeout`.
+
 ### Parsing adversarial or malformed source
 
 The JS/TS and Python parsers run on a pure-Go tree-sitter runtime that can

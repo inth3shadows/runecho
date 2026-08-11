@@ -71,6 +71,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -936,6 +937,28 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		callShapeResult = classifyResult("call-shape", len(callShapes) > 0, "")
 	}
 
+	// Pre-write ruff lint substrate (RUNECHO_GUARD_LINT=1, default off; #333):
+	// F821 (undefined name) / F811 (redefinition), the same two questions the
+	// additive check already answers, run against a TRUSTED whole-file linter
+	// instead of the guard's own symbol resolution. Write-only — an
+	// Edit/MultiEdit hunk would need a disk read spliced with new_string,
+	// which races another session's concurrent write (this repo's own
+	// working pattern) and would poison fpaudit's git-history oracle with a
+	// file state that never existed on disk. Write's content already IS the
+	// whole proposed file (see hookText above), so no splice is needed.
+	var lintFindingsList []lintFinding
+	lintResult := CheckResult{Check: "lint", Verdict: VerdictSkipped}
+	if lintEnabled() && edit.ToolName == "Write" && lang == guard.LangPython {
+		if _, err := exec.LookPath("ruff"); err != nil {
+			// Stays Skipped — the tool isn't available, not that it failed to answer.
+		} else {
+			var reason string
+			lintFindingsList, reason = lintFindingsWithReason(filePath, text)
+			lintResult = classifyResult("lint", len(lintFindingsList) > 0, reason)
+		}
+	}
+	results = append(results, lintResult)
+
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
 	// Write, which replaces wholesale so the old file is the only record of what it
@@ -1062,7 +1085,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// supersedes the stale-IR advisory for this edit (one advisory slot);
 		// degraded coverage is the more actionable of the two.
 		//
-		// degraded now counts a VerdictUnknown from ANY of the ten checks
+		// degraded now counts a VerdictUnknown from ANY of the eleven checks
 		// (#330), not just the three deletion-side ones — a qualified/deps-go/
 		// file-scope abstain (no module path, go.work, a star-import, …) that
 		// used to log identically to a clean pass now surfaces here too.
@@ -1147,6 +1170,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		}
 	}
 	syms = append(syms, callShapeSection(&sb, callShapes)...)
+	if len(lintFindingsList) > 0 {
+		fmt.Fprintf(&sb, "[runecho-guard] %d ruff finding(s) (F821/F811):\n", len(lintFindingsList))
+		for _, f := range lintFindingsList {
+			fmt.Fprintf(&sb, "  line %d: %s %s\n", f.Line, f.Rule, f.Message)
+			if f.Symbol != "" {
+				syms = append(syms, f.Symbol)
+			} else {
+				syms = append(syms, f.Rule)
+			}
+		}
+	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit)}

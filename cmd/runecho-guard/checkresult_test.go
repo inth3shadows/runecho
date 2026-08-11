@@ -28,6 +28,7 @@ func TestFiredChecksFrom_MatchesFieldByField(t *testing.T) {
 		"CallShape":  "call-shape",
 		"RecvMethod": "recv-method",
 		"VarType":    "var-type",
+		"Lint":       "lint",
 	}
 	fields := firedCheckFields(t)
 	if len(fields) != len(fieldToCheck) {

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-08-11
+
+### Changed
+- guard: RUNECHO_HOME hook-install warning (#301) + converge Python bracket trackers (#294) (#334)
+
 ## [0.35.2] — 2026-08-07
 
 ### Changed

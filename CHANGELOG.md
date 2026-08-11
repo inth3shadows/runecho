@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-08-11
+
+### Changed
+- guard: hook timeout / hang fail-open (#332) (#336)
+
 ## [0.36.0] — 2026-08-11
 
 ### Changed

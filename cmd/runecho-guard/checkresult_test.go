@@ -211,3 +211,36 @@ func TestDepsGo_GoWorkAbstain_StrictAdvisory(t *testing.T) {
 			"degraded check, proving decisionRecord.Reason's frozen format held", rec["reason"])
 	}
 }
+
+// TestFileScope_NewFileWrite_NotDegraded is a code-review regression: a Write
+// that creates a brand-new file makes readFileLines(filePath) return nil (the
+// file doesn't exist yet), which is the SAME nil FileScopeViolationsWithReason
+// sees for a genuinely oversized/unreadable file — both collapsed to
+// "oversized-pre-edit-file" before this fix. Under RUNECHO_GUARD_STRICT=1
+// that spuriously surfaced "coverage was incomplete" for an ordinary new-file
+// Write, even though a nonexistent file's pre-edit state ("") is fully known,
+// not degraded — the same distinction wholeFileText (duplicate.go) already
+// makes for the deletion-side checks via os.IsNotExist.
+func TestFileScope_NewFileWrite_NotDegraded(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	top := enrolledStoreWithFiles(t, repoRoot, defAndRefFiles("DoThing", "DoThing"))
+	t.Setenv("RUNECHO_GUARD_FILESCOPE", "1")
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	// brand_new.py does not exist on disk before this edit — that's the point.
+	file := filepath.Join(top, "brand_new.py")
+	in := payloadOld(t, "Write", file, "", "", "def go():\n    pass\n", nil)
+	_, _, d := runHook(t, in)
+
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("a brand-new file must not ask, got: %s", d.Hook.PermissionReason)
+	}
+	if strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("a brand-new file was reported as degraded coverage, got context %q — "+
+			"its pre-edit state (nonexistent) is fully known, not unknown", d.Hook.AdditionalContext)
+	}
+	if rec := readLastDecisionLog(t); rec != nil && rec["reason"] == "check-degraded" {
+		t.Errorf("decision log reason = check-degraded for a brand-new file, want something else")
+	}
+}

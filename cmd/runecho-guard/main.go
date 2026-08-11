@@ -904,6 +904,18 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// in this file's scope — the opposite of "not found in the indexed code".
 	// Own section below.
 	fsv, fsReason := fileScopeViolationsWithReason(lang, fileLines, diffs[0], repoSymbols, filePath)
+	if fsReason == "oversized-pre-edit-file" {
+		// readFileLines (unlike wholeFileText, duplicate.go) collapses "file
+		// doesn't exist yet" and "file exists but is oversized/unreadable"
+		// into the same nil, so fileScopeViolationsWithReason can't tell them
+		// apart either. A brand-new file (this edit's Write creates it) is
+		// DEFINITIVELY empty, not degraded — re-derive which case this was
+		// so an ordinary new-file Write doesn't spuriously surface the
+		// strict-mode "coverage was incomplete" advisory (#330 code review).
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			fsReason = ""
+		}
+	}
 	fileScopeResult := CheckResult{Check: "file-scope", Verdict: VerdictSkipped}
 	if fileScopeEnabled() && lang == guard.LangPython {
 		fileScopeResult = classifyResult("file-scope", len(fsv) > 0, fsReason)

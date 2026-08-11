@@ -799,16 +799,34 @@ var rePyDefParamOpen = regexp.MustCompile(`^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\s
 // captured. `lambda` is single-line: its params run from `lambda` to the first
 // top-level `:` (lambda params take no annotations, so the colon is unambiguous).
 //
-// defSigDepthSeed supplies the def-signature paren depth in effect at the
-// START of the given line — PyDefSigDepthBefore's caller-facing form (#294).
-// Nil (or a gap with no seed) starts at depth 0, the previous unseeded
-// behavior: a hunk whose FIRST line sits mid-signature (opener in unchanged
-// context above the hunk) is then recognized as a continuation instead of
-// being scanned as if no signature were open. This still cannot recover a
-// signature whose CLOSE also sits outside the hunk — there is no added text
-// to bind in that case, an inherent limit of a hunk-only scanner, not
-// something seeding alone can fix.
-func PyParamNames(lines []AddedLine, defSigDepthSeed func(lineNo int) int) []string {
+// paramSigDepthSeed supplies the def-signature nesting depth in effect at
+// the START of the given line — PyParamSigDepthBefore's caller-facing form
+// (#294). Nil (or a gap with no seed) starts at depth 0, the previous
+// unseeded behavior: a hunk whose FIRST line sits mid-signature (opener in
+// unchanged context above the hunk) is then recognized as a continuation
+// instead of being scanned as if no signature were open. This still cannot
+// recover a signature whose CLOSE also sits outside the hunk — there is no
+// added text to bind in that case, an inherent limit of a hunk-only
+// scanner, not something seeding alone can fix.
+//
+// This is PyParamNames' OWN seed, not LocallyBoundNames'/
+// PyDefSigDepthBefore's: the depth below tracks ALL of ()/[]/{} (via
+// pyBracketDelta, matching the continuation branch's own advance), not
+// parens alone — see PyParamSigDepthBefore's doc for why the two must not
+// share a seed.
+//
+// Only a seed of EXACTLY 1 is trusted to resume accumulation. sig
+// accumulates raw text and hands it to pyParseParamList, which tracks its
+// OWN depth from 0 assuming that 0 IS the signature's own paren level — true
+// when the hunk begins directly inside the signature (seed 1) and its own
+// +=pyBracketDelta advance stays consistent with that from then on, but NOT
+// true when the hunk begins already nested one level deeper (seed 2+, e.g.
+// mid-way through a multi-line list/dict default value): pyParseParamList
+// would then read the nested literal's own closing bracket as the
+// signature's, truncating (and potentially misparsing) the accumulated
+// text. A seed of 2+ is deliberately treated as unseedable (falls back to
+// depth 0, the pre-#294 miss — safe, never a wrong parse) rather than risked.
+func PyParamNames(lines []AddedLine, paramSigDepthSeed func(lineNo int) int) []string {
 	var out []string
 	// sigDepth > 0 means we are inside a def signature's parens spanning lines;
 	// sig accumulates the stripped parameter-list text across them.
@@ -820,13 +838,16 @@ func PyParamNames(lines []AddedLine, defSigDepthSeed func(lineNo int) int) []str
 		// A diff hunk's added lines may be non-contiguous; a signature cannot be
 		// assumed to continue across a gap. Reseed from the real file state at
 		// THIS line (mirrors PyDeclaredNames' own reseed) rather than always
-		// resetting to 0 — a nonzero seed means a signature genuinely IS open
-		// here, so the branch below treats this line as its continuation.
+		// resetting to 0 — a seed of exactly 1 means a signature genuinely IS
+		// open here at a depth pyParseParamList can safely resume from, so the
+		// branch below treats this line as its continuation. A deeper seed
+		// (2+) is not safely resumable (see the doc above) and falls back to 0.
 		if first || l.LineNo != prevNo+1 {
-			if defSigDepthSeed != nil {
-				sigDepth = defSigDepthSeed(l.LineNo)
-			} else {
-				sigDepth = 0
+			sigDepth = 0
+			if paramSigDepthSeed != nil {
+				if seed := paramSigDepthSeed(l.LineNo); seed == 1 {
+					sigDepth = 1
+				}
 			}
 			sig.Reset()
 		}
@@ -874,6 +895,49 @@ func PyParamNames(lines []AddedLine, defSigDepthSeed func(lineNo int) int) []str
 		out = append(out, pyLambdaParams(s)...)
 	})
 	return out
+}
+
+// PyParamSigDepthBefore returns the def-signature nesting depth PyParamNames
+// itself tracks — in effect at the START of fileLines[idx], 0 if no
+// signature is open there (#294).
+//
+// NOT PyDefSigDepthBefore: that function (dropped_import.go) tracks parens
+// alone via pyConsumeParens, matching LocallyBoundNames' own pre-existing
+// rule. PyParamNames' live continuation branch tracks ALL of ()/[]/{} via
+// pyBracketDelta(braceScan) instead — a multi-line default value's own `[`
+// or `{` must stay "open" from the signature's point of view too:
+// `b=[\n 1, 2,\n],` only truly closes the signature at its OUTER `)`, not at
+// the list's `]`. Seeding PyParamNames from PyDefSigDepthBefore's parens-only
+// count desyncs the two the moment a default value spans a bracket the
+// parens-only rule doesn't count — a nested list/dict/set literal reads as
+// closing the signature early, silently dropping every parameter after it.
+// This function mirrors PyParamNames' own rule exactly instead.
+func PyParamSigDepthBefore(fileLines []AddedLine, idx int) int {
+	if idx <= 0 || len(fileLines) == 0 {
+		return 0
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	depth := 0
+	for _, l := range fileLines[:idx] {
+		var scan, braceScan string
+		scan, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
+		if depth > 0 {
+			depth += pyBracketDelta(braceScan)
+			if depth <= 0 {
+				depth = 0
+			}
+		} else if loc := rePyDefParamOpen.FindStringSubmatchIndex(scan); loc != nil {
+			rest := braceScan[loc[2]:loc[3]]
+			depth = 1 + pyBracketDelta(rest)
+			if depth <= 0 {
+				depth = 0
+			}
+		}
+	}
+	return depth
 }
 
 // pyParseParamList extracts the bound parameter names from the text of a def

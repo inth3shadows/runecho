@@ -132,7 +132,7 @@ func TestPyParamNames_LambdaCallDefaultNoArgLeak(t *testing.T) {
 	}
 }
 
-// TestPyParamNames_SeededMidSignature exercises PyParamNames' defSigDepthSeed
+// TestPyParamNames_SeededMidSignature exercises PyParamNames' paramSigDepthSeed
 // parameter (#294): a hunk whose first line adds a parameter mid-signature
 // (the `def foo(` opener sits in unchanged context above the hunk) and whose
 // signature closes within the SAME hunk's own lines. Unseeded, the hunk never
@@ -158,6 +158,63 @@ func TestPyParamNames_SeededMidSignature(t *testing.T) {
 	got := PyParamNames(hunk, seed)
 	if len(got) != 1 || got[0] != "timeout" {
 		t.Errorf("seeded PyParamNames = %v, want [timeout]", got)
+	}
+}
+
+// TestPyParamNames_DeepSeedFallsBackSafely pins an adversarial code-review
+// finding on this same PR: a hunk beginning INSIDE a nested list/dict/set
+// default value (paramSigDepthSeed > 1, not just 1) must not be resumed as a
+// continuation. pyParseParamList tracks its own depth from 0, assuming 0 IS
+// the signature's own paren level — true only when the hunk begins directly
+// inside the signature (seed 1). At a deeper seed the nested literal's own
+// closing bracket would misread as the signature's, truncating (and
+// potentially corrupting, not just missing) the accumulated parameter text.
+// The fix must fall back to the safe pre-#294 miss, never a wrong parse.
+func TestPyParamNames_DeepSeedFallsBackSafely(t *testing.T) {
+	whole := []AddedLine{
+		{LineNo: 1, Text: "def f("},
+		{LineNo: 2, Text: " a,"},
+		{LineNo: 3, Text: " b=["},
+		{LineNo: 4, Text: "  1, 2,"},
+		{LineNo: 5, Text: " ],"},
+		{LineNo: 6, Text: " c,"},
+		{LineNo: 7, Text: "):"},
+	}
+	// idx=4 is the start of line 5 (" ],"), reached only after entering the
+	// nested list on line 3 — real depth 2 (one open paren, one open list).
+	seedVal := PyParamSigDepthBefore(whole, 4)
+	if seedVal != 2 {
+		t.Fatalf("test setup: want seed 2 at line 5, got %d", seedVal)
+	}
+
+	hunk := []AddedLine{
+		{LineNo: 5, Text: " ],"},
+		{LineNo: 6, Text: " c,"},
+		{LineNo: 7, Text: "):"},
+	}
+	seed := func(lineNo int) int { return seedVal }
+	if got := PyParamNames(hunk, seed); len(got) != 0 {
+		t.Errorf("a depth-2 seed must fall back to unseeded (safe miss), got %v — a wrong/corrupted parse, not just a miss, would be worse than the pre-#294 bug", got)
+	}
+
+	// Control: a hunk beginning exactly at depth 1 (the signature's own
+	// level, opener line included) must still resolve correctly — the guard
+	// must not blanket-disable seeding, only the unsafe depth.
+	hunk2 := []AddedLine{
+		{LineNo: 3, Text: " b=["},
+		{LineNo: 4, Text: "  1, 2,"},
+		{LineNo: 5, Text: " ],"},
+		{LineNo: 6, Text: " c,"},
+		{LineNo: 7, Text: "):"},
+	}
+	seed1Val := PyParamSigDepthBefore(whole, 2) // start of line 3
+	if seed1Val != 1 {
+		t.Fatalf("test setup: want seed 1 at line 3, got %d", seed1Val)
+	}
+	got2 := PyParamNames(hunk2, func(lineNo int) int { return seed1Val })
+	want := map[string]bool{"b": true, "c": true}
+	if len(got2) != 2 || !want[got2[0]] || !want[got2[1]] {
+		t.Errorf("a depth-1 seed must still resolve correctly, got %v, want [b c]", got2)
 	}
 }
 

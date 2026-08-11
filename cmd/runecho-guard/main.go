@@ -763,8 +763,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// PyDeclaredNames/PyParamNames' own seeds (#294) — same rationale as
 		// PyBraceDepthByLine, for the general bracket depth and the
 		// def-signature-specific depth respectively.
-		PyBracketDepthByLine: hookBracketDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
-		PyDefSigDepthByLine:  hookDefSigDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
+		PyBracketDepthByLine:  hookBracketDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
+		PyDefSigDepthByLine:   hookDefSigDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
+		PyParamSigDepthByLine: hookParamSigDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -1321,12 +1322,14 @@ func hookBracketDepthByLine(toolName, oldString string, edits []editOp, fileLine
 }
 
 // hookDefSigDepthByLine is hookBraceDepthByLine's counterpart for the
-// def-signature-specific paren depth PyParamNames/LocallyBoundNames track
-// (#294): computes, per added-line block, that depth where the block sits in
-// the PRE-EDIT file. Without it, a block beginning partway through a
-// multi-line def signature (opener unchanged context above the block) is
-// scanned as if no signature were open, so a parameter added on the block's
-// own lines is never bound. Python-only.
+// def-signature-specific PAREN-ONLY depth LocallyBoundNames tracks (#294):
+// computes, per added-line block, that depth where the block sits in the
+// PRE-EDIT file. Without it, a block beginning partway through a multi-line
+// def signature (opener unchanged context above the block) is scanned as if
+// no signature were open, so a parameter added on the block's own lines is
+// never bound. LocallyBoundNames ONLY — see PyParamSigDepthBefore's doc for
+// why PyParamNames needs hookParamSigDepthByLine below instead, not this
+// one. Python-only.
 func hookDefSigDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
 	if lang != guard.LangPython {
 		return nil
@@ -1338,6 +1341,31 @@ func hookDefSigDepthByLine(toolName, oldString string, edits []editOp, fileLines
 	seeds := make(map[int]int)
 	for start, idx := range indices {
 		if depth := guard.PyDefSigDepthBefore(fileLines, idx); depth != 0 {
+			seeds[start] = depth
+		}
+	}
+	if len(seeds) == 0 {
+		return nil
+	}
+	return seeds
+}
+
+// hookParamSigDepthByLine is hookDefSigDepthByLine's counterpart for
+// PyParamNames' OWN def-signature depth rule (#294) — ALL of ()/[]/{}, not
+// parens alone (a multi-line default value's own bracket must stay "open"
+// from the signature's point of view too; see PyParamSigDepthBefore's doc
+// for why sharing hookDefSigDepthByLine's seed desyncs the two). Python-only.
+func hookParamSigDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
+	if lang != guard.LangPython {
+		return nil
+	}
+	indices := hookBlockIndices(toolName, oldString, edits, fileLines)
+	if len(indices) == 0 {
+		return nil
+	}
+	seeds := make(map[int]int)
+	for start, idx := range indices {
+		if depth := guard.PyParamSigDepthBefore(fileLines, idx); depth != 0 {
 			seeds[start] = depth
 		}
 	}

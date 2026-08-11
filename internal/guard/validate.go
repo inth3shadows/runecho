@@ -58,17 +58,20 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// by both passes, rather than once per pass.
 	openSeeds := make([]func(lineNo int) string, len(diffs))
 	braceSeeds := make([]func(lineNo int) int, len(diffs))
-	// bracketSeeds/defSigSeeds are PyDeclaredNames/PyParamNames' own seeds
-	// (#294) — hoisted the same way as openSeeds/braceSeeds, for the same
-	// reason (one AbsPath read shared across every consumer of a given fd).
+	// bracketSeeds is PyDeclaredNames' own seed (#294); paramSigSeeds is
+	// PyParamNames' own — a DIFFERENT rule from LocallyBoundNames'
+	// defSigDepthSeedFunc (see PyParamSigDepthBefore's doc for why the two
+	// must not share a seed). Hoisted the same way as openSeeds/braceSeeds,
+	// for the same reason (one AbsPath read shared across every consumer of
+	// a given fd).
 	bracketSeeds := make([]func(lineNo int) int, len(diffs))
-	defSigSeeds := make([]func(lineNo int) int, len(diffs))
+	paramSigSeeds := make([]func(lineNo int) int, len(diffs))
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		openSeeds[i] = seedFunc(lang, fd)
 		braceSeeds[i] = braceDepthSeedFunc(lang, fd)
 		bracketSeeds[i] = bracketDepthSeedFunc(lang, fd)
-		defSigSeeds[i] = defSigDepthSeedFunc(lang, fd)
+		paramSigSeeds[i] = paramSigDepthSeedFunc(lang, fd)
 	}
 
 	// Pass 1: collect all new definitions AND imported names across the entire
@@ -143,7 +146,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			// def/const folds do. Tightening it would require per-function scope
 			// tracking the line-based guard deliberately avoids; the tradeoff
 			// favors never falsely flagging a real parameter call.
-			for _, name := range PyParamNames(fd.AddedLines, defSigSeeds[i]) {
+			for _, name := range PyParamNames(fd.AddedLines, paramSigSeeds[i]) {
 				known[name] = struct{}{}
 			}
 		}
@@ -379,9 +382,11 @@ func pyBracketDepthSeedFor(absPath string) func(int) int {
 }
 
 // defSigDepthSeedFunc is bracketDepthSeedFunc's counterpart for the
-// def-signature-specific paren depth PyParamNames/LocallyBoundNames track
-// (#294) — not a general bracket depth, but specifically "is a def(...)
-// signature open here, and how deep". Python-only, same shape as
+// def-signature-specific PAREN-ONLY depth LocallyBoundNames tracks (#294) —
+// not a general bracket depth, but specifically "is a def(...) signature
+// open here, and how deep (parens alone)". LocallyBoundNames ONLY — see
+// PyParamSigDepthBefore's doc for why PyParamNames needs a different rule
+// and paramSigDepthSeedFunc below, not this one. Python-only, same shape as
 // braceDepthSeedFunc/bracketDepthSeedFunc.
 func defSigDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
 	if lang != LangPython {
@@ -420,6 +425,69 @@ func pyDefSigDepthSeedFor(absPath string) func(int) int {
 		} else if loc := rePyDefOpen.FindStringIndex(scan); loc != nil {
 			depth = 1
 			pyConsumeParens(scan[loc[1]:], &depth)
+		}
+	}
+	prefix[len(fileLines)] = depth
+	return func(lineNo int) int {
+		idx := lineNo - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(prefix) {
+			idx = len(prefix) - 1
+		}
+		return prefix[idx]
+	}
+}
+
+// paramSigDepthSeedFunc is defSigDepthSeedFunc's counterpart for
+// PyParamNames' OWN def-signature depth rule (#294) — ALL of ()/[]/{}, not
+// parens alone. See PyParamSigDepthBefore's doc for why PyParamNames cannot
+// share defSigDepthSeedFunc/LocallyBoundNames' seed. Python-only, same shape
+// as the other seed funcs.
+func paramSigDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
+	if lang != LangPython {
+		return nil
+	}
+	if fd.AbsPath != "" {
+		return pyParamSigDepthSeedFor(fd.AbsPath)
+	}
+	if len(fd.PyParamSigDepthByLine) > 0 {
+		seeds := fd.PyParamSigDepthByLine
+		return func(lineNo int) int { return seeds[lineNo] }
+	}
+	return nil
+}
+
+// pyParamSigDepthSeedFor reads absPath and returns a function mapping a
+// 1-based new-file line number to PyParamNames' own def-signature nesting
+// depth in effect at the START of that line — PyParamSigDepthBefore's
+// caller-facing form for the pre-commit path (#294). Returns nil (no
+// seeding) on the same conditions pyBraceDepthSeedFor does.
+func pyParamSigDepthSeedFor(absPath string) func(int) int {
+	data, err := os.ReadFile(absPath)
+	if err != nil || len(data) > maxSeedFileBytes {
+		return nil
+	}
+	fileLines := strings.Split(string(data), "\n")
+	prefix := make([]int, len(fileLines)+1)
+	open := ""
+	depth := 0
+	for i, ln := range fileLines {
+		prefix[i] = depth
+		var scan, braceScan string
+		scan, braceScan, open = stripLiteralsBraces(LangPython, ln, open)
+		if depth > 0 {
+			depth += pyBracketDelta(braceScan)
+			if depth <= 0 {
+				depth = 0
+			}
+		} else if loc := rePyDefParamOpen.FindStringSubmatchIndex(scan); loc != nil {
+			rest := braceScan[loc[2]:loc[3]]
+			depth = 1 + pyBracketDelta(rest)
+			if depth <= 0 {
+				depth = 0
+			}
 		}
 	}
 	prefix[len(fileLines)] = depth

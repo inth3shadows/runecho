@@ -387,7 +387,7 @@ func pyConsumeParens(s string, depth *int) (string, bool) {
 
 // PyDefSigDepthBefore returns the depth of an open `def(...)` parameter
 // signature in effect at the START of fileLines[idx] — 0 if no signature is
-// open there. LocallyBoundNames/PyParamNames' seed counterpart to
+// open there. LocallyBoundNames' seed counterpart to
 // PyBraceDepthBefore/PyBracketDepthBefore (#294): without it, a hunk
 // beginning partway through a multi-line def signature (opener in unchanged
 // context above the hunk) starts as if no signature were open, so a
@@ -399,6 +399,16 @@ func pyConsumeParens(s string, depth *int) (string, bool) {
 // scan (stripLiteralsStateful) LocallyBoundNames already uses — no
 // additional f-string neutralization here, matching that existing tracker's
 // scope rather than widening it as part of a seeding fix.
+//
+// LocallyBoundNames ONLY: pyConsumeParens tracks `(`/`)` alone, matching
+// LocallyBoundNames' own pre-existing internal rule exactly. PyParamNames'
+// own live advance tracks ALL of ()/[]/{} via pyBracketDelta (a multi-line
+// default value's own `[`/`{` must stay "open" from the signature's point of
+// view too — `b=[\n 1,\n],` only truly closes the signature at its outer
+// `)`, not at the list's `]`) — seeding it from THIS function desyncs the
+// two rules the moment a default value spans a bracket this doesn't count,
+// so PyParamNames has its own PyParamSigDepthBefore below. Do not reuse this
+// one for PyParamNames.
 //
 // Like PyParamNames, this cannot recover a signature whose CLOSE also sits
 // outside the hunk: seeding fixes the depth at hunk start, not the missing

@@ -1868,6 +1868,53 @@ func TestPyDeclaredNames_Seeded(t *testing.T) {
 	}
 }
 
+// TestPyParamSigDepthBefore mirrors TestPyDefSigDepthBefore (dropped_import_test.go)
+// for PyParamNames' OWN def-signature depth rule (#294) — tracks ALL of
+// ()/[]/{}, not parens alone, so a nested list/dict/set default value stays
+// counted as still-open until IT closes.
+func TestPyParamSigDepthBefore(t *testing.T) {
+	fileLines := []AddedLine{
+		{LineNo: 1, Text: "def f("},
+		{LineNo: 2, Text: " a,"},
+		{LineNo: 3, Text: " b=["},
+		{LineNo: 4, Text: "  1, 2,"},
+		{LineNo: 5, Text: " ],"},
+		{LineNo: 6, Text: " c,"},
+		{LineNo: 7, Text: "):"},
+	}
+	cases := []struct {
+		idx  int
+		want int
+	}{
+		{0, 0}, // before any line: no signature open
+		{1, 1}, // start of line 2 (a,): signature opened on line 1
+		{2, 1}, // start of line 3 (b=[): still just the signature's own paren
+		{3, 2}, // start of line 4 (nested list content): now inside the list too
+		{4, 2}, // start of line 5 (],): still inside the list — it closes THIS line
+		{5, 1}, // start of line 6 (c,): list closed, back to the signature's own depth
+		{6, 1}, // start of line 7 ("):"): still open — this line closes the signature
+		{7, 0}, // start of line 8 (past the end): signature closed
+	}
+	for _, tc := range cases {
+		if got := PyParamSigDepthBefore(fileLines, tc.idx); got != tc.want {
+			t.Errorf("PyParamSigDepthBefore(fileLines, %d) = %d, want %d", tc.idx, got, tc.want)
+		}
+	}
+
+	// A plain call is not a def signature — must read 0.
+	plainCall := []AddedLine{
+		{LineNo: 1, Text: "connect("},
+		{LineNo: 2, Text: "    timeout=30,"},
+	}
+	if got := PyParamSigDepthBefore(plainCall, 1); got != 0 {
+		t.Errorf("a plain call must not read as an open def signature, got %d", got)
+	}
+
+	if got := PyParamSigDepthBefore(nil, 1); got != 0 {
+		t.Errorf("nil fileLines should return 0, got %d", got)
+	}
+}
+
 // TestAppendConstRefs_TupleAssignTargetsNotReferences pins #278: every name in
 // a tuple/multiple-assignment LHS (`MAX_VALUE, OTHER_VALUE = 5, 10`) is being
 // DEFINED, not used — neither should be added as a reference. A call argument

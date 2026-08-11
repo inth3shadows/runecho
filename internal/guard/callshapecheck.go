@@ -165,9 +165,15 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	var shadowed map[string]struct{}
 	shadowedSet := func() map[string]struct{} {
 		if shadowed == nil {
-			shadowed = pyNonDefBindings(declLines, declIndex)
+			// declLines is always whole-file-from-line-1 (see its own comment
+			// above) — nil is correct there. added is the hunk when it isn't
+			// the whole file, and needs PyDeclaredNames' own bracket-depth
+			// seed (#294) or a kwarg on a wrapped call whose opener sits in
+			// unchanged context above the hunk misreads as a rebind, silently
+			// widening (not narrowing) the shadow set this check relies on.
+			shadowed = pyNonDefBindings(declLines, declIndex, nil)
 			if addedIndex != nil {
-				for n := range pyNonDefBindings(added, addedIndex) {
+				for n := range pyNonDefBindings(added, addedIndex, bracketDepthSeedFunc(lang, fd)) {
 					shadowed[n] = struct{}{}
 				}
 			}
@@ -410,12 +416,12 @@ func removesSignatureLine(idx *pyDeclIndex, declLine int, removedText string) bo
 // makes the callee "shadowed" at its own call site and silences the check
 // everywhere. The three precise extractors below are the same choice
 // DroppedImportRefs made for JS (JSDeclaredNames, not LocallyBoundNames).
-func pyNonDefBindings(lines []AddedLine, idx *pyDeclIndex) map[string]struct{} {
+func pyNonDefBindings(lines []AddedLine, idx *pyDeclIndex, bracketDepthSeed func(lineNo int) int) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, n := range ExtractImports(LangPython, lines) {
 		out[n] = struct{}{}
 	}
-	for _, n := range PyDeclaredNames(lines) {
+	for _, n := range PyDeclaredNames(lines, bracketDepthSeed) {
 		out[n] = struct{}{}
 	}
 	// PyDeclaredNames sees only plain `=` assignments. A `for` target (statement or

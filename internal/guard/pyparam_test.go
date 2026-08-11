@@ -44,7 +44,7 @@ func TestPyParamNames(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := PyParamNames(pyLines(tc.src))
+			got := PyParamNames(pyLines(tc.src), nil)
 			sort.Strings(got)
 			want := append([]string(nil), tc.want...)
 			sort.Strings(want)
@@ -115,7 +115,7 @@ func TestPyParamNames_LambdaCallDefaultNoArgLeak(t *testing.T) {
 		{"sort(xs, key=lambda item, idx: item)", []string{"item", "idx"}},
 	}
 	for _, tc := range cases {
-		got := PyParamNames(pyLines(tc.src))
+		got := PyParamNames(pyLines(tc.src), nil)
 		gotSet := map[string]bool{}
 		for _, g := range got {
 			gotSet[g] = true
@@ -129,6 +129,35 @@ func TestPyParamNames_LambdaCallDefaultNoArgLeak(t *testing.T) {
 		if len(got) != len(tc.want) {
 			t.Errorf("%q: bound %v, want exactly %v", tc.src, got, tc.want)
 		}
+	}
+}
+
+// TestPyParamNames_SeededMidSignature exercises PyParamNames' defSigDepthSeed
+// parameter (#294): a hunk whose first line adds a parameter mid-signature
+// (the `def foo(` opener sits in unchanged context above the hunk) and whose
+// signature closes within the SAME hunk's own lines. Unseeded, the hunk never
+// recognizes itself as inside a signature at all, so the added parameter is
+// never bound.
+func TestPyParamNames_SeededMidSignature(t *testing.T) {
+	hunk := []AddedLine{
+		{LineNo: 3, Text: "    timeout: int = 30,"},
+		{LineNo: 4, Text: "):"},
+	}
+
+	// Unseeded: the signature opener isn't in this scan, so sigDepth never
+	// goes above 0 and rePyDefParamOpen never matches — nothing is bound.
+	// This is the control: it reproduces the pre-fix miss.
+	if got := PyParamNames(hunk, nil); len(got) != 0 {
+		t.Errorf("unseeded PyParamNames = %v, want none (control: reproduces the pre-fix miss)", got)
+	}
+
+	// Seeded at depth 1 (inside the open signature): line 3 is recognized as
+	// a continuation, and the signature closes on line 4 within the hunk, so
+	// `timeout` is bound.
+	seed := func(lineNo int) int { return 1 }
+	got := PyParamNames(hunk, seed)
+	if len(got) != 1 || got[0] != "timeout" {
+		t.Errorf("seeded PyParamNames = %v, want [timeout]", got)
 	}
 }
 

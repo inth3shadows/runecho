@@ -51,14 +51,18 @@ func FoldInFileDefs(symbols map[string]struct{}, fileLines []AddedLine, lang Lan
 	// HANDLERS[key]; handler(payload)`) is not a hallucination. Fold whole-file
 	// assignment targets so a binding on a line outside the edited hunk resolves.
 	if lang == LangPython {
-		for _, name := range PyDeclaredNames(fileLines) {
+		// fileLines is whole-file, contiguous from line 1 — nil seed is
+		// correct here (#294's seeding gap is a hunk-only problem; this
+		// caller's own tracking already starts at the file's real depth, 0,
+		// by construction). Do not thread a seed through this call.
+		for _, name := range PyDeclaredNames(fileLines, nil) {
 			symbols[name] = struct{}{}
 		}
 		// Parameters used as callables are bound by their signature (a
 		// `Callable`-typed param, a lambda arg). Fold the whole file's parameter
 		// names — names only, never their type annotations. This was the last
 		// surviving Python false-positive class in the live decision log.
-		for _, name := range PyParamNames(fileLines) {
+		for _, name := range PyParamNames(fileLines, nil) {
 			symbols[name] = struct{}{}
 		}
 	}

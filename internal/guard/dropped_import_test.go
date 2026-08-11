@@ -281,8 +281,8 @@ func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T)
 
 	// With whole-file context folded in as preBound (the untouched line rebinds
 	// `re`), the warning must be suppressed.
-	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"))
-	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBound); len(got) != 0 {
+	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"), nil)
+	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBound, nil); len(got) != 0 {
 		t.Errorf("whole-file rebind of re must suppress the dropped-import warning, got %v", droppedNames(got))
 	}
 }
@@ -355,5 +355,86 @@ func TestDroppedImport_Go_Excluded(t *testing.T) {
 	newText := "x.Foo()\n"
 	if got := DroppedImportRefs(LangGo, oldText, newText); got != nil {
 		t.Errorf("Go must be excluded, got %v", droppedNames(got))
+	}
+}
+
+// TestPyDefSigDepthBefore mirrors TestPyBraceDepthBefore/
+// TestPyBracketDepthBefore for the def-signature-specific paren depth
+// PyParamNames/LocallyBoundNames seed from (#294) — 0 outside any signature,
+// >0 only while genuinely inside one.
+func TestPyDefSigDepthBefore(t *testing.T) {
+	fileLines := []AddedLine{
+		{LineNo: 1, Text: "def foo("},
+		{LineNo: 2, Text: "    host,"},
+		{LineNo: 3, Text: "    timeout=30,"},
+		{LineNo: 4, Text: "):"},
+		{LineNo: 5, Text: "    return host"},
+	}
+	cases := []struct {
+		idx  int
+		want int
+	}{
+		{0, 0}, // before any line: no signature open
+		{1, 1}, // start of line 2: signature opened on line 1
+		{2, 1}, // start of line 3 (timeout's line): still open
+		{3, 1}, // start of line 4 ("):"): still open — line 4 itself closes it
+		{4, 0}, // start of line 5: closed by line 4's ")"
+	}
+	for _, tc := range cases {
+		if got := PyDefSigDepthBefore(fileLines, tc.idx); got != tc.want {
+			t.Errorf("PyDefSigDepthBefore(fileLines, %d) = %d, want %d", tc.idx, got, tc.want)
+		}
+	}
+
+	// A plain call is not a def signature — must read 0, not leak into the
+	// def-signature-specific tracker.
+	plainCall := []AddedLine{
+		{LineNo: 1, Text: "connect("},
+		{LineNo: 2, Text: "    timeout=30,"},
+	}
+	if got := PyDefSigDepthBefore(plainCall, 1); got != 0 {
+		t.Errorf("a plain call must not read as an open def signature, got %d", got)
+	}
+
+	// Out-of-range idx clamps rather than panicking.
+	if got := PyDefSigDepthBefore(fileLines, -1); got != 0 {
+		t.Errorf("negative idx should clamp to 0, got %d", got)
+	}
+	if got := PyDefSigDepthBefore(fileLines, 999); got != 0 {
+		t.Errorf("idx past the end should clamp to the full-file depth (0, signature closed), got %d", got)
+	}
+	if got := PyDefSigDepthBefore(nil, 1); got != 0 {
+		t.Errorf("nil fileLines should return 0, got %d", got)
+	}
+}
+
+// TestLocallyBoundNames_SeededMidSignature is LocallyBoundNames' counterpart
+// to TestPyParamNames_SeededMidSignature (#294): a hunk adding a parameter
+// mid-signature, whose def opener sits in unchanged context above the hunk.
+// Unseeded, LocallyBoundNames never recognizes itself as inside a signature,
+// so a dropped import sharing the parameter's name is not suppressed — a
+// false positive for the dropped-import check (over-inclusive binding is the
+// safe direction there; failing to bind is the bug).
+//
+// The parameter deliberately carries no default value or annotation
+// (`timeout,` not `timeout=30,`/`timeout: int,`): LocallyBoundNames' generic
+// assignLHS fold binds any bare `NAME=value` line independently of bracket
+// context (over-inclusive by design, see DroppedImportRefs), which would
+// mask whether THIS seed is doing anything. A bare `timeout,` has no `=` at
+// all, so only the def-signature accumulator this test targets can bind it.
+func TestLocallyBoundNames_SeededMidSignature(t *testing.T) {
+	hunk := []AddedLine{
+		{LineNo: 3, Text: "    timeout,"},
+		{LineNo: 4, Text: "):"},
+	}
+
+	if bound := LocallyBoundNames(LangPython, hunk, nil); len(bound) != 0 {
+		t.Errorf("unseeded LocallyBoundNames = %v, want none (control: reproduces the pre-fix miss)", bound)
+	}
+
+	seed := func(lineNo int) int { return 1 }
+	bound := LocallyBoundNames(LangPython, hunk, seed)
+	if _, ok := bound["timeout"]; !ok || len(bound) != 1 {
+		t.Errorf("seeded LocallyBoundNames = %v, want {timeout}", bound)
 	}
 }

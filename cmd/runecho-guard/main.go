@@ -760,6 +760,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// file's real state there, or the key reads as a definition instead of a
 		// reference. Python-only; hookBraceDepthByLine returns nil for other langs.
 		PyBraceDepthByLine: hookBraceDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
+		// PyDeclaredNames/PyParamNames' own seeds (#294) — same rationale as
+		// PyBraceDepthByLine, for the general bracket depth and the
+		// def-signature-specific depth respectively.
+		PyBracketDepthByLine: hookBracketDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
+		PyDefSigDepthByLine:  hookDefSigDepthByLine(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang),
 	}}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
@@ -916,7 +921,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			if edit.ToolName != "Write" {
 				preBound = wholeFileBoundNames(fileLines, lang)
 			}
-			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound)
+			// newLines is the same slice diffs[0].AddedLines was built from, so
+			// diffs[0].PyDefSigDepthByLine's synthetic-line-number keys (#294)
+			// apply directly here — reused rather than recomputed via
+			// hookDefSigDepthByLine a second time.
+			defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
+			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
@@ -1102,7 +1112,9 @@ func wholeFileBoundNames(fileLines []guard.AddedLine, lang guard.Lang) map[strin
 	if fileLines == nil {
 		return nil
 	}
-	bound := guard.LocallyBoundNames(lang, fileLines)
+	// fileLines is whole-file, contiguous from line 1 — nil seed is correct
+	// here (#294's seeding gap is a hunk-only problem).
+	bound := guard.LocallyBoundNames(lang, fileLines, nil)
 	for _, def := range guard.ExtractDefs(lang, fileLines) {
 		bound[def] = struct{}{}
 	}
@@ -1270,6 +1282,62 @@ func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines 
 	seeds := make(map[int]int)
 	for start, idx := range indices {
 		if depth := guard.PyBraceDepthBefore(fileLines, idx); depth != 0 {
+			seeds[start] = depth
+		}
+	}
+	if len(seeds) == 0 {
+		return nil
+	}
+	return seeds
+}
+
+// hookBracketDepthByLine is hookBraceDepthByLine's counterpart for the general
+// ()/[]/{}-bracket depth PyDeclaredNames/PyParamNames track (#294): computes,
+// per added-line block, that depth where the block sits in the PRE-EDIT file.
+// Without it, a block that adds a kwarg-style line inside a pre-existing
+// multi-line call/list/dict (opener unchanged context above the block) is
+// scanned starting at depth 0, misreading it as a top-level assignment or
+// fresh signature. Shares hookBlockIndices with hookSeedByLine/
+// hookBraceDepthByLine — same block-position resolution, only the per-line
+// state read off fileLines differs. Python-only.
+func hookBracketDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
+	if lang != guard.LangPython {
+		return nil
+	}
+	indices := hookBlockIndices(toolName, oldString, edits, fileLines)
+	if len(indices) == 0 {
+		return nil
+	}
+	seeds := make(map[int]int)
+	for start, idx := range indices {
+		if depth := guard.PyBracketDepthBefore(fileLines, idx); depth != 0 {
+			seeds[start] = depth
+		}
+	}
+	if len(seeds) == 0 {
+		return nil
+	}
+	return seeds
+}
+
+// hookDefSigDepthByLine is hookBraceDepthByLine's counterpart for the
+// def-signature-specific paren depth PyParamNames/LocallyBoundNames track
+// (#294): computes, per added-line block, that depth where the block sits in
+// the PRE-EDIT file. Without it, a block beginning partway through a
+// multi-line def signature (opener unchanged context above the block) is
+// scanned as if no signature were open, so a parameter added on the block's
+// own lines is never bound. Python-only.
+func hookDefSigDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
+	if lang != guard.LangPython {
+		return nil
+	}
+	indices := hookBlockIndices(toolName, oldString, edits, fileLines)
+	if len(indices) == 0 {
+		return nil
+	}
+	seeds := make(map[int]int)
+	for start, idx := range indices {
+		if depth := guard.PyDefSigDepthBefore(fileLines, idx); depth != 0 {
 			seeds[start] = depth
 		}
 	}

@@ -46,7 +46,7 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 // edit boundary. All of its scans (ExtractImports' inPyParen state,
 // firstUnqualifiedUseLines, LocallyBoundNames) honor those gaps.
 func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []DroppedImport {
-	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil)
+	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil, nil)
 }
 
 // DroppedImportRefsLinesWithBound is DroppedImportRefsLines with an extra
@@ -56,7 +56,13 @@ func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []Dropped
 // name rebound on an untouched line elsewhere in the file, which would
 // otherwise false-positive as a dropped import. Pass nil for no extra context
 // (identical to DroppedImportRefsLines).
-func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound map[string]struct{}) []DroppedImport {
+//
+// defSigDepthSeed is threaded straight to LocallyBoundNames(lang, newLines) —
+// nil is correct for a self-contained, contiguous-from-line-1 slice; a
+// hunk-only newLines caller (the guard hook) should pass its real seed
+// (#294), or a parameter added mid-signature in a hunk whose opener sits in
+// unchanged context is never recognized as a rebind of the dropped import.
+func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound map[string]struct{}, defSigDepthSeed func(lineNo int) int) []DroppedImport {
 	if lang != LangPython && lang != LangJS {
 		return nil
 	}
@@ -74,7 +80,7 @@ func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, 
 	// suppressed real drop is a recoverable miss (the additive check or the runtime
 	// still catches it), whereas a false alarm trains users to ignore the guard —
 	// the adoption-killer. Precision over recall.
-	bound := LocallyBoundNames(lang, newLines)
+	bound := LocallyBoundNames(lang, newLines, defSigDepthSeed)
 	for _, d := range ExtractDefs(lang, newLines) {
 		bound[d] = struct{}{}
 	}
@@ -240,7 +246,15 @@ var (
 // false-positive. Over-inclusive by design (see DroppedImportRefs). Exported so
 // a caller (e.g. the guard hook) can compute the same binding set over whole-
 // file context and fold it into DroppedImportRefsLinesWithBound's preBound.
-func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
+//
+// defSigDepthSeed supplies the def-signature paren depth in effect at the
+// START of the given line — PyDefSigDepthBefore's caller-facing form (#294),
+// shared with PyParamNames' own seed. Nil (or a gap with no seed, or any
+// non-Python lang, which never consults it) means "no signature open",
+// matching the previous unseeded behavior — correct for a genuinely
+// whole-file, contiguous-from-line-1 caller, and the previously-accepted gap
+// for a hunk-only caller.
+func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo int) int) map[string]struct{} {
 	m := make(map[string]struct{})
 	add := func(s string) {
 		for _, id := range reIdentAll.FindAllString(s, -1) {
@@ -252,6 +266,7 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 	pyDefDepth := 0
 	var pyDefParams strings.Builder
 	pyDefPrevNo := 0
+	pyFirst := true
 	// scanStripped threads multi-line string state (so a `x = Foo()` example inside
 	// a multi-line docstring/template is not read as a real binding) AND resets it
 	// on a line-number gap (so an unterminated string in one MultiEdit block does
@@ -276,12 +291,20 @@ func LocallyBoundNames(lang Lang, lines []AddedLine) map[string]struct{} {
 			// Bind def parameters, single- or multi-line. Accumulate the param
 			// region by paren depth from the header's `(` until it balances, then
 			// add() every identifier in it (same as the old single-line form).
-			// Reset on a diff-hunk line gap so a partial signature never spans
-			// non-contiguous added lines.
-			if pyDefDepth > 0 && l.LineNo != pyDefPrevNo+1 {
-				pyDefDepth = 0
+			// Reseed (not just reset) from the real file state at a gap OR at
+			// the very first line (#294) — without this a hunk beginning
+			// partway through a multi-line signature (opener in unchanged
+			// context above the hunk) never recognized itself as inside one,
+			// and a parameter added on the hunk's own lines was never bound.
+			if pyFirst || l.LineNo != pyDefPrevNo+1 {
+				if defSigDepthSeed != nil {
+					pyDefDepth = defSigDepthSeed(l.LineNo)
+				} else {
+					pyDefDepth = 0
+				}
 				pyDefParams.Reset()
 			}
+			pyFirst = false
 			if pyDefDepth > 0 {
 				part, closed := pyConsumeParens(s, &pyDefDepth)
 				pyDefParams.WriteString(part + " ")
@@ -360,6 +383,46 @@ func pyConsumeParens(s string, depth *int) (string, bool) {
 		}
 	}
 	return s, false
+}
+
+// PyDefSigDepthBefore returns the depth of an open `def(...)` parameter
+// signature in effect at the START of fileLines[idx] — 0 if no signature is
+// open there. LocallyBoundNames/PyParamNames' seed counterpart to
+// PyBraceDepthBefore/PyBracketDepthBefore (#294): without it, a hunk
+// beginning partway through a multi-line def signature (opener in unchanged
+// context above the hunk) starts as if no signature were open, so a
+// parameter added on that hunk's own lines (e.g. `    timeout: int = 30,`)
+// is never recognized as a bound parameter.
+//
+// Whole-file scan using the exact same rePyDefOpen/pyConsumeParens state
+// machine LocallyBoundNames itself steps incrementally, on the same code
+// scan (stripLiteralsStateful) LocallyBoundNames already uses — no
+// additional f-string neutralization here, matching that existing tracker's
+// scope rather than widening it as part of a seeding fix.
+//
+// Like PyParamNames, this cannot recover a signature whose CLOSE also sits
+// outside the hunk: seeding fixes the depth at hunk start, not the missing
+// text a hunk-only scanner never saw.
+func PyDefSigDepthBefore(fileLines []AddedLine, idx int) int {
+	if idx <= 0 || len(fileLines) == 0 {
+		return 0
+	}
+	if idx > len(fileLines) {
+		idx = len(fileLines)
+	}
+	open := ""
+	depth := 0
+	for _, l := range fileLines[:idx] {
+		var scan string
+		scan, open = stripLiteralsStateful(LangPython, l.Text, open)
+		if depth > 0 {
+			pyConsumeParens(scan, &depth)
+		} else if loc := rePyDefOpen.FindStringIndex(scan); loc != nil {
+			depth = 1
+			pyConsumeParens(scan[loc[1]:], &depth)
+		}
+	}
+	return depth
 }
 
 // assignLHS returns the substring left of the first plain assignment '=' on a

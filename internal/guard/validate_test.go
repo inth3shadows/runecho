@@ -127,6 +127,50 @@ func TestRun_DictKeyEditedInExistingLiteralIsChecked(t *testing.T) {
 	}
 }
 
+// TestRun_KwargEditedInExistingCallIsChecked pins #294 — PyDeclaredNames'
+// counterpart to #289 (TestRun_DictKeyEditedInExistingLiteralIsChecked
+// above), for a general call/list/dict bracket rather than specifically a
+// dict literal. A hunk consisting of `    timeout=30,` sitting inside a
+// pre-existing multi-line call whose opener sits in unchanged context above
+// the hunk must not misread the kwarg as a genuine top-level assignment
+// (which would fold `timeout` into `known` and silently suppress the
+// genuinely unresolved `timeout(...)` reference elsewhere in the same diff)
+// — the exact scenario described in the issue.
+func TestRun_KwargEditedInExistingCallIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	// The call opens on line 1 and stays open through the edited kwarg (line 3).
+	content := "connect(\n" +
+		"    host=\"x\",\n" +
+		"    timeout=30,\n" +
+		")\n" +
+		"timeout(5)\n"
+	path := filepath.Join(dir, "runner.py")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diffs := []FileDiff{{
+		Path:    "runner.py",
+		AbsPath: path,
+		AddedLines: []AddedLine{
+			{LineNo: 3, Text: "    timeout=30,"},
+			{LineNo: 5, Text: "timeout(5)"},
+		},
+	}}
+	v := Run(map[string]struct{}{"connect": {}}, "", diffs)
+	if len(v) != 1 || v[0].Symbol != "timeout" {
+		t.Fatalf("timeout(5) must still flag as unresolved — the kwarg on line 3 must not fold `timeout` into known via the AbsPath seed, got %+v", v)
+	}
+
+	// Control: without the seed, the kwarg starts scanning at depth 0 and
+	// misreads as a top-level `timeout = 30` assignment, folding `timeout`
+	// into known and silently suppressing the later call — the exact false
+	// negative this seeding closes.
+	diffs[0].AbsPath = ""
+	if v := Run(map[string]struct{}{"connect": {}}, "", diffs); len(v) != 0 {
+		t.Fatalf("unseeded control should NOT flag timeout (misread as an assignment, suppressing the call); got %+v — test no longer covers seeding", v)
+	}
+}
+
 // TestRun_DocstringSeedThreadedIntoPass1 pins a round-3 code-review finding on
 // PR #290: Pass 1 (extractDefsSeeded) got braceDepthSeed but not openSeed, so its
 // own local string-open tracker started unseeded at each hunk while Pass 2's

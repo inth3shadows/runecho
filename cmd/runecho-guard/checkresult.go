@@ -64,7 +64,7 @@ var checkOrder = []string{
 // needs verifying is this mapping (Verdict == VerdictViolation → the matching
 // bool field), a much smaller surface than askReason's own string-joining.
 //
-// A result whose Check name is not one of checkOrder's ten is ignored rather
+// A result whose Check name is not one of checkOrder's eleven is ignored rather
 // than erroring: this stays a pure projection, and an unrecognized name is a
 // caller bug that unit tests (not a panic on every hook invocation) should
 // catch.

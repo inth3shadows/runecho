@@ -465,8 +465,8 @@
     {
       "id": "lint/isolated-flag",
       "file": "cmd/runecho-guard/lint.go",
-      "find": "cmd := exec.CommandContext(ctx, ruffBin, \"check\", \"--no-cache\", \"--isolated\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
-      "replace": "cmd := exec.CommandContext(ctx, ruffBin, \"check\", \"--no-cache\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "find": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\", \"--isolated\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
+      "replace": "cmd := exec.CommandContext(ctx, \"ruff\", \"check\", \"--no-cache\",\n\t\t\"--select\", \"F821,F811\", \"--stdin-filename\", filePath, \"--output-format\", \"json\", \"-\")",
       "desc": "config discovery (pyproject.toml/ruff.toml) is no longer refused, so an attacker-controlled config in the tree can silence a real finding"
     },
     {

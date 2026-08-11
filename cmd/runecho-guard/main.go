@@ -1174,7 +1174,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		fmt.Fprintf(&sb, "[runecho-guard] %d ruff finding(s) (F821/F811):\n", len(lintFindingsList))
 		for _, f := range lintFindingsList {
 			fmt.Fprintf(&sb, "  line %d: %s %s\n", f.Line, f.Rule, f.Message)
-			syms = append(syms, f.Rule)
+			if f.Symbol != "" {
+				syms = append(syms, f.Symbol)
+			} else {
+				syms = append(syms, f.Rule)
+			}
 		}
 	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")

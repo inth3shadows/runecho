@@ -34,7 +34,26 @@ var lintTimeout = 2 * time.Second
 type lintFinding struct {
 	Line    int
 	Rule    string // ruff's "code", e.g. "F821"
+	Symbol  string // the flagged identifier, e.g. "helper" — see lintSymbolFromMessage
 	Message string
+}
+
+// lintSymbolFromMessage pulls the flagged identifier out of ruff's own
+// message text — both F821 ("Undefined name `helper`") and F811
+// ("Redefinition of unused `fetch` from line 1: ...") name it first inside
+// backticks. Falls back to "" (caller substitutes the rule code) rather than
+// guessing, since a future ruff version reformatting the message is a
+// silent-degrade case, not a crash.
+func lintSymbolFromMessage(msg string) string {
+	start := strings.IndexByte(msg, '`')
+	if start < 0 {
+		return ""
+	}
+	end := strings.IndexByte(msg[start+1:], '`')
+	if end < 0 {
+		return ""
+	}
+	return msg[start+1 : start+1+end]
 }
 
 // lintFindingsWithReason runs ruff against content (a Write payload's full
@@ -47,19 +66,22 @@ type lintFinding struct {
 // an untrusted tree can't reach the subprocess and silence a real finding —
 // measured to cost nothing (issue's own p50/p99 table shows config
 // discovery isn't the cost; process start is), so it is not an opt-in.
+// No separate exec.LookPath("ruff") here: the caller (runHookMode) already
+// resolves it before ever calling this function, so its own Skipped gate
+// covers "ruff not found" — a second, independent LookPath here would race
+// that one (ruff vanishing from PATH between the two calls) and misreport as
+// a clean VerdictOK instead of an abstain. exec.CommandContext resolves the
+// bare name itself at Run() time; a not-found error surfaces through the
+// same non-ExitError branch below as any other exec failure.
 func lintFindingsWithReason(filePath, content string) ([]lintFinding, string) {
-	ruffBin, err := exec.LookPath("ruff")
-	if err != nil {
-		return nil, "" // caller's Skipped gate covers "ruff not found"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), lintTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, ruffBin, "check", "--no-cache", "--isolated",
+	cmd := exec.CommandContext(ctx, "ruff", "check", "--no-cache", "--isolated",
 		"--select", "F821,F811", "--stdin-filename", filePath, "--output-format", "json", "-")
 	cmd.Stdin = strings.NewReader(content)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, "timeout"
 	}
@@ -82,7 +104,7 @@ func lintFindingsWithReason(filePath, content string) ([]lintFinding, string) {
 	}
 	findings := make([]lintFinding, 0, len(raw))
 	for _, r := range raw {
-		findings = append(findings, lintFinding{Line: r.Location.Row, Rule: r.Code, Message: r.Message})
+		findings = append(findings, lintFinding{Line: r.Location.Row, Rule: r.Code, Symbol: lintSymbolFromMessage(r.Message), Message: r.Message})
 	}
 	return findings, ""
 }

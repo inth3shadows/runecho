@@ -52,11 +52,15 @@ func TestLintFindingsWithReason_HappyPath(t *testing.T) {
 	})
 }
 
+// TestLintFindingsWithReason_RuffAbsent covers a caller that skipped its own
+// LookPath gate (or hit the TOCTOU window where ruff vanishes between the
+// caller's check and this one) — exec.CommandContext must still surface a
+// real abstain, not silently read as "ran clean".
 func TestLintFindingsWithReason_RuffAbsent(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	findings, reason := lintFindingsWithReason("client.py", "def go():\n    return undefined_thing(1)\n")
-	if findings != nil || reason != "" {
-		t.Fatalf("findings=%v reason=%q, want nil/empty — caller's Skipped gate covers ruff-not-found", findings, reason)
+	if findings != nil || reason != "lint-exec-failed" {
+		t.Fatalf("findings=%v reason=%q, want nil/%q", findings, reason, "lint-exec-failed")
 	}
 }
 
@@ -121,8 +125,17 @@ func TestRunHookMode_Lint(t *testing.T) {
 		if strings.Contains(d.Hook.PermissionReason, "snippet line") {
 			t.Fatalf("ask uses hunk-relative \"snippet line\" wording — lint reports true file lines:\n%s", d.Hook.PermissionReason)
 		}
-		if rec := readLastDecisionLog(t); rec == nil || rec["reason"] != "lint" {
+		rec := readLastDecisionLog(t)
+		if rec == nil || rec["reason"] != "lint" {
 			t.Errorf("decision-log reason = %v, want %q", rec["reason"], "lint")
+		}
+		// decisionRecord.Symbols must carry the flagged identifier ("fetch"),
+		// not ruff's rule code ("F811") -- guardstats' per-symbol frequency
+		// report and fpaudit's duplicate-fire dedup both key on this field,
+		// and every OTHER check in this file appends the real name here.
+		syms, _ := rec["symbols"].([]any)
+		if len(syms) != 1 || syms[0] != "fetch" {
+			t.Fatalf("decision-log symbols = %v, want [\"fetch\"] -- not the rule code", rec["symbols"])
 		}
 	})
 

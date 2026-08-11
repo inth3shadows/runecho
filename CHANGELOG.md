@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-08-11
+
+### Changed
+- guard: gated pre-write lint substrate (#333) (#338)
+
 ## [0.38.0] — 2026-08-11
 
 ### Changed

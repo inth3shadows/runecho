@@ -1703,6 +1703,19 @@ func hookModeLabel(name string) string {
 
 func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int) {
 	var buf bytes.Buffer
+	// This outer recover is a SEPARATE backstop from the one inside the
+	// goroutine below. Go does not propagate a goroutine's panic to its
+	// parent's defers, so fn()'s own recover only protects fn() — it does
+	// nothing for a panic in THIS goroutine, which is where the select
+	// below, out.Write, and the timeout branch's warnf/logDecision all run.
+	// Losing this would silently reopen the exact bug deferOnPanic exists to
+	// close, just for a narrower slice of the function.
+	defer func() {
+		if r := recover(); r != nil {
+			warnf("%s panicked — edit deferred, NOT blocked: %v", name, r)
+			code = 0
+		}
+	}()
 	type result struct {
 		code     int
 		panicked bool

@@ -61,6 +61,36 @@ func TestDeferOnPanic_PreservesNonZeroExit(t *testing.T) {
 	}
 }
 
+// panicWriter panics on Write, standing in for anything that can fail
+// catastrophically on the OUT side of deferOnPanic — the one path the
+// fn-side recover (inside the child goroutine) does not reach, since it only
+// protects fn() itself.
+type panicWriter struct{}
+
+func (panicWriter) Write([]byte) (int, error) {
+	panic("simulated write failure")
+}
+
+// TestDeferOnPanic_RecoversPanicOutsideFn pins the half of the fail-open
+// contract fn's own recover cannot cover: deferOnPanic buffers fn's output
+// and then calls out.Write itself, in the CALLING goroutine, after fn's
+// child goroutine has already exited. A panic there — or anywhere else in
+// deferOnPanic's own code, including the timeout branch — needs its own
+// recover, because Go does not propagate a panic across a goroutine boundary
+// to the parent's defers. Losing this recover (as an earlier revision of the
+// #332 timeout rework did) silently reopens the exact bug this function
+// exists to close, just for a narrower slice of it.
+func TestDeferOnPanic_RecoversPanicOutsideFn(t *testing.T) {
+	code := deferOnPanic("test-mode", panicWriter{}, func(w io.Writer) int {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+		return 0
+	})
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 — a panic in out.Write must defer, not block", code)
+	}
+}
+
 // TestDeferOnPanic_TimesOut is #332's backstop: a hang in fn is the one
 // degraded state the panic/exit-code contract above does not cover — nothing
 // panics, nothing returns, and without this the hook blocks the agent's edit

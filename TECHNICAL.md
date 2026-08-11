@@ -210,7 +210,7 @@ change date is only valid for combinations that involve none of them.
 | Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
 | Receiver method | `RUNECHO_GUARD_RECVMETHOD` | (Go) `r.Foo()` inside `func (r *T)` where `T` has no member `Foo`. The receiver is the one value in Go whose type is written lexically, so this needs no type inference. Five gates keep it precision-first, the last being an embedding backstop: it fires only on a name the repository has never seen in any form |
 | Call-shape agreement | `RUNECHO_GUARD_CALLSHAPE` | (Python) A keyword argument the callee's declaration does not accept — the name resolves, the call does not match it (#243). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot (#261) |
-| Pre-write lint substrate | `RUNECHO_GUARD_LINT` | (Python, **Write only**) A trusted whole-file linter (`ruff`, rules F821/F811) run against the proposed file content before it reaches disk (#333). Needs no index. Reports true file line numbers, not the hunk-relative "snippet line N" every other hook-mode check carries. Edit/MultiEdit is an explicit non-goal for v1 — see the lint call site's comment in `runHookMode` (`cmd/runecho-guard/main.go`) for why |
+| Pre-write lint substrate | `RUNECHO_GUARD_LINT` | (Python, **Write only**) A trusted whole-file linter (`ruff`, rules F821/F811) run against the proposed file content before it reaches disk (#333). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot. Reports true file line numbers, not the hunk-relative "snippet line N" every other hook-mode check carries. Findings the always-on additive check already reported are suppressed, so one hallucination is never counted twice. Requires `ruff` on `PATH` — absent, the check stays silent (fail-open). Edit/MultiEdit is an explicit non-goal for v1 — see the lint call site's comment in `runHookMode` (`cmd/runecho-guard/main.go`) for why |
 
 C3 **learned-allow** (`RUNECHO_GUARD_LEARN`) is not a check but a suppressor:
 after a symbol is approved `RUNECHO_GUARD_LEARN_N` times (default 2) it stops
@@ -229,12 +229,13 @@ must never block work. The last of those is covered by two independent layers
 the process never returns at all, and an inner `guardTimeout` (4s,
 `cmd/runecho-guard/main.go`) that lets the guard notice its own hang first,
 defer cleanly, and log `Reason: "timeout"` to `decisions.jsonl` instead of
-being killed from outside with no record. Two checks
+being killed from outside with no record. Three checks
 are exceptions, and only when explicitly enabled: the edit-scope contract
-resolves off the repo row alone, and call-shape resolves against the edited
-file's own declarations, so with `RUNECHO_GUARD_CONTRACT=1` /
-`RUNECHO_GUARD_CALLSHAPE=1` those two still answer on a repo with no usable
-snapshot, and call-shape also answers on an unenrolled tree (#261). A
+resolves off the repo row alone, call-shape resolves against the edited
+file's own declarations, and lint resolves against the Write payload itself,
+so with `RUNECHO_GUARD_CONTRACT=1` / `RUNECHO_GUARD_CALLSHAPE=1` /
+`RUNECHO_GUARD_LINT=1` those three still answer on a repo with no usable
+snapshot, and the latter two also answer on an unenrolled tree (#261). A
 schema-newer store is never one of these: that advisory is surfaced instead,
 because a stale binary is the thing the user has to fix first. Repo
 resolution is three-tier: git-common-dir key (O(1), schema V4) → enrolled-path

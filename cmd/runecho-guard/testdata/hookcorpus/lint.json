@@ -23,6 +23,35 @@
     "expect_log_reason": "lint"
   },
   {
+    "name": "python-lint-syntax-error-clean",
+    "desc": "ruff emits `invalid-syntax` diagnostics UNCONDITIONALLY — `--select F821,F811` does not suppress them (verified against 0.16.1). Without the explicit rule filter in lintFindingsWithReason this Write asks with a header claiming '(F821/F811)' over a parser error, and lintSymbolFromMessage puts punctuation (')' out of \"Expected `)`, found newline\") into decisionRecord.Symbols — the field guardstats buckets per-symbol and fpaudit dedups on. A file the interpreter cannot parse is also not a resolution question: it fails loudly at runtime with or without the guard.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "file": "pkg/broken.py",
+    "no_pre_edit_file": true,
+    "new": "def go(:\n    return 1\n",
+    "expect_ask": false
+  },
+  {
+    "name": "python-lint-additive-overlap-adds-nothing",
+    "desc": "The firewall against the additive check. `totally_made_up` resolves nowhere, so the ALWAYS-ON additive check flags it — and ruff independently flags the same name F821, since 'undefined name' and 'not found in the indexed code' are the same question asked twice. ask_without_flag is the shape built for exactly this (the file-scope firewall): it asserts flag-OFF already asks, then that flag-ON produces a BYTE-IDENTICAL reason. A plain expect_ask fixture cannot see this defect — removing the firewall only DOUBLES an existing ask, which an ask/no-ask assertion reads as unchanged.",
+    "check": "lint",
+    "flags": [
+      "RUNECHO_GUARD_LINT=1"
+    ],
+    "file": "pkg/overlap.py",
+    "no_pre_edit_file": true,
+    "new": "def go():\n    return totally_made_up(1)\n",
+    "expect_ask": true,
+    "ask_without_flag": true,
+    "expect_symbols": [
+      "totally_made_up"
+    ],
+    "expect_log_reason": "violations"
+  },
+  {
     "name": "python-lint-edit-tool-clean",
     "desc": "Same isolating shape as the ask fixture (a same-file redefinition, so nothing else fires), replayed as an Edit hunk. Lint is Write-only in v1: an Edit hunk alone ('    return 1\\n\\ndef fetch():...' with no enclosing def) is not valid standalone Python, so if the tool-gate were ever removed this would ask for the wrong reason (a ruff invalid-syntax finding on a fragment) rather than staying silent — which is exactly why Write-only matters, not an incidental detail of this fixture.",
     "check": "lint",

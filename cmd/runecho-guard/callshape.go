@@ -70,22 +70,43 @@ func callShapeSection(sb *strings.Builder, ms []guard.CallShapeMismatch) []strin
 	return syms
 }
 
+// askWithoutIndexTrailer picks the closing line for a store-free ask. The
+// call-shape-only string is reproduced BYTE-IDENTICALLY to what shipped before
+// lint could answer here: it is the text an approving user has been reading,
+// and a silent reword would make before/after dogfood transcripts
+// incomparable for the check whose rate is actually being measured.
+//
+// Each variant names only the flags that can actually silence the findings it
+// accompanies. Naming RUNECHO_GUARD_CALLSHAPE=0 on a lint-only ask sends the
+// user to a switch that changes nothing, which is the same "remedy that
+// cannot work" failure the call-shape trailer's own comment warns about.
+func askWithoutIndexTrailer(hasShapes, hasLints bool) string {
+	switch {
+	case hasShapes && hasLints:
+		return "Approve if these are legitimate (a dynamic or re-bound callee, a signature this edit does not show, or a name defined at runtime). RUNECHO_GUARD_CALLSHAPE=0 / RUNECHO_GUARD_LINT=0 disable the individual checks; RUNECHO_GUARD_SKIP=1 disables the guard."
+	case hasLints:
+		return "Approve if these are legitimate (a name defined at runtime, or an intended redefinition). RUNECHO_GUARD_LINT=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard."
+	default:
+		return "Approve if the call is legitimate (a dynamic or re-bound callee, or a signature this edit does not show). RUNECHO_GUARD_CALLSHAPE=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard."
+	}
+}
+
 // askWithoutIndex emits the ask for a path where the symbol pipeline never ran —
 // an unenrolled tree, an unreadable store, an enrolled repo with no snapshot —
-// and reports whether it emitted. Two checks survive those states: a contract
-// binding, which resolves off the repo row alone, and call-shape, which needs no
-// store row at all. Everything else there is genuinely unanswerable.
+// and reports whether it emitted. Three checks survive those states: a contract
+// binding, which resolves off the repo row alone, and call-shape and lint, which
+// need no store row at all. Everything else there is genuinely unanswerable.
 //
 // Callers must invoke this INSTEAD OF their defer, not before it: the hook emits
 // exactly one decision.
 //
-// With no mismatches it delegates verbatim to askContractOnly rather than
-// re-rendering, so the long-shipped contract-only text and its "contract" log
-// reason are untouched by this path existing.
+// With no findings from either store-free check it delegates verbatim to
+// askContractOnly rather than re-rendering, so the long-shipped contract-only
+// text and its "contract" log reason are untouched by this path existing.
 //
 // editHash is threaded straight through to the ask record — see askContractOnly.
-func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
-	if len(ms) == 0 {
+func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, lints []lintFinding, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
+	if len(ms) == 0 && len(lints) == 0 {
 		return askContractOnly(out, cw, filePath, lang, editHash)
 	}
 	var sb strings.Builder
@@ -97,12 +118,13 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		sb.WriteString(cw.section())
 	}
 	syms := callShapeSection(&sb, ms)
+	syms = append(syms, lintSection(&sb, lints)...)
 	// Not the full ask's trailer. That one offers .runechoguardignore, which
-	// guard.Run consumes and call-shape never consults — and on an unenrolled
-	// tree there is no resolved repo root to hold one anyway. Naming a remedy
-	// that cannot work is worse than naming fewer: the user tries it, nothing
-	// changes, and the next ask reads as the guard being broken.
-	sb.WriteString("Approve if the call is legitimate (a dynamic or re-bound callee, or a signature this edit does not show). RUNECHO_GUARD_CALLSHAPE=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard.")
+	// guard.Run consumes and neither store-free check consults — and on an
+	// unenrolled tree there is no resolved repo root to hold one anyway. Naming
+	// a remedy that cannot work is worse than naming fewer: the user tries it,
+	// nothing changes, and the next ask reads as the guard being broken.
+	sb.WriteString(askWithoutIndexTrailer(len(ms) > 0, len(lints) > 0))
 	hookAskContext(out, sb.String(), advisory)
 
 	// Not contractReason(cw != nil, askReason(...)) with all-false flags:
@@ -117,7 +139,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		File:     filePath,
 		Lang:     string(lang),
 		Decision: "ask",
-		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: true})),
+		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: len(ms) > 0, Lint: len(lints) > 0})),
 		Symbols:  syms,
 		Edit:     editHash,
 	}

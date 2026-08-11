@@ -71,6 +71,7 @@ func installHooks(root string, force bool) (installed int, err error) {
 		return 0, fmt.Errorf("resolve binary path: %w", err)
 	}
 	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
+	warnIfNotInstalledBinary(irBin)
 
 	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %s \"$@\"\n", shellQuote(guardBin))
 	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
@@ -118,6 +119,49 @@ func installHooks(root string, force bool) (installed int, err error) {
 		fmt.Printf("Hooks installed in %s (%d/%d)\n", hooksDir, installed, len(hooks))
 	}
 	return installed, nil
+}
+
+// installLookupInstalledBin resolves the `runecho-ir` a normal invocation —
+// a hook firing, or a user typing the bare command — would run. Seam
+// overridden in tests: exec.LookPath depends on the real PATH, which a test
+// must not rely on.
+var installLookupInstalledBin = func() (string, error) { return exec.LookPath("runecho-ir") }
+
+// warnIfNotInstalledBinary compares the currently-running binary against the
+// one `runecho-ir` resolves to on PATH. installHooks writes hook bodies that
+// invoke THIS process's own path (irBin) — shared by every worktree of the
+// repo via the common git dir. A mismatch means those hooks are about to
+// point at something other than the operator's normal install (a scratch
+// `go build .` from a dev checkout is the case that bit #301: RUNECHO_HOME
+// read as isolating the sandbox, but the hooks it silently repointed are
+// shared state, not sandboxed).
+//
+// Advisory only, not a block: some workflows (packaging, an intentionally
+// pinned build, CI) legitimately want a non-PATH binary's hooks installed.
+// The bug #301 documents was that this happened with no signal at all — the
+// hooks kept working, just against the wrong binary — so silence is the
+// thing being fixed here, not the ability to do it deliberately.
+func warnIfNotInstalledBinary(irBin string) {
+	installed, err := installLookupInstalledBin()
+	if err != nil {
+		return // nothing on PATH to compare against; nothing to warn about
+	}
+	// Resolve symlinks on both sides so a symlinked install (e.g. a Homebrew
+	// Cellar layout) doesn't read as a mismatch against itself.
+	self, err1 := filepath.EvalSymlinks(irBin)
+	other, err2 := filepath.EvalSymlinks(installed)
+	if err1 != nil || err2 != nil {
+		self, other = irBin, installed
+	}
+	if self == other {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"  Warning: this binary (%s) is not the one on PATH (%s) — the hooks\n"+
+			"  about to be written will point at THIS binary for every worktree of\n"+
+			"  this repo. If unintentional, re-run from the installed binary, or\n"+
+			"  pass --no-hooks.\n",
+		irBin, installed)
 }
 
 // installHookFile writes a single hook script. Skips if an existing hook is not

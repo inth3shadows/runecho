@@ -120,3 +120,76 @@ func TestInstallHooks_FreshnessFoldedIn(t *testing.T) {
 		t.Errorf("pre-commit is not the guard hook:\n%s", body)
 	}
 }
+
+// warnIfNotInstalledBinary must warn when the running binary differs from the
+// one `runecho-ir` resolves to on PATH — the scenario that bit #301, where a
+// scratch build silently repointed a repo's shared hooks for every worktree
+// with no signal at all.
+func TestWarnIfNotInstalledBinary_MismatchWarns(t *testing.T) {
+	orig := installLookupInstalledBin
+	defer func() { installLookupInstalledBin = orig }()
+	installLookupInstalledBin = func() (string, error) {
+		return "/usr/local/bin/runecho-ir", nil
+	}
+
+	_, stderr := captureOutput(func() {
+		warnIfNotInstalledBinary("/tmp/scratch-build/runecho-ir")
+	})
+	if !strings.Contains(stderr, "not the one on PATH") {
+		t.Errorf("expected a mismatch warning on stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "--no-hooks") {
+		t.Errorf("warning should name the escape hatch, got: %q", stderr)
+	}
+}
+
+// The match case must stay silent — most invocations (a normal `runecho-ir
+// install` run from the installed binary) are not the #301 scenario, and a
+// warning on every run would be noise the real one gets lost in.
+func TestWarnIfNotInstalledBinary_MatchIsSilent(t *testing.T) {
+	orig := installLookupInstalledBin
+	defer func() { installLookupInstalledBin = orig }()
+	installLookupInstalledBin = func() (string, error) {
+		return "/usr/local/bin/runecho-ir", nil
+	}
+
+	_, stderr := captureOutput(func() {
+		warnIfNotInstalledBinary("/usr/local/bin/runecho-ir")
+	})
+	if stderr != "" {
+		t.Errorf("expected no warning when binaries match, got: %q", stderr)
+	}
+}
+
+// A resolvable-but-nonexistent PATH entry (EvalSymlinks fails) must fall back
+// to a raw string comparison rather than warning spuriously or panicking.
+func TestWarnIfNotInstalledBinary_UnresolvablePathFallsBackToRawCompare(t *testing.T) {
+	orig := installLookupInstalledBin
+	defer func() { installLookupInstalledBin = orig }()
+	const same = "/does/not/exist/runecho-ir"
+	installLookupInstalledBin = func() (string, error) { return same, nil }
+
+	_, stderr := captureOutput(func() {
+		warnIfNotInstalledBinary(same)
+	})
+	if stderr != "" {
+		t.Errorf("identical unresolvable paths must not warn, got: %q", stderr)
+	}
+}
+
+// No `runecho-ir` on PATH at all (LookPath errors, e.g. a fresh install
+// before PATH is updated) must not warn — there is nothing to compare against.
+func TestWarnIfNotInstalledBinary_LookupFailureIsSilent(t *testing.T) {
+	orig := installLookupInstalledBin
+	defer func() { installLookupInstalledBin = orig }()
+	installLookupInstalledBin = func() (string, error) {
+		return "", exec.ErrNotFound
+	}
+
+	_, stderr := captureOutput(func() {
+		warnIfNotInstalledBinary("/tmp/scratch-build/runecho-ir")
+	})
+	if stderr != "" {
+		t.Errorf("expected no warning when PATH lookup fails, got: %q", stderr)
+	}
+}

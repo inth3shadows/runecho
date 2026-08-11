@@ -60,7 +60,7 @@
     {
       "id": "filescope/edit-binds-names",
       "file": "internal/guard/filescope.go",
-      "find": "\tfor name := range pyFileScope(addedLines, openSeed, braceSeed) {\n\t\tscope[name] = struct{}{}\n\t}",
+      "find": "\tfor name := range pyFileScope(addedLines, openSeed, braceSeed, bracketSeed, defSigSeed, paramSigSeed) {\n\t\tscope[name] = struct{}{}\n\t}",
       "replace": "",
       "desc": "a binding introduced by the edit itself no longer resolves"
     },

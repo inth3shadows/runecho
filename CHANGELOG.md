@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-08-11
+
+### Changed
+- guard: typed per-check result — Verdict/CheckResult (#330) (#337)
+
 ## [0.37.0] — 2026-08-11
 
 ### Changed

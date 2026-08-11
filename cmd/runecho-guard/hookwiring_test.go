@@ -45,6 +45,16 @@ var hookContract = map[string]string{
 
 const hookMatcher = "Edit|Write|MultiEdit"
 
+// wantHookTimeout is the outer, Claude-Code-enforced per-hook-invocation
+// timeout (in seconds) every shipped config must set. It exists as a backstop
+// for the one degraded state nothing else covers: the guard process itself
+// hanging (#332) — a stalled disk read, a pathological parse, anything that
+// blocks before deferOnPanic's own inner guardTimeout (main.go) gets a chance
+// to fire. Kept as its own named constant, not a bare 5, so a future change to
+// either side of the pair (this value or main.go's guardTimeout) is a one-line
+// diff instead of a grep.
+const wantHookTimeout = 5
+
 // repoRoot walks up from this package (cmd/runecho-guard) to the module root.
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -84,6 +94,11 @@ type claudeHookFile struct {
 		Hooks   []struct {
 			Type    string `json:"type"`
 			Command string `json:"command"`
+			// Timeout is a *int so a config that omits the field is distinguishable
+			// from one that sets it to a JSON 0 — both would otherwise decode to the
+			// zero value and the presence check below would go blind to the field
+			// simply vanishing from a future edit.
+			Timeout *int `json:"timeout"`
 		} `json:"hooks"`
 	} `json:"hooks"`
 }
@@ -129,8 +144,20 @@ func TestShippedConfigsWireEveryHookEvent(t *testing.T) {
 						name, event, entry.Matcher, hookMatcher)
 				}
 				for _, h := range entry.Hooks {
-					if strings.Contains(h.Command, mode) {
-						found = true
+					if !strings.Contains(h.Command, mode) {
+						continue
+					}
+					found = true
+					// #332: a hook with no timeout can hang the agent's edit
+					// indefinitely with no diagnostic — the one degraded state
+					// nothing else in the fail-open contract covers. See
+					// guardTimeout's doc comment in main.go for why this must
+					// stay a strictly outer backstop, not the primary defense.
+					if h.Timeout == nil {
+						t.Errorf("%s: %s hook has no \"timeout\" — a hang in the guard "+
+							"process blocks the edit indefinitely instead of failing open", name, event)
+					} else if *h.Timeout != wantHookTimeout {
+						t.Errorf("%s: %s hook timeout = %d, want %d", name, event, *h.Timeout, wantHookTimeout)
 					}
 				}
 			}
@@ -200,6 +227,14 @@ func TestPrintHookConfigWiresEveryHookEvent(t *testing.T) {
 				if strings.ContainsAny(h.Command, "$") {
 					t.Errorf("--print-hook-config %s command has an unexpanded variable: %q",
 						event, h.Command)
+				}
+				// #332: the manual-fallback channel is exactly as exposed to a
+				// hang as the other two — it has no reason to be the one that
+				// ships without the backstop.
+				if h.Timeout == nil {
+					t.Errorf("--print-hook-config %s hook has no \"timeout\"", event)
+				} else if *h.Timeout != wantHookTimeout {
+					t.Errorf("--print-hook-config %s hook timeout = %d, want %d", event, *h.Timeout, wantHookTimeout)
 				}
 			}
 		}

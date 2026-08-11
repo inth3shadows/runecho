@@ -47,8 +47,13 @@ enough to run its hooks against.
 ### The guard is a hallucination-catcher, not a security control
 
 `runecho-guard` is fail-open by design: missing store, unenrolled repo, no
-snapshot, DB error, or a hung git subprocess all degrade to silence rather than
-blocking work. One consequence is worth stating plainly: with
+snapshot, DB error, a hung git subprocess, or the guard process itself hanging
+all degrade to silence rather than blocking work. The last is covered by an
+outer per-hook `"timeout": 5` in every shipped Claude Code hook config plus an
+inner 4s deadline inside the guard (`guardTimeout`, `cmd/runecho-guard/main.go`,
+#332) — a hang produces a clean defer and a `Reason: "timeout"` line in
+`decisions.jsonl`, not an indefinitely stuck edit. One consequence is worth
+stating plainly: with
 `RUNECHO_GUARD_CALLSHAPE=1` (default off) the guard reads and parses the edited
 Python file even on a tree that was never enrolled, since that check needs no
 index — so the trust boundary below covers any repo you EDIT under the hook, not

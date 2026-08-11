@@ -220,8 +220,15 @@ allowed forever. Only *hallucination-origin* approvals train it: approving a
 dangling or duplicate ask says the edit was fine, never that the name resolves.
 
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
-error, or a hung git subprocess (2s cap, `gitutil.Timeout`) all degrade to
-silence — the guard blocks hallucinations; it must never block work. Two checks
+error, a hung git subprocess (2s cap, `gitutil.Timeout`), or the guard process
+itself hanging all degrade to silence — the guard blocks hallucinations; it
+must never block work. The last of those is covered by two independent layers
+(#332): an outer `"timeout": 5` on every shipped hook config (`hooks.json`,
+`.claude/settings.json`, `install.sh --print-hook-config`) as the backstop if
+the process never returns at all, and an inner `guardTimeout` (4s,
+`cmd/runecho-guard/main.go`) that lets the guard notice its own hang first,
+defer cleanly, and log `Reason: "timeout"` to `decisions.jsonl` instead of
+being killed from outside with no record. Two checks
 are exceptions, and only when explicitly enabled: the edit-scope contract
 resolves off the repo row alone, and call-shape resolves against the edited
 file's own declarations, so with `RUNECHO_GUARD_CONTRACT=1` /

@@ -1672,21 +1672,82 @@ func sanitizeReasonPaths(paths []string) []string {
 // fn writes to a buffer instead of straight to out so a panic partway through a
 // response cannot leave a truncated JSON frame — or, worse, a complete frame
 // followed by a second one — on the hook's stdout. On success the buffer is
-// flushed verbatim; on panic it is discarded, and emitting nothing is precisely
-// what hookDefer() does.
+// flushed verbatim; on panic (or timeout, below) it is discarded, and emitting
+// nothing is precisely what hookDefer() does.
+//
+// guardTimeout is this function's own deadline for fn, distinct from the outer
+// "timeout": 5 set in every shipped hook config (hooks.json, .claude/settings.json,
+// install.sh --print-hook-config). Two layers, not one: the outer timeout is
+// Claude Code's backstop if the guard process itself never returns; this inner
+// one lets the guard notice its own hang first, defer cleanly, and leave a
+// diagnosable `Reason: "timeout"` line in decisions.jsonl instead of being
+// killed from outside with no record at all. It must stay comfortably under the
+// outer value — the point of the inner deadline is to win that race every time.
+//
+// A var, not a const: TestDeferOnPanic_TimesOut shrinks it for the duration of
+// one test so the suite pins the timeout behavior without actually sleeping 4
+// real seconds per run.
+var guardTimeout = 4 * time.Second
+
+// hookModeLabel maps deferOnPanic's name argument ("hook-mode" / "outcome-mode")
+// to the decisionRecord.Mode value the rest of this file already uses ("hook").
+// Only used on the timeout path, where fn never got far enough to log its own
+// Mode — every other early-defer log line in this file hand-writes "hook" for
+// the same reason (see main.go:607,676,682,700).
+func hookModeLabel(name string) string {
+	if name == "outcome-mode" {
+		return "outcome"
+	}
+	return "hook"
+}
+
 func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int) {
 	var buf bytes.Buffer
+	// This outer recover is a SEPARATE backstop from the one inside the
+	// goroutine below. Go does not propagate a goroutine's panic to its
+	// parent's defers, so fn()'s own recover only protects fn() — it does
+	// nothing for a panic in THIS goroutine, which is where the select
+	// below, out.Write, and the timeout branch's warnf/logDecision all run.
+	// Losing this would silently reopen the exact bug deferOnPanic exists to
+	// close, just for a narrower slice of the function.
 	defer func() {
 		if r := recover(); r != nil {
-			// stderr only: in hook mode stdout is the JSON protocol channel, and
-			// the operator still needs the panic to be diagnosable.
 			warnf("%s panicked — edit deferred, NOT blocked: %v", name, r)
 			code = 0
 		}
 	}()
-	code = fn(&buf)
-	_, _ = out.Write(buf.Bytes())
-	return code
+	type result struct {
+		code     int
+		panicked bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// stderr only: in hook mode stdout is the JSON protocol channel, and
+				// the operator still needs the panic to be diagnosable.
+				warnf("%s panicked — edit deferred, NOT blocked: %v", name, r)
+				done <- result{code: 0, panicked: true}
+			}
+		}()
+		done <- result{code: fn(&buf)}
+	}()
+
+	select {
+	case res := <-done:
+		if !res.panicked {
+			_, _ = out.Write(buf.Bytes())
+		}
+		return res.code
+	case <-time.After(guardTimeout):
+		// fn may still be running in the background goroutine; it writes only to
+		// buf (never touched again here) and the goroutine dies with the process
+		// on the os.Exit that follows main()'s return, so there is nothing to
+		// clean up and no data race to guard against.
+		warnf("%s exceeded %s — edit deferred, NOT blocked (timeout)", name, guardTimeout)
+		logDecision(decisionRecord{Mode: hookModeLabel(name), Decision: "defer", Reason: "timeout"})
+		return 0
+	}
 }
 
 // hookDefer emits no decision, so Claude Code applies its normal permission flow.

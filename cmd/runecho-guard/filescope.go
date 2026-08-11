@@ -29,14 +29,23 @@ func fileScopeEnabled() bool { return os.Getenv("RUNECHO_GUARD_FILESCOPE") == "1
 // ABSENT from the known set, while this one fires only on names PRESENT in it. The
 // two are disjoint by construction, so a symbol can never be reported twice.
 func fileScopeViolations(lang guard.Lang, wholeFileLines []guard.AddedLine, fd guard.FileDiff, repoSymbols map[string]struct{}, path string) []guard.Violation {
+	vs, _ := fileScopeViolationsWithReason(lang, wholeFileLines, fd, repoSymbols, path)
+	return vs
+}
+
+// fileScopeViolationsWithReason is fileScopeViolations plus the reason the
+// check abstained — "oversized-pre-edit-file", "star-import", or
+// "dynamic-binding" — see guard.FileScopeViolationsWithReason, which this
+// wraps.
+func fileScopeViolationsWithReason(lang guard.Lang, wholeFileLines []guard.AddedLine, fd guard.FileDiff, repoSymbols map[string]struct{}, path string) ([]guard.Violation, string) {
 	if !fileScopeEnabled() || lang != guard.LangPython {
-		return nil
+		return nil, ""
 	}
-	vs := guard.FileScopeViolations(lang, wholeFileLines, fd, repoSymbols)
+	vs, reason := guard.FileScopeViolationsWithReason(lang, wholeFileLines, fd, repoSymbols)
 	for i := range vs {
 		vs[i].File = path
 	}
-	return vs
+	return vs, reason
 }
 
 // snapshotSymbols copies a symbol set so later in-place folds (in-file defs,

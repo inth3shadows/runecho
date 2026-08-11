@@ -18,30 +18,30 @@
     {
       "id": "filescope/abstain-wholefile-arm",
       "file": "internal/guard/filescope.go",
-      "find": "if abstainsFileScope(wholeFile) || abstainsFileScope(addedLines) {",
-      "replace": "if abstainsFileScope(addedLines) {",
-      "desc": "abstain no longer consults the pre-edit file"
+      "find": "\tif reason := abstainReasonFileScope(wholeFile); reason != \"\" {\n\t\treturn nil, reason\n\t}\n",
+      "replace": "",
+      "desc": "abstain no longer consults the pre-edit file (#330: split into two if-blocks, abstainsFileScope renamed abstainReasonFileScope)"
     },
     {
       "id": "filescope/abstain-addedlines-arm",
       "file": "internal/guard/filescope.go",
-      "find": "if abstainsFileScope(wholeFile) || abstainsFileScope(addedLines) {",
-      "replace": "if abstainsFileScope(wholeFile) {",
-      "desc": "abstain no longer consults the added text"
+      "find": "\tif reason := abstainReasonFileScope(addedLines); reason != \"\" {\n\t\treturn nil, reason\n\t}\n",
+      "replace": "",
+      "desc": "abstain no longer consults the added text (#330: split into two if-blocks, abstainsFileScope renamed abstainReasonFileScope)"
     },
     {
       "id": "filescope/star-import-gate",
       "file": "internal/guard/filescope.go",
-      "find": "\t\tif rePyStarImport.MatchString(l.Text) {\n\t\t\treturn true\n\t\t}",
+      "find": "\t\tif rePyStarImport.MatchString(l.Text) {\n\t\t\treturn \"star-import\"\n\t\t}",
       "replace": "",
-      "desc": "star-import abstain removed"
+      "desc": "star-import abstain removed (#330: abstainsFileScope renamed abstainReasonFileScope, bool return became a reason string)"
     },
     {
       "id": "filescope/dynamic-binding-gate",
       "file": "internal/guard/filescope.go",
-      "find": "\t\tfor _, marker := range pyDynamicBinding {\n\t\t\tif strings.Contains(l.Text, marker) {\n\t\t\t\treturn true\n\t\t\t}\n\t\t}",
+      "find": "\t\tfor _, marker := range pyDynamicBinding {\n\t\t\tif strings.Contains(l.Text, marker) {\n\t\t\t\treturn \"dynamic-binding\"\n\t\t\t}\n\t\t}",
       "replace": "",
-      "desc": "dynamic-binding abstain removed"
+      "desc": "dynamic-binding abstain removed (#330: abstainsFileScope renamed abstainReasonFileScope, bool return became a reason string)"
     },
     {
       "id": "filescope/firewall",
@@ -67,9 +67,9 @@
     {
       "id": "filescope/no-context-bail",
       "file": "internal/guard/filescope.go",
-      "find": "\tif len(wholeFile) == 0 {\n\t\treturn nil\n\t}",
+      "find": "\tif len(wholeFile) == 0 {\n\t\treturn nil, \"oversized-pre-edit-file\"\n\t}",
       "replace": "",
-      "desc": "a file with no pre-edit content is scanned instead of abstained"
+      "desc": "a file with no pre-edit content is scanned instead of abstained (#330: FileScopeViolationsWithReason now returns a reason alongside nil)"
     },
     {
       "id": "filescope/imports-bind",
@@ -81,10 +81,10 @@
     {
       "id": "filescope/lang-gate-pure",
       "file": "internal/guard/filescope.go",
-      "find": "\tif lang != LangPython {\n\t\treturn nil\n\t}",
+      "find": "\tif lang != LangPython {\n\t\treturn nil, \"\"\n\t}",
       "replace": "",
       "known_gap": "the pure function and the hook wrapper gate independently, so neither is observable alone; internal/guard's unit suite covers the restriction",
-      "desc": "Python-only restriction removed from the pure function"
+      "desc": "Python-only restriction removed from the pure function (#330: moved into FileScopeViolationsWithReason)"
     },
     {
       "id": "filescope/lang-gate-hook",
@@ -395,9 +395,9 @@
     {
       "id": "qualified/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "fired.Qualified = len(qualifiedV) > 0",
-      "replace": "fired.Qualified = false",
-      "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket"
+      "find": "qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)\n\t\t\tqualifiedResult = classifyResult(\"qualified\", len(qualifiedV) > 0, \"\")",
+      "replace": "qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)\n\t\t\tqualifiedResult = classifyResult(\"qualified\", false, \"\")",
+      "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket (#330: qualifiedResult replaces fired.Qualified)"
     },
     {
       "id": "qualified/repo-ir-lookup",
@@ -423,9 +423,9 @@
     {
       "id": "deps-go/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "fired.DepsGo = len(depsGoV) > 0",
-      "replace": "fired.DepsGo = false",
-      "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket"
+      "find": "depsGoResult = classifyResult(\"deps-go\", len(depsGoV) > 0, reason)",
+      "replace": "depsGoResult = classifyResult(\"deps-go\", false, reason)",
+      "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket (#330: depsGoResult replaces fired.DepsGo)"
     },
     {
       "id": "deps-go/exported-membership",

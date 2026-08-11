@@ -225,6 +225,71 @@ func TestFileScope_Negatives(t *testing.T) {
 	}
 }
 
+// TestFileScope_WithReasonCapturesAbstain pins #330: FileScopeViolations'
+// abstain gates (star import, dynamic binding, no whole-file context) used to
+// be indistinguishable from "ran, found nothing". FileScopeViolationsWithReason
+// must name which one fired, so cmd/runecho-guard can classify the check as
+// Unknown rather than a silent OK.
+func TestFileScope_WithReasonCapturesAbstain(t *testing.T) {
+	cases := []struct {
+		name       string
+		wholeFile  []string
+		wantReason string
+	}{
+		{
+			name:       "star import",
+			wholeFile:  []string{"from helpers import *", "", "def go():", "    pass"},
+			wantReason: "star-import",
+		},
+		{
+			name:       "globals() dynamic binding",
+			wholeFile:  []string{"def wire():", "    globals()['injected'] = 1", "", "def go():", "    pass"},
+			wantReason: "dynamic-binding",
+		},
+		{
+			name:       "importlib dynamic binding",
+			wholeFile:  []string{"import importlib", "", "def go():", "    pass"},
+			wantReason: "dynamic-binding",
+		},
+		{
+			name:       "no whole-file context",
+			wholeFile:  nil,
+			wantReason: "oversized-pre-edit-file",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var whole []AddedLine
+			if tc.wholeFile != nil {
+				whole = linesOf(tc.wholeFile...)
+			}
+			got, reason := FileScopeViolationsWithReason(LangPython, whole,
+				FileDiff{AddedLines: linesOf("    injected(1)")}, repoKnown("injected"))
+			if len(got) != 0 {
+				t.Errorf("FALSE POSITIVE: flagged %v under an abstain condition", flaggedNames(got))
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestFileScope_WithReasonClean pins the empty-reason half: a check that ran
+// to completion — whether or not it found anything — must not report a
+// reason, or every clean/violation edit would misclassify as an abstain.
+func TestFileScope_WithReasonClean(t *testing.T) {
+	wholeFile := []string{"import pytest", "", "def test_it():", "    pass"}
+	got, reason := FileScopeViolationsWithReason(LangPython, linesOf(wholeFile...),
+		FileDiff{AddedLines: linesOf("    out = render(digest)")}, repoKnown("render", "pytest"))
+	if len(got) != 1 || got[0].Symbol != "render" {
+		t.Fatalf("want exactly [render], got %v", flaggedNames(got))
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty — the check ran to completion", reason)
+	}
+}
+
 // TestFileScope_NonPythonIsSilent pins the v1 language scope. Go is
 // package-qualified and compiler-checked; JS lands only after Python proves out.
 func TestFileScope_NonPythonIsSilent(t *testing.T) {

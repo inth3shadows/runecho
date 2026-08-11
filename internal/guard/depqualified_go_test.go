@@ -162,6 +162,57 @@ func TestGoDepQualified_NeverFlags(t *testing.T) {
 	}
 }
 
+// TestGoDepQualified_WithReasonCapturesAbstain pins #330: the abstain reason
+// idx.Lookup already computes (depindex.PackageSymbols.Reason) was silently
+// discarded by GoDepQualifiedViolations' `continue`. GoDepQualifiedViolationsWithReason
+// must surface it so cmd/runecho-guard can classify the deps-go check as
+// Unknown (a real go.work/not-in-cache abstain) rather than indistinguishable
+// from OK (nothing to report).
+func TestGoDepQualified_WithReasonCapturesAbstain(t *testing.T) {
+	tests := []struct {
+		name       string
+		src        string
+		wantReason string
+	}{
+		{
+			// Gate 4 in TestGoDepQualified_NeverFlags: Partial resolution.
+			"partial resolution",
+			"package main\n\nimport \"github.com/vendor/lazything\"\n\nfunc f() { lazything.Whatever() }\n",
+			"not scannable",
+		},
+		{
+			"unknown package",
+			"package main\n\nimport \"github.com/nobody/nothing\"\n\nfunc f() { nothing.Whatever() }\n",
+			"not in stub",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, reason := GoDepQualifiedViolationsWithReason(nil, TextToAddedLines(tt.src), goMod, httpStub)
+			if len(got) != 0 {
+				t.Fatalf("violations = %v, want none — Partial/Unknown resolution proves nothing by absence", symbolList(got))
+			}
+			if reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestGoDepQualified_WithReasonClean pins the empty-reason half: a call that
+// resolves cleanly (or a file with no qualifying candidate at all) must not
+// report a reason, or every clean edit would misclassify as an abstain.
+func TestGoDepQualified_WithReasonClean(t *testing.T) {
+	src := "package main\n\nimport \"net/http\"\n\nfunc f() { http.Get(\"u\") }\n"
+	got, reason := GoDepQualifiedViolationsWithReason(nil, TextToAddedLines(src), goMod, httpStub)
+	if len(got) != 0 {
+		t.Fatalf("violations = %v, want none", symbolList(got))
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty — a clean resolution is not an abstain", reason)
+	}
+}
+
 func TestGoDepQualified_BlockImportsAndDedupe(t *testing.T) {
 	src := "package main\n\nimport (\n\t\"net/http\"\n\t\"github.com/google/uuid\"\n)\n\n" +
 		"func f() {\n\thttp.Gett()\n\thttp.Gett()\n\tuuid.NewString()\n}\n"

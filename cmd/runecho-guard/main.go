@@ -266,13 +266,19 @@ func runArgs(args []string) int {
 	}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
-	// fired.Violations is captured here, before any other check runs, so it
-	// names only the additive check's own result. The three checks below used
-	// to append into this same slice, which erased their provenance and made
-	// them all log as "violations" (#268); #269 stopped that merge (see
-	// qualifiedV/depsGoV/fileScopeV below), so today they never touch this
-	// slice at all — fired.Qualified/DepsGo/FileScope are their only record.
-	fired := firedChecks{Violations: len(violations) > 0}
+	// results accumulates one CheckResult per applicable check (#330), mirroring
+	// runHookMode — see checkresult.go. Pre-commit has no deletion-side checks
+	// and no strict-mode degraded advisory, so unlike runHookMode this is a
+	// pure internal bookkeeping refactor: Skipped/OK/Violation only, no Unknown
+	// verdict is ever produced here, and firedChecksFrom/askReason's output is
+	// unchanged for every existing input.
+	//
+	// "violations" captured here, before any other check runs, so it names only
+	// the additive check's own result. The three checks below used to append
+	// into this same slice, which erased their provenance and made them all log
+	// as "violations" (#268); #269 stopped that merge (see qualifiedV/depsGoV/
+	// fileScopeV below), so today they never touch this slice at all.
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
 
 	// Same-repo internal-package qualified-call check (default on since #314;
 	// RUNECHO_GUARD_QUALIFIED=0 disables it). Reads each staged Go file's whole
@@ -286,6 +292,7 @@ func runArgs(args []string) int {
 	// the shared "unresolved symbol(s)" header false for exactly these findings
 	// (#269's fourth confound). Each gets writeCheckSection below instead.
 	var qualifiedV []guard.Violation
+	qualifiedResult := CheckResult{Check: "qualified", Verdict: VerdictSkipped}
 	if qualifiedEnabled() {
 		if modulePath := guard.GoModulePath(repoRoot); modulePath != "" {
 			for _, fd := range diffs {
@@ -294,16 +301,22 @@ func runArgs(args []string) int {
 				}
 				whole := readFileLines(fd.AbsPath)
 				qv := qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)
-				fired.Qualified = fired.Qualified || len(qv) > 0
 				qualifiedV = append(qualifiedV, qv...)
 			}
+			qualifiedResult = classifyResult("qualified", len(qualifiedV) > 0, "")
+		} else {
+			// See runHookMode's identical branch: no go.mod means this check
+			// does not apply, not that it failed to answer.
+			qualifiedResult = CheckResult{Check: "qualified", Verdict: VerdictSkipped, Reason: "no-module-path"}
 		}
 	}
+	results = append(results, qualifiedResult)
 
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). One index per commit, rooted at repoRoot so go.mod, the
 	// module cache, and any vendor/ or go.work are resolved once.
 	var depsGoV []guard.Violation
+	depsGoResult := CheckResult{Check: "deps-go", Verdict: VerdictSkipped}
 	if goDepIdx := newGoDepIndex(repoRoot); goDepIdx != nil {
 		modulePath := guard.GoModulePath(repoRoot)
 		for _, fd := range diffs {
@@ -312,16 +325,18 @@ func runArgs(args []string) int {
 			}
 			whole := readFileLines(fd.AbsPath)
 			dv := goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)
-			fired.DepsGo = fired.DepsGo || len(dv) > 0
 			depsGoV = append(depsGoV, dv...)
 		}
+		depsGoResult = classifyResult("deps-go", len(depsGoV) > 0, "")
 	}
+	results = append(results, depsGoResult)
 
 	// File-scope resolution check (RUNECHO_GUARD_FILESCOPE=1, default off). Unlike
 	// the hook path, `symbols` here is never folded with in-file defs or
 	// learned-allow entries, so it is already the repo's own set and needs no
 	// snapshot before being used as the firewall.
 	var fileScopeV []guard.Violation
+	fileScopeResult := CheckResult{Check: "file-scope", Verdict: VerdictSkipped}
 	if fileScopeEnabled() {
 		for _, fd := range diffs {
 			if guard.LangFor(fd.Path) != guard.LangPython {
@@ -329,10 +344,13 @@ func runArgs(args []string) int {
 			}
 			whole := readFileLines(fd.AbsPath)
 			fv := fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)
-			fired.FileScope = fired.FileScope || len(fv) > 0
 			fileScopeV = append(fileScopeV, fv...)
 		}
+		fileScopeResult = classifyResult("file-scope", len(fileScopeV) > 0, "")
 	}
+	results = append(results, fileScopeResult)
+
+	fired := firedChecksFrom(results)
 
 	// Gated on anyNonViolation() too, not just len(violations): qualifiedV,
 	// depsGoV and fileScopeV no longer feed `violations`, so without this half
@@ -776,10 +794,17 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 
 	violations := guard.Run(symbols, ignorePath, diffs)
-	// See firedChecks: captured before recv-method/var-type below append (the
-	// only two checks still merging into `violations` — qualified/deps-go/
+	// results accumulates one CheckResult per check (#330's typed epistemic
+	// status — OK/Violation/Unknown/Skipped, replacing firedChecks/degraded's
+	// untyped bools+counter), in checkOrder's canonical order. firedChecksFrom
+	// derives the untouched firedChecks/askReason from it at the bottom of this
+	// function — see checkresult.go for why askReason itself is not
+	// reimplemented against this type.
+	//
+	// "violations" captured before recv-method/var-type below append (the only
+	// two checks still merging into `violations` — qualified/deps-go/
 	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
-	fired := firedChecks{Violations: len(violations) > 0}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
 	// learnEligible is the additive check's OWN finding set, captured here for the
 	// same reason firedChecks is: recv-method and var-type below append into
 	// `violations` too, and reading learn-eligibility back off the merged slice
@@ -807,30 +832,46 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// shared header ("not found in the indexed code") false for this finding.
 	// It gets its own section below, like dangling and duplicate do.
 	var qualifiedV []guard.Violation
+	qualifiedResult := CheckResult{Check: "qualified", Verdict: VerdictSkipped}
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
 			qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
-			fired.Qualified = len(qualifiedV) > 0
+			qualifiedResult = classifyResult("qualified", len(qualifiedV) > 0, "")
+		} else {
+			// No go.mod anywhere upward: this check validates a call against
+			// the repo's OWN module IR, so with no module there is no
+			// module-scoped question to ask — not applicable (Skipped), not a
+			// transient failure to answer one (Unknown). Distinct from
+			// deps-go's go.work/not-in-cache abstains below, where a module
+			// DOES exist and the environment just can't confirm an answer.
+			qualifiedResult = CheckResult{Check: "qualified", Verdict: VerdictSkipped, Reason: "no-module-path"}
 		}
 	}
+	results = append(results, qualifiedResult)
 
 	// Go receiver-method check (RUNECHO_GUARD_RECVMETHOD=1, default off). Takes
 	// the pre-edit file plus the added text for the same reason the qualified
 	// check does: a receiver declaration or a rebinding introduced by THIS edit
 	// has to be visible, or the check judges the call against a stale file.
-	if rv := recvMethodViolations(lang, fileLines, newLines, symbols, filePath); len(rv) > 0 {
-		fired.RecvMethod = true
+	recvMethodResult := CheckResult{Check: "recv-method", Verdict: VerdictSkipped}
+	if recvMethodEnabled() && lang == guard.LangGo {
+		rv := recvMethodViolations(lang, fileLines, newLines, symbols, filePath)
+		recvMethodResult = classifyResult("recv-method", len(rv) > 0, "")
 		violations = append(violations, rv...)
 	}
+	results = append(results, recvMethodResult)
 
 	// Go local-variable-type method check (RUNECHO_GUARD_VARTYPE=1, default
 	// off). Same family as the receiver check above and the same reason for
 	// taking both fileLines and newLines; kept as its own flag — see
 	// vartype.go for why it is not folded into RECVMETHOD.
-	if vv := varTypeViolations(lang, fileLines, newLines, symbols, filePath); len(vv) > 0 {
-		fired.VarType = true
+	varTypeResult := CheckResult{Check: "var-type", Verdict: VerdictSkipped}
+	if varTypeEnabled() && lang == guard.LangGo {
+		vv := varTypeViolations(lang, fileLines, newLines, symbols, filePath)
+		varTypeResult = classifyResult("var-type", len(vv) > 0, "")
 		violations = append(violations, vv...)
 	}
+	results = append(results, varTypeResult)
 
 	// External-dependency qualified-call check for Go (RUNECHO_GUARD_DEPS_GO=1,
 	// default off). The edited file's directory anchors go.mod discovery, so a
@@ -841,13 +882,16 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// is absent from its exports, which is not what "not found in the indexed
 	// code" says. Own section below.
 	var depsGoV []guard.Violation
+	depsGoResult := CheckResult{Check: "deps-go", Verdict: VerdictSkipped}
 	if lang == guard.LangGo {
 		if goDepIdx := newGoDepIndex(filepath.Dir(filePath)); goDepIdx != nil {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
-			depsGoV = goDepQualifiedViolations(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
-			fired.DepsGo = len(depsGoV) > 0
+			var reason string
+			depsGoV, reason = goDepQualifiedViolationsWithReason(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
+			depsGoResult = classifyResult("deps-go", len(depsGoV) > 0, reason)
 		}
 	}
+	results = append(results, depsGoResult)
 
 	// File-scope resolution check (RUNECHO_GUARD_FILESCOPE=1, default off): a name
 	// that resolves repo-wide but not inside THIS file — a helper used without
@@ -859,8 +903,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// fsv stays out of `violations` too: the symbol resolves repo-wide, just not
 	// in this file's scope — the opposite of "not found in the indexed code".
 	// Own section below.
-	fsv := fileScopeViolations(lang, fileLines, diffs[0], repoSymbols, filePath)
-	fired.FileScope = len(fsv) > 0
+	fsv, fsReason := fileScopeViolationsWithReason(lang, fileLines, diffs[0], repoSymbols, filePath)
+	fileScopeResult := CheckResult{Check: "file-scope", Verdict: VerdictSkipped}
+	if fileScopeEnabled() && lang == guard.LangPython {
+		fileScopeResult = classifyResult("file-scope", len(fsv) > 0, fsReason)
+	}
+	results = append(results, fileScopeResult)
 
 	// Call-shape agreement (RUNECHO_GUARD_CALLSHAPE=1, default off): a keyword
 	// argument the declaration does not accept. Kept out of `violations` on purpose
@@ -871,6 +919,10 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
 	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
 	callShapes := callShapeMismatches(lang, fileLines, diffs[0], edit.ToolName, removedText)
+	callShapeResult := CheckResult{Check: "call-shape", Verdict: VerdictSkipped}
+	if callShapeEnabled() && lang == guard.LangPython {
+		callShapeResult = classifyResult("call-shape", len(callShapes) > 0, "")
+	}
 
 	// Deletion-side checks (both gated OFF by default; dogfood-first). They share
 	// the pre-edit text — removedText for Edit/MultiEdit, or the on-disk file for
@@ -883,7 +935,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	var dangling []danglingWarning
 	var droppedImps []guard.DroppedImport
 	var duplicates []duplicateWarning
-	degraded := 0
+	danglingResult := CheckResult{Check: "dangling", Verdict: VerdictSkipped}
+	droppedResult := CheckResult{Check: "dropped-import", Verdict: VerdictSkipped}
+	duplicateResult := CheckResult{Check: "duplicate-symbol", Verdict: VerdictSkipped}
 	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
 		// ONE definitive read of the pre-edit on-disk file, shared by every check
 		// that needs it: E1/dropped-import's oldText for Write (the old file is
@@ -892,14 +946,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// is wholeFileText's: a missing file means "" IS the pre-edit truth; an
 		// existing file that is unreadable or over the cap means the pre-edit
 		// state is unknown — the checks would run against a fabricated empty old
-		// text and silently find nothing, so they are skipped and the single
-		// cause counted once in degraded.
+		// text and silently find nothing, so they are skipped and classified
+		// Unknown individually below (#330 — previously a single shared
+		// `degraded` counter, which could not say which check was affected).
 		wholeOld, wholeDefinitive := "", true
 		if edit.ToolName == "Write" || duplicateEnabled() {
 			wholeOld, wholeDefinitive = wholeFileText(filePath)
-		}
-		if !wholeDefinitive {
-			degraded++
 		}
 		oldText := removedText
 		oldTextDefinitive := true
@@ -907,54 +959,68 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			oldText, oldTextDefinitive = wholeOld, wholeDefinitive
 		}
 		// E1: does this edit remove a definition that *other* files still reference?
-		if danglingEnabled() && oldTextDefinitive {
-			if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+		if danglingEnabled() {
+			switch {
+			case !oldTextDefinitive:
+				danglingResult = CheckResult{Check: "dangling", Verdict: VerdictUnknown, Reason: "oversized-pre-edit-file"}
+			default:
 				var qErrs int
-				dangling, qErrs = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
-				degraded += qErrs
+				if deleted := deletedDefs(lang, oldText, text); len(deleted) > 0 {
+					dangling, qErrs = checkDanglingRefs(filepath.Dir(filePath), filePath, deleted)
+				}
+				danglingResult = classifyResult("dangling", len(dangling) > 0, storeQueryReason(qErrs))
 			}
 		}
 		// Dropped-import: does this edit remove an import whose name the new text
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
-		if droppedImportEnabled() && oldTextDefinitive {
-			oldLines := hookOldLines(edit.ToolName, edit.OldString, edit.Edits, oldText)
-			// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
-			// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
-			// addInFileDefs folds whole-file defs into the additive check's known
-			// set above). Fold the on-disk file's whole-file binding context in as
-			// preBound so such a rebind still suppresses the false positive. Not
-			// needed for Write: its newLines already IS the whole file.
-			var preBound map[string]struct{}
-			if edit.ToolName != "Write" {
-				preBound = wholeFileBoundNames(fileLines, lang)
+		if droppedImportEnabled() {
+			if !oldTextDefinitive {
+				droppedResult = CheckResult{Check: "dropped-import", Verdict: VerdictUnknown, Reason: "oversized-pre-edit-file"}
+			} else {
+				oldLines := hookOldLines(edit.ToolName, edit.OldString, edit.Edits, oldText)
+				// newLines is hunk-only for Edit/MultiEdit, so its bound set can't see a
+				// name rebound on an UNTOUCHED line elsewhere in the file (mirrors why
+				// addInFileDefs folds whole-file defs into the additive check's known
+				// set above). Fold the on-disk file's whole-file binding context in as
+				// preBound so such a rebind still suppresses the false positive. Not
+				// needed for Write: its newLines already IS the whole file.
+				var preBound map[string]struct{}
+				if edit.ToolName != "Write" {
+					preBound = wholeFileBoundNames(fileLines, lang)
+				}
+				// newLines is the same slice diffs[0].AddedLines was built from, so
+				// diffs[0].PyDefSigDepthByLine's synthetic-line-number keys (#294)
+				// apply directly here — reused rather than recomputed via
+				// hookDefSigDepthByLine a second time.
+				defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
+				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
+				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, "")
 			}
-			// newLines is the same slice diffs[0].AddedLines was built from, so
-			// diffs[0].PyDefSigDepthByLine's synthetic-line-number keys (#294)
-			// apply directly here — reused rather than recomputed via
-			// hookDefSigDepthByLine a second time.
-			defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
-			droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
 		// this file, whose name is already defined in a DIFFERENT file? Uses the
 		// whole pre-edit file (wholeOld), not oldText/removedText — see
 		// wholeFileText's doc comment for why the hunk-scoped variable above is
 		// not reusable here.
-		if duplicateEnabled() && wholeDefinitive {
-			if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
+		if duplicateEnabled() {
+			switch {
+			case !wholeDefinitive:
+				duplicateResult = CheckResult{Check: "duplicate-symbol", Verdict: VerdictUnknown, Reason: "oversized-pre-edit-file"}
+			default:
 				var qErrs int
-				duplicates, qErrs = checkDuplicateDefs(lang, filepath.Dir(filePath), filePath, added,
-					goBuildConstrained(filePath, wholeOld, text))
-				degraded += qErrs
+				if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
+					duplicates, qErrs = checkDuplicateDefs(lang, filepath.Dir(filePath), filePath, added,
+						goBuildConstrained(filePath, wholeOld, text))
+				}
+				duplicateResult = classifyResult("duplicate-symbol", len(duplicates) > 0, storeQueryReason(qErrs))
 			}
 		}
 	}
+	results = append(results, danglingResult, droppedResult, duplicateResult, callShapeResult)
 
-	fired.Dangling = len(dangling) > 0
-	fired.Dropped = len(droppedImps) > 0
-	fired.Duplicate = len(duplicates) > 0
-	fired.CallShape = len(callShapes) > 0
+	fired := firedChecksFrom(results)
+	degraded := countUnknown(results)
 
 	// Gated on BOTH len(violations) and fired.anyNonViolation(): violations
 	// covers additive/recv-method/var-type (still merged into that slice), and
@@ -973,8 +1039,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit)) {
 			return 0
 		}
-		// Nothing flagged. A degraded deletion-side check means "found nothing"
-		// is not the same as "checked everything" — under strict, say so via
+		// Nothing flagged. A degraded check means "found nothing" is not the
+		// same as "checked everything" — under strict, say so via
 		// additionalContext (the same posture strict already applies to other
 		// degraded states); by default stay silent per the fail-open contract.
 		// Reason is check-degraded, NOT store-degraded: the store may be fine
@@ -983,8 +1049,13 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// health signal the un-gating decisions rest on. This intentionally
 		// supersedes the stale-IR advisory for this edit (one advisory slot);
 		// degraded coverage is the more actionable of the two.
+		//
+		// degraded now counts a VerdictUnknown from ANY of the ten checks
+		// (#330), not just the three deletion-side ones — a qualified/deps-go/
+		// file-scope abstain (no module path, go.work, a star-import, …) that
+		// used to log identically to a clean pass now surfaces here too.
 		if degraded > 0 && strictMode() {
-			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d deletion-side/duplicate check(s) could not run to completion (pre-edit file unreadable/oversized, or a store query failed) — coverage was incomplete for this edit.", degraded))
+			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check-specific abstain) — coverage was incomplete for this edit.", degraded))
 			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded"})
 			return 0
 		}

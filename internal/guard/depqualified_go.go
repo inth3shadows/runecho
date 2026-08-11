@@ -103,9 +103,30 @@ func addExternalGoAlias(aliases map[string]string, spec, modulePath string) {
 // current file (import parsing and the shadow gate); modulePath is the repo's own
 // module path, used only to EXCLUDE same-repo imports; idx resolves an import
 // path to its exported names. A nil idx yields no violations. Go only.
+//
+// Thin wrapper over GoDepQualifiedViolationsWithReason, discarding the abstain
+// reason — kept so every existing caller (bench/score.go, the differential
+// tests, this package's own tests) is untouched by #330's reason-surfacing.
 func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath string, idx depindex.Index) []Violation {
+	vs, _ := GoDepQualifiedViolationsWithReason(wholeFile, addedLines, modulePath, idx)
+	return vs
+}
+
+// GoDepQualifiedViolationsWithReason is GoDepQualifiedViolations plus the
+// reason a candidate call was skipped because its package could not be
+// resolved (go.work overlay, no go.mod, not in the module cache — see
+// depindex.GoIndex.Lookup, which already returns idx.reason uniformly for
+// every call in the index-level cases, so this only has to capture what
+// Lookup already computed). Empty when nothing was skipped for that reason,
+// which includes the idx==nil and language-mismatch cases callers already
+// gate on before calling this.
+//
+// Only the FIRST skip reason encountered is kept (scan order = addedLines
+// order): #330 needs one distinguishable reason per check per edit, not a
+// full account of every candidate that individually abstained.
+func GoDepQualifiedViolationsWithReason(wholeFile, addedLines []AddedLine, modulePath string, idx depindex.Index) ([]Violation, string) {
 	if idx == nil {
-		return nil
+		return nil, ""
 	}
 	// Gates run over the pre-edit file PLUS the added lines, so an import or a
 	// shadowing binding introduced by THIS edit is visible — same reasoning as
@@ -116,7 +137,7 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 
 	aliases := externalGoAliases(ctx, modulePath)
 	if len(aliases) == 0 {
-		return nil
+		return nil, ""
 	}
 	// Reuse the same-repo shadow gate verbatim: it takes a candidate set and
 	// keeps only aliases never used as a bare identifier.
@@ -126,10 +147,11 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 	}
 	kept := onlySelectorQualifiers(ctx, candidates)
 	if len(kept) == 0 {
-		return nil
+		return nil, ""
 	}
 
 	var violations []Violation
+	var reason string
 	seen := map[string]struct{}{}
 	open := ""
 	prevNo := 0
@@ -166,6 +188,9 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 			}
 			pkg := idx.Lookup(importPath)
 			if pkg.Res != depindex.Resolved {
+				if reason == "" {
+					reason = pkg.Reason
+				}
 				continue
 			}
 			if pkg.Has(sym) {
@@ -185,5 +210,5 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 			})
 		}
 	}
-	return violations
+	return violations, reason
 }

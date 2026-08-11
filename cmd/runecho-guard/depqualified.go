@@ -47,12 +47,21 @@ func newGoDepIndex(startDir string) depindex.Index {
 // file is invisible. Degraded exactly as the rest of the guard degrades on
 // oversized input.
 func goDepQualifiedViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, modulePath string, idx depindex.Index, path string) []guard.Violation {
+	vs, _ := goDepQualifiedViolationsWithReason(lang, wholeFileLines, addedLines, modulePath, idx, path)
+	return vs
+}
+
+// goDepQualifiedViolationsWithReason is goDepQualifiedViolations plus the
+// reason a candidate call was skipped because its package couldn't be
+// resolved (go.work, no go.mod, not in the module cache) — see
+// guard.GoDepQualifiedViolationsWithReason, which this wraps.
+func goDepQualifiedViolationsWithReason(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, modulePath string, idx depindex.Index, path string) ([]guard.Violation, string) {
 	if idx == nil || lang != guard.LangGo {
-		return nil
+		return nil, ""
 	}
-	vs := guard.GoDepQualifiedViolations(wholeFileLines, addedLines, modulePath, idx)
+	vs, reason := guard.GoDepQualifiedViolationsWithReason(wholeFileLines, addedLines, modulePath, idx)
 	for i := range vs {
 		vs[i].File = path
 	}
-	return vs
+	return vs, reason
 }

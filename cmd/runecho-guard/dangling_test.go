@@ -508,7 +508,11 @@ func TestDangling_WriteOversizedOldFile_StrictAdvisory(t *testing.T) {
 	if d.Hook.PermissionDec == "ask" {
 		t.Fatalf("degraded deletion-side check must not ask, got: %s", d.Hook.PermissionReason)
 	}
-	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
+	// "could not run to completion" is the stable substring every
+	// check-degraded advisory contains, regardless of WHICH check(s) went
+	// Unknown (#330 widened this from a deletion-side-only count to any of
+	// the ten checks — see checkresult.go's countUnknown).
+	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
 		t.Errorf("strict mode should surface a degraded-coverage advisory, got context %q", d.Hook.AdditionalContext)
 	}
 	if rec := readLastDecisionLog(t); rec["reason"] != "check-degraded" {
@@ -551,7 +555,7 @@ func TestDangling_RefsQueryError_StrictAdvisory(t *testing.T) {
 	if d.Hook.PermissionDec == "ask" {
 		t.Fatalf("query-error path must not ask, got: %s", d.Hook.PermissionReason)
 	}
-	if !strings.Contains(d.Hook.AdditionalContext, "deletion-side") {
+	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
 		t.Errorf("strict mode should surface the swallowed query error as an advisory, got context %q", d.Hook.AdditionalContext)
 	}
 	if rec := readLastDecisionLog(t); rec["reason"] != "check-degraded" {

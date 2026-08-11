@@ -53,28 +53,33 @@
   },
   {
     "name": "python-lint-edit-tool-clean",
-    "desc": "Same isolating shape as the ask fixture (a same-file redefinition, so nothing else fires), replayed as an Edit hunk. Lint is Write-only in v1: an Edit hunk alone ('    return 1\\n\\ndef fetch():...' with no enclosing def) is not valid standalone Python, so if the tool-gate were ever removed this would ask for the wrong reason (a ruff invalid-syntax finding on a fragment) rather than staying silent — which is exactly why Write-only matters, not an incidental detail of this fixture.",
+    "desc": "Lint is Write-only in v1. The hunk is deliberately a COMPLETE, VALID standalone Python snippet carrying a real F811 (`fetch` redefined at hunk line 4) — NOT a fragment. That matters for what this fixture can detect: an earlier cut used a fragment, which relied on ruff's invalid-syntax diagnostic to produce the ask when the tool-gate was removed, and the moment lintFindingsWithReason started filtering non-selected rules (correctly) that fixture went silent for BOTH the intact and the mutated gate — proving nothing while still passing. With a genuine F811 in the hunk, removing the tool-gate makes lint run on Edit text and ask, so this fixture actually kills lint/tool-gate. Flag-off stays silent because `fetch` is defined in the hunk itself, so the additive check resolves it.",
     "check": "lint",
     "flags": [
       "RUNECHO_GUARD_LINT=1"
     ],
     "file": "pkg/edit_client.py",
-    "old": "def fetch():\n    return 1\n",
+    "old": "def other():\n    return 0\n",
     "tool": "Edit",
-    "edit_old": "    return 1\n",
-    "edit_new": "    return 1\n\ndef fetch():\n    return 2\n",
+    "edit_old": "def other():\n    return 0\n",
+    "edit_new": "def fetch():\n    return 1\n\ndef fetch():\n    return 2\n",
     "expect_ask": false
   },
   {
     "name": "python-lint-non-python-clean",
-    "desc": "Same shape as the ask fixture's gate, in a .go file lint never runs against. Deliberately valid Go with no unresolved symbols and no qualified-call sites, so no OTHER default-on Go check (RUNECHO_GUARD_QUALIFIED is on by default) reads it as a finding either — the fixture is clean because nothing fires, not because it happens to be ignored.",
+    "desc": "Lint only runs on Python. The content is deliberately VALID PYTHON carrying a real F811, placed in a .go file — so the only thing keeping this fixture silent is the language gate, not ruff failing to find anything. (The previous cut put valid Go here, which ruff can only report as invalid-syntax; once that rule is correctly filtered out, removing the lang-gate produced no ask and the fixture stopped detecting the mutation.) `fetch` is enrolled so the always-on additive check — which reads Python `def` lines in a .go file as an unresolved reference — resolves it and stays quiet; there are no qualified `pkg.Sel()` call sites for the same-repo/deps-go checks either.",
     "check": "lint",
     "flags": [
       "RUNECHO_GUARD_LINT=1"
     ],
+    "enroll": {
+      "pkg/other.go": [
+        "fetch"
+      ]
+    },
     "file": "pkg/client.go",
     "no_pre_edit_file": true,
-    "new": "package main\n\nfunc fetch() int {\n\treturn 1\n}\n",
+    "new": "def fetch():\n    return 1\n\ndef fetch():\n    return 2\n",
     "expect_ask": false
   },
   {

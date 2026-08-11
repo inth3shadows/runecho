@@ -110,7 +110,7 @@ entries matter — see the note below:
         {
           "matcher": "Edit|Write|MultiEdit",
           "hooks": [
-            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --hook-mode" }
+            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --hook-mode", "timeout": 5 }
           ]
         }
       ],
@@ -118,7 +118,7 @@ entries matter — see the note below:
         {
           "matcher": "Edit|Write|MultiEdit",
           "hooks": [
-            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --outcome-mode" }
+            { "type": "command", "command": "$BIN_DIR/runecho-guard$EXE --outcome-mode", "timeout": 5 }
           ]
         }
       ]

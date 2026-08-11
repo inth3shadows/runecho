@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "runecho-guard --hook-mode"
+            "command": "runecho-guard --hook-mode",
+            "timeout": 5
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "runecho-guard --outcome-mode"
+            "command": "runecho-guard --outcome-mode",
+            "timeout": 5
           }
         ]
       }

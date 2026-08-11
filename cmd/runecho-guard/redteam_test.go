@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDeferOnPanic_FailsOpen pins the fail-open contract against the specific
@@ -54,6 +58,62 @@ func TestDeferOnPanic_FlushesOnSuccess(t *testing.T) {
 func TestDeferOnPanic_PreservesNonZeroExit(t *testing.T) {
 	if code := deferOnPanic("test-mode", io.Discard, func(io.Writer) int { return 1 }); code != 1 {
 		t.Errorf("exit code = %d, want 1 — a deliberate non-zero return must survive the wrapper", code)
+	}
+}
+
+// TestDeferOnPanic_TimesOut is #332's backstop: a hang in fn is the one
+// degraded state the panic/exit-code contract above does not cover — nothing
+// panics, nothing returns, and without this the hook blocks the agent's edit
+// indefinitely. Shrinks guardTimeout for the duration of the test instead of
+// sleeping the real 4s default.
+func TestDeferOnPanic_TimesOut(t *testing.T) {
+	old := guardTimeout
+	guardTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { guardTimeout = old })
+
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+
+	var out bytes.Buffer
+	started := make(chan struct{})
+	code := deferOnPanic("test-mode", &out, func(w io.Writer) int {
+		close(started)
+		// Simulate a genuine hang — no channel, no ctx, just blocked longer than
+		// guardTimeout. The goroutine leaks until process exit, same as a real
+		// stalled disk read or pathological parse would.
+		<-make(chan struct{})
+		return 0 // unreachable
+	})
+	<-started
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (a hang must defer the edit, not block it)", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want empty — nothing the stalled fn wrote should reach the hook's stdout", out.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(home, "decisions.jsonl"))
+	if err != nil {
+		t.Fatalf("decisions.jsonl not written: %v", err)
+	}
+	var rec struct {
+		Mode     string `json:"mode"`
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &rec); err != nil {
+		t.Fatalf("decisions.jsonl last line is not valid JSON: %v\n%s", err, lines[len(lines)-1])
+	}
+	if rec.Reason != "timeout" {
+		t.Errorf("decisions.jsonl reason = %q, want %q — a hang must be countable, not invisible", rec.Reason, "timeout")
+	}
+	if rec.Decision != "defer" {
+		t.Errorf("decisions.jsonl decision = %q, want %q", rec.Decision, "defer")
+	}
+	if rec.Mode != "hook" {
+		t.Errorf("decisions.jsonl mode = %q, want %q for name %q", rec.Mode, "hook", "test-mode")
 	}
 }
 

@@ -72,19 +72,39 @@ var pyDynamicBinding = []string{
 // extracted refs with a nil seed would reintroduce it wholesale.
 //
 // Python only in v1.
+//
+// Thin wrapper over FileScopeViolationsWithReason, discarding the abstain
+// reason — kept so every existing caller (this package's own tests, the
+// differential tests, cmd/runecho-guard's own pre-#330 wrapper) is untouched
+// by #330's reason-surfacing.
 func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnown map[string]struct{}) []Violation {
+	vs, _ := FileScopeViolationsWithReason(lang, wholeFile, fd, repoKnown)
+	return vs
+}
+
+// FileScopeViolationsWithReason is FileScopeViolations plus the reason the
+// whole-file abstain fired: "oversized-pre-edit-file" (empty/unreadable
+// wholeFile — the same root cause readFileLines' cap produces elsewhere, so
+// the name is reused rather than inventing a second one for it), "star-import",
+// or "dynamic-binding" (see abstainReasonFileScope). Empty when the check ran to
+// completion, whether or not it found anything, and empty for the
+// language-mismatch case callers already gate on before calling this.
+func FileScopeViolationsWithReason(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnown map[string]struct{}) ([]Violation, string) {
 	if lang != LangPython {
-		return nil
+		return nil, ""
 	}
 	addedLines := fd.AddedLines
 	// No whole-file context: the imports and defs that bind these names are
 	// invisible, so every reference would look unresolved. Fail silent, matching
 	// the guard's degraded-input posture everywhere else.
 	if len(wholeFile) == 0 {
-		return nil
+		return nil, "oversized-pre-edit-file"
 	}
-	if abstainsFileScope(wholeFile) || abstainsFileScope(addedLines) {
-		return nil
+	if reason := abstainReasonFileScope(wholeFile); reason != "" {
+		return nil, reason
+	}
+	if reason := abstainReasonFileScope(addedLines); reason != "" {
+		return nil, reason
 	}
 
 	// wholeFile is one contiguous run from line 1, so ExtractDefs' own tracking
@@ -133,25 +153,26 @@ func FileScopeViolations(lang Lang, wholeFile []AddedLine, fd FileDiff, repoKnow
 			Lang:   lang,
 		})
 	}
-	return violations
+	return violations, ""
 }
 
-// abstainsFileScope reports whether the lines contain any construct that makes the
-// file's binding surface unknowable — a star import or runtime name injection.
-// Scanned on raw text: a match inside a string or comment only causes an extra
-// abstain, which is the safe direction.
-func abstainsFileScope(lines []AddedLine) bool {
+// abstainReasonFileScope reports whether the lines contain any construct that
+// makes the file's binding surface unknowable — a star import or runtime name
+// injection — and, if so, which: "star-import" or "dynamic-binding". Empty
+// means neither fired. Scanned on raw text: a match inside a string or
+// comment only causes an extra abstain, which is the safe direction.
+func abstainReasonFileScope(lines []AddedLine) string {
 	for _, l := range lines {
 		if rePyStarImport.MatchString(l.Text) {
-			return true
+			return "star-import"
 		}
 		for _, marker := range pyDynamicBinding {
 			if strings.Contains(l.Text, marker) {
-				return true
+				return "dynamic-binding"
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // pyFileScope collects every name the given lines bind: imports, definitions,

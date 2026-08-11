@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-08-11
+
+### Changed
+- guard: fix six lint-substrate defects found in post-merge review (#333) (#339)
+
 ## [0.39.0] — 2026-08-11
 
 ### Changed

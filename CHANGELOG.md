@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.5] — 2026-08-12
+
+### Changed
+- ci: gate autorelease on CI success, not just a push to master (#347) (#349)
+
 ## [0.42.4] — 2026-08-12
 
 ### Changed

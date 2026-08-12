@@ -62,20 +62,32 @@ jobs:
       # payload is lifted into the run summary where it is read without scrolling.
       # `always()` because a skip that only appears on a FAILING run is exactly
       # the one worth seeing.
+      #
+      # "no SKIP lines" does NOT mean "nothing skipped" — it also describes a run
+      # where no test ever started. On a compile error anywhere in the tree `tee`
+      # still creates test.log, and it contains build errors and zero SKIP lines,
+      # so a naive check reports "every test ran" on a red run: a positively
+      # false coverage claim, which is the same unverified inference this step
+      # exists to remove. `=== RUN` is the discriminator, verified rather than
+      # assumed — a healthy run of this suite emits 1,778 of them and a build
+      # failure emits none. `^FAIL` is NOT usable for this: `FAIL <pkg> [build
+      # failed]` prints on exactly the run being excluded.
       - name: Report skipped tests
         if: always()
         run: |
           {
             echo "### Skipped tests"
             echo
-            if [ -f test.log ] && skips=$(grep -E '^[[:space:]]*--- SKIP' test.log | sed 's/^[[:space:]]*//' | sort -u) && [ -n "$skips" ]; then
+            if [ ! -f test.log ]; then
+              echo "_No test.log: the test step did not get far enough to produce one._"
+            elif ! grep -q '^=== RUN' test.log; then
+              echo "_No test executed — the build failed before any test started, so this run says nothing about what does or does not skip. See the Test step log._"
+            elif skips=$(grep -E '^[[:space:]]*--- SKIP' test.log | sed 's/^[[:space:]]*//' | sort -u) && [ -n "$skips" ]; then
               echo '```'
               echo "$skips"
               echo '```'
-            elif [ -f test.log ]; then
-              echo "_None — every test ran._"
             else
-              echo "_No test.log: the test step did not get far enough to produce one._"
+              echo "_None — every test ran._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Installer syntax

@@ -59,5 +59,11 @@ __pycache__/
 # triage-check default report output (maintainer tool)
 triage-report.json
 
-# CI writes this via `go test ... | tee test.log`; keep a local copy out of commits.
+# Load-bearing for CI, not local hygiene — do not remove as cleanup.
+# The Test step writes test.log into the repo root (`go test ... | tee
+# test.log`), and the later "Hook-fixture mutation gate" step runs
+# bench/hookmutate/mutate.py, which hard-exits on `git status --porcelain`
+# being non-empty ("refusing to run: working tree is dirty"). That check
+# respects .gitignore, so this entry is the only thing keeping the mutation
+# gate runnable on every pull request. Delete this line and every PR fails.
 test.log

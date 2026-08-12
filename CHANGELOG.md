@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.1] — 2026-08-12
+
+### Changed
+- ci: make skipped tests visible in the run summary (#342)
+
 ## [0.42.0] — 2026-08-12
 
 ### Changed

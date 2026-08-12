@@ -1,0 +1,29 @@
+# Tests that are EXPECTED to skip in CI, one per line as `TestName: reason`.
+#
+# A reason is required, mirroring the `known_gap` discipline in
+# bench/hookmutate/mutate.py: you cannot silence an instrument here without
+# writing down why. .github/scripts/check-skips.sh fails on an entry without one.
+#
+# The gate fails in BOTH directions, for the same reason mutate.py --strict
+# treats a dead fixture as fatal alongside an unclaimed survivor:
+#
+#   - a skip NOT listed here  -> the environment degraded silently and the run
+#     measured less than it claims. This is the case the file exists for: ruff
+#     missing, a chmod that no longer denies, a stub that cannot exec.
+#   - an entry that did NOT skip -> the list is lying about what runs. The
+#     realistic way this happens is not someone setting a spike env var; it is
+#     someone DELETING the test and leaving the entry behind, at which point this
+#     file quietly becomes fiction. mutations.json has already drifted out of
+#     sync with the code it names once; this is the same failure, so it gets the
+#     same treatment.
+#
+# Names are matched EXACTLY as `go test -v` prints them, so a subtest is
+# `Parent/Sub` and a parent entry does not cover its children — a different
+# thing skipping is a different fact.
+#
+# Only DELIBERATELY opt-in tests belong here. An environment-conditional skip is
+# precisely what this gate is meant to catch, so allowlisting one defeats it.
+
+TestFileScopeFPSmoke: opt-in FP smoke harness; runs only with RUNECHO_FPSMOKE=<dir> pointed at a real corpus (internal/guard/filescope_fpsmoke_test.go)
+TestSpikeGoplsOracleVarType: opt-in #323 oracle spike; needs RUNECHO_SPIKE_GOPLS=1 and an executable GOPLS_BIN (internal/guard/oracle_spike_test.go)
+TestSpikePrematureLatency: opt-in #329 spike; needs RUNECHO_SPIKE_PREMATURE_LATENCY=1 and a real decision log (internal/guardstats/premature_latency_spike_test.go)

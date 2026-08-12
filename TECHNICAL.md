@@ -350,7 +350,7 @@ argument** while the check uses `--stdin-filename`; if both went through stdin,
 a stdin-plumbing bug would cancel out on both sides and read as agreement.
 
 ```
-RUNECHO_LINT_CORPUS=<repo> RUNECHO_LINT_CORPUS_MAX=300 \
+RUNECHO_LINT_CORPUS=<repo> RUNECHO_LINT_CORPUS_MAX=250 \
   go test ./cmd/runecho-guard -run TestLintDifferential -v
 ```
 
@@ -371,14 +371,22 @@ only the linter still sees what will actually land. The first two postures agree
 on every file by construction, so a harness built from them alone measures one
 posture twice — the #313 failure mode above, reproduced.
 
-Measured 2026-08-11. The two real corpora are 250 files x 3 postures each; the
-committed corpus is 5 files x 3.
+Re-measured 2026-08-12. The two real corpora are 250 files x 3 postures each;
+the committed corpus is 5 files x 3.
 
 | Corpus | Observations | Oracle findings | Hook FPs | Marginal p50 |
 |---|---|---|---|---|
-| `testdata/lintcorpus` | 15 | 12 | 0 | +9.9 ms |
-| `secret-broker` | 750 | 0 | 0 | +10.9 ms |
+| `testdata/lintcorpus` | 15 | 12 | 0 | n too small — see below |
+| `secret-broker` | 750 | 0 | 0 | +9.2 ms |
 | `competitive-intel` | 750 | 0 | 0 | +11.0 ms |
+
+The lint-on and lint-off runs are **order-alternated** per file, so neither side
+systematically pays a payload's cold-cache costs. Under the original fixed
+ON-then-OFF order the same two corpora read +10.9 and +11.0 ms; alternating
+moved `secret-broker` by 1.8 ms and `competitive-intel` not at all, which puts
+the ordering inside run-to-run noise rather than making it a bias that was
+inflating the published cost. It is alternated regardless, because that is
+cheaper than re-arguing it at each review.
 
 Only p50 is published, on purpose. The nearest-rank p99 was unstable across
 runs of the *unchanged* harness on the same corpus (+30.5, +13.6, +13.1 ms on
@@ -387,6 +395,12 @@ and the tail measures that as much as it measures the check. Below
 `tailMinSamples` (100) the harness labels the figure `max` rather than `p99`,
 because nearest-rank rounds the p99 index to n: for n=15 the "p99" is literally
 the slowest of fifteen runs.
+
+The committed corpus is too small to publish *any* latency figure from, tail or
+median: four consecutive runs of the unchanged harness gave marginal p50s of
++7.3, +12.9, +8.8 and +13.9 ms. Its job is to prove a true finding survives the
+plumbing end-to-end — the thing the real corpora cannot do, being F821/F811-clean
+— not to time anything.
 
 Zero-byte `.py` files are skipped and the count logged. `payload`'s
 `tool_input.content` is omitted when the string is empty, so `runHookMode` takes

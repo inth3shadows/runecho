@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-08-12
+
+### Changed
+- guard: oracle-differential harness for the lint substrate (#333 P2-2) (#340)
+
 ## [0.40.0] — 2026-08-11
 
 ### Changed

@@ -107,6 +107,15 @@ func requireRuff(t *testing.T) {
 	}
 }
 
+// ruffBin is the oracle's executable. A var, not a const, for exactly one
+// reason: ruffOracle's unexpected-exit branch is unreachable through real ruff —
+// it warns and exits 0 on I/O errors, and the harness always passes an ABSOLUTE
+// path, so no filename can be misread as a flag. Without a substitutable binary
+// that branch's claim ("one oddity cannot take the sweep down") is untestable,
+// and an untestable claim in this harness is the thing the harness exists to
+// object to. Not safe for parallel tests; nothing in this file uses t.Parallel.
+var ruffBin = "ruff"
+
 // ruffOracle runs ruff against the file on disk, as a path argument. Flags match
 // lintFindingsWithReason's except for the input shape, and the same
 // lintSelectedRules filter is applied for the same reason (--select does not
@@ -128,15 +137,6 @@ func requireRuff(t *testing.T) {
 // 750 observations", the same false-denominator defect as the zero-byte files
 // lintCorpusFiles drops, one layer down. stderr is therefore load-bearing and is
 // captured explicitly rather than discarded.
-// ruffBin is the oracle's executable. A var, not a const, for exactly one
-// reason: the unexpected-exit branch below is unreachable through real ruff — it
-// warns and exits 0 on I/O errors, and the harness always passes an ABSOLUTE
-// path, so no filename can be misread as a flag. Without a substitutable binary
-// that branch's claim ("one oddity cannot take the sweep down") is untestable,
-// and an untestable claim in this harness is the thing the harness exists to
-// object to. Not safe for parallel tests; nothing in this file uses t.Parallel.
-var ruffBin = "ruff"
-
 func ruffOracle(t *testing.T, path string) ([]oracleFinding, bool) {
 	t.Helper()
 	cmd := exec.Command(ruffBin, "check", "--no-cache", "--isolated",
@@ -912,9 +912,6 @@ func oracleAbstains(t *testing.T, file string) bool {
 // catch, so it is not one to reproduce in the harness's own tests.
 func TestRuffOracle_UnreadableFileIsNotAdjudicated(t *testing.T) {
 	requireRuff(t)
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: chmod 000 does not deny reads, so the unreadable case cannot be staged")
-	}
 	path := filepath.Join(t.TempDir(), "locked.py")
 	if err := os.WriteFile(path, []byte("def f():\n    return undefined_thing\n"), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
@@ -928,6 +925,14 @@ func TestRuffOracle_UnreadableFileIsNotAdjudicated(t *testing.T) {
 		t.Fatalf("chmod fixture: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	// Probe rather than infer. `os.Geteuid() == 0` is not the only way chmod 000
+	// fails to deny a read: CAP_DAC_OVERRIDE (containers, rootless/userns) grants
+	// it to a non-zero uid, and mode bits are advisory on filesystems like a
+	// drvfs/NTFS TMPDIR under WSL. In those environments ruff reads the file
+	// fine and this test would report a spurious failure instead of skipping.
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("chmod 000 did not deny reads here (CAP_DAC_OVERRIDE, or a filesystem that ignores mode bits) — the unreadable case cannot be staged")
+	}
 
 	found, ok = ruffOracle(t, path)
 	if ok {
@@ -943,20 +948,36 @@ func TestRuffOracle_UnreadableFileIsNotAdjudicated(t *testing.T) {
 func TestRuffOracle_UnexpectedExitDropsOneFileNotTheSweep(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "ruff-stub")
-	// Exit 2 with well-formed empty JSON on stdout: the point is that the EXIT
-	// CODE alone must condemn the observation. A stub that also emitted garbage
-	// would be killed by the JSON check instead, and the branch under test would
-	// stay unexercised.
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho '[]'\nexit 2\n"), 0o755); err != nil {
-		t.Fatalf("write ruff stub: %v", err)
-	}
-	defer func(old string) { ruffBin = old }(ruffBin)
-	ruffBin = stub
-
 	py := filepath.Join(dir, "x.py")
 	if err := os.WriteFile(py, []byte("x = 1\n"), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
+	defer func(old string) { ruffBin = old }(ruffBin)
+	ruffBin = stub
+
+	writeStub := func(exit int) {
+		// Well-formed empty JSON on stdout in BOTH variants, so the exit code is
+		// the only thing that differs between them. A stub that also emitted
+		// garbage would be condemned by the JSON check instead, leaving the
+		// branch under test unexercised.
+		src := fmt.Sprintf("#!/bin/sh\necho '[]'\nexit %d\n", exit)
+		if err := os.WriteFile(stub, []byte(src), 0o755); err != nil {
+			t.Fatalf("write ruff stub: %v", err)
+		}
+	}
+
+	// Control FIRST. `ok == false` is also what an unexecutable stub produces —
+	// a noexec TMPDIR or a missing /bin/sh makes cmd.Run return an *exec.Error,
+	// which fails the *exec.ExitError type assertion and reaches the same
+	// `return nil, false` without the exit code ever being the reason. Without
+	// this the test would pass in those environments while asserting nothing,
+	// which is the vacuous-negative the rest of this harness exists to reject.
+	writeStub(0)
+	if _, ok := ruffOracle(t, py); !ok {
+		t.Skipf("the stub could not be executed (noexec %s, or no /bin/sh) — the exit-code branch cannot be staged here", dir)
+	}
+
+	writeStub(2)
 	if found, ok := ruffOracle(t, py); ok {
 		t.Errorf("an oracle exit this harness does not understand was treated as a valid adjudication (findings=%v) — the file enters the corpus as clean on the strength of an error", found)
 	}
@@ -1011,9 +1032,6 @@ func TestWalkLintCorpus_RootErrorSurfaces(t *testing.T) {
 	})
 
 	t.Run("unreadable subtree is skipped, not fatal", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("running as root: chmod 000 does not deny traversal")
-		}
 		root := t.TempDir()
 		if err := os.WriteFile(filepath.Join(root, "good.py"), []byte("x = 1\n"), 0o644); err != nil {
 			t.Fatalf("write good.py: %v", err)
@@ -1029,6 +1047,13 @@ func TestWalkLintCorpus_RootErrorSurfaces(t *testing.T) {
 			t.Fatalf("chmod blocked: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+		// Same probe-don't-infer reasoning as the unreadable-file test above: if
+		// the directory is still traversable, the walk legitimately finds
+		// inner.py and the assertion below would fail for an environmental
+		// reason rather than a behavioural one.
+		if _, err := os.ReadDir(blocked); err == nil {
+			t.Skip("chmod 000 did not deny traversal here (CAP_DAC_OVERRIDE, or a filesystem that ignores mode bits) — the unreadable-subtree case cannot be staged")
+		}
 
 		files, _, err := walkLintCorpus(root)
 		if err != nil {

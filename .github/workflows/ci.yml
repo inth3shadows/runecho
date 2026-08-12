@@ -59,37 +59,15 @@ jobs:
           set -o pipefail
           go test ./... -race -cover -v 2>&1 | tee test.log
       # The verbose log is ~3,800 lines to carry ~3 lines of payload, so the
-      # payload is lifted into the run summary where it is read without scrolling.
-      # `always()` because a skip that only appears on a FAILING run is exactly
-      # the one worth seeing.
-      #
-      # "no SKIP lines" does NOT mean "nothing skipped" — it also describes a run
-      # where no test ever started. On a compile error anywhere in the tree `tee`
-      # still creates test.log, and it contains build errors and zero SKIP lines,
-      # so a naive check reports "every test ran" on a red run: a positively
-      # false coverage claim, which is the same unverified inference this step
-      # exists to remove. `=== RUN` is the discriminator, verified rather than
-      # assumed — a healthy run of this suite emits 1,778 of them and a build
-      # failure emits none. `^FAIL` is NOT usable for this: `FAIL <pkg> [build
-      # failed]` prints on exactly the run being excluded.
-      - name: Report skipped tests
+      # payload is lifted into the run summary where it is read without scrolling
+      # — and gated, so a silent coverage hole fails the build rather than
+      # waiting to be noticed. Logic lives in a script so it can be exercised
+      # locally against staged logs; an inline block can only be tested by
+      # pushing. `always()` because a skip that appears only on a FAILING run is
+      # exactly the one worth seeing.
+      - name: Gate skipped tests against the allowlist
         if: always()
-        run: |
-          {
-            echo "### Skipped tests"
-            echo
-            if [ ! -f test.log ]; then
-              echo "_No test.log: the test step did not get far enough to produce one._"
-            elif ! grep -q '^=== RUN' test.log; then
-              echo "_No test executed — the build failed before any test started, so this run says nothing about what does or does not skip. See the Test step log._"
-            elif skips=$(grep -E '^[[:space:]]*--- SKIP' test.log | sed 's/^[[:space:]]*//' | sort -u) && [ -n "$skips" ]; then
-              echo '```'
-              echo "$skips"
-              echo '```'
-            else
-              echo "_None — every test ran._"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: bash .github/scripts/check-skips.sh test.log .github/expected-skips.txt
       - name: Installer syntax
         run: bash -n install.sh
       # Scores the hook-fixture corpus: breaks one guard behaviour at a time and

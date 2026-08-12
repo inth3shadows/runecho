@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/hookwiring"
 )
 
 // The guard attaches to Claude Code through TWO hook events, and every channel
@@ -34,26 +36,12 @@ import (
 // not synchronization — the only thing that keeps them in step is a test that
 // parses all of them.
 //
-// Deliberately NOT derived from main.go's flag set: "which bool flags are hook
-// entry points" is not recoverable from source without guessing. The event→mode
-// table below IS the contract. What IS derived is the check that each mode is a
-// real flag the binary defines, which is what catches a typo.
-var hookContract = map[string]string{
-	"PreToolUse":  "--hook-mode",
-	"PostToolUse": "--outcome-mode",
-}
-
-const hookMatcher = "Edit|Write|MultiEdit"
-
-// wantHookTimeout is the outer, Claude-Code-enforced per-hook-invocation
-// timeout (in seconds) every shipped config must set. It exists as a backstop
-// for the one degraded state nothing else covers: the guard process itself
-// hanging (#332) — a stalled disk read, a pathological parse, anything that
-// blocks before deferOnPanic's own inner guardTimeout (main.go) gets a chance
-// to fire. Kept as its own named constant, not a bare 5, so a future change to
-// either side of the pair (this value or main.go's guardTimeout) is a one-line
-// diff instead of a grep.
-const wantHookTimeout = 5
+// The contract table and the two-JSON-channel check live in
+// internal/hookwiring (lifted 2026-08-12, #331) so this test and
+// `runecho-ir doctor` — which answers the same question for an
+// already-installed binary — share one table and one check instead of two
+// hand-kept copies. What stays here and IS derived: the check that each mode
+// is a real flag the binary defines, which is what catches a typo.
 
 // repoRoot walks up from this package (cmd/runecho-guard) to the module root.
 func repoRoot(t *testing.T) string {
@@ -87,22 +75,6 @@ func trackedPath(t *testing.T, parts ...string) string {
 	return p
 }
 
-// claudeHookFile is the shape of both hooks.json and settings.json.
-type claudeHookFile struct {
-	Hooks map[string][]struct {
-		Matcher string `json:"matcher"`
-		Hooks   []struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-			// Timeout is a *int so a config that omits the field is distinguishable
-			// from one that sets it to a JSON 0 — both would otherwise decode to the
-			// zero value and the presence check below would go blind to the field
-			// simply vanishing from a future edit.
-			Timeout *int `json:"timeout"`
-		} `json:"hooks"`
-	} `json:"hooks"`
-}
-
 // TestShippedConfigsWireEveryHookEvent checks the two JSON channels: the plugin
 // (what `/plugin install` wires) and this repo's own settings.json (what the
 // project dogfoods itself with). A guard that is not dogfooded with the same
@@ -121,49 +93,13 @@ func TestShippedConfigsWireEveryHookEvent(t *testing.T) {
 			t.Errorf("%s: unreadable, so this channel ships unverified: %v", name, err)
 			continue
 		}
-		var cfg claudeHookFile
-		if err := json.Unmarshal(raw, &cfg); err != nil {
+		violations, err := hookwiring.CheckChannel(raw)
+		if err != nil {
 			t.Errorf("%s: invalid JSON — Claude Code would ignore the whole file: %v", name, err)
 			continue
 		}
-
-		for event, mode := range hookContract {
-			entries, ok := cfg.Hooks[event]
-			if !ok || len(entries) == 0 {
-				t.Errorf("%s: no %s hook. The guard degrades SILENTLY without it "+
-					"(see this file's header) — it does not error, it just stops "+
-					"measuring and stops learning.", name, event)
-				continue
-			}
-
-			var found bool
-			for _, entry := range entries {
-				if entry.Matcher != hookMatcher {
-					t.Errorf("%s: %s matcher is %q, want %q — a narrower matcher means "+
-						"edits that the other event DOES see go unpaired",
-						name, event, entry.Matcher, hookMatcher)
-				}
-				for _, h := range entry.Hooks {
-					if !strings.Contains(h.Command, mode) {
-						continue
-					}
-					found = true
-					// #332: a hook with no timeout can hang the agent's edit
-					// indefinitely with no diagnostic — the one degraded state
-					// nothing else in the fail-open contract covers. See
-					// guardTimeout's doc comment in main.go for why this must
-					// stay a strictly outer backstop, not the primary defense.
-					if h.Timeout == nil {
-						t.Errorf("%s: %s hook has no \"timeout\" — a hang in the guard "+
-							"process blocks the edit indefinitely instead of failing open", name, event)
-					} else if *h.Timeout != wantHookTimeout {
-						t.Errorf("%s: %s hook timeout = %d, want %d", name, event, *h.Timeout, wantHookTimeout)
-					}
-				}
-			}
-			if !found {
-				t.Errorf("%s: %s hook exists but never invokes %s", name, event, mode)
-			}
+		for _, v := range violations {
+			t.Errorf("%s: %s", name, v)
 		}
 	}
 }
@@ -197,14 +133,14 @@ func TestPrintHookConfigWiresEveryHookEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no JSON block in --print-hook-config output: %v", err)
 	}
-	var cfg claudeHookFile
+	var cfg hookwiring.ClaudeHookFile
 	if err := json.Unmarshal([]byte(block), &cfg); err != nil {
 		t.Fatalf("--print-hook-config emits INVALID JSON: %v\nA user merging this "+
 			"gets a settings.json Claude Code cannot parse, which disables every "+
 			"hook they have, not just ours.\n%s", err, block)
 	}
 
-	for event, mode := range hookContract {
+	for event, mode := range hookwiring.Contract {
 		entries, ok := cfg.Hooks[event]
 		if !ok || len(entries) == 0 {
 			t.Errorf("--print-hook-config omits %s — a user who follows the printed "+
@@ -213,9 +149,9 @@ func TestPrintHookConfigWiresEveryHookEvent(t *testing.T) {
 		}
 		var found bool
 		for _, entry := range entries {
-			if entry.Matcher != hookMatcher {
+			if entry.Matcher != hookwiring.Matcher {
 				t.Errorf("--print-hook-config %s matcher is %q, want %q",
-					event, entry.Matcher, hookMatcher)
+					event, entry.Matcher, hookwiring.Matcher)
 			}
 			for _, h := range entry.Hooks {
 				if !strings.HasSuffix(h.Command, " "+mode) {
@@ -233,8 +169,8 @@ func TestPrintHookConfigWiresEveryHookEvent(t *testing.T) {
 				// ships without the backstop.
 				if h.Timeout == nil {
 					t.Errorf("--print-hook-config %s hook has no \"timeout\"", event)
-				} else if *h.Timeout != wantHookTimeout {
-					t.Errorf("--print-hook-config %s hook timeout = %d, want %d", event, *h.Timeout, wantHookTimeout)
+				} else if *h.Timeout != hookwiring.WantHookTimeout {
+					t.Errorf("--print-hook-config %s hook timeout = %d, want %d", event, *h.Timeout, hookwiring.WantHookTimeout)
 				}
 			}
 		}
@@ -479,7 +415,7 @@ func TestTechnicalDocDescribesEveryHookEvent(t *testing.T) {
 	}
 	doc := string(raw)
 
-	for event, mode := range hookContract {
+	for event, mode := range hookwiring.Contract {
 		if !strings.Contains(doc, event) {
 			t.Errorf("TECHNICAL.md never mentions %s, but install.sh and guard.sh both "+
 				"point readers here for the hook contract", event)
@@ -502,7 +438,7 @@ func TestHookModesAreRealFlags(t *testing.T) {
 	}
 	src := string(raw)
 
-	for event, mode := range hookContract {
+	for event, mode := range hookwiring.Contract {
 		flag := strings.TrimPrefix(mode, "--")
 		if !strings.Contains(src, `fs.Bool("`+flag+`"`) {
 			t.Errorf("%s wires %s, but main.go defines no %q flag — the binary would "+
@@ -554,7 +490,7 @@ func TestGuardShimAcceptsEveryMode(t *testing.T) {
 		return stderr.String(), code
 	}
 
-	for event, mode := range hookContract {
+	for event, mode := range hookwiring.Contract {
 		stderr, code := run(t, mode)
 		if code != 0 {
 			t.Errorf("guard.sh %s exited %d — a hook shim must always exit 0", mode, code)

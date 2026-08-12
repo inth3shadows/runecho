@@ -127,6 +127,8 @@ is fully finished.
 | `cmd/runecho-ir/contract.go` | `contract list\|show\|activate\|deactivate\|check` | `contract`, `snapshot` |
 | `cmd/runecho-ir/fpreport.go` | `fpreport` — approval rate (see the caveat in USAGE.md; approvals carry no variance on the reference log) | `guardstats` |
 | `cmd/runecho-ir/fpaudit.go` | `fpaudit` — three-way verdict (fp / premature / stands) judged against git history, no human in the loop | `guardstats` |
+| `cmd/runecho-ir/doctor.go`, `internal/doctor/` | `doctor` — "is this install actually wired and answering?": binaries on PATH vs source tag, Claude Code hook wiring, git-hook-body-vs-resolved-binary, enrollment/snapshot staleness, store health + recent activity, active `RUNECHO_GUARD_*` flags. Read-only (#331) | `hookwiring`, `snapshot`, `version` |
+| `internal/hookwiring/contract.go` | The `PreToolUse`/`PostToolUse` hook contract table + JSON-channel check, shared by `hookwiring_test.go` and `doctor` so both read one table instead of two | — |
 | `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
@@ -634,6 +636,7 @@ go test -race ./internal/snapshot/                # concurrency safety
 go test -run=x -fuzz=FuzzJSParser ./internal/parser   # parser fuzzing
 govulncheck ./...                                 # reachable-CVE scan
 runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
+runecho-ir doctor [--json] [--strict]             # is this install actually wired and answering?
 runecho-ir repo list                              # enrolled repos + index state
 runecho-ir guard-stats                            # guard ask volume from decisions.jsonl
 runecho-ir fpreport --gv <version>                # approval rate, scoped to one guard build

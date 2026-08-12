@@ -338,6 +338,67 @@ approve-anyway rate that doesn't read as reflexive (see
 that window means setting `RUNECHO_GUARD_DEPS_GO=1` somewhere real edits will
 exercise it; not done as part of #314.
 
+### The lint differential (#333)
+
+The gated pre-write lint substrate gets the same treatment, adjudicated by
+`ruff` (`cmd/runecho-guard/lint_differential_test.go`). It lives beside the
+check rather than in `internal/guard` deliberately: the harness drives the real
+`runHookMode`, so it can only live in the package the check ships in — a copy
+of the ruff call written for the test would prove ruff is deterministic and
+nothing about the plumbing. The oracle invokes ruff on the file as a **path
+argument** while the check uses `--stdin-filename`; if both went through stdin,
+a stdin-plumbing bug would cancel out on both sides and read as agreement.
+
+```
+RUNECHO_LINT_CORPUS=<repo> RUNECHO_LINT_CORPUS_MAX=300 \
+  go test ./cmd/runecho-guard -run TestLintDifferential -v
+```
+
+Three postures, all sending an identical Write payload and differing only in
+what sits on disk at the target — the thing ruff never sees but `readFileLines`
+folds into the additive check:
+
+| Posture | On disk | Purpose |
+|---|---|---|
+| `create` | absent | additive check sees only the payload |
+| `overwrite-same` | byte-identical | **control**: must equal `create`, asserted |
+| `stale-fold` | defines the names the payload no longer does | models a rewrite that drops a definition it still calls |
+
+`stale-fold` is the posture that does the work. On the committed corpus it moves
+the partition from `both=2 ruff-only=2` to `both=0 ruff-only=4`: the additive
+check resolves those symbols out of the stale on-disk copy and goes quiet, and
+only the linter still sees what will actually land. The first two postures agree
+on every file by construction, so a harness built from them alone measures one
+posture twice — the #313 failure mode above, reproduced.
+
+Measured 2026-08-11, 250–300 files x 3 postures per corpus:
+
+| Corpus | Observations | Oracle findings | Hook FPs | Marginal p50 | Marginal p99 |
+|---|---|---|---|---|---|
+| `testdata/lintcorpus` | 15 | 12 | 0 | +8.4 ms | +12.3 ms |
+| `secret-broker` | 750 | 0 | 0 | +12.0 ms | +30.5 ms |
+| `competitive-intel` | 900 | 0 | 0 | +10.7 ms | +20.5 ms |
+
+Two things follow, and the second is the more important one.
+
+The marginal cost is roughly the guard's entire ~12 ms hook budget again — the
+check about doubles p50 and is far worse at the tail. That is the measurement
+behind `RUNECHO_GUARD_LINT` shipping default-off, now taken in the harness
+rather than by hand.
+
+And **committed Python is F821/F811-clean**: 1,650 observations across two real
+repositories produced not one oracle finding, because an undefined name is a bug
+someone already fixed before committing. So no corpus can validate this check's
+positive direction — a repository only contains code that already passed. The
+committed `testdata/lintcorpus` exists to carry findings a real corpus cannot,
+and the harness distinguishes the two cases rather than reporting one number: a
+silent oracle is a hard failure on the default corpus and an explicitly-labelled
+"false-positive freedom and latency only" run on any other. `0 false positives
+over 750 observations` is the exact sentence a completely disabled check also
+produces, so the harness refuses to print it unqualified. Positive evidence has
+to come from the dogfood window — in-flight agent-proposed code is the only
+place these findings exist.
+
 ## Storage Schema
 
 SQLite at `~/.runecho/history.db` (override dir with `RUNECHO_HOME`). Schema

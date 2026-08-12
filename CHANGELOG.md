@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-08-12
+
+### Changed
+- guard: runecho-ir doctor — is this install actually wired? (#331) (#350)
+
 ## [0.42.5] — 2026-08-12
 
 ### Changed

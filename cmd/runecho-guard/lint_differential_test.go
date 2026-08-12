@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -116,7 +117,7 @@ func ruffOracle(t *testing.T, path string) []oracleFinding {
 	if err != nil {
 		var exitErr *exec.ExitError
 		// Exit 1 is "found violations", ruff's normal reporting exit.
-		if !(asExitError(err, &exitErr) && exitErr.ExitCode() == 1) {
+		if !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1) {
 			t.Fatalf("oracle ruff on %s: %v", path, err)
 		}
 	}
@@ -138,16 +139,6 @@ func ruffOracle(t *testing.T, path string) []oracleFinding {
 		findings = append(findings, oracleFinding{Line: r.Location.Row, Rule: r.Code, Symbol: lintSymbolFromMessage(r.Message)})
 	}
 	return findings
-}
-
-// asExitError is errors.As specialised, kept local so the oracle's error
-// handling reads the same as the check's without importing errors twice.
-func asExitError(err error, target **exec.ExitError) bool {
-	if e, ok := err.(*exec.ExitError); ok {
-		*target = e
-		return true
-	}
-	return false
 }
 
 // lintCorpusRoot resolves the corpus: RUNECHO_LINT_CORPUS, else the committed
@@ -360,6 +351,14 @@ func observe(t *testing.T, target, file string, posture lintPosture, oracle []or
 	_, _, withLint := runHook(t, body)
 	onDur := time.Since(start)
 
+	// Truncate before the lint-off run so its record is unambiguously the last
+	// line. The log is append-only and every observation targets the SAME path,
+	// so a run that logs nothing (any early return that skips logDecision) would
+	// otherwise leave the PREVIOUS file's symbols as the last line, and its
+	// `file` field would match — the stale read would be undetectable and every
+	// downstream partition would be attributed to the wrong corpus file.
+	resetDecisionLog(t)
+
 	t.Setenv("RUNECHO_GUARD_LINT", "")
 	start = time.Now()
 	_, _, _ = runHook(t, body)
@@ -383,6 +382,18 @@ func observe(t *testing.T, target, file string, posture lintPosture, oracle []or
 		other:    other,
 		withLint: onDur,
 		noLint:   offDur,
+	}
+}
+
+// resetDecisionLog removes decisions.jsonl from the current RUNECHO_HOME.
+func resetDecisionLog(t *testing.T) {
+	t.Helper()
+	home := os.Getenv("RUNECHO_HOME")
+	if home == "" {
+		t.Fatal("RUNECHO_HOME is unset — lintDiffEnv did not run, and the decision log being read belongs to the developer's real store")
+	}
+	if err := os.Remove(filepath.Join(home, "decisions.jsonl")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reset decision log: %v", err)
 	}
 }
 
@@ -442,10 +453,8 @@ func checkPostureFidelity(t *testing.T, run corpusRun) {
 		totalReported += len(o.reported)
 
 		byKey := map[string]oracleFinding{}
-		bySymbol := map[string]struct{}{}
 		for _, f := range o.oracle {
 			byKey[f.key()] = f
-			bySymbol[f.Symbol] = struct{}{}
 		}
 
 		// L subset of R, matched on line AND rule AND symbol, not just count:

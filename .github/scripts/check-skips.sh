@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Gate the set of skipped tests against .github/expected-skips.txt, and write the
-# result to $GITHUB_STEP_SUMMARY.
+# result to BOTH $GITHUB_STEP_SUMMARY and stdout — the job log needs the reason
+# as much as the summary page does. See the flush() comment below.
 #
 # `go test` without -v prints only a per-package `ok`, which makes a test that
 # SKIPPED indistinguishable from one that passed. Several tests here skip on a
@@ -24,9 +25,33 @@ set -euo pipefail
 
 LOG=${1:-test.log}
 ALLOW=${2:-.github/expected-skips.txt}
-SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
+SUMMARY=${GITHUB_STEP_SUMMARY:-}
 
-emit() { printf '%s\n' "$@" >>"$SUMMARY"; }
+work=$(mktemp -d)
+report=$work/report
+: >"$report"
+
+# The report is built once and flushed on exit to BOTH the run summary and
+# stdout. Writing only to $GITHUB_STEP_SUMMARY was the defect the #344 probe
+# exposed: it is a FILE, so a failing run printed nothing to the job log but
+# "Process completed with exit code 1", and the reason was reachable only by
+# knowing to open the summary page — from a gate whose entire job is saying what
+# went wrong.
+#
+# Local testing could not see it. GITHUB_STEP_SUMMARY is unset on a developer
+# box, so the old fallback sent the report to /dev/stdout and every local case
+# printed its reasons perfectly: nine cases passed and all nine were blind to
+# it, because the behaviour diverged only in the environment that matters.
+# Hence an unconditional stdout write rather than a fallback.
+# shellcheck disable=SC2329  # invoked by the EXIT trap below, not by name
+flush() {
+  [ -n "$SUMMARY" ] && cat "$report" >>"$SUMMARY"
+  cat "$report"
+  rm -rf "$work"
+}
+trap flush EXIT
+
+emit() { printf '%s\n' "$@" >>"$report"; }
 
 emit "### Skipped tests" ""
 
@@ -53,8 +78,10 @@ if [ ! -f "$ALLOW" ]; then
   exit 1
 fi
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# Reuses the work dir the report lives in. A second `trap ... EXIT` here would
+# REPLACE the flush trap rather than add to it, and the report would silently
+# never be written — the same shape of defect this file was just fixed for.
+tmp=$work
 
 : >"$tmp/allowed"
 : >"$tmp/malformed"
@@ -86,7 +113,7 @@ comm -13 "$tmp/actual" "$tmp/allowed" >"$tmp/stale"
 
 block() { # title, file
   emit "$1" '```'
-  cat "$2" >>"$SUMMARY"
+  cat "$2" >>"$report"
   emit '```' ''
 }
 

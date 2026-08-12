@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.3] — 2026-08-12
+
+### Changed
+- ci: write the skip-gate report to the job log, not just the summary (#345)
+
 ## [0.42.2] — 2026-08-12
 
 ### Changed

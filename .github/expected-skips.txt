@@ -24,6 +24,6 @@
 # Only DELIBERATELY opt-in tests belong here. An environment-conditional skip is
 # precisely what this gate is meant to catch, so allowlisting one defeats it.
 
-TestFileScopeFPSmoke: opt-in FP smoke harness; runs only with RUNECHO_FPSMOKE=<dir> pointed at a real corpus (internal/guard/filescope_fpsmoke_test.go)
 TestSpikeGoplsOracleVarType: opt-in #323 oracle spike; needs RUNECHO_SPIKE_GOPLS=1 and an executable GOPLS_BIN (internal/guard/oracle_spike_test.go)
 TestSpikePrematureLatency: opt-in #329 spike; needs RUNECHO_SPIKE_PREMATURE_LATENCY=1 and a real decision log (internal/guardstats/premature_latency_spike_test.go)
+TestThisDoesNotExistAnywhere: deliberately bogus entry, proving the stale direction fails

@@ -72,6 +72,17 @@ jobs:
       github.event.workflow_run.head_branch == 'master' &&
       github.repository == 'inth3shadows/runecho'
     runs-on: ubuntu-latest
+    # Waiting for CI (workflow_run) instead of starting on push, as this job
+    # now does, means the gap between "commit tested" and "job starts" is
+    # CI's full runtime, not the ~seconds an immediate push trigger left. Two
+    # masters merges landing within that gap each fire their own workflow_run,
+    # so without serializing them the second job's atomic push below can
+    # collide with the first's non-fast-forward — queue instead of racing.
+    # cancel-in-progress: false because an in-flight `git push`/goreleaser
+    # publish must finish, not be killed mid-way.
+    concurrency:
+      group: autorelease
+      cancel-in-progress: false
     permissions:
       contents: write
       # Both required by attest-build-provenance: id-token to mint the OIDC
@@ -90,15 +101,36 @@ jobs:
           # existing semver tag, which a shallow clone would not have.
           fetch-depth: 0
 
+      # Queuing (above) stops two pushes racing each other, but a queued job
+      # can still be built on a commit master has since moved past — e.g. two
+      # merges landed inside CI's runtime and this run is for the older one,
+      # now sitting behind the newer one's own already-published release. Its
+      # `git push --atomic origin HEAD:master` below would fail non-fast-forward.
+      # Detect that here and skip cleanly: the newer commit's own workflow_run
+      # will decide the release from the (by-then) live tip, so nothing is
+      # lost by deferring to it.
+      - name: Guard against a stale base
+        id: guard
+        run: |
+          tested="${{ github.event.workflow_run.head_sha }}"
+          current="$(git rev-parse origin/master)"
+          if [ "$current" != "$tested" ]; then
+            echo "master is now at $current; this run tested $tested and is superseded. Deferring to that commit's own CI run."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Decide the release
         id: decide
+        if: steps.guard.outputs.stale == 'false'
         run: |
           subject="$(git log -1 --format=%s)"
           echo "subject: $subject"
           python3 scripts/next-release.py --subject "$subject" --apply >> "$GITHUB_OUTPUT"
 
       - name: Report a skip
-        if: steps.decide.outputs.version == ''
+        if: steps.guard.outputs.stale == 'false' && steps.decide.outputs.version == ''
         run: echo "No release for this merge (${{ steps.decide.outputs.skip }})."
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

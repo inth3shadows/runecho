@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [master]
   pull_request:
     paths:
@@ -34,16 +37,26 @@ jobs:
       - name: Self-test the release decision logic
         run: python3 scripts/next-release-test.py
 
-  # Push to master: decide whether this merge is a release, and if so tag and
-  # publish it. This is what removes "cut a tag" as a thing anyone has to
+  # CI green on master: decide whether this merge is a release, and if so tag
+  # and publish it. This is what removes "cut a tag" as a thing anyone has to
   # remember — see scripts/next-release.py for the bump rules.
+  #
+  # WHY `workflow_run` INSTEAD OF `push: branches: [master]` (#347): this job
+  # used to fire on the same push that started CI, with no idea whether CI
+  # would pass. #344/#346 proved a push can look entirely normal and still
+  # have a red `test` job. `workflow_run` makes publication wait for the CI
+  # workflow (name: "CI", ci.yml) to finish and checks its conclusion below —
+  # a red `test` or `docker` job means the workflow conclusion is failure and
+  # nothing here runs. `workflow_run` evaluates the workflow file from the
+  # default branch, so this trigger only takes effect once merged to master.
   #
   # WHY THIS JOB PUBLISHES INSTEAD OF LETTING THE `release` JOB BELOW DO IT:
   # a tag pushed using GITHUB_TOKEN does NOT trigger another workflow run.
   # GitHub suppresses that to prevent recursion. So `on: push: tags` will not
   # fire for a tag this job creates, and the release has to happen right here or
   # not at all. That same suppression is what keeps the CHANGELOG commit below
-  # from re-triggering this job; the skip-ci marker is belt-and-braces.
+  # from re-triggering CI (and so this job, transitively) — the skip-ci marker
+  # is belt-and-braces.
   #
   # HAZARD, learned the hard way on this file's own first push: GitHub honours
   # that skip marker ANYWHERE in a commit message, body included. This repo
@@ -52,7 +65,12 @@ jobs:
   # and silently suppresses this job. If a release you expected did not happen,
   # check the merge commit message for the token before suspecting anything here.
   autorelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'inth3shadows/runecho'
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.repository == 'inth3shadows/runecho'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -62,9 +80,15 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Full history AND tags: the version is computed from the highest
-        # existing semver tag, which a shallow clone would not have.
-        with: { fetch-depth: 0 }
+        with:
+          # The commit CI actually tested — not whatever master has drifted to
+          # by the time this job starts, which can be later (another merge
+          # landed) or, on GITHUB_TOKEN push suppression failing open, this
+          # job's own prior changelog commit.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Full history AND tags: the version is computed from the highest
+          # existing semver tag, which a shallow clone would not have.
+          fetch-depth: 0
 
       - name: Decide the release
         id: decide

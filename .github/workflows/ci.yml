@@ -70,6 +70,12 @@ jobs:
         run: bash .github/scripts/check-skips.sh test.log .github/expected-skips.txt
       - name: Installer syntax
         run: bash -n install.sh
+      # The skip gate decides whether every PR goes red, so its own behaviour
+      # needs pinning. Self-contained and ~1s: synthetic logs in a temp dir, no
+      # dependency on the run it sits beside. Mutation-scored — six deliberate
+      # breaks of check-skips.sh are each caught by a named case.
+      - name: Self-test the skip gate
+        run: bash .github/scripts/check-skips-test.sh
       # Scores the hook-fixture corpus: breaks one guard behaviour at a time and
       # fails if any fixture caught nothing, or if a mutation survived without a
       # written `known_gap` reason. The corpus is the only instrument reaching

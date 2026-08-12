@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.4] — 2026-08-12
+
+### Changed
+- ci: commit and wire the skip-gate self-test (#348)
+
 ## [0.42.3] — 2026-08-12
 
 ### Changed

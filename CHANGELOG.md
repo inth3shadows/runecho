@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-08-12
+
+### Changed
+- guard: pin findings 5-7 of the lint differential by mutation (#333) (#341)
+
 ## [0.41.0] — 2026-08-12
 
 ### Changed

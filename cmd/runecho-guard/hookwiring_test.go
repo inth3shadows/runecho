@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/wiring"
 )
 
 // The guard attaches to Claude Code through TWO hook events, and every channel
@@ -36,24 +38,20 @@ import (
 //
 // Deliberately NOT derived from main.go's flag set: "which bool flags are hook
 // entry points" is not recoverable from source without guessing. The event→mode
-// table below IS the contract. What IS derived is the check that each mode is a
-// real flag the binary defines, which is what catches a typo.
-var hookContract = map[string]string{
-	"PreToolUse":  "--hook-mode",
-	"PostToolUse": "--outcome-mode",
-}
+// table IS the contract. What IS derived is the check that each mode is a real
+// flag the binary defines, which is what catches a typo.
+//
+// The table itself now lives in internal/wiring so `runecho-ir doctor` (#331)
+// reads the SAME one. A second copy here would be the fourth hand-kept copy of
+// a fact that has already shipped wrong once — exactly what this test exists to
+// prevent, so it must not reintroduce the pattern in its own file.
+var hookContract = wiring.Contract
 
-const hookMatcher = "Edit|Write|MultiEdit"
+const hookMatcher = wiring.Matcher
 
 // wantHookTimeout is the outer, Claude-Code-enforced per-hook-invocation
-// timeout (in seconds) every shipped config must set. It exists as a backstop
-// for the one degraded state nothing else covers: the guard process itself
-// hanging (#332) — a stalled disk read, a pathological parse, anything that
-// blocks before deferOnPanic's own inner guardTimeout (main.go) gets a chance
-// to fire. Kept as its own named constant, not a bare 5, so a future change to
-// either side of the pair (this value or main.go's guardTimeout) is a one-line
-// diff instead of a grep.
-const wantHookTimeout = 5
+// timeout every shipped config must set (see wiring.Timeout for why).
+const wantHookTimeout = wiring.Timeout
 
 // repoRoot walks up from this package (cmd/runecho-guard) to the module root.
 func repoRoot(t *testing.T) string {
@@ -87,21 +85,9 @@ func trackedPath(t *testing.T, parts ...string) string {
 	return p
 }
 
-// claudeHookFile is the shape of both hooks.json and settings.json.
-type claudeHookFile struct {
-	Hooks map[string][]struct {
-		Matcher string `json:"matcher"`
-		Hooks   []struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-			// Timeout is a *int so a config that omits the field is distinguishable
-			// from one that sets it to a JSON 0 — both would otherwise decode to the
-			// zero value and the presence check below would go blind to the field
-			// simply vanishing from a future edit.
-			Timeout *int `json:"timeout"`
-		} `json:"hooks"`
-	} `json:"hooks"`
-}
+// claudeHookFile is the shape of both hooks.json and settings.json, shared with
+// the doctor command so the two cannot decode the same file differently.
+type claudeHookFile = wiring.HookFile
 
 // TestShippedConfigsWireEveryHookEvent checks the two JSON channels: the plugin
 // (what `/plugin install` wires) and this repo's own settings.json (what the

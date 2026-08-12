@@ -90,6 +90,8 @@ func run() int {
 			return runTruthTrail(os.Args[2:])
 		case "validate-claims":
 			return runValidateClaims(os.Args[2:])
+		case "doctor":
+			return runDoctor(os.Args[2:])
 		case "contract":
 			return runContract(os.Args[2:])
 		case "--help", "-h", "help":
@@ -123,6 +125,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir doctor [--json] [--strict] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic] [--force] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir version-check [--reinstall] [--quiet] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")

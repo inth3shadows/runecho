@@ -409,6 +409,20 @@ its `empty-input` fast return and never reaches ruff — the observation costs
 files in the two corpora above), so counting them would pad the observation
 total with non-observations and drag the latency distribution toward zero.
 
+Files the **oracle** cannot read are dropped for the same reason, and finding
+them took a stub. ruff does not report an unreadable file through its exit
+code: measured against 0.16.1, a `chmod 000` file that genuinely contains an
+F821 gives exit 0, `[]` on stdout, and `warning: Failed to lint <path>` on
+stderr. Judged by exit code alone that is a clean file, so it would enter the
+corpus as a real observation the oracle never read — one more silent entry in
+the denominator of "0 false positives over 750 observations". The oracle
+therefore captures stderr and treats a read failure, and only a read failure,
+as unadjudicable: dropping on *any* stderr would quietly shrink the corpus
+every time ruff emitted a deprecation warning. Both directions are pinned by
+tests, and the exit-code branch — which real ruff cannot reach, since the
+harness always passes an absolute path — is staged through a substitutable
+`ruffBin`.
+
 Two things follow, and the second is the more important one.
 
 The marginal cost is roughly the guard's entire ~12 ms hook budget again — the

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,30 +107,59 @@ func requireRuff(t *testing.T) {
 	}
 }
 
+// ruffBin is the oracle's executable. A var, not a const, for exactly one
+// reason: ruffOracle's unexpected-exit branch is unreachable through real ruff —
+// it warns and exits 0 on I/O errors, and the harness always passes an ABSOLUTE
+// path, so no filename can be misread as a flag. Without a substitutable binary
+// that branch's claim ("one oddity cannot take the sweep down") is untestable,
+// and an untestable claim in this harness is the thing the harness exists to
+// object to. Not safe for parallel tests; nothing in this file uses t.Parallel.
+var ruffBin = "ruff"
+
 // ruffOracle runs ruff against the file on disk, as a path argument. Flags match
 // lintFindingsWithReason's except for the input shape, and the same
 // lintSelectedRules filter is applied for the same reason (--select does not
 // bound ruff's output; it emits invalid-syntax regardless).
 //
 // The bool reports whether this file could be adjudicated at all. A per-file
-// failure — an unreadable file, a ruff exit this harness does not understand —
-// drops that ONE file rather than aborting the sweep, matching lintCorpusFiles's
-// posture on unreadable subtrees: one permission-denied .py in a 750-observation
-// corpus is a property of the corpus, not a harness failure. The caller logs
-// what it dropped, and the vacuity guards still fail loudly if a systemic break
-// (a ruff output-format change, say) makes EVERY file unusable.
+// failure drops that ONE file rather than aborting the sweep, matching
+// lintCorpusFiles's posture on unreadable subtrees: one permission-denied .py in
+// a 750-observation corpus is a property of the corpus, not a harness failure.
+// The caller logs what it dropped, and the vacuity guards still fail loudly if a
+// systemic break (a ruff output-format change, say) makes EVERY file unusable.
+//
+// The exit code is NOT how ruff reports an unreadable file, which is the trap
+// here. Measured against ruff 0.16.1: a chmod-000 .py that genuinely contains an
+// F821 produces exit 0, `[]` on stdout, and `warning: Failed to lint <path>` on
+// stderr. Read by exit code alone that is indistinguishable from a clean file,
+// so the observation would be counted as real while the oracle never read a byte
+// of it — a file silently entering the denominator of "0 false positives over
+// 750 observations", the same false-denominator defect as the zero-byte files
+// lintCorpusFiles drops, one layer down. stderr is therefore load-bearing and is
+// captured explicitly rather than discarded.
 func ruffOracle(t *testing.T, path string) ([]oracleFinding, bool) {
 	t.Helper()
-	cmd := exec.Command("ruff", "check", "--no-cache", "--isolated",
+	cmd := exec.Command(ruffBin, "check", "--no-cache", "--isolated",
 		"--select", lintSelect, "--output-format", "json", path)
-	out, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := stdout.Bytes()
 	if err != nil {
 		var exitErr *exec.ExitError
-		// Exit 1 is "found violations", ruff's normal reporting exit.
+		// Exit 1 is "found violations", ruff's normal reporting exit. Anything
+		// else is a harness-level fault (a bad flag, a missing binary) rather
+		// than a property of this file, but it is still dropped per-file so one
+		// oddity cannot take the sweep down with it.
 		if !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1) {
 			t.Logf("oracle ruff on %s: %v — file NOT adjudicated, dropped from the corpus", relOrSelf(path), err)
 			return nil, false
 		}
+	}
+	if s := strings.TrimSpace(stderr.String()); strings.Contains(s, "Failed to lint") {
+		t.Logf("oracle ruff could not read %s (%s) — file NOT adjudicated, dropped from the corpus", relOrSelf(path), s)
+		return nil, false
 	}
 	var raw []struct {
 		Code     string `json:"code"`
@@ -185,12 +215,15 @@ var lintCorpusSkipDirs = map[string]bool{
 	".mypy_cache": true, ".ruff_cache": true, "site-packages": true, "vendor": true,
 }
 
-// lintCorpusFiles walks the corpus for .py files, capped at
-// RUNECHO_LINT_CORPUS_MAX (default lintCorpusMaxDefault). Sorted so a capped run
-// is reproducible rather than filesystem-order-dependent, and the drop count is
-// logged.
-func lintCorpusFiles(t *testing.T, root string) []string {
-	t.Helper()
+// walkLintCorpus walks root for candidate .py files, returning them unsorted
+// alongside the count of zero-byte files skipped.
+//
+// Split out of lintCorpusFiles so the root-error path is reachable from a test.
+// lintCorpusFiles reports every failure through t.Fatalf, and a test cannot tell
+// one fatal from another — which is exactly how the swallowed root error stayed
+// invisible: it surfaced as the vacuous-corpus fatal, a message about a
+// different fault entirely.
+func walkLintCorpus(root string) ([]string, int, error) {
 	var all []string
 	empty := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -232,6 +265,16 @@ func lintCorpusFiles(t *testing.T, root string) []string {
 		all = append(all, path)
 		return nil
 	})
+	return all, empty, err
+}
+
+// lintCorpusFiles walks the corpus for .py files, capped at
+// RUNECHO_LINT_CORPUS_MAX (default lintCorpusMaxDefault). Sorted so a capped run
+// is reproducible rather than filesystem-order-dependent, and the drop count is
+// logged.
+func lintCorpusFiles(t *testing.T, root string) []string {
+	t.Helper()
+	all, empty, err := walkLintCorpus(root)
 	if err != nil {
 		t.Fatalf("walk corpus %s: %v", root, err)
 	}
@@ -756,11 +799,7 @@ func checkOverlapPartition(t *testing.T, run corpusRun) {
 				b.abstainFiles[relOrSelf(o.file)] = struct{}{}
 			} else {
 				b.guardOnlyClean++
-				// Keyed symbol@file, not bare symbol. A bare name cannot be
-				// triaged — this is the bucket the docs call the next
-				// investigation, and "which file was that in" was the first
-				// question it could not answer.
-				b.cleanSample[s+" @ "+relOrSelf(o.file)] = struct{}{}
+				b.cleanSample[cleanSampleKey(s, o.file)] = struct{}{}
 			}
 		}
 	}
@@ -822,6 +861,15 @@ func checkOverlapPartition(t *testing.T, run corpusRun) {
 	}
 }
 
+// cleanSampleKey identifies one guard-only/oracle-clean divergence, keyed on
+// symbol AND file. This bucket is what TECHNICAL.md calls the next
+// investigation, and a bare symbol key failed it twice over: it did not say
+// which file to open, and it collapsed the same name appearing in two files into
+// one entry, so the distinct count silently under-reported the spread.
+func cleanSampleKey(symbol, file string) string {
+	return symbol + " @ " + relOrSelf(file)
+}
+
 // oracleAbstains reports whether the file contains a star import, the construct
 // verified to make F821 stop reporting undefined names.
 //
@@ -853,6 +901,183 @@ func oracleAbstains(t *testing.T, file string) bool {
 		}
 	}
 	return false
+}
+
+// TestRuffOracle_UnreadableFileIsNotAdjudicated pins the stderr check.
+//
+// The readable control runs FIRST and asserts the fixture really does produce a
+// finding. Without it, `ok == false` on the unreadable pass would also hold for
+// a fixture ruff simply had nothing to say about, and the test would pass while
+// asserting nothing — which is the failure mode this whole harness exists to
+// catch, so it is not one to reproduce in the harness's own tests.
+func TestRuffOracle_UnreadableFileIsNotAdjudicated(t *testing.T) {
+	requireRuff(t)
+	path := filepath.Join(t.TempDir(), "locked.py")
+	if err := os.WriteFile(path, []byte("def f():\n    return undefined_thing\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	found, ok := ruffOracle(t, path)
+	if !ok || len(found) != 1 || found[0].Rule != "F821" {
+		t.Fatalf("readable control: got ok=%v findings=%v, want one F821 — the fixture must be adjudicable for the unreadable case below to mean anything", ok, found)
+	}
+
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	// Probe rather than infer. `os.Geteuid() == 0` is not the only way chmod 000
+	// fails to deny a read: CAP_DAC_OVERRIDE (containers, rootless/userns) grants
+	// it to a non-zero uid, and mode bits are advisory on filesystems like a
+	// drvfs/NTFS TMPDIR under WSL. In those environments ruff reads the file
+	// fine and this test would report a spurious failure instead of skipping.
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("chmod 000 did not deny reads here (CAP_DAC_OVERRIDE, or a filesystem that ignores mode bits) — the unreadable case cannot be staged")
+	}
+
+	found, ok = ruffOracle(t, path)
+	if ok {
+		t.Errorf("an unreadable file was adjudicated (findings=%v) — ruff exits 0 with `[]` on stdout and only warns on stderr, so this file enters the corpus as a clean observation the oracle never read, padding the denominator of every false-positive claim", found)
+	}
+}
+
+// TestRuffOracle_UnexpectedExitDropsOneFileNotTheSweep pins the exit-code
+// branch, which real ruff cannot reach (see ruffBin). A stub is the only way to
+// stage it, and staging it is worth doing: the alternative to this branch
+// dropping one file is a t.Fatalf that ends a 750-observation sweep over a
+// single anomaly.
+func TestRuffOracle_UnexpectedExitDropsOneFileNotTheSweep(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "ruff-stub")
+	py := filepath.Join(dir, "x.py")
+	if err := os.WriteFile(py, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	defer func(old string) { ruffBin = old }(ruffBin)
+	ruffBin = stub
+
+	writeStub := func(exit int) {
+		// Well-formed empty JSON on stdout in BOTH variants, so the exit code is
+		// the only thing that differs between them. A stub that also emitted
+		// garbage would be condemned by the JSON check instead, leaving the
+		// branch under test unexercised.
+		src := fmt.Sprintf("#!/bin/sh\necho '[]'\nexit %d\n", exit)
+		if err := os.WriteFile(stub, []byte(src), 0o755); err != nil {
+			t.Fatalf("write ruff stub: %v", err)
+		}
+	}
+
+	// Control FIRST. `ok == false` is also what an unexecutable stub produces —
+	// a noexec TMPDIR or a missing /bin/sh makes cmd.Run return an *exec.Error,
+	// which fails the *exec.ExitError type assertion and reaches the same
+	// `return nil, false` without the exit code ever being the reason. Without
+	// this the test would pass in those environments while asserting nothing,
+	// which is the vacuous-negative the rest of this harness exists to reject.
+	writeStub(0)
+	if _, ok := ruffOracle(t, py); !ok {
+		t.Skipf("the stub could not be executed (noexec %s, or no /bin/sh) — the exit-code branch cannot be staged here", dir)
+	}
+
+	writeStub(2)
+	if found, ok := ruffOracle(t, py); ok {
+		t.Errorf("an oracle exit this harness does not understand was treated as a valid adjudication (findings=%v) — the file enters the corpus as clean on the strength of an error", found)
+	}
+}
+
+// TestRuffOracle_BenignStderrStillAdjudicates is the other side of the stderr
+// check. "Any stderr output means unadjudicable" would also pass the unreadable
+// test above, and would silently shrink the corpus every time ruff emitted a
+// deprecation or unused-noqa warning — a quiet loss of coverage that reads as a
+// smaller corpus rather than as a fault. Only a read FAILURE condemns the file.
+func TestRuffOracle_BenignStderrStillAdjudicates(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "ruff-stub")
+	stubSrc := `#!/bin/sh
+echo "warning: unused noqa directive (non-enabled: F401)" >&2
+echo '[{"code":"F821","message":"Undefined name missing_helper","location":{"row":3}}]'
+exit 1
+`
+	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+		t.Fatalf("write ruff stub: %v", err)
+	}
+	defer func(old string) { ruffBin = old }(ruffBin)
+	ruffBin = stub
+
+	py := filepath.Join(dir, "x.py")
+	if err := os.WriteFile(py, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	found, ok := ruffOracle(t, py)
+	if !ok {
+		t.Fatalf("a file ruff adjudicated fine was dropped because ruff also printed a warning — every such warning would silently shrink the corpus")
+	}
+	if len(found) != 1 || found[0].Rule != "F821" || found[0].Line != 3 {
+		t.Errorf("got %v, want one F821 at line 3", found)
+	}
+}
+
+// TestWalkLintCorpus_RootErrorSurfaces pins BOTH halves of the root-vs-subtree
+// split. A fix that surfaced every walk error, not just the root's, would make
+// any real repository with one unreadable directory fail outright — so the
+// subtree case is asserted alongside, not assumed.
+func TestWalkLintCorpus_RootErrorSurfaces(t *testing.T) {
+	t.Run("missing root is an error", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "no-such-corpus")
+		files, _, err := walkLintCorpus(missing)
+		if err == nil {
+			t.Fatalf("walking a nonexistent root returned no error (%d file(s)) — a typo'd RUNECHO_LINT_CORPUS then reports `contains no .py files`, blaming the corpus for a fault in the env var", len(files))
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("got %v, want a not-exist error", err)
+		}
+	})
+
+	t.Run("unreadable subtree is skipped, not fatal", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "good.py"), []byte("x = 1\n"), 0o644); err != nil {
+			t.Fatalf("write good.py: %v", err)
+		}
+		blocked := filepath.Join(root, "blocked")
+		if err := os.MkdirAll(blocked, 0o755); err != nil {
+			t.Fatalf("mkdir blocked: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(blocked, "inner.py"), []byte("y = 2\n"), 0o644); err != nil {
+			t.Fatalf("write inner.py: %v", err)
+		}
+		if err := os.Chmod(blocked, 0o000); err != nil {
+			t.Fatalf("chmod blocked: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+		// Same probe-don't-infer reasoning as the unreadable-file test above: if
+		// the directory is still traversable, the walk legitimately finds
+		// inner.py and the assertion below would fail for an environmental
+		// reason rather than a behavioural one.
+		if _, err := os.ReadDir(blocked); err == nil {
+			t.Skip("chmod 000 did not deny traversal here (CAP_DAC_OVERRIDE, or a filesystem that ignores mode bits) — the unreadable-subtree case cannot be staged")
+		}
+
+		files, _, err := walkLintCorpus(root)
+		if err != nil {
+			t.Fatalf("one unreadable subtree aborted the whole walk: %v — a real repository with a single unreadable directory would never be measurable", err)
+		}
+		if len(files) != 1 || filepath.Base(files[0]) != "good.py" {
+			t.Errorf("got %v, want just good.py", files)
+		}
+	})
+}
+
+// TestCleanSampleKey_CarriesFileAttribution pins the oracle-clean bucket's key.
+func TestCleanSampleKey_CarriesFileAttribution(t *testing.T) {
+	alpha := cleanSampleKey("helper", filepath.Join("pkg", "alpha.py"))
+	beta := cleanSampleKey("helper", filepath.Join("pkg", "beta.py"))
+	if alpha == beta {
+		t.Errorf("the same symbol in two files collapsed to one key (%q) — the bucket cannot be triaged without knowing which file, and the distinct count under-reports the spread", alpha)
+	}
+	if !strings.Contains(alpha, "helper") {
+		t.Errorf("key %q dropped the symbol", alpha)
+	}
+	if !strings.Contains(alpha, "alpha.py") {
+		t.Errorf("key %q dropped the file", alpha)
+	}
 }
 
 // TestOracleAbstains_TrailingComment pins the classifier fix. The committed

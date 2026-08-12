@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -41,66 +40,15 @@ const installTimeout = 5 * time.Minute
 
 const runechoModuleLine = "module github.com/inth3shadows/runecho"
 
-// semverCoreRE matches the X.Y.Z core of a version string, dropping any
-// `-N-gsha`/`-dirty` build suffix. A post-tag build reports v0.16.1-3-gabc1234,
-// and comparing full describe strings with sort -V orders such suffixes
-// inconsistently — comparing only the core makes "ahead of the tag" read as
-// "not behind".
-//
-// The leading `v` is OPTIONAL because the two build channels stamp differently:
-// install.sh uses `git describe --tags` → "v0.17.4", but goreleaser stamps
-// `{{ .Version }}` → "0.17.4" (goreleaser strips the v). Requiring the v made
-// version-check silently inert for a goreleaser binary. Inputs are always our own
-// stamp or `--version` output, never free text, so the optional v cannot match a
-// stray "goX.Y.Z"-style substring in practice. parseSemver strips any v, so a
-// mixed-format comparison (v0.16.0 vs 0.17.0) still works.
-var semverCoreRE = regexp.MustCompile(`v?[0-9]+\.[0-9]+\.[0-9]+`)
-
-// semverCore extracts the first vX.Y.Z occurrence from s, or "" if none.
-func semverCore(s string) string {
-	return semverCoreRE.FindString(s)
-}
-
-// semverLess reports whether core a is strictly semver-less than core b. Both
-// must be vX.Y.Z cores (as returned by semverCore); a malformed or empty input
-// yields false, so an unreadable version never triggers a downgrade or a rebuild.
-func semverLess(a, b string) bool {
-	ap, aok := parseSemver(a)
-	bp, bok := parseSemver(b)
-	if !aok || !bok {
-		return false
-	}
-	for i := 0; i < 3; i++ {
-		if ap[i] != bp[i] {
-			return ap[i] < bp[i]
-		}
-	}
-	return false
-}
-
-// parseSemver parses "vX.Y.Z" into [3]int. ok=false on any malformed input.
-func parseSemver(s string) ([3]int, bool) {
-	var out [3]int
-	s = strings.TrimPrefix(s, "v")
-	parts := strings.Split(s, ".")
-	if len(parts) != 3 {
-		return out, false
-	}
-	for i, p := range parts {
-		n := 0
-		if p == "" {
-			return out, false
-		}
-		for _, r := range p {
-			if r < '0' || r > '9' {
-				return out, false
-			}
-			n = n*10 + int(r-'0')
-		}
-		out[i] = n
-	}
-	return out, true
-}
+// semverCore, semverLess and parseSemver delegate to internal/version, the
+// single shared implementation (lifted 2026-08-12, #331) — `runecho-ir doctor`
+// needs the identical comparison and cannot import this `main` package, so the
+// logic lives where both can reach it. Kept as package-local wrappers here
+// (rather than rewriting every call site to `version.SemverCore`, etc.) to
+// keep this diff to the move alone.
+func semverCore(s string) string          { return version.SemverCore(s) }
+func semverLess(a, b string) bool         { return version.SemverLess(a, b) }
+func parseSemver(s string) ([3]int, bool) { return version.ParseSemver(s) }
 
 // versionBehind reports whether the installed core is strictly older than the
 // newest core — the one case that warrants a rebuild. Equal or ahead (an older

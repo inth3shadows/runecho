@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.42.2] — 2026-08-12
+
+### Changed
+- ci: fail the build on an unexpected skipped test (#343)
+
 ## [0.42.1] — 2026-08-12
 
 ### Changed

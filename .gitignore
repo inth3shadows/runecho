@@ -58,3 +58,6 @@ __pycache__/
 
 # triage-check default report output (maintainer tool)
 triage-report.json
+
+# CI writes this via `go test ... | tee test.log`; keep a local copy out of commits.
+test.log

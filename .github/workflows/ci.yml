@@ -39,8 +39,45 @@ jobs:
       # Version pinned to what lint.go's design was measured against.
       - name: Install ruff (RUNECHO_GUARD_LINT test dependency, #333)
         run: pipx install ruff==0.16.1
+      # -v exists for one reason: without it `go test` prints only a per-package
+      # `ok`, which makes a test that SKIPPED indistinguishable from one that
+      # passed. Several tests here skip on a condition the runner controls rather
+      # than the code -- ruff absent, a chmod that does not deny (CAP_DAC_OVERRIDE
+      # or a filesystem ignoring mode bits), a stub that cannot exec on a noexec
+      # TMPDIR. Each is a correct skip locally and a silent hole in coverage here,
+      # and the non-verbose log could not tell the two apart: #341 shipped with
+      # the claim "the pin is live in CI" resting on inference about the runner's
+      # uid and filesystem, because nothing in the log could confirm it.
+      #
+      # set -o pipefail is load-bearing, not hygiene. GitHub runs `run:` under
+      # `bash -e`, which does NOT propagate a failure from the left side of a
+      # pipe -- so `go test | tee` without it reports tee's exit status and turns
+      # a failing suite green. The step that makes skips visible would otherwise
+      # be the step that hides failures.
       - name: Test (race + coverage, includes guard corpus gate)
-        run: go test ./... -race -cover
+        run: |
+          set -o pipefail
+          go test ./... -race -cover -v 2>&1 | tee test.log
+      # The verbose log is ~3,800 lines to carry ~3 lines of payload, so the
+      # payload is lifted into the run summary where it is read without scrolling.
+      # `always()` because a skip that only appears on a FAILING run is exactly
+      # the one worth seeing.
+      - name: Report skipped tests
+        if: always()
+        run: |
+          {
+            echo "### Skipped tests"
+            echo
+            if [ -f test.log ] && skips=$(grep -E '^[[:space:]]*--- SKIP' test.log | sed 's/^[[:space:]]*//' | sort -u) && [ -n "$skips" ]; then
+              echo '```'
+              echo "$skips"
+              echo '```'
+            elif [ -f test.log ]; then
+              echo "_None — every test ran._"
+            else
+              echo "_No test.log: the test step did not get far enough to produce one._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Installer syntax
         run: bash -n install.sh
       # Scores the hook-fixture corpus: breaks one guard behaviour at a time and

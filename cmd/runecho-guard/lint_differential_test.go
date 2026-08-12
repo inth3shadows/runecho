@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,6 +182,7 @@ var lintCorpusSkipDirs = map[string]bool{
 func lintCorpusFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var all []string
+	empty := 0
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable subtree: skip, don't abort the corpus
@@ -191,13 +193,30 @@ func lintCorpusFiles(t *testing.T, root string) []string {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".py") {
-			all = append(all, path)
+		if !strings.HasSuffix(path, ".py") {
+			return nil
 		}
+		// Zero-byte files are dropped, not measured. `payload` omits
+		// tool_input.content when the string is empty, so runHookMode takes its
+		// `empty-input` fast return and never reaches ruff, guard.Run or the ask
+		// — the observation costs ~130us instead of ~25ms and adjudicates
+		// nothing. Empty `__init__.py` is ubiquitous (18 of 378 in one real
+		// corpus, 63 of 3049 in another), so keeping them would pad the
+		// observation count with non-observations and drag the latency
+		// distribution toward zero. Counted and logged rather than silently
+		// filtered: a corpus that is mostly empty files should say so.
+		if info, statErr := d.Info(); statErr == nil && info.Size() == 0 {
+			empty++
+			return nil
+		}
+		all = append(all, path)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk corpus %s: %v", root, err)
+	}
+	if empty > 0 {
+		t.Logf("corpus %s: skipped %d zero-byte .py file(s) — the hook's empty-input fast return would measure nothing for them", root, empty)
 	}
 	sort.Strings(all)
 
@@ -236,11 +255,17 @@ func lintDiffEnv(t *testing.T) string {
 		"RUNECHO_GUARD_SKIP", "RUNECHO_GUARD_STRICT", "RUNECHO_GUARD_DANGLING",
 		"RUNECHO_GUARD_DROPPED_IMPORT", "RUNECHO_GUARD_DUPLICATE",
 		"RUNECHO_GUARD_CALLSHAPE", "RUNECHO_GUARD_RECVMETHOD", "RUNECHO_GUARD_VARTYPE",
-		"RUNECHO_GUARD_FILESCOPE", "RUNECHO_GUARD_DEPS_GO", "RUNECHO_GUARD_QUALIFIED",
+		"RUNECHO_GUARD_FILESCOPE", "RUNECHO_GUARD_DEPS_GO",
 		"RUNECHO_GUARD_CONTRACT", "RUNECHO_GUARD_LEARN",
 	} {
 		t.Setenv(k, "")
 	}
+	// RUNECHO_GUARD_QUALIFIED is the ONE default-on gate: qualifiedEnabled() is
+	// `!= "0"`, so clearing it above would have left the check running. Audited
+	// against every RUNECHO_GUARD_* read in the package — it is currently the
+	// only inverted one, and a future default-on check added to the list above
+	// would silently stay on the same way.
+	t.Setenv("RUNECHO_GUARD_QUALIFIED", "0")
 	root := t.TempDir()
 	gitInit(t, root)
 	// enrolledStore sets RUNECHO_HOME; the symbol set is deliberately unrelated
@@ -470,12 +495,18 @@ func checkPostureFidelity(t *testing.T, run corpusRun) {
 
 		// R \ A subset of L: an oracle finding may go unreported ONLY because
 		// suppressAlreadyReported dropped it against another check's symbol.
-		reportedSyms := map[string]struct{}{}
+		// Keyed on line+rule+symbol, matching the forward direction. A bare
+		// symbol set would let a hook finding for `helper` at line 3 stand in
+		// for an oracle finding for `helper` at line 40, so a regression that
+		// reports the right name at the wrong line — for one of several
+		// occurrences — would pass. The suppression set below stays
+		// symbol-keyed because suppressAlreadyReported compares on Symbol.
+		reportedKeys := map[string]struct{}{}
 		for _, r := range o.reported {
-			reportedSyms[r.Symbol] = struct{}{}
+			reportedKeys[oracleFinding{Line: r.Line, Rule: r.Rule, Symbol: r.Symbol}.key()] = struct{}{}
 		}
 		for _, f := range o.oracle {
-			if _, shown := reportedSyms[f.Symbol]; shown {
+			if _, shown := reportedKeys[f.key()]; shown {
 				continue
 			}
 			if _, dup := o.other[f.Symbol]; dup {
@@ -542,11 +573,11 @@ func assertPostureControl(t *testing.T, obs []lintObservation) {
 			continue
 		}
 		compared++
-		if a, b := findingKeys(o.reported), findingKeys(same.reported); !equalStrings(a, b) {
+		if a, b := findingKeys(o.reported), findingKeys(same.reported); !slices.Equal(a, b) {
 			t.Errorf("%s: lint findings differ between create (%v) and overwrite-same (%v) — a byte-identical on-disk file must not change the answer",
 				relOrSelf(o.file), a, b)
 		}
-		if a, b := sortedKeys(o.other), sortedKeys(same.other); !equalStrings(a, b) {
+		if a, b := sortedKeys(o.other), sortedKeys(same.other); !slices.Equal(a, b) {
 			t.Errorf("%s: other-check symbols differ between create (%v) and overwrite-same (%v) — the fold added something the payload did not already define",
 				relOrSelf(o.file), a, b)
 		}
@@ -565,18 +596,6 @@ func findingKeys(fs []lintFinding) []string {
 	return out
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // checkOverlapPartition measures what the check adds and what it misses, per
 // posture. It asserts only non-vacuity: the partition is a number to read, not a
 // threshold to hold, and pinning one now would freeze a measurement taken before
@@ -586,14 +605,14 @@ func checkOverlapPartition(t *testing.T, run corpusRun) {
 
 	type bucket struct {
 		both, ruffOnly, guardOnlyAbstain, guardOnlyClean int
-		cleanSample                                      map[string]struct{}
+		cleanSample, abstainFiles                        map[string]struct{}
 	}
 	byPosture := map[lintPosture]*bucket{}
 
 	for _, o := range obs {
 		b := byPosture[o.posture]
 		if b == nil {
-			b = &bucket{cleanSample: map[string]struct{}{}}
+			b = &bucket{cleanSample: map[string]struct{}{}, abstainFiles: map[string]struct{}{}}
 			byPosture[o.posture] = b
 		}
 		// Star imports are the one construct verified to silence F821 (pyflakes
@@ -620,6 +639,7 @@ func checkOverlapPartition(t *testing.T, run corpusRun) {
 			}
 			if abstains {
 				b.guardOnlyAbstain++
+				b.abstainFiles[relOrSelf(o.file)] = struct{}{}
 			} else {
 				b.guardOnlyClean++
 				b.cleanSample[s] = struct{}{}
@@ -638,6 +658,19 @@ func checkOverlapPartition(t *testing.T, run corpusRun) {
 			p, b.both, b.ruffOnly, b.guardOnlyAbstain, b.guardOnlyClean)
 		// Name the divergent symbols, capped. A bare count cannot be triaged;
 		// the names are what turn this table into the next investigation.
+		// The abstain bucket is file-scoped because pyflakes' abstention is:
+		// verified against ruff 0.16.1, a single `from x import *` silences F821
+		// for the WHOLE module, including names that are plainly undefined
+		// (`definitely_not_defined_anywhere()` goes unreported). So the scope is
+		// right, but the bucket is still the one this harness does not
+		// investigate — name the files so it can be.
+		if files := sortedKeys(b.abstainFiles); len(files) > 0 {
+			if len(files) > 10 {
+				t.Logf("[%s]   oracle-abstains files (first 10 of %d): %v", p, len(files), files[:10])
+			} else {
+				t.Logf("[%s]   oracle-abstains files: %v", p, files)
+			}
+		}
 		if names := sortedKeys(b.cleanSample); len(names) > 0 {
 			if len(names) > 20 {
 				t.Logf("[%s]   oracle-clean symbols (first 20 of %d): %v", p, len(names), names[:20])
@@ -696,9 +729,29 @@ func checkLatency(t *testing.T, obs []lintObservation) {
 	}
 	onP50, onP99 := percentile(on, 50), percentile(on, 99)
 	offP50, offP99 := percentile(off, 50), percentile(off, 99)
-	t.Logf("n=%d  lint ON  p50=%v p99=%v", len(on), onP50, onP99)
-	t.Logf("n=%d  lint OFF p50=%v p99=%v", len(off), offP50, offP99)
-	t.Logf("marginal cost of the lint check: p50 +%v, p99 +%v", onP50-offP50, onP99-offP99)
+	tail := tailLabel(len(on))
+	t.Logf("n=%d  lint ON  p50=%v %s=%v", len(on), onP50, tail, onP99)
+	t.Logf("n=%d  lint OFF p50=%v %s=%v", len(off), offP50, tail, offP99)
+	t.Logf("marginal cost of the lint check: p50 +%v, %s +%v", onP50-offP50, tail, onP99-offP99)
+	if len(on) < tailMinSamples {
+		t.Logf("n=%d is below %d, so the tail figure above is a SINGLE observation, not a percentile — do not publish it as p99",
+			len(on), tailMinSamples)
+	}
+}
+
+// tailMinSamples is where a nearest-rank p99 stops being one observation. Below
+// it the p99 index rounds to n, so the "p99" IS the maximum — for n=15 it is
+// literally the slowest of fifteen runs, and re-running the unchanged harness
+// moves it by milliseconds. Naming it honestly is cheaper than publishing a
+// number that reads as a distribution and behaves like a coin flip.
+const tailMinSamples = 100
+
+// tailLabel names the upper statistic for a sample of size n.
+func tailLabel(n int) string {
+	if n < tailMinSamples {
+		return "max"
+	}
+	return "p99"
 }
 
 // percentile returns the p-th percentile by nearest-rank. Sorts a copy: the

@@ -371,22 +371,37 @@ only the linter still sees what will actually land. The first two postures agree
 on every file by construction, so a harness built from them alone measures one
 posture twice — the #313 failure mode above, reproduced.
 
-Measured 2026-08-11, 250–300 files x 3 postures per corpus:
+Measured 2026-08-11. The two real corpora are 250 files x 3 postures each; the
+committed corpus is 5 files x 3.
 
-| Corpus | Observations | Oracle findings | Hook FPs | Marginal p50 | Marginal p99 |
-|---|---|---|---|---|---|
-| `testdata/lintcorpus` | 15 | 12 | 0 | +8.4 ms | +12.3 ms |
-| `secret-broker` | 750 | 0 | 0 | +12.0 ms | +30.5 ms |
-| `competitive-intel` | 900 | 0 | 0 | +10.7 ms | +20.5 ms |
+| Corpus | Observations | Oracle findings | Hook FPs | Marginal p50 |
+|---|---|---|---|---|
+| `testdata/lintcorpus` | 15 | 12 | 0 | +9.9 ms |
+| `secret-broker` | 750 | 0 | 0 | +10.9 ms |
+| `competitive-intel` | 750 | 0 | 0 | +11.0 ms |
+
+Only p50 is published, on purpose. The nearest-rank p99 was unstable across
+runs of the *unchanged* harness on the same corpus (+30.5, +13.6, +13.1 ms on
+`secret-broker`) — this is a developer workstation with other processes on it,
+and the tail measures that as much as it measures the check. Below
+`tailMinSamples` (100) the harness labels the figure `max` rather than `p99`,
+because nearest-rank rounds the p99 index to n: for n=15 the "p99" is literally
+the slowest of fifteen runs.
+
+Zero-byte `.py` files are skipped and the count logged. `payload`'s
+`tool_input.content` is omitted when the string is empty, so `runHookMode` takes
+its `empty-input` fast return and never reaches ruff — the observation costs
+~130 µs and adjudicates nothing. Empty `__init__.py` is ubiquitous (18 and 21
+files in the two corpora above), so counting them would pad the observation
+total with non-observations and drag the latency distribution toward zero.
 
 Two things follow, and the second is the more important one.
 
 The marginal cost is roughly the guard's entire ~12 ms hook budget again — the
-check about doubles p50 and is far worse at the tail. That is the measurement
-behind `RUNECHO_GUARD_LINT` shipping default-off, now taken in the harness
-rather than by hand.
+check about doubles p50. That is the measurement behind `RUNECHO_GUARD_LINT`
+shipping default-off, now taken in the harness rather than by hand.
 
-And **committed Python is F821/F811-clean**: 1,650 observations across two real
+And **committed Python is F821/F811-clean**: 1,500 observations across two real
 repositories produced not one oracle finding, because an undefined name is a bug
 someone already fixed before committing. So no corpus can validate this check's
 positive direction — a repository only contains code that already passed. The

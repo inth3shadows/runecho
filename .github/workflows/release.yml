@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [master]
   pull_request:
     paths:
@@ -34,16 +37,26 @@ jobs:
       - name: Self-test the release decision logic
         run: python3 scripts/next-release-test.py
 
-  # Push to master: decide whether this merge is a release, and if so tag and
-  # publish it. This is what removes "cut a tag" as a thing anyone has to
+  # CI green on master: decide whether this merge is a release, and if so tag
+  # and publish it. This is what removes "cut a tag" as a thing anyone has to
   # remember — see scripts/next-release.py for the bump rules.
+  #
+  # WHY `workflow_run` INSTEAD OF `push: branches: [master]` (#347): this job
+  # used to fire on the same push that started CI, with no idea whether CI
+  # would pass. #344/#346 proved a push can look entirely normal and still
+  # have a red `test` job. `workflow_run` makes publication wait for the CI
+  # workflow (name: "CI", ci.yml) to finish and checks its conclusion below —
+  # a red `test` or `docker` job means the workflow conclusion is failure and
+  # nothing here runs. `workflow_run` evaluates the workflow file from the
+  # default branch, so this trigger only takes effect once merged to master.
   #
   # WHY THIS JOB PUBLISHES INSTEAD OF LETTING THE `release` JOB BELOW DO IT:
   # a tag pushed using GITHUB_TOKEN does NOT trigger another workflow run.
   # GitHub suppresses that to prevent recursion. So `on: push: tags` will not
   # fire for a tag this job creates, and the release has to happen right here or
   # not at all. That same suppression is what keeps the CHANGELOG commit below
-  # from re-triggering this job; the skip-ci marker is belt-and-braces.
+  # from re-triggering CI (and so this job, transitively) — the skip-ci marker
+  # is belt-and-braces.
   #
   # HAZARD, learned the hard way on this file's own first push: GitHub honours
   # that skip marker ANYWHERE in a commit message, body included. This repo
@@ -52,8 +65,24 @@ jobs:
   # and silently suppresses this job. If a release you expected did not happen,
   # check the merge commit message for the token before suspecting anything here.
   autorelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'inth3shadows/runecho'
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.repository == 'inth3shadows/runecho'
     runs-on: ubuntu-latest
+    # Waiting for CI (workflow_run) instead of starting on push, as this job
+    # now does, means the gap between "commit tested" and "job starts" is
+    # CI's full runtime, not the ~seconds an immediate push trigger left. Two
+    # masters merges landing within that gap each fire their own workflow_run,
+    # so without serializing them the second job's atomic push below can
+    # collide with the first's non-fast-forward — queue instead of racing.
+    # cancel-in-progress: false because an in-flight `git push`/goreleaser
+    # publish must finish, not be killed mid-way.
+    concurrency:
+      group: autorelease
+      cancel-in-progress: false
     permissions:
       contents: write
       # Both required by attest-build-provenance: id-token to mint the OIDC
@@ -62,19 +91,46 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Full history AND tags: the version is computed from the highest
-        # existing semver tag, which a shallow clone would not have.
-        with: { fetch-depth: 0 }
+        with:
+          # The commit CI actually tested — not whatever master has drifted to
+          # by the time this job starts, which can be later (another merge
+          # landed) or, on GITHUB_TOKEN push suppression failing open, this
+          # job's own prior changelog commit.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Full history AND tags: the version is computed from the highest
+          # existing semver tag, which a shallow clone would not have.
+          fetch-depth: 0
+
+      # Queuing (above) stops two pushes racing each other, but a queued job
+      # can still be built on a commit master has since moved past — e.g. two
+      # merges landed inside CI's runtime and this run is for the older one,
+      # now sitting behind the newer one's own already-published release. Its
+      # `git push --atomic origin HEAD:master` below would fail non-fast-forward.
+      # Detect that here and skip cleanly: the newer commit's own workflow_run
+      # will decide the release from the (by-then) live tip, so nothing is
+      # lost by deferring to it.
+      - name: Guard against a stale base
+        id: guard
+        run: |
+          tested="${{ github.event.workflow_run.head_sha }}"
+          current="$(git rev-parse origin/master)"
+          if [ "$current" != "$tested" ]; then
+            echo "master is now at $current; this run tested $tested and is superseded. Deferring to that commit's own CI run."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Decide the release
         id: decide
+        if: steps.guard.outputs.stale == 'false'
         run: |
           subject="$(git log -1 --format=%s)"
           echo "subject: $subject"
           python3 scripts/next-release.py --subject "$subject" --apply >> "$GITHUB_OUTPUT"
 
       - name: Report a skip
-        if: steps.decide.outputs.version == ''
+        if: steps.guard.outputs.stale == 'false' && steps.decide.outputs.version == ''
         run: echo "No release for this merge (${{ steps.decide.outputs.skip }})."
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -299,6 +300,17 @@ func pruneReindexWhere(repoID int64, keepN int) (string, []any) {
 	return where, args
 }
 
+// pruneChunkSize bounds how many snapshots one prune transaction deletes, and
+// therefore how long it can hold the store's write lock. Sized against the 5s
+// busy_timeout in setPragmas with room to spare: the worst repo measured on a
+// real store deleted 885 snapshots in 27s (~30ms each), so 50 puts a chunk
+// around 1.5s even on that repo's unusually heavy snapshots.
+//
+// Larger would be marginally faster overall and would reintroduce the lock
+// starvation this exists to prevent; much smaller pays a commit per handful of
+// rows for no benefit.
+const pruneChunkSize = 50
+
 // CountPruneReindexCandidates reports how many snapshots
 // PruneReindexSnapshots(repoID, keepN) would delete, without deleting anything.
 // Powers `repo prune --dry-run`.
@@ -321,31 +333,107 @@ func (db *DB) CountPruneReindexCandidates(repoID int64, keepN int) (int64, error
 // (issue #13). Do not add a second one here or anywhere else; see that
 // function's comment for why the schema carries no ON DELETE CASCADE and why
 // funnelling every delete through it is the mitigation that replaces one.
+//
+// The delete is CHUNKED — many short transactions, not one long one. Measured
+// on a real 1.3GB store, a single-transaction prune held the write lock for 63
+// seconds while deleting 2.9M symbol rows, against the 5s busy_timeout
+// setPragmas sets. That is tolerable for a one-off manual command and not
+// tolerable now that `reindex --all --prune` runs hourly: a concurrent
+// PostToolUse RollAutoSnapshot or post-commit reindex blocks for 5s, fails
+// "database is locked", and the guard's freshness silently degrades for the
+// whole window.
+//
+// Two measurements shaped this. The cost is NOT the correlated subquery —
+// counting is 0.37s of the 63s, and a covering index on
+// (repo_id, label, timestamp) changed the query plan without moving the total.
+// It is the child-row deletes. And batching per repo is not a tight enough
+// bound either: the largest repo alone held the lock 27s. Only a bound on
+// snapshots-per-transaction is independent of how lopsided the store is.
+//
+// The trade-off this accepts: a store-wide prune is no longer atomic. A failure
+// partway leaves earlier chunks deleted. That is the right side of the trade —
+// pruned history is redundant by construction (the newest keepN survive and a
+// reindex regenerates current state), so partial progress beats rolling back an
+// hour of work because the last chunk errored. Callers get the true count of
+// what was removed alongside the error.
 func (db *DB) PruneReindexSnapshots(repoID int64, keepN int) (int64, error) {
 	if keepN < 1 {
 		return 0, fmt.Errorf("keepN must be >= 1, got %d", keepN)
 	}
+
+	doomed, err := db.prunableSnapshotIDs(repoID, keepN)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for start := 0; start < len(doomed); start += pruneChunkSize {
+		end := min(start+pruneChunkSize, len(doomed))
+		n, err := db.deleteSnapshotChunk(doomed[start:end])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// prunableSnapshotIDs resolves which snapshots the policy condemns, newest
+// first, as a plain read. Snapshots arriving between this read and the deletes
+// can only ADD to the prunable set, never remove from it (a new snapshot pushes
+// older siblings further past keepN), so a stale-but-conservative list is safe:
+// the extras are simply caught by the next run.
+func (db *DB) prunableSnapshotIDs(repoID int64, keepN int) ([]int64, error) {
 	where, args := pruneReindexWhere(repoID, keepN)
+	rows, err := db.conn.Query(`SELECT s.id FROM snapshots s WHERE `+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list prune candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan prune candidate: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list prune candidates: %w", err)
+	}
+	// The pool is capped at one connection, so these rows must be fully drained
+	// before any delete transaction can begin. They are, by the loop above.
+	return ids, nil
+}
+
+// deleteSnapshotChunk removes one bounded batch of snapshots and their child
+// rows in a single transaction, through deleteSnapshotsTx. The IN-list is built
+// from int64s this package selected — never from user input — which keeps
+// deleteSnapshotsTx's "code-controlled fragment" contract intact.
+func (db *DB) deleteSnapshotChunk(ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	where := `s.id IN (` + placeholders + `)`
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
 
 	tx, err := db.conn.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("begin prune: %w", err)
+		return 0, fmt.Errorf("begin prune chunk: %w", err)
 	}
 	defer tx.Rollback()
-
-	// Count inside the same transaction as the delete so the returned number
-	// describes what was actually removed, not a separate read.
-	var n int64
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM snapshots s WHERE `+where, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count prune candidates: %w", err)
-	}
-	if n == 0 {
-		return 0, tx.Commit()
-	}
 	if err := deleteSnapshotsTx(tx, where, args...); err != nil {
 		return 0, fmt.Errorf("prune reindex snapshots: %w", err)
 	}
-	return n, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit prune chunk: %w", err)
+	}
+	return int64(len(ids)), nil
 }
 
 // TouchRepo records indexing state after a (re)index: when it last ran, how

@@ -275,3 +275,72 @@ func TestVacuum_PreservesData(t *testing.T) {
 		t.Errorf("integrity check after VACUUM: %v", err)
 	}
 }
+
+// TestPruneReindexSnapshots_CrossesChunkBoundary exercises the multi-transaction
+// path. Every other prune test here seeds fewer than pruneChunkSize prunable
+// snapshots, so they all complete in ONE chunk and would stay green if chunking
+// were broken outright — the batching would be present but never executed.
+//
+// Seeds enough to require at least three chunks, including a final partial one
+// (the off-by-one most likely to drop or double-delete rows at a boundary).
+func TestPruneReindexSnapshots_CrossesChunkBoundary(t *testing.T) {
+	db, _ := openTemp(t)
+	repo := enrollForPrune(t, db, "chunked")
+
+	// The fixture size is derived from pruneChunkSize, so it grows with any
+	// change to it. Bail out rather than seeding a pathological number of rows:
+	// TestPruneReindexSnapshots_ChunkSizeIsBounded is the test that fails on an
+	// oversized constant, and it does so instantly. Without this guard, raising
+	// the constant to 100000 made this test try to seed 250,000 snapshots and
+	// hang the package instead of reporting anything useful.
+	if pruneChunkSize > 100 {
+		t.Skipf("pruneChunkSize = %d is out of the sane range; ChunkSizeIsBounded reports that", pruneChunkSize)
+	}
+
+	keep := 5
+	// 2.5 chunks' worth of deletions, so the last chunk is deliberately partial.
+	prunable := pruneChunkSize*2 + pruneChunkSize/2
+	total := prunable + keep
+	ids := seedReindex(t, db, repo, total)
+
+	deleted, err := db.PruneReindexSnapshots(repo, keep)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != int64(prunable) {
+		t.Errorf("deleted = %d, want %d — a chunk boundary dropped or double-counted rows", deleted, prunable)
+	}
+
+	survivors := snapshotIDsWithLabel(t, db, repo, ReindexLabel)
+	if len(survivors) != keep {
+		t.Fatalf("survivors = %d, want %d", len(survivors), keep)
+	}
+	// ids is oldest-first: exactly the newest `keep` must remain, and every
+	// deletion must have landed — not just the first chunk's worth.
+	for _, id := range ids[:prunable] {
+		if survivors[id] {
+			t.Errorf("snapshot %d should have been pruned but survived; a later chunk did not run", id)
+		}
+	}
+	for _, id := range ids[prunable:] {
+		if !survivors[id] {
+			t.Errorf("snapshot %d is among the newest %d but was pruned", id, keep)
+		}
+	}
+	assertNoOrphans(t, db, "chunked PruneReindexSnapshots")
+}
+
+// TestPruneReindexSnapshots_ChunkSizeIsBounded guards the constant itself. The
+// whole reason chunking exists is to keep a single write transaction well under
+// the 5s busy_timeout; someone raising this to "reduce commit overhead" would
+// silently reintroduce the lock starvation it prevents.
+func TestPruneReindexSnapshots_ChunkSizeIsBounded(t *testing.T) {
+	if pruneChunkSize < 1 {
+		t.Fatalf("pruneChunkSize = %d; must be at least 1 or prune makes no progress", pruneChunkSize)
+	}
+	// ~30ms per snapshot on the heaviest repo measured; 200 would put a chunk
+	// near the 5s busy_timeout with no margin.
+	if pruneChunkSize > 100 {
+		t.Errorf("pruneChunkSize = %d; at roughly 30ms per snapshot on a heavy repo that approaches the 5s busy_timeout, which is the lock starvation chunking exists to prevent", pruneChunkSize)
+	}
+}

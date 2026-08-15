@@ -498,8 +498,25 @@ other history readers resolve only the newest snapshot for a label, so any keep
 ≥ 1 is safe for them. `--dry-run` and the delete are built from the same
 predicate, so the preview cannot drift from the action.
 
+The delete is **chunked** — many short transactions rather than one long one.
+Measured on a real 1.3GB store, a single-transaction prune held the write lock
+for 63s against the 5s `busy_timeout`, and a concurrent writer lost 5 of 15
+attempts to "database is locked"; chunked, it loses 0 of 15. Batching per repo
+is not enough (the largest repo alone held the lock 27s), and the cost is not
+the correlated subquery — counting is 0.37s of the 63s, and a covering index
+changed the plan without moving the total. Only a bound on
+snapshots-per-transaction is independent of how lopsided a store is. The
+trade-off is that a store-wide prune is no longer atomic; partial progress is
+the better failure mode here, since pruned history is redundant by construction.
+
 The installed hourly job runs `repo reindex --all --prune`, which keeps the
-store bounded on the same schedule that fills it. It is a **flag** rather than a
+store bounded on the same schedule that fills it. **Upgrading the binary does
+not rewrite an existing schedule** — the cron line and LaunchAgent plist are
+written once by `install --periodic`, and neither `install.sh` nor
+`version-check --reinstall` touches them. A machine that installed the periodic
+job before retention shipped keeps running the old reindex-only command, so
+`runecho-ir doctor` reports a `periodic reindex` warning with the remedy
+(`install --periodic` rewrites it). It is a **flag** rather than a
 chained `&& repo prune` because the macOS LaunchAgent runs an argv array with no
 shell — a chained command would work in the crontab line and silently not on
 macOS. It never vacuums: deleting rows frees pages *inside* the file, and only

@@ -16,7 +16,7 @@ import (
 	"github.com/inth3shadows/runecho/internal/version"
 )
 
-func main() { os.Exit(run(os.Stdin, os.Stdout, os.Stderr)) }
+func main() { os.Exit(run(os.Args, os.Stdin, os.Stdout, os.Stderr)) }
 
 // run is the testable seam, matching runecho-ir's shape. main() is otherwise
 // unreachable from a test, which is how this binary — one of the three RunEcho
@@ -24,7 +24,23 @@ func main() { os.Exit(run(os.Stdin, os.Stdout, os.Stderr)) }
 // The wiring here is exactly what a packaging regression breaks: a store that
 // fails to open, an oracle that is never registered, or a diagnostic written to
 // stdout, which corrupts the stdio JSON-RPC framing for every client.
-func run(stdin io.Reader, stdout, stderr io.Writer) int {
+//
+// args is threaded in rather than read from the process-global os.Args so the
+// seam stays honest: a test can drive the flag path without mutating global
+// state that `go test` also owns.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Answer --version before touching the store. This binary has no flag
+	// parsing otherwise, so a version probe used to fall through to Serve and
+	// block forever on a JSON-RPC `initialize` frame that a version caller never
+	// sends — indistinguishable from a hang, and the slower Open got (PRAGMA
+	// quick_check reads the whole file) the more it looked like one (#351).
+	// Mirrors cmd/runecho-ir/main.go's --version case, which also short-circuits
+	// ahead of any DB work.
+	if len(args) > 1 && (args[1] == "--version" || args[1] == "-v") {
+		fmt.Fprintln(stdout, "runecho-mcp "+version.Version)
+		return 0
+	}
+
 	dir, err := runechoDir()
 	if err != nil {
 		fmt.Fprintf(stderr, "runecho-mcp: %v\n", err)

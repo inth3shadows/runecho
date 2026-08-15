@@ -349,3 +349,49 @@ func TestRunHookMode_Lint_Degraded(t *testing.T) {
 		}
 	})
 }
+
+// TestLintSection_HeaderUsesSlashSeparatedRules pins the ask header's rule
+// list. Nothing asserted this before: lintSelect was interpolated straight into
+// the header, so the ask read "(F821,F811)" while every comment and test
+// docstring in this file described it as "(F821/F811)".
+//
+// It is not purely cosmetic to pin. lintSelect is ruff's literal --select
+// argument, where comma separation is ruff's own syntax, and it is also the
+// source of lintSelectedRules. Anyone "fixing" the display by editing the
+// constant breaks the actual invocation, so this test exists alongside
+// TestLintSelectStaysRuffSyntax below — the pair makes the split deliberate
+// rather than something a future reader collapses back together.
+func TestLintSection_HeaderUsesSlashSeparatedRules(t *testing.T) {
+	var sb strings.Builder
+	lintSection(&sb, []lintFinding{
+		{Line: 4, Rule: "F821", Symbol: "helper", Message: "Undefined name `helper`"},
+	})
+	got := sb.String()
+
+	if !strings.Contains(got, "(F821/F811)") {
+		t.Errorf("ask header does not use slash-separated rules:\n%s", got)
+	}
+	if strings.Contains(got, "(F821,F811)") {
+		t.Errorf("ask header still renders ruff's comma syntax to the reader:\n%s", got)
+	}
+}
+
+// TestLintSelectStaysRuffSyntax is the other half: the constant handed to ruff
+// must remain comma-separated. `ruff check --select F821/F811` is not valid, so
+// a display-motivated edit to lintSelect would silently change which rules run
+// — or make every invocation fail — while the header above still looked right.
+func TestLintSelectStaysRuffSyntax(t *testing.T) {
+	if !strings.Contains(lintSelect, ",") || strings.Contains(lintSelect, "/") {
+		t.Errorf("lintSelect = %q; it is ruff's literal --select argument and must stay comma-separated (fix the display at the call site instead)", lintSelect)
+	}
+	// The display form must name exactly the same rules, in the same order.
+	if strings.ReplaceAll(lintSelect, ",", "/") != lintSelectDisplay {
+		t.Errorf("lintSelectDisplay = %q does not match lintSelect = %q; the header and the invocation can now name different rules", lintSelectDisplay, lintSelect)
+	}
+	// And the membership filter must still agree with both.
+	for _, rule := range strings.Split(lintSelect, ",") {
+		if _, ok := lintSelectedRules[rule]; !ok {
+			t.Errorf("rule %q is in lintSelect but not in lintSelectedRules; ruff output for it would be filtered out", rule)
+		}
+	}
+}

@@ -37,6 +37,15 @@ var lintTimeout = 2 * time.Second
 // and the reported findings drift apart.
 const lintSelect = "F821,F811"
 
+// lintSelectDisplay is lintSelect rendered for the ask header, where a slash
+// reads as "or" — these are alternatives a finding can be, not a list the
+// reader has to supply. Derived rather than written out so the two can never
+// name different rules, and kept separate from lintSelect because that constant
+// is ruff's literal --select argument (comma-separated is ruff's syntax) AND
+// the source of lintSelectedRules. Editing the constant to fix the display
+// would break the actual invocation.
+var lintSelectDisplay = strings.ReplaceAll(lintSelect, ",", "/")
+
 var lintSelectedRules = func() map[string]struct{} {
 	m := make(map[string]struct{})
 	for _, r := range strings.Split(lintSelect, ",") {
@@ -88,7 +97,7 @@ func lintSection(sb *strings.Builder, findings []lintFinding) []string {
 	if len(findings) == 0 {
 		return nil
 	}
-	fmt.Fprintf(sb, "[runecho-guard] %d ruff finding(s) (%s):\n", len(findings), lintSelect)
+	fmt.Fprintf(sb, "[runecho-guard] %d ruff finding(s) (%s):\n", len(findings), lintSelectDisplay)
 	syms := make([]string, 0, len(findings))
 	for _, f := range findings {
 		fmt.Fprintf(sb, "  line %d: %s %s\n", f.Line, f.Rule, f.Message)

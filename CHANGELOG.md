@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.43.1] — 2026-08-15
+
+### Changed
+- fix(store): bound history.db growth; mcp flag handling; #333/#202 closeouts (#357)
+
 ## [0.43.0] — 2026-08-12
 
 ### Changed

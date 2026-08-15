@@ -487,6 +487,27 @@ Schema history (`internal/snapshot/db.go`, `SchemaVersion = len(migrations)`):
 | 8 | `symbols.sig_hash` — per-symbol body hash for modified-symbol diff |
 | 9 | `contracts` table |
 
+**Retention.** `runecho-ir repo prune` keeps the newest `--keep` (default 30)
+`reindex` snapshots per repo and deletes the rest through `deleteSnapshotsTx`,
+the single child-first delete path (issue #13 — never add a second one). Only
+`reindex` is a candidate: `auto` is already capped at one row per repo by
+`RollAutoSnapshot`, and `session-start` / `probe` / manual labels are the
+reference points `diff --since=<label>` and `truth-trail` resolve against, so
+they are exempt. 30 clears `churn`'s default `--n=20` window with headroom; the
+other history readers resolve only the newest snapshot for a label, so any keep
+≥ 1 is safe for them. `--dry-run` and the delete are built from the same
+predicate, so the preview cannot drift from the action.
+
+The installed hourly job runs `repo reindex --all --prune`, which keeps the
+store bounded on the same schedule that fills it. It is a **flag** rather than a
+chained `&& repo prune` because the macOS LaunchAgent runs an argv array with no
+shell — a chained command would work in the crontab line and silently not on
+macOS. It never vacuums: deleting rows frees pages *inside* the file, and only
+`VACUUM` returns them to the filesystem, which rewrites every live page and has
+no business on an hourly timer. Growth is bounded without it (SQLite reuses
+freed pages), so `repo prune --vacuum` is the one-time step for shrinking a
+store that has already accumulated a backlog.
+
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
 concurrency test). `Open` runs `PRAGMA quick_check` and refuses a corrupt or
@@ -644,6 +665,9 @@ go test -race ./internal/snapshot/                # concurrency safety
 go test -run=x -fuzz=FuzzJSParser ./internal/parser   # parser fuzzing
 govulncheck ./...                                 # reachable-CVE scan
 runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
+runecho-ir repo prune --dry-run                   # what retention would delete
+runecho-ir repo prune [--keep=30] [--repo=<name>] # trim reindex history
+runecho-ir repo prune --vacuum                    # ... and return the space to the filesystem
 runecho-ir doctor [--json] [--strict]             # is this install actually wired and answering?
 runecho-ir repo list                              # enrolled repos + index state
 runecho-ir guard-stats                            # guard ask volume from decisions.jsonl

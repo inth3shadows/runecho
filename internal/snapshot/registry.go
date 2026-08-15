@@ -264,6 +264,90 @@ func deleteAutoSnapshotsTx(tx *sql.Tx, repoID int64) error {
 	return nil
 }
 
+// pruneReindexWhere builds the snapshotWhere fragment matching every "reindex"
+// snapshot beyond the newest keepN for its repo — i.e. one with at least keepN
+// newer reindex siblings in the same repo. repoID == 0 spans every repo.
+//
+// Both the dry-run count and the delete are built from THIS function, so
+// "what prune would remove" and "what prune removes" cannot drift apart. That
+// matters more than it looks: a preview that diverges from the action is worse
+// than no preview, because it is trusted.
+//
+// Only "reindex" is ever a candidate. It is the sole high-volume label (4,878
+// of 5,098 rows on the store that motivated #351); "auto" is already capped at
+// one row per repo by RollAutoSnapshot; and session-start / probe / manual
+// labels are exactly the deliberate reference points `diff --since=<label>`
+// and truth-trail pin, so pruning them would break a real feature to reclaim
+// roughly nothing.
+//
+// The correlated COUNT(*) mirrors the subquery style already used in
+// GetLatestByLabel rather than reaching for ROW_NUMBER(), which keeps this
+// clear of any question about the vendored SQLite build's window-function
+// support. At this table's size the difference is unmeasurable; revisit if a
+// store ever reaches hundreds of thousands of snapshots.
+func pruneReindexWhere(repoID int64, keepN int) (string, []any) {
+	where := `s.label = '` + ReindexLabel + `' AND (
+		SELECT COUNT(*) FROM snapshots s2
+		WHERE s2.repo_id = s.repo_id AND s2.label = s.label
+		  AND (s2.timestamp > s.timestamp OR (s2.timestamp = s.timestamp AND s2.id > s.id))
+	) >= ?`
+	args := []any{keepN}
+	if repoID != 0 {
+		where = `s.repo_id = ? AND ` + where
+		args = append([]any{repoID}, args...)
+	}
+	return where, args
+}
+
+// CountPruneReindexCandidates reports how many snapshots
+// PruneReindexSnapshots(repoID, keepN) would delete, without deleting anything.
+// Powers `repo prune --dry-run`.
+func (db *DB) CountPruneReindexCandidates(repoID int64, keepN int) (int64, error) {
+	if keepN < 1 {
+		return 0, fmt.Errorf("keepN must be >= 1, got %d", keepN)
+	}
+	where, args := pruneReindexWhere(repoID, keepN)
+	var n int64
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM snapshots s WHERE `+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count prune candidates: %w", err)
+	}
+	return n, nil
+}
+
+// PruneReindexSnapshots deletes "reindex" snapshots beyond the newest keepN per
+// repo (every repo when repoID == 0), and returns how many it removed.
+//
+// The deletion goes through deleteSnapshotsTx — the one child-first delete path
+// (issue #13). Do not add a second one here or anywhere else; see that
+// function's comment for why the schema carries no ON DELETE CASCADE and why
+// funnelling every delete through it is the mitigation that replaces one.
+func (db *DB) PruneReindexSnapshots(repoID int64, keepN int) (int64, error) {
+	if keepN < 1 {
+		return 0, fmt.Errorf("keepN must be >= 1, got %d", keepN)
+	}
+	where, args := pruneReindexWhere(repoID, keepN)
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin prune: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Count inside the same transaction as the delete so the returned number
+	// describes what was actually removed, not a separate read.
+	var n int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM snapshots s WHERE `+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count prune candidates: %w", err)
+	}
+	if n == 0 {
+		return 0, tx.Commit()
+	}
+	if err := deleteSnapshotsTx(tx, where, args...); err != nil {
+		return 0, fmt.Errorf("prune reindex snapshots: %w", err)
+	}
+	return n, tx.Commit()
+}
+
 // TouchRepo records indexing state after a (re)index: when it last ran, how
 // many parse errors were seen, and how many supported files the walk
 // encountered (self-observing / honest-coverage guarantees).

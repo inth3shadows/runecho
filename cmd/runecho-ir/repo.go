@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +16,7 @@ import (
 // runRepo dispatches the central-store registry subcommands.
 func runRepo(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo add|list|rm|reindex|prune ...")
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo add|list|rm|reindex|prune|prune-missing ...")
 		return ExitError
 	}
 	switch args[0] {
@@ -29,6 +30,8 @@ func runRepo(args []string) int {
 		return runRepoReindex(args[1:])
 	case "prune":
 		return runRepoPrune(args[1:])
+	case "prune-missing":
+		return runRepoPruneMissing(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "runecho-ir repo: unknown subcommand %q\n", args[0])
 		return ExitError
@@ -417,6 +420,87 @@ func runRepoPrune(args []string) int {
 			return printErr(err)
 		}
 		fmt.Println("Vacuum complete.")
+	}
+	return ExitOK
+}
+
+// runRepoPruneMissing lists — or with --yes purges — enrolled repos whose
+// source root no longer exists on disk.
+//
+// List-only by default, and deliberately with no heuristic to make it
+// automatic. A stat() miss means "not there right now", which is also what an
+// unmounted external drive, a detached network share, or a temporarily moved
+// checkout looks like. Purging a repo's entire history on one failed stat is
+// unrecoverable, so the decision stays with a human who can read the printed
+// paths and recognise them. There is deliberately no age or streak threshold:
+// a drive that has been unplugged for a month is still not gone.
+//
+// This is never wired into `reindex --all`, cron, or launchd for the same
+// reason.
+//
+// It is not, despite appearances, a fix for snapshot growth. buildIR already
+// refuses a vanished root via requireExistingDir before any snapshot is
+// written, so these repos are dead weight and hourly log noise, not a source
+// of junk rows.
+func runRepoPruneMissing(args []string) int {
+	fs := flag.NewFlagSet("repo prune-missing", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "actually purge the listed repos and their history")
+	if code, ok := parseSub(fs, args); !ok {
+		return code
+	}
+
+	db, code := mustOpenDB()
+	if code != 0 {
+		return code
+	}
+	defer db.Close()
+
+	repos, err := db.ListRepos()
+	if err != nil {
+		return printErr(err)
+	}
+
+	var missing []snapshot.Repo
+	for i := range repos {
+		root := repos[i].EffectiveSourceRoot()
+		// Only a definitive "not there" counts. A permission error or an I/O
+		// error on a flaky mount is NOT evidence the repo is gone, and treating
+		// it as such is how --yes deletes something real.
+		if _, statErr := os.Stat(root); errors.Is(statErr, os.ErrNotExist) {
+			missing = append(missing, repos[i])
+		}
+	}
+
+	if len(missing) == 0 {
+		fmt.Println("No enrolled repos have a missing source root.")
+		return ExitOK
+	}
+
+	for _, r := range missing {
+		fmt.Printf("%s (id=%d) -> %s [missing]\n", r.Name, r.ID, r.EffectiveSourceRoot())
+	}
+
+	if !*yes {
+		fmt.Printf("\n%d of %d enrolled repo(s) have a missing source root. Nothing deleted.\n", len(missing), len(repos))
+		fmt.Println("Re-run with --yes to purge them and their history — only once you have")
+		fmt.Println("read the paths above and confirmed they are gone for good, not on an")
+		fmt.Println("unmounted drive or a detached share.")
+		return ExitOK
+	}
+
+	purged := 0
+	for _, r := range missing {
+		// PurgeRepo is the existing, orphan-tested whole-repo funnel that
+		// `repo rm` uses; no new delete path is introduced here.
+		if err := db.PurgeRepo(r.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not purge %s (id=%d): %v\n", r.Name, r.ID, err)
+			continue
+		}
+		purged++
+	}
+	fmt.Printf("Purged %d of %d missing repo(s) and their history.\n", purged, len(missing))
+	if purged != len(missing) {
+		return ExitError
 	}
 	return ExitOK
 }

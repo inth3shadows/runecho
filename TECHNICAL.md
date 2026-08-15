@@ -525,6 +525,19 @@ no business on an hourly timer. Growth is bounded without it (SQLite reuses
 freed pages), so `repo prune --vacuum` is the one-time step for shrinking a
 store that has already accumulated a backlog.
 
+**Dead enrolments.** `runecho-ir repo prune-missing` reports enrolled repos
+whose `EffectiveSourceRoot` no longer exists — on a machine using the
+worktree-per-session workflow these accumulate quickly (446 of 530 on the box
+that motivated #351). It **lists by default and deletes only with `--yes`**, and
+there is deliberately no age or streak heuristic to make it automatic: a
+`stat()` miss is also what an unmounted drive or a detached share looks like,
+and purging a repo's whole history on one failed stat is unrecoverable. Only
+`ENOENT` counts as evidence — a permission or I/O error means "cannot tell", not
+"gone". It is never wired into `reindex --all`, cron, or launchd, and purging
+goes through the same `PurgeRepo` funnel `repo rm` uses. Note this is dead
+weight and hourly log noise, not a source of junk rows: `buildIR` already
+refuses a vanished root via `requireExistingDir` before any snapshot is written.
+
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
 concurrency test). `Open` runs `PRAGMA quick_check` and refuses a corrupt or
@@ -685,6 +698,7 @@ runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
 runecho-ir repo prune --dry-run                   # what retention would delete
 runecho-ir repo prune [--keep=30] [--repo=<name>] # trim reindex history
 runecho-ir repo prune --vacuum                    # ... and return the space to the filesystem
+runecho-ir repo prune-missing [--yes]             # enrolments whose source root is gone (lists by default)
 runecho-ir doctor [--json] [--strict]             # is this install actually wired and answering?
 runecho-ir repo list                              # enrolled repos + index state
 runecho-ir guard-stats                            # guard ask volume from decisions.jsonl

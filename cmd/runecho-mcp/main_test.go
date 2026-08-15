@@ -192,19 +192,91 @@ func TestVersionShortCircuitsBeforeOpeningStore(t *testing.T) {
 }
 
 // TestVersionDoesNotFallThroughToServe pins the other half of the original bug
-// shape: a version probe must not end up waiting on stdin. A non-empty reader
-// that is NOT a valid JSON-RPC frame would make Serve report an error (exit 1)
-// if the short-circuit were removed, so a clean exit 0 here means Serve was
-// never reached.
+// shape: a version probe must not reach the JSON-RPC loop at all.
+//
+// The reader here is deliberately a real, non-empty, non-JSON-RPC frame. That
+// matters: with an EMPTY reader, Serve hits EOF immediately and returns nil, so
+// deleting the short-circuit would still produce exit 0 and the test would pass
+// while pinning nothing. A garbage frame makes Serve emit a parse-error
+// diagnostic to stderr, so "stderr is silent" is real evidence Serve never ran.
 func TestVersionDoesNotFallThroughToServe(t *testing.T) {
-	code, stdout := runArgsWithHome(t, t.TempDir(), "runecho-mcp", "--version", "extra-arg")
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	var out, errBuf bytes.Buffer
+	code := run([]string{"runecho-mcp", "--version"},
+		strings.NewReader("this is not a json-rpc frame\n"), &out, &errBuf)
+
 	if code != 0 {
 		t.Errorf("--version exit %d, want 0", code)
 	}
-	if strings.Count(stdout, "\n") != 1 {
-		t.Errorf("--version stdout = %q, want exactly one line (no JSON-RPC frames)", stdout)
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Errorf("--version stdout = %q, want exactly one line (no JSON-RPC frames)", out.String())
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("--version wrote %q to stderr; Serve was reached and parsed the garbage frame", errBuf.String())
 	}
 }
+
+// TestUnknownFlagExitsRatherThanHanging closes the gap the --version fix left:
+// the original defect was "any argument reaches Serve and blocks on stdin that
+// never arrives", and handling only --version reproduces it one typo over.
+// An unrecognised flag must fail fast with usage, not wait forever.
+func TestUnknownFlagExitsRatherThanHanging(t *testing.T) {
+	for _, arg := range []string{"--verison", "--serve", "-x", "somefile.json"} {
+		t.Run(arg, func(t *testing.T) {
+			t.Setenv("RUNECHO_HOME", t.TempDir())
+			var out, errBuf bytes.Buffer
+			// A reader that never yields EOF would hang the test if the argument
+			// fell through to Serve, which is exactly the bug being pinned.
+			code := run([]string{"runecho-mcp", arg}, neverEOF{}, &out, &errBuf)
+			if code == 0 {
+				t.Errorf("%q exited 0; an unrecognised argument must be rejected, not served", arg)
+			}
+			if !strings.Contains(errBuf.String(), "unexpected argument") {
+				t.Errorf("%q stderr = %q, want it to name the bad argument", arg, errBuf.String())
+			}
+		})
+	}
+}
+
+// TestHelpShortCircuitsBeforeOpeningStore: --help must also answer without the
+// store, using the same unopenable fixture as the --version test.
+func TestHelpShortCircuitsBeforeOpeningStore(t *testing.T) {
+	home := t.TempDir()
+	blocked := home + "/not-a-dir"
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"--help", "-h", "help"} {
+		t.Run(flag, func(t *testing.T) {
+			code, stdout := runArgsWithHome(t, blocked+"/nested", "runecho-mcp", flag)
+			if code != 0 {
+				t.Errorf("%s against an unopenable store: exit %d, want 0", flag, code)
+			}
+			if !strings.Contains(stdout, "Usage:") {
+				t.Errorf("%s: stdout = %q, want usage text", flag, stdout)
+			}
+		})
+	}
+}
+
+// TestNoArgsStillServes is the control. Every rejection above must not have
+// broken the normal path: an MCP host launches this with no arguments at all.
+func TestNoArgsStillServes(t *testing.T) {
+	resps, _, code := rpc(t, t.TempDir(),
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if code != 0 {
+		t.Fatalf("bare invocation returned %d, want 0 — flag handling broke the normal launch path", code)
+	}
+	if len(resps) != 1 {
+		t.Fatalf("bare invocation got %d responses, want 1", len(resps))
+	}
+}
+
+// neverEOF is a reader that blocks forever rather than returning EOF, so a test
+// that accidentally reaches Serve hangs visibly instead of passing.
+type neverEOF struct{}
+
+func (neverEOF) Read(p []byte) (int, error) { select {} }
 
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))

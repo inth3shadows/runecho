@@ -184,6 +184,26 @@ root). Three reference shapes are checked, all unqualified — `Foo(`, never
 - **SCREAMING_SNAKE constant references** (Python) — uses of module-level
   `UPPER_CASE` names
 
+### What the guard can see, per tool
+
+"The same code produces the same answer" is true **per surface**, and the
+surfaces differ in how much code they hand over. Writing that down makes the
+determinism claim checkable rather than merely asserted, and it is the fact any
+whole-file check has to be designed around (#333's Write-only v1 is exactly
+this constraint applied).
+
+| Tool | Visible content | Mitigation | Residual blind spot |
+|---|---|---|---|
+| `Write` | **The complete proposed file.** `content` IS the whole file, so nothing has to be reconstructed (`main.go:1033-1034`: *"Not needed for Write: its newLines already IS the whole file"*) | none needed | none from visibility — only the parser's own limits |
+| `Edit` | **Only the changed hunk** — `main.go:743`: *"An Edit/MultiEdit hunk sees only the changed region, not the rest of the file"* | `addInFileDefs` (`main.go:1218`) folds the file's own defs into the known-symbol set via `guard.FoldInFileDefs` (`internal/guard/foldinfile.go:18`); `wholeFileBoundNames` (`main.go:1238`) seeds `preBound` for the dropped-import check | a name bound in a form the def-extractor does not recognise still reads as unknown; findings are reported as `snippet line N` (`main.go:1132-1135`), not true file lines |
+| `MultiEdit` | Only the changed hunks, same as `Edit` | same | same, and across several disjoint regions rather than one |
+
+The mitigations are why the hunk-scoped surfaces are usable at all:
+`FoldInFileDefs` folds every def-extractor hit — top-level and nested defs,
+imports, JS declared names — into the known-symbol set without a full
+scope-tracking parser, and it is shared by the hook and the compiler-oracle
+differential so index-time and edit-time facts cannot disagree.
+
 ### Opt-in checks
 
 The hallucination check above is the guard's always-on core. Seven further

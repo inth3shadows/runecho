@@ -70,8 +70,86 @@ func Run(root string) []Result {
 	out = append(out, checkGitHooks(root)...)
 	out = append(out, checkEnrollment(root)...)
 	out = append(out, checkStore(root)...)
+	out = append(out, checkPeriodic()...)
 	out = append(out, checkGates()...)
 	return out
+}
+
+// periodicPruneArg is the flag the installed hourly job must carry for
+// retention to actually run. Kept next to the check that looks for it so the
+// two cannot drift.
+const periodicPruneArg = "--prune"
+
+// checkPeriodic reports whether the installed hourly reindex job also prunes.
+//
+// This check exists because upgrading the binary does NOT rewrite the schedule.
+// The cron line and the LaunchAgent plist are written once, by
+// `runecho-ir install --periodic`; install.sh does not touch them, and neither
+// does the version-check --reinstall path the post-merge/post-checkout hooks
+// run. So a machine that installed the periodic job before retention shipped
+// keeps running the old reindex-only command forever, and its store keeps
+// growing — on exactly the long-lived installs #351 was filed about.
+//
+// Asserting the GENERATED text (as the installer tests do) cannot catch that:
+// the generator is correct and the installed artifact is stale. Only reading
+// what is actually scheduled can, which is what this does.
+func checkPeriodic() []Result {
+	entry, where, found := installedPeriodicJob()
+	return classifyPeriodic(entry, where, found)
+}
+
+// classifyPeriodic is the verdict, split from the I/O so it can be tested
+// against every shape of installed job without a real crontab or LaunchAgent
+// on the machine running the tests.
+func classifyPeriodic(entry, where string, found bool) []Result {
+	const name = "periodic reindex"
+
+	switch {
+	case !found:
+		// Not an error: the periodic job is opt-in, and the git hooks keep the
+		// IR fresh without it. Say so rather than implying something is broken.
+		return []Result{{
+			Check: name, Status: OK,
+			Detail: "not installed (optional; git hooks keep the IR fresh)",
+		}}
+	case !strings.Contains(entry, periodicPruneArg):
+		return []Result{{
+			Check: name, Status: Warn,
+			Detail: "installed in " + where + " but does NOT prune — snapshot history grows without bound (#351)",
+			Remedy: "runecho-ir install --periodic   # rewrites the schedule to `repo reindex --all --prune`",
+		}}
+	default:
+		return []Result{{
+			Check: name, Status: OK,
+			Detail: "installed in " + where + " and prunes",
+		}}
+	}
+}
+
+// installedPeriodicJob returns the scheduled command line RunEcho installed,
+// where it lives, and whether one was found. Reads the real artifacts — the
+// user's crontab on Linux, the LaunchAgent plist on macOS — because the point
+// is to catch an installed job that no longer matches what this binary would
+// write today.
+func installedPeriodicJob() (entry, where string, found bool) {
+	if home, err := os.UserHomeDir(); err == nil {
+		plist := filepath.Join(home, "Library", "LaunchAgents", "com.runecho.reindex.plist")
+		if b, err := os.ReadFile(plist); err == nil {
+			return string(b), plist, true
+		}
+	}
+	// `crontab -l` exits non-zero when no crontab exists, which is a legitimate
+	// "not installed", not a failure worth reporting.
+	out, err := exec.Command("crontab", "-l").Output()
+	if err != nil {
+		return "", "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "# runecho") && strings.Contains(line, "repo reindex") {
+			return line, "crontab", true
+		}
+	}
+	return "", "", false
 }
 
 // resolvedBin returns the absolute, symlink-resolved path exec.LookPath finds

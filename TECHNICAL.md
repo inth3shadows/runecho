@@ -184,6 +184,26 @@ root). Three reference shapes are checked, all unqualified — `Foo(`, never
 - **SCREAMING_SNAKE constant references** (Python) — uses of module-level
   `UPPER_CASE` names
 
+### What the guard can see, per tool
+
+"The same code produces the same answer" is true **per surface**, and the
+surfaces differ in how much code they hand over. Writing that down makes the
+determinism claim checkable rather than merely asserted, and it is the fact any
+whole-file check has to be designed around (#333's Write-only v1 is exactly
+this constraint applied).
+
+| Tool | Visible content | Mitigation | Residual blind spot |
+|---|---|---|---|
+| `Write` | **The complete proposed file.** `content` IS the whole file, so nothing has to be reconstructed (`main.go:1033-1034`: *"Not needed for Write: its newLines already IS the whole file"*) | none needed | none from visibility — only the parser's own limits |
+| `Edit` | **Only the changed hunk** — `main.go:743`: *"An Edit/MultiEdit hunk sees only the changed region, not the rest of the file"* | `addInFileDefs` (`main.go:1218`) folds the file's own defs into the known-symbol set via `guard.FoldInFileDefs` (`internal/guard/foldinfile.go:18`); `wholeFileBoundNames` (`main.go:1238`) seeds `preBound` for the dropped-import check | a name bound in a form the def-extractor does not recognise still reads as unknown; findings are reported as `snippet line N` (`main.go:1132-1135`), not true file lines |
+| `MultiEdit` | Only the changed hunks, same as `Edit` | same | same, and across several disjoint regions rather than one |
+
+The mitigations are why the hunk-scoped surfaces are usable at all:
+`FoldInFileDefs` folds every def-extractor hit — top-level and nested defs,
+imports, JS declared names — into the known-symbol set without a full
+scope-tracking parser, and it is shared by the hook and the compiler-oracle
+differential so index-time and edit-time facts cannot disagree.
+
 ### Opt-in checks
 
 The hallucination check above is the guard's always-on core. Seven further
@@ -455,6 +475,14 @@ transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
   worktree of a repo; the guard keys lookup on it so bare-repo worktrees resolve
   in O(1) instead of scanning `git worktree list`.
 - `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
+  — the `reindex` label is deduped on write: when a reindex produces a
+  `root_hash` identical to the repo's newest `reindex` snapshot, that row's
+  `timestamp` is advanced instead of inserting a byte-identical copy of the
+  whole `files`/`symbols`/`refs` tree (`SaveReindexSnapshot`, #351). It
+  **touches** rather than skips because the guard's staleness check reads the
+  newest snapshot's own `timestamp`, not `repos.last_indexed` — freezing it
+  would trade unbounded growth for spurious "IR is stale" advisories past
+  `RUNECHO_GUARD_MAX_AGE`. `repo reindex` prints `Unchanged` on that path.
 - `files(id, snapshot_id → snapshots, path, content_hash)`
 - `symbols(id, file_id → files, name, kind)`
 - `refs(id, file_id → files, name UNIQUE per file)` — bare call sites per snapshot file (IR v2).
@@ -478,6 +506,57 @@ Schema history (`internal/snapshot/db.go`, `SchemaVersion = len(migrations)`):
 | 7 | `refs` uniqueness `(file_id, name)` enforced by schema |
 | 8 | `symbols.sig_hash` — per-symbol body hash for modified-symbol diff |
 | 9 | `contracts` table |
+
+**Retention.** `runecho-ir repo prune` keeps the newest `--keep` (default 30)
+`reindex` snapshots per repo and deletes the rest through `deleteSnapshotsTx`,
+the single child-first delete path (issue #13 — never add a second one). Only
+`reindex` is a candidate: `auto` is already capped at one row per repo by
+`RollAutoSnapshot`, and `session-start` / `probe` / manual labels are the
+reference points `diff --since=<label>` and `truth-trail` resolve against, so
+they are exempt. 30 clears `churn`'s default `--n=20` window with headroom; the
+other history readers resolve only the newest snapshot for a label, so any keep
+≥ 1 is safe for them. `--dry-run` and the delete are built from the same
+predicate, so the preview cannot drift from the action.
+
+The delete is **chunked** — many short transactions rather than one long one.
+Measured on a real 1.3GB store, a single-transaction prune held the write lock
+for 63s against the 5s `busy_timeout`, and a concurrent writer lost 5 of 15
+attempts to "database is locked"; chunked, it loses 0 of 15. Batching per repo
+is not enough (the largest repo alone held the lock 27s), and the cost is not
+the correlated subquery — counting is 0.37s of the 63s, and a covering index
+changed the plan without moving the total. Only a bound on
+snapshots-per-transaction is independent of how lopsided a store is. The
+trade-off is that a store-wide prune is no longer atomic; partial progress is
+the better failure mode here, since pruned history is redundant by construction.
+
+The installed hourly job runs `repo reindex --all --prune`, which keeps the
+store bounded on the same schedule that fills it. **Upgrading the binary does
+not rewrite an existing schedule** — the cron line and LaunchAgent plist are
+written once by `install --periodic`, and neither `install.sh` nor
+`version-check --reinstall` touches them. A machine that installed the periodic
+job before retention shipped keeps running the old reindex-only command, so
+`runecho-ir doctor` reports a `periodic reindex` warning with the remedy
+(`install --periodic` rewrites it). It is a **flag** rather than a
+chained `&& repo prune` because the macOS LaunchAgent runs an argv array with no
+shell — a chained command would work in the crontab line and silently not on
+macOS. It never vacuums: deleting rows frees pages *inside* the file, and only
+`VACUUM` returns them to the filesystem, which rewrites every live page and has
+no business on an hourly timer. Growth is bounded without it (SQLite reuses
+freed pages), so `repo prune --vacuum` is the one-time step for shrinking a
+store that has already accumulated a backlog.
+
+**Dead enrolments.** `runecho-ir repo prune-missing` reports enrolled repos
+whose `EffectiveSourceRoot` no longer exists — on a machine using the
+worktree-per-session workflow these accumulate quickly (446 of 530 on the box
+that motivated #351). It **lists by default and deletes only with `--yes`**, and
+there is deliberately no age or streak heuristic to make it automatic: a
+`stat()` miss is also what an unmounted drive or a detached share looks like,
+and purging a repo's whole history on one failed stat is unrecoverable. Only
+`ENOENT` counts as evidence — a permission or I/O error means "cannot tell", not
+"gone". It is never wired into `reindex --all`, cron, or launchd, and purging
+goes through the same `PurgeRepo` funnel `repo rm` uses. Note this is dead
+weight and hourly log noise, not a source of junk rows: `buildIR` already
+refuses a vanished root via `requireExistingDir` before any snapshot is written.
 
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
@@ -636,6 +715,10 @@ go test -race ./internal/snapshot/                # concurrency safety
 go test -run=x -fuzz=FuzzJSParser ./internal/parser   # parser fuzzing
 govulncheck ./...                                 # reachable-CVE scan
 runecho-ir backup [dest.db]                       # atomic VACUUM INTO backup
+runecho-ir repo prune --dry-run                   # what retention would delete
+runecho-ir repo prune [--keep=30] [--repo=<name>] # trim reindex history
+runecho-ir repo prune --vacuum                    # ... and return the space to the filesystem
+runecho-ir repo prune-missing [--yes]             # enrolments whose source root is gone (lists by default)
 runecho-ir doctor [--json] [--strict]             # is this install actually wired and answering?
 runecho-ir repo list                              # enrolled repos + index state
 runecho-ir guard-stats                            # guard ask volume from decisions.jsonl

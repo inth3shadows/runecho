@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -370,4 +371,85 @@ func TestCheckGates_NoneSetReportsDefaultPosture(t *testing.T) {
 	if results[0].Detail == "" {
 		t.Error("checkGates with nothing set returned an empty detail instead of naming the default posture")
 	}
+}
+
+// The periodic-job check exists because upgrading the binary does not rewrite
+// the schedule: the cron line and LaunchAgent plist are written once by
+// `install --periodic`, and neither install.sh nor version-check --reinstall
+// touches them. A machine that installed the job before retention shipped keeps
+// running the old reindex-only command and keeps growing (#351). Asserting the
+// GENERATED text cannot catch that — the generator is right and the installed
+// artifact is stale — so these assert the classification of what was actually
+// found on disk.
+
+func TestCheckPeriodic_StaleJobWithoutPruneIsWarn(t *testing.T) {
+	stale := `0 * * * * '/home/u/bin/runecho-ir' repo reindex --all >>/tmp/r.log 2>&1 # runecho`
+	r := find(classifyPeriodic(stale, "crontab", true), "periodic reindex")
+	if r == nil {
+		t.Fatal("no periodic reindex result")
+	}
+	if r.Status != Warn {
+		t.Errorf("status = %q, want %q — a pre-retention job must be flagged, or the #351 fix is invisible on exactly the installs it was written for", r.Status, Warn)
+	}
+	if r.Remedy == "" {
+		t.Error("a warn with no remedy leaves the user with a problem and no next step")
+	}
+	if !strings.Contains(r.Remedy, "install --periodic") {
+		t.Errorf("remedy %q should name the command that rewrites the schedule", r.Remedy)
+	}
+}
+
+func TestCheckPeriodic_CurrentJobIsOK(t *testing.T) {
+	current := `0 * * * * '/home/u/bin/runecho-ir' repo reindex --all --prune >>/tmp/r.log 2>&1 # runecho`
+	r := find(classifyPeriodic(current, "crontab", true), "periodic reindex")
+	if r == nil {
+		t.Fatal("no periodic reindex result")
+	}
+	if r.Status != OK {
+		t.Errorf("status = %q, want %q for a job that already prunes", r.Status, OK)
+	}
+}
+
+// A LaunchAgent passes --prune as its own argv element rather than inline, so
+// the check must match the plist shape too — not just the crontab one.
+func TestCheckPeriodic_LaunchAgentPlistIsRecognised(t *testing.T) {
+	plist := launchdPlistFixture()
+	r := find(classifyPeriodic(plist, "/Users/u/Library/LaunchAgents/com.runecho.reindex.plist", true), "periodic reindex")
+	if r == nil {
+		t.Fatal("no periodic reindex result")
+	}
+	if r.Status != OK {
+		t.Errorf("status = %q, want %q — the plist passes --prune as an argv element and must be recognised", r.Status, OK)
+	}
+}
+
+// Not installed is a legitimate, common state (the job is opt-in and the git
+// hooks keep the IR fresh), so it must not read as a problem.
+func TestCheckPeriodic_NotInstalledIsOKNotWarn(t *testing.T) {
+	r := find(classifyPeriodic("", "", false), "periodic reindex")
+	if r == nil {
+		t.Fatal("no periodic reindex result")
+	}
+	if r.Status != OK {
+		t.Errorf("status = %q, want %q — the periodic job is optional; flagging its absence is noise", r.Status, OK)
+	}
+	if !strings.Contains(r.Detail, "not installed") {
+		t.Errorf("detail %q should say plainly that no job is installed", r.Detail)
+	}
+}
+
+func launchdPlistFixture() string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/runecho-ir</string>
+		<string>repo</string>
+		<string>reindex</string>
+		<string>--all</string>
+		<string>--prune</string>
+	</array>
+</dict>
+</plist>`
 }

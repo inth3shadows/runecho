@@ -117,6 +117,27 @@ func (db *DB) BackupTo(path string) error {
 	return nil
 }
 
+// Vacuum rebuilds the live store file in place, returning space freed by
+// deletes to the filesystem. Sibling of BackupTo, which vacuums into a new
+// file; this one has no destination.
+//
+// Deliberately opt-in and never automatic. A full VACUUM rewrites every live
+// page — order of minutes on a multi-gigabyte store — and needs free disk
+// roughly equal to the file. Putting it in the hourly job would add that spike
+// to every tick, including the ticks that pruned nothing, which is a worse
+// operational property than the growth it cleans up.
+//
+// Ongoing growth does not require it: SQLite reuses freed pages for later
+// inserts, so once the write-side dedup and a periodic prune hold the row count
+// flat, the file stops growing on its own. VACUUM is only how you shrink it
+// back down, once, after a backlog has already accumulated.
+func (db *DB) Vacuum() error {
+	if _, err := db.conn.Exec("VACUUM"); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	return nil
+}
+
 func (db *DB) setPragmas() error {
 	for _, p := range []string{
 		// busy_timeout MUST come first: switching journal_mode to WAL (and WAL

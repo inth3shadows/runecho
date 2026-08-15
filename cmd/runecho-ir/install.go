@@ -236,7 +236,31 @@ func installLaunchd(irBin, logPath string) error {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
 	}
 	plistPath := filepath.Join(agentsDir, "com.runecho.reindex.plist")
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	plist := launchdPlist(irBin, logPath, logPath)
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	// Unload first (idempotent — ignore error if not loaded), then load.
+	_ = exec.Command("launchctl", "unload", plistPath).Run()
+	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+	fmt.Printf("Periodic reindex installed (hourly): %s\n", plistPath)
+	return nil
+}
+
+// launchdPlist renders the hourly-reindex LaunchAgent. Split out of
+// installLaunchd for the same reason cronEntry is split out of installCron: the
+// generated text can then be asserted directly, on any platform, without a
+// macOS-only side effect. Every value that reaches the XML goes through
+// xmlEscape.
+//
+// ProgramArguments is an argv array executed with no shell, which is why
+// retention is a `--prune` FLAG rather than a chained `&& repo prune` — a
+// chained command is expressible in the crontab line and not here, and one
+// scheduler quietly not pruning is exactly the asymmetry #351 is about.
+func launchdPlist(irBin, outLog, errLog string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -248,6 +272,7 @@ func installLaunchd(irBin, logPath string) error {
 		<string>repo</string>
 		<string>reindex</string>
 		<string>--all</string>
+		<string>--prune</string>
 	</array>
 	<key>StartInterval</key>
 	<integer>3600</integer>
@@ -257,17 +282,7 @@ func installLaunchd(irBin, logPath string) error {
 	<string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(irBin), xmlEscape(logPath), xmlEscape(logPath))
-	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
-		return fmt.Errorf("write plist: %w", err)
-	}
-	// Unload first (idempotent — ignore error if not loaded), then load.
-	_ = exec.Command("launchctl", "unload", plistPath).Run()
-	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
-		return fmt.Errorf("launchctl load: %w", err)
-	}
-	fmt.Printf("Periodic reindex installed (hourly): %s\n", plistPath)
-	return nil
+`, xmlEscape(irBin), xmlEscape(outLog), xmlEscape(errLog))
 }
 
 // xmlEscape escapes s for inclusion in an XML text node, using encoding/xml so
@@ -308,8 +323,11 @@ func cronQuote(s string) string {
 // filesystem path that may contain shell metacharacters — or a `%`, which cron
 // itself converts to a newline before the shell ever parses the line, splitting
 // the command and feeding the remainder as stdin.
+// --prune keeps the store bounded on the same schedule that fills it, without a
+// second crontab line to install, quote and keep in sync. It never vacuums: a
+// full rewrite of a multi-gigabyte file has no business on an hourly timer.
 func cronEntry(irBin, logPath string) string {
-	return fmt.Sprintf("0 * * * * %s repo reindex --all >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(logPath))
+	return fmt.Sprintf("0 * * * * %s repo reindex --all --prune >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(logPath))
 }
 
 // installCron adds an hourly crontab entry on Linux/other.

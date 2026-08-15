@@ -455,6 +455,14 @@ transactions on `Open`, so an interrupted upgrade can never leave a torn schema.
   worktree of a repo; the guard keys lookup on it so bare-repo worktrees resolve
   in O(1) instead of scanning `git worktree list`.
 - `snapshots(id, repo_id → repos, session_id, label, timestamp, root, root_hash)`
+  — the `reindex` label is deduped on write: when a reindex produces a
+  `root_hash` identical to the repo's newest `reindex` snapshot, that row's
+  `timestamp` is advanced instead of inserting a byte-identical copy of the
+  whole `files`/`symbols`/`refs` tree (`SaveReindexSnapshot`, #351). It
+  **touches** rather than skips because the guard's staleness check reads the
+  newest snapshot's own `timestamp`, not `repos.last_indexed` — freezing it
+  would trade unbounded growth for spurious "IR is stale" advisories past
+  `RUNECHO_GUARD_MAX_AGE`. `repo reindex` prints `Unchanged` on that path.
 - `files(id, snapshot_id → snapshots, path, content_hash)`
 - `symbols(id, file_id → files, name, kind)`
 - `refs(id, file_id → files, name UNIQUE per file)` — bare call sites per snapshot file (IR v2).

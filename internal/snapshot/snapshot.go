@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -65,6 +66,87 @@ func (db *DB) RollAutoSnapshot(repoID int64, sessionID, root string, irData *ir.
 		return 0, fmt.Errorf("commit roll: %w", err)
 	}
 	return id, nil
+}
+
+// ReindexLabel is the label the reindex path (the hourly job and the
+// post-commit/post-merge/post-checkout hooks) always writes with. It is the
+// only high-volume label in the store, which is why it is the only one
+// SaveReindexSnapshot and the prune path treat specially.
+const ReindexLabel = "reindex"
+
+// SaveReindexSnapshot persists a "reindex" snapshot, or — when irData.RootHash
+// already matches the repo's newest "reindex" snapshot — advances that existing
+// row's timestamp instead of writing a byte-identical copy of the whole
+// files/symbols/refs tree. Returns the resulting snapshot ID and whether a full
+// write happened (false = touched an existing row).
+//
+// Why this exists: the hourly `repo reindex --all` job wrote a fresh snapshot
+// on every tick regardless of whether anything changed. Measured on a real
+// store, 73% of snapshots were content-duplicates (5,098 rows / 1,390 distinct
+// root hashes; one repo held 458 snapshots across 3 distinct hashes), which is
+// what grew history.db to 1.4GB here and 4.5GB on another machine (#351).
+//
+// Why it TOUCHES rather than skips — this is the whole correctness argument:
+// the guard's staleness check reads the newest snapshot's OWN timestamp
+// (cmd/runecho-guard/main.go: `time.Since(snaps[0].Timestamp) > maxAge`), not
+// repos.last_indexed. A bare skip would freeze that timestamp at the last real
+// content change, so any repo that stopped changing would start emitting
+// "IR is stale" advisories once past RUNECHO_GUARD_MAX_AGE (default 24h) —
+// trading a disk-growth bug for a false-advisory bug. Advancing the timestamp
+// leaves that read exactly as fresh as a full rewrite would have, which is
+// sound precisely because the content is identical by construction.
+//
+// The read and the branch share one transaction, so a concurrent writer (the
+// hourly job racing a git hook's `repo reindex .` on the same repo) cannot slip
+// between the hash comparison and the write.
+//
+// This mirrors what the guard hook has always done on its own path
+// (RollAutoSnapshot's caller skips the store entirely when
+// generator.UpdateFile reports the root hash unchanged); the reindex path
+// simply never inherited it.
+func (db *DB) SaveReindexSnapshot(repoID int64, sessionID, root string, irData *ir.IR) (id int64, wrote bool, err error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return 0, false, fmt.Errorf("begin reindex tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var existingID int64
+	var existingHash string
+	err = tx.QueryRow(
+		`SELECT id, root_hash FROM snapshots
+		 WHERE repo_id = ? AND label = ?
+		 ORDER BY timestamp DESC, id DESC
+		 LIMIT 1`,
+		repoID, ReindexLabel,
+	).Scan(&existingID, &existingHash)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// No prior reindex snapshot for this repo — always a full write.
+	case err != nil:
+		return 0, false, fmt.Errorf("read latest reindex snapshot: %w", err)
+	case existingHash == irData.RootHash:
+		ts := time.Now().UTC().Format(time.RFC3339)
+		if _, err := tx.Exec(
+			`UPDATE snapshots SET timestamp = ?, session_id = ? WHERE id = ?`,
+			ts, sessionID, existingID,
+		); err != nil {
+			return 0, false, fmt.Errorf("touch snapshot %d: %w", existingID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, false, fmt.Errorf("commit touch: %w", err)
+		}
+		return existingID, false, nil
+	}
+
+	newID, err := writeSnapshotTx(tx, repoID, sessionID, ReindexLabel, root, irData)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("commit reindex snapshot: %w", err)
+	}
+	return newID, true, nil
 }
 
 // writeSnapshotTx inserts a full IR snapshot using the provided transaction and

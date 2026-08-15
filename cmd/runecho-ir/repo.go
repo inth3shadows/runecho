@@ -281,11 +281,18 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 			exitCode = printErr(fmt.Errorf("save ir.json: %w", err))
 			return
 		}
-		id, err := db.SaveSnapshot(repo.ID, "", "reindex", srcRoot, irData)
+		// Dedup: an unchanged tree touches the existing snapshot's timestamp
+		// instead of writing an identical copy of every file/symbol/ref row
+		// (#351). TouchRepo below still runs either way — see its comment.
+		id, wrote, err := db.SaveReindexSnapshot(repo.ID, "", srcRoot, irData)
 		if err != nil {
 			exitCode = printErr(err)
 			return
 		}
+		// Unconditional, in BOTH branches: repos.last_indexed is what the
+		// staleness path and the coverage counters read, and a repo whose
+		// content simply did not change this tick is fully current — recording
+		// it as anything else would be a lie the guard acts on.
 		if err := db.TouchRepo(repo.ID, time.Now(), stats.ParseErrors, stats.SupportedSeen); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to record index time: %v\n", err)
 		}
@@ -293,8 +300,13 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 		if len(short) > 12 {
 			short = short[:12]
 		}
-		fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
-			repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
+		if wrote {
+			fmt.Printf("Reindexed %s: snapshot id=%d files=%d root_hash=%s...%s\n",
+				repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
+		} else {
+			fmt.Printf("Unchanged %s: snapshot id=%d files=%d root_hash=%s (touched)%s\n",
+				repo.Name, id, len(irData.Files), short, coverageSuffix(stats))
+		}
 	})
 	return exitCode
 }

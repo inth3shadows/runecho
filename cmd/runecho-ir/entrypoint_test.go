@@ -359,8 +359,12 @@ func TestRepoReindex(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("repo reindex: got code %d, want 0", code)
 	}
-	if !strings.Contains(out, "Reindexed") {
-		t.Errorf("stdout %q: expected \"Reindexed\"", out)
+	// `repo add` already indexed this tree and nothing has touched it since, so
+	// the dedup path (#351) reports Unchanged rather than writing a
+	// byte-identical second snapshot. TestReindex_ChangedTreeStillWrites covers
+	// the Reindexed side.
+	if !strings.Contains(out, "Unchanged") {
+		t.Errorf("stdout %q: expected \"Unchanged\" for a tree that has not changed since enrollment", out)
 	}
 }
 
@@ -448,8 +452,12 @@ func TestRepoReindex_Incremental(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("repo reindex (poisoned, unchanged source): got code %d, want 0", code)
 	}
-	if !strings.Contains(out, "Reindexed") {
-		t.Errorf("stdout %q: expected \"Reindexed\"", out)
+	// Poisoning rewrites .ai/ir.json, not the source, so every file hash — and
+	// therefore the root hash — is unchanged, and the dedup path (#351) touches
+	// the existing snapshot instead of writing a duplicate. ir.json is still
+	// saved either way, which is what the marker assertions below depend on.
+	if !strings.Contains(out, "Unchanged") {
+		t.Errorf("stdout %q: expected \"Unchanged\" (source untouched, so the root hash cannot have moved)", out)
 	}
 	if !hasSymbolName(t, irPath, "stub.go", "HelloPoisoned") {
 		t.Errorf("poisoned marker did not survive reindex: unchanged file was re-parsed instead of reused")
@@ -464,6 +472,11 @@ func TestRepoReindex_Incremental(t *testing.T) {
 	code, out, _ = runWith(t, home, []string{"runecho-ir", "repo", "reindex", name})
 	if code != 0 {
 		t.Fatalf("repo reindex (changed source): got code %d, want 0", code)
+	}
+	// The source really changed here, so the root hash moved and the dedup must
+	// step aside — this is the other half of the pair asserted above.
+	if !strings.Contains(out, "Reindexed") {
+		t.Errorf("stdout %q: expected \"Reindexed\" after a real source change", out)
 	}
 	if hasSymbolName(t, irPath, "stub.go", "HelloPoisoned") {
 		t.Errorf("poisoned marker survived after source changed: file was reused instead of re-parsed")

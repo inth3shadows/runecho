@@ -133,15 +133,15 @@
     {
       "id": "contract/inserted-lang-gate-unknown",
       "file": "cmd/runecho-guard/contract.go",
-      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {\n\tif cw == nil {",
-      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {\n\tif lang == guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif lang == guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
       "desc": "INSERTED fault: the check skips files with no parser (docs, configs) — half of 'keys on the path, not the language'"
     },
     {
       "id": "contract/inserted-lang-gate-known",
       "file": "cmd/runecho-guard/contract.go",
-      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {\n\tif cw == nil {",
-      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {\n\tif lang != guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif lang != guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
       "desc": "INSERTED fault: the check skips source files — the mirror half"
     },
     {

@@ -375,6 +375,49 @@ func TestRunHookMode_StaleIRDefersWithContext(t *testing.T) {
 	}
 }
 
+// TestRunHookMode_ChecksPersisted is #333's integration proof: decisionRecord.
+// Checks is actually populated end-to-end, on both a clean defer (the common
+// case #333's dogfood window couldn't distinguish from "never ran") and a
+// violation ask, not just in checkStatusMap's own unit test.
+func TestRunHookMode_ChecksPersisted(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	enrolledStore(t, repoRoot, []string{"KnownFunc"})
+	goFile := filepath.Join(repoRoot, "main.go")
+
+	// Clean edit: every check should read "ok" or "skipped", never absent —
+	// this is the case that used to leave no per-check trace at all.
+	code, _, d := runHook(t, payload(t, "Edit", goFile, "z := KnownFunc()", "", nil))
+	if code != 0 || d.Hook.PermissionDec == "ask" {
+		t.Fatalf("expected a clean defer, got code=%d permission=%q", code, d.Hook.PermissionDec)
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("decisions.jsonl: no record written")
+	}
+	checks, _ := rec["checks"].(map[string]any)
+	if checks == nil {
+		t.Fatalf("clean defer record has no \"checks\" field: %v", rec)
+	}
+	if got, _ := checks["violations"].(string); got != "ok" {
+		t.Errorf("checks[violations] = %q, want %q (clean edit ran to completion)", got, "ok")
+	}
+
+	// Violation edit: the same record must carry checks alongside the ask.
+	code, _, d = runHook(t, payload(t, "Edit", goFile, "z := HallucinatedFunc()", "", nil))
+	if code != 0 || d.Hook.PermissionDec != "ask" {
+		t.Fatalf("expected an ask, got code=%d permission=%q", code, d.Hook.PermissionDec)
+	}
+	rec = readLastDecisionLog(t)
+	checks, _ = rec["checks"].(map[string]any)
+	if checks == nil {
+		t.Fatalf("ask record has no \"checks\" field: %v", rec)
+	}
+	if got, _ := checks["violations"].(string); got != "violation" {
+		t.Errorf("checks[violations] = %q, want %q on a hallucination ask", got, "violation")
+	}
+}
+
 // A store migrated by a newer binary disables validation; lookupSymbolsFor
 // returns a warn that the hook surfaces via additionalContext (still a defer,
 // never a block) — the schema-skew-must-be-loud path.

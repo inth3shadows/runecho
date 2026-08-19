@@ -274,7 +274,16 @@ func contractRepoRoot(contractPath string) string {
 // editFingerprint), stamped on the ask record so the matching PostToolUse
 // outcome can be joined precisely (#300). Empty for the pre-commit surface,
 // which has no PostToolUse outcome to join.
-func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string) bool {
+//
+// checks is checkStatusMap(results) (#333) from a caller that already built a
+// full per-check results slice before falling through to this ask — today
+// only runHookMode's post-lookup path, where every fact check ran clean and
+// the contract is the only reason this edit asks. nil from callers with no
+// such slice to hand it (the empty-input/unknown-lang early-return paths in
+// runHookMode, and askWithoutIndex's degraded-store delegation, which has no
+// results slice by construction — see answerDegradedStore's doc). Passing nil
+// is correct there, not a gap: there is nothing true to report.
+func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {
 	if cw == nil {
 		return false
 	}
@@ -289,6 +298,7 @@ func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang g
 		Contract:     cw.Name,
 		ContractHash: shortHash(cw.ActivatedHash),
 		Edit:         editHash,
+		Checks:       checks,
 	})
 	return true
 }

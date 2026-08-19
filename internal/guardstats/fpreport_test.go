@@ -1060,3 +1060,85 @@ func TestFPReport_EditHashScopedByFile(t *testing.T) {
 		t.Errorf("b.go's real approval should appear in TopSymbols, got %+v", s.TopSymbols)
 	}
 }
+
+// TestFPReport_CheckRunsTallyAcrossAskAndDefer is #333's core claim: a clean
+// defer record (no ask at all) still contributes to CheckRuns, which is
+// exactly the coverage decisions.jsonl was missing before Checks existed —
+// FPStats' other fields see only asks and outcomes. Also proves defer-only
+// checks (lint here, "skipped" on a clean go.py — er, go.go — edit) are
+// counted even though they never once appear in ByCheck/ByReason.
+func TestFPReport_CheckRunsTallyAcrossAskAndDefer(t *testing.T) {
+	decs := []Decision{
+		// Clean edit: hook ran to completion, nothing fired, no ask logged.
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Decision: "defer", Reason: "",
+			Checks: map[string]string{"violations": "ok", "lint": "skipped"}},
+		// A second clean edit — lint runs this time (a .py file), finds nothing.
+		{TS: ts(1), Mode: "hook", Repo: "r", File: "b.py", Decision: "defer", Reason: "",
+			Checks: map[string]string{"violations": "ok", "lint": "ok"}},
+		// A violation ask — Checks still travels alongside Symbols/Reason.
+		{TS: ts(2), Mode: "hook", Repo: "r", File: "c.go", Decision: "ask", Reason: "violations",
+			Symbols: []string{"foo"}, Checks: map[string]string{"violations": "violation", "lint": "skipped"}},
+		// A degraded defer — one check couldn't answer.
+		{TS: ts(3), Mode: "hook", Repo: "r", File: "d.go", Decision: "defer", Reason: "check-degraded",
+			Checks: map[string]string{"violations": "ok", "deps-go": "unknown"}},
+		// Older-guard / pre-#333 record with no Checks at all — must not panic
+		// and must not fabricate a "skipped" entry for it.
+		{TS: ts(4), Mode: "hook", Repo: "r", File: "e.go", Decision: "defer", Reason: ""},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+
+	violations := s.CheckRuns["violations"]
+	if violations.OK != 3 || violations.Violation != 1 || violations.Unknown != 0 || violations.Skipped != 0 {
+		t.Errorf("CheckRuns[violations] = %+v, want {OK:3 Violation:1}", violations)
+	}
+	if got := violations.Ran(); got != 4 {
+		t.Errorf("CheckRuns[violations].Ran() = %d, want 4 (OK+Violation, Skipped excluded)", got)
+	}
+
+	lint := s.CheckRuns["lint"]
+	if lint.OK != 1 || lint.Skipped != 2 {
+		t.Errorf("CheckRuns[lint] = %+v, want {OK:1 Skipped:2}", lint)
+	}
+	// This is the exact ambiguity #333 hit: lint never asked in this window
+	// (it has no ByCheck/ByReason entry), yet it plainly ran.
+	if _, asked := s.ByCheck["lint"]; asked {
+		t.Errorf("lint should have no ByCheck entry (it never asked) — got %+v", s.ByCheck["lint"])
+	}
+	if lint.Ran() == 0 {
+		t.Errorf("lint.Ran() = 0, but CheckRuns should show it executed twice despite zero asks")
+	}
+
+	depsGo := s.CheckRuns["deps-go"]
+	if depsGo.Unknown != 1 {
+		t.Errorf("CheckRuns[deps-go].Unknown = %d, want 1", depsGo.Unknown)
+	}
+}
+
+// TestFPReport_CheckRunsIgnoresUnrecognizedVerdict is the code-review
+// regression: a corrupted or hand-edited log line, or a future Verdict
+// constant added without a matching case in the tally switch, must not
+// fabricate an all-zero CheckTally entry for a check that plainly ran.
+// Falling through to `s.CheckRuns[check] = t` unconditionally did exactly
+// that — this pins the fix (an explicit default that skips the write-back).
+func TestFPReport_CheckRunsIgnoresUnrecognizedVerdict(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Decision: "defer", Reason: "",
+			Checks: map[string]string{"violations": "not-a-real-verdict"}},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if _, ok := s.CheckRuns["violations"]; ok {
+		t.Errorf("CheckRuns[violations] = %+v, want no entry at all for an unrecognized verdict",
+			s.CheckRuns["violations"])
+	}
+
+	// Same case, but the check already had real counts from an earlier valid
+	// record — the corrupted line must not touch them either.
+	decs = append(decs, Decision{TS: ts(1), Mode: "hook", Repo: "r", File: "b.go", Decision: "defer", Reason: "",
+		Checks: map[string]string{"violations": "ok"}})
+	decs = append(decs, Decision{TS: ts(2), Mode: "hook", Repo: "r", File: "c.go", Decision: "defer", Reason: "",
+		Checks: map[string]string{"violations": "not-a-real-verdict"}})
+	s = FPReport(decs, ts(-1000), 10)
+	if got := s.CheckRuns["violations"].OK; got != 1 {
+		t.Errorf("CheckRuns[violations].OK = %d, want 1 — the corrupted later record must not overwrite it", got)
+	}
+}

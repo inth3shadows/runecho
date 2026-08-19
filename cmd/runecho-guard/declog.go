@@ -74,6 +74,18 @@ type decisionRecord struct {
 	// making a silent regression to the fallback path observable via
 	// `jq -r 'select(.decision=="outcome")|.join'` rather than invisible.
 	Join string `json:"join,omitempty"`
+	// Checks is checkStatusMap(results) (#333): check name -> "ok"/"violation"/
+	// "unknown"/"skipped", for every check that ran to a verdict for this edit.
+	// Populated on hook-mode ask and defer records and on pre-commit ask
+	// records — everywhere results is fully built before logDecision is called.
+	// Empty/absent on the four early-return defer paths (parse-fail,
+	// empty-input, bad-path, unknown-lang) and on outcome records, where no
+	// results slice exists to project. This is the field #333's dogfood window
+	// found missing: without it, "zero lint asks in four days" is indistinguishable
+	// from "the lint check never ran once" — Verdict/VerdictSkipped were built
+	// in memory (checkresult.go) and discarded every time. Read back via
+	// guardstats.Decision.Checks / guardstats.FPStats.CheckRuns.
+	Checks map[string]string `json:"checks,omitempty"`
 }
 
 // editFingerprint returns a 12-hex-character fingerprint of a tool call's edit

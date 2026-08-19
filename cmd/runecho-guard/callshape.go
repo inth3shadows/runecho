@@ -107,7 +107,9 @@ func askWithoutIndexTrailer(hasShapes, hasLints bool) string {
 // editHash is threaded straight through to the ask record — see askContractOnly.
 func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, lints []lintFinding, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
 	if len(ms) == 0 && len(lints) == 0 {
-		return askContractOnly(out, cw, filePath, lang, editHash)
+		// nil checks: this whole function is the degraded-store path, which has
+		// no per-check results slice to project (see answerDegradedStore's doc).
+		return askContractOnly(out, cw, filePath, lang, editHash, nil)
 	}
 	var sb strings.Builder
 	// Contract first, matching the full ask's ordering: "should you be editing
@@ -133,6 +135,20 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 	// checks that actually ran may name themselves here — fpreport buckets on the
 	// exact string, and a phantom "violations" term inflates the very rate the
 	// un-gating decision rests on.
+	// checks: only the two verdicts this degraded path can actually assert.
+	// There is no per-check results slice here (see answerDegradedStore's
+	// doc), so an empty ms/lints does not mean "ran clean" — it may just mean
+	// the check was never applicable (gate off, wrong language, no store
+	// dependency but still not reached). Claiming "ok" for that would be a
+	// fabricated verdict, exactly what checkStatusMap's contract forbids;
+	// leaving it absent is the honest "not reported" the rest of #333 uses.
+	checks := map[string]string{}
+	if len(ms) > 0 {
+		checks["call-shape"] = "violation"
+	}
+	if len(lints) > 0 {
+		checks["lint"] = "violation"
+	}
 	rec := decisionRecord{
 		Mode:     "hook",
 		Repo:     repoName,
@@ -142,6 +158,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: len(ms) > 0, Lint: len(lints) > 0})),
 		Symbols:  syms,
 		Edit:     editHash,
+		Checks:   checks,
 	}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)

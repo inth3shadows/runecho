@@ -123,6 +123,47 @@ func classifyResult(check string, found bool, reason string) CheckResult {
 	}
 }
 
+// String renders a Verdict as the lowercase token decisionRecord.Checks and
+// fpreport (#333) key on — "ok"/"violation"/"unknown"/"skipped". A value
+// outside the four known constants (impossible from classifyResult, but not
+// from a hand-built CheckResult in a test) renders as "unknown" rather than
+// panicking or silently keying an empty-string bucket.
+func (v Verdict) String() string {
+	switch v {
+	case VerdictOK:
+		return "ok"
+	case VerdictViolation:
+		return "violation"
+	case VerdictSkipped:
+		return "skipped"
+	default:
+		return "unknown"
+	}
+}
+
+// checkStatusMap projects results onto check name -> Verdict.String(), for
+// decisionRecord.Checks (#333). Persisting this is what lets fpreport tell
+// "the check ran and found nothing" apart from "the check never ran" — before
+// this, only a Violation verdict left any trace in decisions.jsonl; OK,
+// Unknown and Skipped were computed in-process (firedChecksFrom, countUnknown)
+// and then discarded once the hook returned. A results slice missing a
+// checkOrder name simply leaves that check absent from the map rather than
+// backfilling a fake Skipped — this is NOT a hypothetical: the pre-commit path
+// (runArgs) only ever appends 4 of the 11 checkOrder names (violations,
+// qualified, deps-go, file-scope), so every pre-commit-mode Checks map is
+// missing the other 7 by construction, not by bug. A caller must treat a
+// missing key as "not reported by this surface," never as Skipped.
+func checkStatusMap(results []CheckResult) map[string]string {
+	if len(results) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(results))
+	for _, r := range results {
+		m[r.Check] = r.Verdict.String()
+	}
+	return m
+}
+
 // storeQueryReason names the Unknown reason for a check whose store lookup
 // failed (qErrs, the existing dangling/duplicate query-error count), or "" if
 // it didn't.

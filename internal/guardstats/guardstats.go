@@ -47,23 +47,33 @@ type Decision struct {
 	// outcome records whose PostToolUse fire failed to reproduce the ask's
 	// hash — those fall back to FPReport's window-based join.
 	Edit string
+	// Checks is decisionRecord.Checks (#333): check name -> "ok"/"violation"/
+	// "unknown"/"skipped", one entry per check that ran to a verdict on this
+	// edit. Present on hook/precommit ask and hook defer records from guards
+	// new enough to write it; nil on everything else (outcome records, the
+	// four early-return defer paths, and any record from an older guard). A
+	// nil map must be treated as "not reported," never as "every check was
+	// skipped" — see FPReport's tally loop in fpreport.go, which builds
+	// FPStats.CheckRuns from this field and is its only consumer.
+	Checks map[string]string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
 // import — see package doc). Keep in sync with declog.go's decisionRecord.
 type rawDecision struct {
-	V            int      `json:"v"`
-	GV           string   `json:"gv,omitempty"`
-	TS           string   `json:"ts"`
-	Mode         string   `json:"mode"`
-	Repo         string   `json:"repo,omitempty"`
-	File         string   `json:"file,omitempty"`
-	Lang         string   `json:"lang,omitempty"`
-	Decision     string   `json:"decision"`
-	Reason       string   `json:"reason"`
-	Symbols      []string `json:"symbols,omitempty"`
-	LearnSymbols []string `json:"learn_symbols,omitempty"`
-	Edit         string   `json:"edit,omitempty"`
+	V            int               `json:"v"`
+	GV           string            `json:"gv,omitempty"`
+	TS           string            `json:"ts"`
+	Mode         string            `json:"mode"`
+	Repo         string            `json:"repo,omitempty"`
+	File         string            `json:"file,omitempty"`
+	Lang         string            `json:"lang,omitempty"`
+	Decision     string            `json:"decision"`
+	Reason       string            `json:"reason"`
+	Symbols      []string          `json:"symbols,omitempty"`
+	LearnSymbols []string          `json:"learn_symbols,omitempty"`
+	Edit         string            `json:"edit,omitempty"`
+	Checks       map[string]string `json:"checks,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -99,6 +109,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Symbols:      raw.Symbols,
 						LearnSymbols: raw.LearnSymbols,
 						Edit:         raw.Edit,
+						Checks:       raw.Checks,
 					})
 				}
 			}

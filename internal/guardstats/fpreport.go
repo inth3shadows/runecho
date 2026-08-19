@@ -29,6 +29,30 @@ const OutcomeJoinWindow = 5 * time.Minute
 // cmd/runecho-guard/declog_window_test.go asserts the two stay in sync.
 const KeyedOutcomeJoinWindow = 24 * time.Hour
 
+// CheckTally counts one check's in-process verdicts (checkresult.go's
+// Verdict, mirrored via decisionRecord.Checks — #333) across every hook or
+// pre-commit invocation that reported one, independent of whether that
+// invocation ever asked. This is what distinguishes "the check ran and found
+// nothing" from "the check never ran" — before #333, only a Violation left
+// any trace in decisions.jsonl, so a check with a low ask rate was
+// indistinguishable from a check that was never reached (gate off, wrong
+// language, no matching file). See #333's issue comment: four days of
+// dogfooding a Python-heavy repo produced exactly two lint records, and
+// there was no way to tell whether that was "true rarity" or "silently not
+// firing" without this field.
+type CheckTally struct {
+	OK        int `json:"ok"`        // ran, found nothing
+	Violation int `json:"violation"` // ran, found something (also counted in FPStats.ByCheck)
+	Unknown   int `json:"unknown"`   // ran, could not answer (oversized file, store-query error, go.work abstain, ...)
+	Skipped   int `json:"skipped"`   // gate off, wrong language, or not applicable
+}
+
+// Ran is how many invocations this check actually executed to a verdict —
+// OK, Violation, or Unknown all count; only Skipped does not. This is the
+// number #333 needed and decisions.jsonl couldn't answer: "did the check
+// ever run," as opposed to "did it ever ask."
+func (t CheckTally) Ran() int { return t.OK + t.Violation + t.Unknown }
+
 // FPBucket is an ask/approved tally for one grouping key (a reason or a
 // language). Approved is the count of asks that were followed by a
 // symbol-exact "approved" outcome for the same file within OutcomeJoinWindow.
@@ -253,6 +277,24 @@ type FPStats struct {
 	// Only (3) is a data-integrity problem, so a large value is a caveat on the
 	// rates above, not by itself evidence of a damaged log.
 	UnmatchedOutcomes int
+	// CheckRuns tallies decisionRecord.Checks (#333) across EVERY decision in
+	// window that reported one — ask and defer records alike, not just asks —
+	// keyed by check name. Unlike every other field on this struct, it answers
+	// a run-coverage question, not a false-positive-rate one: it has no
+	// Approved/Rate and does not participate in ByCheck/ByReason. A check
+	// absent from this map means no in-window record ever carried a Checks
+	// entry for it — either no guard new enough to write #333's field has run
+	// in the window, or the check name was never passed to classifyResult.
+	//
+	// Pools hook-mode and pre-commit-mode records with no Mode split, the same
+	// simplification ByCheck/ByReason already make for asks. This matters more
+	// here than there: pre-commit only ever populates 4 of the 11 checkOrder
+	// names (see checkStatusMap's doc), so a repo relying mainly on the
+	// pre-commit hook will show the other 7 as rare or absent in this report
+	// regardless of how often they'd fire given a hook-mode edit — read a low
+	// count here as "rare on the surfaces that exercise it," not as "rare,
+	// full stop," until a Mode-split view exists.
+	CheckRuns map[string]CheckTally
 }
 
 // MixedVersions reports whether the window's RATEABLE asks came from more than
@@ -345,6 +387,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		ByCheck:   map[string]FPBucket{},
 		ByLang:    map[string]FPBucket{},
 		ByVersion: map[string]FPBucket{},
+		CheckRuns: map[string]CheckTally{},
 	}
 
 	// Index approved outcomes by join key. A file may see the same symbol set
@@ -379,6 +422,36 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		}
 		if d.TS.After(s.Until) {
 			s.Until = d.TS
+		}
+		// CheckRuns tallies EVERY decision carrying a Checks map — ask and
+		// defer, hook and pre-commit alike — ahead of the ask-only filtering
+		// below, because it answers a different question (did the check run at
+		// all) than the rest of this function (what's its approve-anyway rate).
+		// Deliberately not deduped against hook re-invocations the way asks are
+		// (eventSeen below): a re-fired hook still means the check genuinely ran
+		// again, and this field is read qualitatively (zero vs. nonzero, rare
+		// vs. common), not as a rate a small duplication bias would distort.
+		for check, verdict := range d.Checks {
+			t := s.CheckRuns[check]
+			switch verdict {
+			case "ok":
+				t.OK++
+			case "violation":
+				t.Violation++
+			case "unknown":
+				t.Unknown++
+			case "skipped":
+				t.Skipped++
+			default:
+				// Unrecognized token (a hand-edited log line, or a future
+				// Verdict added on the write side without a matching case
+				// here) — skip rather than write back. Falling through would
+				// insert an all-zero CheckTally for a check that plainly DID
+				// run, the exact misleading "ran 0" row this field exists to
+				// prevent.
+				continue
+			}
+			s.CheckRuns[check] = t
 		}
 		switch d.Decision {
 		case "ask":
@@ -832,6 +905,15 @@ func FormatFP(s FPStats) string {
 		}
 	}
 
+	if len(s.CheckRuns) > 0 {
+		fmt.Fprintf(&b, "\nCheck run coverage (#333 — did the check run at all, independent of ask rate):\n")
+		for _, c := range sortedCheckRunKeys(s.CheckRuns) {
+			t := s.CheckRuns[c]
+			fmt.Fprintf(&b, "  %-16s ran %4d  (ok %d, violation %d, unknown %d)  skipped %d\n",
+				c, t.Ran(), t.OK, t.Violation, t.Unknown, t.Skipped)
+		}
+	}
+
 	if s.UnmatchedOutcomes > 0 {
 		fmt.Fprintf(&b, "\nNote: %d approved outcome(s) had no matching ask in-window. Usually benign:\n",
 			s.UnmatchedOutcomes)
@@ -909,6 +991,23 @@ func sortedFPKeys(m map[string]FPBucket) []string {
 	return keys
 }
 
+// sortedCheckRunKeys orders CheckRuns by Ran() descending then name, matching
+// sortedFPKeys' convention (busiest first) even though CheckTally has no
+// Total() of its own — Ran() is CheckRuns' analogous "how much happened" figure.
+func sortedCheckRunKeys(m map[string]CheckTally) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]].Ran() != m[keys[j]].Ran() {
+			return m[keys[i]].Ran() > m[keys[j]].Ran()
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
 // PayloadFP renders an FPStats as a JSON-serializable map (parity with Payload).
 //
 // Every bucket carries "unrated" and "coverage" alongside "rate" (#254). They
@@ -965,6 +1064,14 @@ func PayloadFP(s FPStats) map[string]any {
 	if loudest == nil {
 		loudest = []RepoCount{}
 	}
+	checkRuns := make([]map[string]any, 0, len(s.CheckRuns))
+	for _, c := range sortedCheckRunKeys(s.CheckRuns) {
+		t := s.CheckRuns[c]
+		checkRuns = append(checkRuns, map[string]any{
+			"check": c, "ran": t.Ran(), "ok": t.OK, "violation": t.Violation,
+			"unknown": t.Unknown, "skipped": t.Skipped,
+		})
+	}
 	return map[string]any{
 		"since":              s.Since,
 		"until":              s.Until,
@@ -977,6 +1084,7 @@ func PayloadFP(s FPStats) map[string]any {
 		"top_symbols":        topSymbols,
 		"loudest_repos":      loudest,
 		"unmatched_outcomes": s.UnmatchedOutcomes,
+		"check_runs":         checkRuns,
 	}
 }
 

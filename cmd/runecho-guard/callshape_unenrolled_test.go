@@ -75,6 +75,14 @@ func TestCallShape_UnenrolledTree(t *testing.T) {
 		if got := rec["decision"]; got != "ask" {
 			t.Errorf("decision = %v, want ask", got)
 		}
+		// #333 follow-up: askWithoutIndex's real-finding branch must carry
+		// Checks too, or this exact ask — a genuine call-shape violation on
+		// an unenrolled tree, arguably the check's most common firing shape
+		// — would leave no trace that call-shape ran at all.
+		checks, _ := rec["checks"].(map[string]any)
+		if got, _ := checks["call-shape"].(string); got != "violation" {
+			t.Errorf("checks[call-shape] = %q, want %q", got, "violation")
+		}
 	})
 
 	t.Run("flag off still defers", func(t *testing.T) {

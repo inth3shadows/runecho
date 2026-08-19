@@ -285,6 +285,15 @@ type FPStats struct {
 	// absent from this map means no in-window record ever carried a Checks
 	// entry for it — either no guard new enough to write #333's field has run
 	// in the window, or the check name was never passed to classifyResult.
+	//
+	// Pools hook-mode and pre-commit-mode records with no Mode split, the same
+	// simplification ByCheck/ByReason already make for asks. This matters more
+	// here than there: pre-commit only ever populates 4 of the 11 checkOrder
+	// names (see checkStatusMap's doc), so a repo relying mainly on the
+	// pre-commit hook will show the other 7 as rare or absent in this report
+	// regardless of how often they'd fire given a hook-mode edit — read a low
+	// count here as "rare on the surfaces that exercise it," not as "rare,
+	// full stop," until a Mode-split view exists.
 	CheckRuns map[string]CheckTally
 }
 
@@ -433,6 +442,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 				t.Unknown++
 			case "skipped":
 				t.Skipped++
+			default:
+				// Unrecognized token (a hand-edited log line, or a future
+				// Verdict added on the write side without a matching case
+				// here) — skip rather than write back. Falling through would
+				// insert an all-zero CheckTally for a check that plainly DID
+				// run, the exact misleading "ran 0" row this field exists to
+				// prevent.
+				continue
 			}
 			s.CheckRuns[check] = t
 		}

@@ -1113,3 +1113,32 @@ func TestFPReport_CheckRunsTallyAcrossAskAndDefer(t *testing.T) {
 		t.Errorf("CheckRuns[deps-go].Unknown = %d, want 1", depsGo.Unknown)
 	}
 }
+
+// TestFPReport_CheckRunsIgnoresUnrecognizedVerdict is the code-review
+// regression: a corrupted or hand-edited log line, or a future Verdict
+// constant added without a matching case in the tally switch, must not
+// fabricate an all-zero CheckTally entry for a check that plainly ran.
+// Falling through to `s.CheckRuns[check] = t` unconditionally did exactly
+// that — this pins the fix (an explicit default that skips the write-back).
+func TestFPReport_CheckRunsIgnoresUnrecognizedVerdict(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Decision: "defer", Reason: "",
+			Checks: map[string]string{"violations": "not-a-real-verdict"}},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if _, ok := s.CheckRuns["violations"]; ok {
+		t.Errorf("CheckRuns[violations] = %+v, want no entry at all for an unrecognized verdict",
+			s.CheckRuns["violations"])
+	}
+
+	// Same case, but the check already had real counts from an earlier valid
+	// record — the corrupted line must not touch them either.
+	decs = append(decs, Decision{TS: ts(1), Mode: "hook", Repo: "r", File: "b.go", Decision: "defer", Reason: "",
+		Checks: map[string]string{"violations": "ok"}})
+	decs = append(decs, Decision{TS: ts(2), Mode: "hook", Repo: "r", File: "c.go", Decision: "defer", Reason: "",
+		Checks: map[string]string{"violations": "not-a-real-verdict"}})
+	s = FPReport(decs, ts(-1000), 10)
+	if got := s.CheckRuns["violations"].OK; got != 1 {
+		t.Errorf("CheckRuns[violations].OK = %d, want 1 — the corrupted later record must not overwrite it", got)
+	}
+}

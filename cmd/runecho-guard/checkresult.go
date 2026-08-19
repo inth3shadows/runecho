@@ -147,10 +147,12 @@ func (v Verdict) String() string {
 // this, only a Violation verdict left any trace in decisions.jsonl; OK,
 // Unknown and Skipped were computed in-process (firedChecksFrom, countUnknown)
 // and then discarded once the hook returned. A results slice missing a
-// checkOrder name (never happens today — every call site appends all eleven —
-// but not guaranteed by the type) simply leaves that check absent from the
-// map rather than backfilling a fake Skipped, so a future caller bug is
-// visible as a missing key, not a wrong verdict.
+// checkOrder name simply leaves that check absent from the map rather than
+// backfilling a fake Skipped — this is NOT a hypothetical: the pre-commit path
+// (runArgs) only ever appends 4 of the 11 checkOrder names (violations,
+// qualified, deps-go, file-scope), so every pre-commit-mode Checks map is
+// missing the other 7 by construction, not by bug. A caller must treat a
+// missing key as "not reported by this surface," never as Skipped.
 func checkStatusMap(results []CheckResult) map[string]string {
 	if len(results) == 0 {
 		return nil

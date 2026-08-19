@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.44.0] — 2026-08-19
+
+### Changed
+- guard: persist per-check verdicts to decisions.jsonl (#333) (#358)
+
 ## [0.43.1] — 2026-08-15
 
 ### Changed

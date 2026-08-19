@@ -107,7 +107,9 @@ func askWithoutIndexTrailer(hasShapes, hasLints bool) string {
 // editHash is threaded straight through to the ask record — see askContractOnly.
 func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, lints []lintFinding, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
 	if len(ms) == 0 && len(lints) == 0 {
-		return askContractOnly(out, cw, filePath, lang, editHash)
+		// nil checks: this whole function is the degraded-store path, which has
+		// no per-check results slice to project (see answerDegradedStore's doc).
+		return askContractOnly(out, cw, filePath, lang, editHash, nil)
 	}
 	var sb strings.Builder
 	// Contract first, matching the full ask's ordering: "should you be editing

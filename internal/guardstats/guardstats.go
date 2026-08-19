@@ -53,7 +53,8 @@ type Decision struct {
 	// new enough to write it; nil on everything else (outcome records, the
 	// four early-return defer paths, and any record from an older guard). A
 	// nil map must be treated as "not reported," never as "every check was
-	// skipped" — see CheckRunCoverage in fpreport.go, its only consumer.
+	// skipped" — see FPReport's tally loop in fpreport.go, which builds
+	// FPStats.CheckRuns from this field and is its only consumer.
 	Checks map[string]string
 }
 

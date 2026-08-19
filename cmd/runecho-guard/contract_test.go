@@ -142,6 +142,33 @@ func TestContract_InScopeSilent_OutOfScopeAsks_OffIsSilent(t *testing.T) {
 	})
 }
 
+// TestContract_OnlyAskStillCarriesChecks is #333's regression on the case its
+// own review pass caught: askContractOnly is reached from runHookMode's
+// post-lookup path with a fully-built `results` (every fact check ran clean —
+// KnownFunc resolves), and the contract is the ONLY reason this edit asks.
+// Before the fix, that path built decisionRecord.Checks nowhere, so the most
+// common contract-only ask shape (a clean edit outside declared scope) left
+// every check's verdict just as unrecoverable as before #333 shipped at all.
+func TestContract_OnlyAskStillCarriesChecks(t *testing.T) {
+	const sess = "sess-checks"
+	top := contractRepo(t, sess, inScopeBody)
+	outOfScope := filepath.Join(top, "internal", "guard", "y.go")
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+
+	_, raw, d := runHook(t, contractPayload(t, sess, outOfScope, "package main\n\nfunc F() { KnownFunc() }\n"))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("out-of-scope edit must ask; got %q\n%s", d.Hook.PermissionDec, raw)
+	}
+	rec := readLastDecisionLog(t)
+	checks, _ := rec["checks"].(map[string]any)
+	if checks == nil {
+		t.Fatalf("contract-only ask record has no \"checks\" field: %v", rec)
+	}
+	if got, _ := checks["violations"].(string); got != "ok" {
+		t.Errorf("checks[violations] = %q, want %q — the edit itself is clean, only scope fired", got, "ok")
+	}
+}
+
 // With no contract activated for the session the check must be invisible even
 // with the flag on — the D-4 total-abstention rule, and the thing that keeps the
 // ask rate at exactly zero for everyone who did not opt in.

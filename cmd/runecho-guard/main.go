@@ -689,7 +689,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// contract at all. This path costs a single store open, only for a
 		// session that named a contract, and leaves the log alone when it
 		// abstains.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath), editFingerprint(edit)) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath), editFingerprint(edit), nil) {
 			return 0
 		}
 		hookDefer()
@@ -713,7 +713,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// pays for its own store open; every other edit picks it up from
 		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
 		// session explicitly activated a contract AND the path fell outside it.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang, editFingerprint(edit)) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang, editFingerprint(edit), nil) {
 			return 0
 		}
 		hookDefer()
@@ -1084,7 +1084,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// touch is precisely the case this check exists for — so it is answered
 		// here, ahead of the degraded and stale advisories, because an ask is a
 		// stronger signal than either and the hook emits only one decision.
-		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit)) {
+		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit), checkStatusMap(results)) {
 			return 0
 		}
 		// Nothing flagged. A degraded check means "found nothing" is not the

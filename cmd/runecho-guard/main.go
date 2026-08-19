@@ -392,6 +392,7 @@ func runArgs(args []string) int {
 		Decision: "ask",
 		Reason:   askReason(fired),
 		Symbols:  syms,
+		Checks:   checkStatusMap(results),
 	})
 
 	if *dryRun {
@@ -1103,13 +1104,13 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// used to log identically to a clean pass now surfaces here too.
 		if degraded > 0 && strictMode() {
 			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check-specific abstain) — coverage was incomplete for this edit.", degraded))
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded"})
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded", Checks: checkStatusMap(results)})
 			return 0
 		}
 		// If the IR is stale the check may be incomplete — say so via
 		// additionalContext (which informs Claude without forcing an allow/deny).
 		staleReason := hookDeferStale(out, latest)
-		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason})
+		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason, Checks: checkStatusMap(results)})
 		return 0
 	}
 
@@ -1185,7 +1186,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	syms = append(syms, lintSection(&sb, lintFindingsList)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit)}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results)}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

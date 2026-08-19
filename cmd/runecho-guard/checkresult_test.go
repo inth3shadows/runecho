@@ -155,6 +155,61 @@ func TestClassifyResult(t *testing.T) {
 	}
 }
 
+// TestVerdictString pins the four tokens decisionRecord.Checks and fpreport's
+// CheckTally (#333) key on. A drift here breaks the switch in FPReport's
+// CheckRuns tally silently (an unrecognized string just falls through every
+// case), so this is worth its own test independent of checkStatusMap's.
+func TestVerdictString(t *testing.T) {
+	cases := map[Verdict]string{
+		VerdictOK:        "ok",
+		VerdictViolation: "violation",
+		VerdictUnknown:   "unknown",
+		VerdictSkipped:   "skipped",
+	}
+	for v, want := range cases {
+		if got := v.String(); got != want {
+			t.Errorf("Verdict(%d).String() = %q, want %q", v, got, want)
+		}
+	}
+	// An out-of-range value (never produced by classifyResult, but not
+	// prevented by the type) must not panic and must not silently key an
+	// empty-string bucket in the persisted map.
+	if got := Verdict(99).String(); got != "unknown" {
+		t.Errorf("Verdict(99).String() = %q, want the unknown fallback", got)
+	}
+}
+
+// TestCheckStatusMap pins #333's projection: every result becomes one
+// check->verdict-string entry, and an empty/nil results slice returns nil
+// (not an empty non-nil map) so decisionRecord's omitempty drops the field
+// entirely rather than persisting "checks":{} on every early-return defer.
+func TestCheckStatusMap(t *testing.T) {
+	results := []CheckResult{
+		{Check: "violations", Verdict: VerdictOK},
+		{Check: "lint", Verdict: VerdictSkipped, Reason: "not-python"},
+		{Check: "dangling", Verdict: VerdictViolation},
+		{Check: "deps-go", Verdict: VerdictUnknown, Reason: "go.work workspace"},
+	}
+	got := checkStatusMap(results)
+	want := map[string]string{
+		"violations": "ok",
+		"lint":       "skipped",
+		"dangling":   "violation",
+		"deps-go":    "unknown",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("checkStatusMap = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("checkStatusMap[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if checkStatusMap(nil) != nil {
+		t.Errorf("checkStatusMap(nil) = %v, want nil", checkStatusMap(nil))
+	}
+}
+
 // TestStoreQueryReason is a one-line invariant, pinned so a future refactor
 // of the dangling/duplicate query-error plumbing can't silently invert it.
 func TestStoreQueryReason(t *testing.T) {

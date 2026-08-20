@@ -960,3 +960,70 @@ func TestJSParamNamesRoundNineShapes(t *testing.T) {
 		t.Errorf("CRLF real declaration lost its parameter: %v", got)
 	}
 }
+
+// TestJSDeclaredNamesRoundTenShapes pins review-round-10. Three of these are in
+// code the PR only reaches rather than introduces, but all three are the same
+// #302 false-positive class and one function away from the change.
+func TestJSDeclaredNamesRoundTenShapes(t *testing.T) {
+	decl := func(src string) []string {
+		got := JSDeclaredNames(TextToAddedLines(src))
+		sort.Strings(got)
+		return got
+	}
+
+	// Finding 1: assignLHS splits at the FIRST `=` at any depth, so a
+	// destructuring pattern carrying a default truncated mid-pattern and every
+	// name after the default was lost — `onCancel()` was then flagged.
+	got := decl(`const { onSave = noop, onCancel } = props;`)
+	for _, want := range []string{"onSave", "onCancel"} {
+		if !hasName(got, want) {
+			t.Errorf("%q not bound from a destructure-with-default: %v", want, got)
+		}
+	}
+
+	// Finding 3: the nested split inside jsBindingTargets was made angle-aware,
+	// but the TOP-LEVEL declarator split was not, so a generic in the
+	// INITIALISER still leaked its type name.
+	for _, tc := range []struct{ src, leak, keep string }{
+		{`const [a, setA] = useState<Map<string, Bogus>>(new Map());`, "Bogus", "setA"},
+		{`const m = new Map<string, Bogus>();`, "Bogus", "m"},
+	} {
+		got := decl(tc.src)
+		if hasName(got, tc.leak) {
+			t.Errorf("type name %q leaked from an initialiser generic: %v", tc.leak, got)
+		}
+		if !hasName(got, tc.keep) {
+			t.Errorf("real binding %q lost: %v", tc.keep, got)
+		}
+	}
+}
+
+// TestJSParamNamesRoundTenShapes pins the two round-10 findings in this PR's
+// own code.
+func TestJSParamNamesRoundTenShapes(t *testing.T) {
+	// Finding 2: round 9 fixed `\r` in three end-of-line helpers but not in
+	// jsTypeContinuationStart, so on a CRLF checkout a blank line ("\r") read
+	// as NOT a continuation and ended the type statement early.
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	src := "type H =\n\n  | ((e: Bogus) => void)\n"
+	for _, v := range []struct{ name, s string }{{"LF", src}, {"CRLF", crlf(src)}} {
+		if got := jsParams(t, v.s); len(got) > 0 {
+			t.Errorf("%s: bound %v from a type position", v.name, got)
+		}
+	}
+
+	// Finding 6: the return-type branch of jsArrowFollows accepted a ternary's
+	// `:` arm, binding a parenthesised value expression as a parameter. A
+	// return-type annotation abuts its `)`; a ternary arm is spaced.
+	if got := jsParams(t, `const q = cond ? (a) : b => b;`); hasName(got, "a") {
+		t.Errorf("bound `a` from a ternary branch: %v", got)
+	}
+	for _, tc := range []struct{ src, want string }{
+		{`const g = (bb): Foo => bb;`, "bb"},
+		{`const h = (cc): Map<string, X> => cc;`, "cc"},
+	} {
+		if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+			t.Errorf("real return-type annotation broke for %q: %v", tc.src, got)
+		}
+	}
+}

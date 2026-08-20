@@ -521,8 +521,15 @@ func JSDeclaredNames(lines []AddedLine) []string {
 		if mm == nil {
 			return
 		}
-		for _, decl := range splitTopLevelCommas(mm[1]) {
-			lhs := assignLHS(decl)
+		// splitJSParamList, not splitTopLevelCommas: the latter is not
+		// angle-aware, so a generic in the INITIALISER split mid-type and its
+		// tail bound the type name — `const m = new Map<string, Bogus>();`
+		// yielded `[m Bogus]`, and `const [a, setA] = useState<Map<string,
+		// Bogus>>(…)` yielded `[a setA Bogus]`. The nested split inside
+		// jsBindingTargets was already fixed for this; the frame above it was
+		// not, so the leak survived at the top level.
+		for _, decl := range splitJSParamList(mm[1]) {
+			lhs := jsAssignLHS(decl)
 			if lhs == "" {
 				lhs = decl // declarator with no initializer (`let a, b;`)
 			}
@@ -3086,7 +3093,11 @@ func jsArrowFollows(s string) bool {
 	if s[i] == '=' {
 		return i+1 < len(s) && s[i+1] == '>'
 	}
-	if s[i] != ':' {
+	// A return-type annotation abuts its `)` — `(a): Foo => a`. A ternary's
+	// `:` arm is spaced — `cond ? (a) : b => b` — and accepting that bound `a`,
+	// a parenthesised value expression rather than a parameter. Requiring the
+	// colon to be the very next byte separates them.
+	if i != 0 || s[0] != ':' {
 		return false
 	}
 	for i++; i < len(s); i++ {
@@ -3247,6 +3258,11 @@ func jsFunctionParenAfter(s string, kw int) int {
 // not close on this line. One left-to-right pass, so the opener loop can look a
 // group's extent up instead of re-walking it per nesting level.
 func jsParenMatches(s string) []int {
+	// Bounded: this is 8 bytes per input byte, and parseDiffOutput (unlike
+	// TextToAddedLines) does not apply capLine — so a staged 2 MB minified line
+	// would allocate a 16 MB table. Past the cap the line is generated code that
+	// no binding is usefully read from anyway.
+	s = capLine(s)
 	m := make([]int, len(s))
 	for i := range m {
 		m[i] = -1
@@ -3299,7 +3315,7 @@ func jsTypeDelta(s string) int {
 // opener (`| A`, `? X`, `: never`, `(e: E) => void`, `string[]`) rather than
 // with a keyword or an identifier-led statement (`const cb = …`).
 func jsTypeContinuationStart(s string) bool {
-	t := strings.TrimLeft(s, " \t")
+	t := strings.Trim(s, " \t\r")
 	if t == "" {
 		return true // a blank line does not end a type statement
 	}
@@ -3431,4 +3447,41 @@ func jsBareArrowParams(s string) []string {
 		out = append(out, s[j+1:end])
 	}
 	return out
+}
+
+// jsAssignLHS is assignLHS with bracket-depth awareness, for JS declarators.
+// assignLHS splits at the FIRST `=` wherever it sits, so a destructuring
+// pattern carrying a default truncated mid-pattern:
+// `const { onSave = noop, onCancel } = props;` gave the LHS `"{ onSave "` and
+// bound only `onSave`, leaving a bare `onCancel(…)` to be reported as a
+// hallucination — a live false positive of the very class this file addresses,
+// and destructuring-with-default is as ordinary a React props shape as the
+// destructured callback prop.
+//
+// Only the `=` at depth 0 separates a declarator's target from its initialiser.
+// Kept separate from assignLHS rather than changing it, because that helper is
+// shared with the Python paths.
+func jsAssignLHS(decl string) string {
+	depth := 0
+	for i := 0; i < len(decl); i++ {
+		switch decl[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '=':
+			if depth != 0 {
+				continue
+			}
+			// `==`, `===`, `=>` and `<=`/`>=`/`!=` are not assignment.
+			if i+1 < len(decl) && (decl[i+1] == '=' || decl[i+1] == '>') {
+				continue
+			}
+			if i > 0 && strings.IndexByte("=!<>+-*/%&|^", decl[i-1]) >= 0 {
+				continue
+			}
+			return decl[:i]
+		}
+	}
+	return ""
 }

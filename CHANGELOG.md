@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.44.1] — 2026-08-20
+
+### Changed
+- fix(guard): bind JS/TS function parameters (#302) (#361)
+
 ## [0.44.0] — 2026-08-19
 
 ### Changed

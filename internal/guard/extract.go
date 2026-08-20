@@ -2581,6 +2581,14 @@ func JSParamNames(lines []AddedLine) []string {
 		// every line of a large file was 89% of this extractor's total runtime
 		// (CPU profile, 400 KB TS corpus). The keyword test is exact — both
 		// patterns require the literal word — so gating changes no result.
+		// An ambient declaration or a bodyless overload signature declares a
+		// TYPE, not a value: nothing in its parameter list is bound at runtime,
+		// so binding those names would mask a hallucinated call to one. Both end
+		// in `;` with no body brace, which is what distinguishes them from a
+		// real declaration.
+		if jsAmbientOrOverload(s) {
+			return
+		}
 		if (strings.Contains(s, "interface") && jsInterfaceOpen.MatchString(s)) ||
 			(strings.Contains(s, "type") && jsTypeAliasOpen.MatchString(s)) {
 			typeDepth = jsTypeDelta(s)
@@ -2632,7 +2640,11 @@ func JSParamNames(lines []AddedLine) []string {
 				if sigLines++; sigLines > maxJSSigLines {
 					sigDepth, sigLines = 0, 0
 					sig.Reset()
-					return
+					// Fall through rather than return: this line is what breaks
+					// a runaway latch, and it may carry its own parameter list.
+					// Its two siblings — the jsTopLevelStatementStart arm above
+					// and the twin in dropped_import.go — both fall through.
+					goto openerScan
 				}
 				sig.WriteByte(' ')
 				sig.WriteString(s)
@@ -2662,6 +2674,7 @@ func JSParamNames(lines []AddedLine) []string {
 			}
 		}
 
+	openerScan:
 		// --- a parameter list may open on this line -------------------------
 		// Scan openers left to right rather than committing to the first. A
 		// parameter list is often not the first `(` on its line — `function
@@ -2720,6 +2733,16 @@ func JSParamNames(lines []AddedLine) []string {
 					}
 					continue
 				}
+				// Compute the REAL depth rather than assuming 1. A signature
+				// whose opening line contains an unclosed nested call —
+				// `const handler = (a = foo(` / `1` / `)) => a;` — is two deep
+				// at the line end, and starting the continuation at 1 made the
+				// first `)` on a later line read as the list's close, so
+				// jsArrowFollows saw `") => a;"` and rejected it. Both siblings
+				// already do this: PyParamNames via pyBracketDelta, and this
+				// PR's own LocallyBoundNames twin via jsConsumeParens.
+				sigDepth = 1
+				jsConsumeParens(rest, &sigDepth)
 				sigLines = 1
 				sig.Reset()
 				sig.WriteString(rest)
@@ -2806,6 +2829,14 @@ func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
 	angle := 0
 	for i := from; i < len(s); i++ {
 		switch s[i] {
+		case '{', ';':
+			// A generic parameter clause never spans a block or statement
+			// boundary. Without this, an unspaced comparison or left shift —
+			// `if (i<n) {` — opened a depth that never closed, and the
+			// `angle > 0` guard below then hid every later `(` on the line,
+			// silently disabling the fix for it.
+			angle = 0
+			continue
 		case '<':
 			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
 				angle++
@@ -2914,6 +2945,10 @@ func appendJSParams(out []string, inner string, isFunction bool, after string) [
 // the depth negative — the failure mode of the accumulator this replaces.
 func splitJSParamList(s string) []string {
 	var out []string
+	// A `<` with no `>` after it anywhere is a comparison or a shift, never a
+	// generic. Without this an unspaced `f(a = i<n, cb)` latched the depth and
+	// stopped splitting, losing `cb`.
+	lastGT := strings.LastIndexByte(s, '>')
 	depth, angle, start := 0, 0, 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; c {
@@ -2929,7 +2964,7 @@ func splitJSParamList(s string) []string {
 			// non-space AFTER `<` rejected the legal `Map< string, Handler >`,
 			// which then split mid-type and bound `Handler` — the type-name
 			// leak this tracking exists to prevent.
-			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' {
+			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' {
 				angle++
 			}
 		case '>':
@@ -3034,20 +3069,6 @@ func jsConsumeParens(s string, depth *int) (int, bool) {
 		}
 	}
 	return -1, false
-}
-
-// jsBracketDelta is the net change in ()/[]/{} nesting across s.
-func jsBracketDelta(s string) int {
-	d := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '(', '[', '{':
-			d++
-		case ')', ']', '}':
-			d--
-		}
-	}
-	return d
 }
 
 // jsOpenParamListLoose is jsParamListOpen's over-inclusive twin, for
@@ -3240,4 +3261,22 @@ func jsTypeContinuationStart(s string) bool {
 	}
 	return strings.HasPrefix(t, "extends") || strings.HasPrefix(t, "infer") ||
 		strings.HasPrefix(t, "keyof") || strings.HasPrefix(t, "readonly")
+}
+
+// jsAmbientOrOverload reports whether a line is a `declare function …;` or a
+// bodyless TS overload signature (`export function fmt(c: number): string;`).
+// Both are pure type positions — the parameter names bind nothing at runtime —
+// and both are distinguished from a real declaration by ending at a `;` with no
+// body brace on the line.
+func jsAmbientOrOverload(s string) bool {
+	if !strings.Contains(s, "function") {
+		return false
+	}
+	t := strings.TrimRight(s, " \t")
+	if !strings.HasSuffix(t, ";") || strings.ContainsAny(t, "{}") {
+		return false
+	}
+	// `const f = function (a) { … };` is a value; it carries a body brace and is
+	// already excluded above. What remains is a declaration head with no body.
+	return jsFunctionOpen.MatchString(t)
 }

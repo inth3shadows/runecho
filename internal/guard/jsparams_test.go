@@ -815,3 +815,45 @@ func TestJSParamNamesSemiFreeUnionInBlock(t *testing.T) {
 		t.Errorf("bound %v from a wrapped generic", got)
 	}
 }
+
+// TestJSParamNamesRoundSevenShapes pins review-round-7.
+func TestJSParamNamesRoundSevenShapes(t *testing.T) {
+	// Finding 1: the latch depth was hardcoded to 1, ignoring parens already
+	// open and unclosed on the signature's own opening line — so the first `)`
+	// on a later line was read as the list's close. Both siblings (PyParamNames,
+	// and this PR's LocallyBoundNames twin) already computed the real depth.
+	if got := jsParams(t, "const handler = (a = foo(\n  1\n)) => a;"); !hasName(got, "a") {
+		t.Errorf("a not bound (got %v): a nested unclosed call on the opening "+
+			"line broke the continuation depth", got)
+	}
+
+	// Finding 2: ambient declarations and bodyless overload signatures are pure
+	// type positions — their parameter names bind nothing at runtime, so binding
+	// them masks a hallucinated call.
+	for _, tc := range []struct{ src, leak string }{
+		{`declare function bar(bX: number): void;`, "bX"},
+		{`export function fmt(cX: number): string;`, "cX"},
+	} {
+		if got := jsParams(t, tc.src); hasName(got, tc.leak) {
+			t.Errorf("bound %q from %q: %v", tc.leak, tc.src, got)
+		}
+	}
+	// A real declaration with a body must still bind.
+	if got := jsParams(t, `export function fmt(cX: number): string { return ""; }`); !hasName(got, "cX") {
+		t.Errorf("real declaration lost its parameter: %v", got)
+	}
+
+	// Finding 4: `angle++` fired on any `<` after an identifier but `angle--`
+	// only on a `>`, so an unspaced comparison latched the depth and the
+	// `angle > 0` guard hid every later `(` on the line.
+	if got := jsParams(t, `if (i<n) { list.forEach((row) => row()); }`); !hasName(got, "row") {
+		t.Errorf("row lost to a latched generic depth: %v", got)
+	}
+	if got := jsParams(t, `function f(a = i<n, cb) {}`); !hasName(got, "cb") {
+		t.Errorf("cb lost — the splitter latched on an unspaced comparison: %v", got)
+	}
+	// The generic clause it exists for must still be excluded.
+	if got := jsParams(t, `const f = <T extends Array<(zzz: number) => void>>(x: T) => x;`); hasName(got, "zzz") {
+		t.Errorf("generic-clause guard broke: %v", got)
+	}
+}

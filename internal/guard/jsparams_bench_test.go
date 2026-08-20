@@ -45,8 +45,11 @@ export function Component%d({
 }
 
 // BenchmarkJSParamNamesSynthetic is the reproducible headline number: ~120
-// components, ~2400 lines, comparable in size to the real 400 KB TS file the
-// original measurements used.
+// components, ~2400 lines, ~55 KB. That is roughly the 64 KiB capLine ceiling
+// for a single line but 7x SMALLER than the 400 KB real-world file the first
+// measurements used — so it bounds the per-run cost on a realistic file, and
+// does not reproduce those original absolute numbers. Growth over input size is
+// pinned separately, by the two linearity tests in jsparams_test.go.
 func BenchmarkJSParamNamesSynthetic(b *testing.B) {
 	lines := synthTSX(120)
 	b.ReportAllocs()

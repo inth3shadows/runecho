@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.46.0] — 2026-08-20
+
+### Changed
+- guard: tokenise deps-go abstain reasons and close the round-two review gaps (#364)
+
 ## [0.45.0] — 2026-08-20
 
 ### Changed

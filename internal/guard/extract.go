@@ -2532,7 +2532,13 @@ func JSParamNames(lines []AddedLine) []string {
 			// continuation line be read as an ordinary value arrow and bind its
 			// parameter, which is a false negative for every reference to that
 			// name in the file.
-			if typeDepth > 0 || !strings.Contains(s, ";") {
+			// The test is whether the head is UNFINISHED, not whether it lacks
+			// a semicolon. Those differ under `semi: false` (prettier), where
+			// `type Props = { a: string }` is a complete statement with no `;`
+			// — and treating it as unfinished consumed the following line,
+			// which for a whole class of TS codebases blanked the code after
+			// every type alias and brought #302's false positive back.
+			if typeDepth > 0 || jsHeadIsUnfinished(s) {
 				inTypeStmt = true
 			}
 			return
@@ -2599,7 +2605,7 @@ func JSParamNames(lines []AddedLine) []string {
 		// is committed to it.
 		from := 0
 		for {
-			open, isFn := jsParamListOpen(s[from:])
+			open, isFn, mayLatch := jsParamListOpen(s[from:])
 			if open < 0 {
 				return
 			}
@@ -2609,6 +2615,17 @@ func JSParamNames(lines []AddedLine) []string {
 			rest := s[open+1:]
 			idx, closed := jsConsumeParens(rest, &sigDepth)
 			if !closed {
+				if !mayLatch {
+					// An expression keyword's `(` that runs past the line end
+					// is a parenthesised expression, not a parameter list —
+					// overwhelmingly a multi-line JSX `return (`. Keep scanning
+					// this line instead of swallowing the ones below it.
+					sigDepth = 0
+					if from = open + 1; from >= len(s) {
+						return
+					}
+					continue
+				}
 				sigLines = 1
 				sig.Reset()
 				sig.WriteString(rest)
@@ -2654,10 +2671,16 @@ func JSParamNames(lines []AddedLine) []string {
 //
 // Only the FIRST eligible opener on a line is returned. Two function
 // definitions sharing one line is not a shape worth the state to handle.
-func jsParamListOpen(s string) (int, bool) {
+// The third result reports whether the opener may LATCH across lines.
+// `function`, and a `(` in a plain value position, may. A `(` led by an
+// EXPRESSION keyword (`return (`, `yield (`) may not: those are followed by
+// multi-line JSX far more often than by a wrapped arrow signature, and latching
+// on one swallowed the whole JSX body — including every arrow inside it, which
+// is exactly the binding this extractor exists to find.
+func jsParamListOpen(s string) (int, bool, bool) {
 	if strings.Contains(s, "function") {
 		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
-			return loc[1] - 1, true
+			return loc[1] - 1, true, true
 		}
 	}
 	for i := 0; i < len(s); i++ {
@@ -2684,17 +2707,18 @@ func jsParamListOpen(s string) (int, bool) {
 		// But the preceding word is NOT always a callee. A keyword can sit
 		// directly before a genuine arrow's parameter list — `async (url) => …`
 		// above all, which is ubiquitous in the TS/React code this extractor
-		// exists for, plus `await (`, `return (`, `yield (`. Rejecting on the
-		// raw byte dropped every one of them, so this is a CORRECTNESS rule
-		// with a performance motive, not the pure optimisation an earlier
-		// revision of this comment claimed. TestJSParamNamesKeywordLedArrows
-		// pins it.
-		if j >= 0 && isJSIdentByte(s[j]) && !jsKeywordEndsAt(s, j) {
-			continue
+		// exists for. Rejecting on the raw byte dropped every one of them, so
+		// this is a CORRECTNESS rule with a performance motive, not the pure
+		// optimisation an earlier revision of this comment claimed.
+		// TestJSParamNamesKeywordLedArrows pins it.
+		if j < 0 || !isJSIdentByte(s[j]) {
+			return i, false, true
 		}
-		return i, false
+		if kw, mayLatch := jsKeywordEndsAt(s, j); kw {
+			return i, false, mayLatch
+		}
 	}
-	return -1, false
+	return -1, false, false
 }
 
 // isJSIdentByte reports whether b may appear in a JS/TS identifier.
@@ -2729,12 +2753,21 @@ func appendJSParams(out []string, inner string, isFunction bool, after string) [
 	angle := 0
 	for _, el := range splitTopLevelCommas(inner) {
 		if angle > 0 {
-			angle += jsAngleDelta(el)
+			if angle += jsAngleDelta(el); angle < 0 {
+				angle = 0
+			}
 			continue // a continuation of the previous parameter's type
 		}
 		out = append(out, jsBindingTargets(el)...)
 		if i := jsTopLevelColon(el); i >= 0 {
-			angle += jsAngleDelta(el[i+1:])
+			// Clamped: a lone `>` from a comparison in a default value
+			// (`a: number = n > 0 ? 1 : 2`) drives this negative, and a later
+			// real generic's `<` would then only bring it back to 0 — leaving
+			// that generic's split-off type fragment to be bound as a
+			// parameter, which is precisely the leak this tracking prevents.
+			if angle += jsAngleDelta(el[i+1:]); angle < 0 {
+				angle = 0
+			}
 		}
 	}
 	return out
@@ -2804,11 +2837,32 @@ func jsTopLevelStatementStart(s string) bool {
 // jsArrowFollows reports whether `=>` appears in s before any `{` or `;` —
 // i.e. whether the parameter list just closed belongs to an arrow function
 // rather than to a call or a method body.
+// The `=>` must belong to THIS paren, so only two things may follow the close:
+// the arrow itself, or a return-type annotation leading to it. Scanning ahead
+// for any `=>` before `{`/`;` was too loose — it read a parenthesised
+// EXPRESSION followed by a chained call as a parameter list, so a wrapped
+// `(items).map((i) => i)` bound `items`, and `register(Dropped).then(v => v)`
+// bound `Dropped`. Both fold a non-parameter into the known set, the
+// false-negative direction; the second additionally suppresses a genuine
+// dropped-import warning.
 func jsArrowFollows(s string) bool {
-	for i := 0; i < len(s); i++ {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return false
+	}
+	if s[i] == '=' {
+		return i+1 < len(s) && s[i+1] == '>'
+	}
+	if s[i] != ':' {
+		return false
+	}
+	for i++; i < len(s); i++ {
 		switch s[i] {
-		case '{', ';':
-			return false
+		case '(', ')', '{', '}', ';', '[':
+			return false // not a plain return-type annotation
 		case '=':
 			if i+1 < len(s) && s[i+1] == '>' {
 				return true
@@ -2878,20 +2932,45 @@ const maxJSSigLines = 40
 // jsParamListOpen reads `async (url) => …` as a call to something named `async`
 // and binds nothing — and `async` arrows are the dominant form in the TS/React
 // code this extractor exists to serve.
-var jsKeywordsBeforeParams = map[string]struct{}{
-	"async": {}, "await": {}, "return": {}, "yield": {},
-	"typeof": {}, "void": {}, "delete": {}, "in": {}, "of": {},
-	"case": {}, "do": {}, "else": {}, "new": {},
+// The value is whether that keyword's `(` may latch across lines. Only `async`
+// and `await` genuinely lead a parameter list that can wrap (`async (\n url\n)
+// => …`, which TestJSParamNamesKeywordLedArrows covers). The rest lead
+// EXPRESSIONS — see jsParamListOpen's third result.
+var jsKeywordsBeforeParams = map[string]bool{
+	"async": true, "await": true,
+	"return": false, "yield": false, "typeof": false, "void": false,
+	"delete": false, "in": false, "of": false, "case": false,
+	"do": false, "else": false, "new": false,
 }
 
 // jsKeywordEndsAt reports whether the identifier ending at s[j] (inclusive) is
-// one of jsKeywordsBeforeParams.
-func jsKeywordEndsAt(s string, j int) bool {
+// one of jsKeywordsBeforeParams, and whether it may latch across lines.
+func jsKeywordEndsAt(s string, j int) (bool, bool) {
+	if j < 0 {
+		return false, false
+	}
 	end := j + 1
 	i := j
 	for i >= 0 && isJSIdentByte(s[i]) {
 		i--
 	}
-	_, ok := jsKeywordsBeforeParams[s[i+1:end]]
-	return ok
+	latch, ok := jsKeywordsBeforeParams[s[i+1:end]]
+	return ok, latch
+}
+
+// jsHeadIsUnfinished reports whether a stripped line ends mid-statement — its
+// last meaningful byte is an operator or opener that requires a continuation.
+// Used to decide whether a type-alias head carries into the next line, where
+// "has no semicolon" is the wrong test: under `semi: false` a complete
+// statement has none either.
+func jsHeadIsUnfinished(s string) bool {
+	t := strings.TrimRight(s, " \t")
+	if t == "" {
+		return false
+	}
+	switch t[len(t)-1] {
+	case '=', '|', '&', ',', '(', '<', '+', '-', '?', ':', '.':
+		return true
+	}
+	return strings.HasSuffix(t, "extends")
 }

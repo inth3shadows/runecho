@@ -392,3 +392,93 @@ func TestJSTopLevelStatementStartClosesPattern(t *testing.T) {
 		}
 	}
 }
+
+// TestJSParamNamesSemiFreeTypeAlias pins review-round-2 finding 1. The
+// type-alias continuation guard originally tested "line has no semicolon", but
+// under `semi: false` (prettier) a COMPLETE statement has none either — so
+// every type alias consumed the line after it, blanking the code below and
+// bringing #302's false positive back for that whole class of TS codebase.
+func TestJSParamNamesSemiFreeTypeAlias(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"type alias without semicolon", `type Props = { a: string }
+export function Picker({ onChange }: Props) { return onChange(1); }`},
+		{"interface without semicolon", `interface Props { a: string }
+export function Picker({ onChange }: Props) { return onChange(1); }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); !hasName(got, "onChange") {
+				t.Errorf("onChange not bound (got %v): a complete type head "+
+					"swallowed the following line", got)
+			}
+		})
+	}
+	// The genuinely unfinished head must still carry over.
+	if got := jsParams(t, "type H =\n  (e: MouseEvent) => void;"); len(got) > 0 {
+		t.Errorf("bound %v from an unfinished type-alias head", got)
+	}
+}
+
+// TestJSArrowFollowsRejectsChainedCalls pins review-round-2 findings 2 and 3.
+// Scanning ahead for any `=>` before `{`/`;` read a parenthesised EXPRESSION
+// followed by a chained call as a parameter list, folding a non-parameter into
+// the known set — the false-negative direction.
+func TestJSArrowFollowsRejectsChainedCalls(t *testing.T) {
+	if got := jsParams(t, "const out = (\n  items\n).map((i) => i);"); hasName(got, "items") {
+		t.Errorf("bound %v: a parenthesised expression was read as a parameter list", got)
+	}
+	// The dropped-import path has the same shape, where it additionally
+	// suppresses a real warning for a name passed as an argument.
+	lb := LocallyBoundNames(LangJS, TextToAddedLines("register(\n  Dropped,\n  other\n).then(v => v);"), nil)
+	if _, ok := lb["Dropped"]; ok {
+		t.Error("a multi-line call's argument was bound as a parameter — " +
+			"this suppresses a genuine dropped-import finding")
+	}
+	// Real arrows, including with a return-type annotation, must still bind.
+	for _, tc := range []struct{ src, want string }{
+		{"const f = (a) => a;", "a"},
+		{"const g = (b): Foo => b;", "b"},
+		{"const h = (c): Map<string, X> => c;", "c"},
+	} {
+		if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+			t.Errorf("%q lost from %q: %v", tc.want, tc.src, got)
+		}
+	}
+}
+
+// TestJSParamNamesAngleClamp pins review-round-2 finding 4: an unclamped angle
+// depth driven negative by a comparison in a default value let a later
+// generic's split-off type fragment bind its TYPE NAME.
+func TestJSParamNamesAngleClamp(t *testing.T) {
+	got := jsParams(t, "function f(a: number = n > 0 ? 1 : 2, m: Map<string, Handler>) {}")
+	if hasName(got, "Handler") {
+		t.Errorf("type name Handler leaked after a negative angle depth: %v", got)
+	}
+	for _, want := range []string{"a", "m"} {
+		if !hasName(got, want) {
+			t.Errorf("real binding %q lost: %v", want, got)
+		}
+	}
+}
+
+// TestJSParamNamesReturnParenJSX pins review-round-2 finding 5. `return (` is
+// followed by multi-line JSX far more often than by a wrapped arrow signature,
+// so letting it latch swallowed the JSX body and lost every arrow inside it —
+// a false negative in exactly the code shape this extractor was written for.
+func TestJSParamNamesReturnParenJSX(t *testing.T) {
+	withReturn := `export function C(p) {
+  return (
+    <div>{items.map((render) => render())}</div>
+  );
+}`
+	withoutReturn := `export function C(p) {
+    <div>{items.map((render) => render())}</div>
+}`
+	got, ctrl := jsParams(t, withReturn), jsParams(t, withoutReturn)
+	if !hasName(got, "render") {
+		t.Errorf("render lost inside a `return (` JSX body: got %v, control %v", got, ctrl)
+	}
+	// async/await DO lead wrappable parameter lists and must still latch.
+	if g := jsParams(t, "const send = async (\n  url,\n  opts\n) => url;"); !hasName(g, "opts") {
+		t.Errorf("async multi-line parameter list stopped latching: %v", g)
+	}
+}

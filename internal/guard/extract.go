@@ -2488,6 +2488,7 @@ func JSParamNames(lines []AddedLine) []string {
 	sigDepth := 0
 	var sig strings.Builder
 	sigIsFunction := false // opener carried the `function` keyword
+	sigLines := 0          // lines the open parameter list has spanned
 	typeDepth := 0         // >0 while inside an interface body or type alias
 	inTypeStmt := false
 	prevNo := 0
@@ -2500,7 +2501,7 @@ func JSParamNames(lines []AddedLine) []string {
 		// resumable-depth rule for a state nobody currently reaches would be
 		// untestable surface. Reset and move on.
 		if first || l.LineNo != prevNo+1 {
-			sigDepth, typeDepth, inTypeStmt = 0, 0, false
+			sigDepth, typeDepth, inTypeStmt, sigLines = 0, 0, false, 0
 			sig.Reset()
 		}
 		first = false
@@ -2525,7 +2526,13 @@ func JSParamNames(lines []AddedLine) []string {
 		if (strings.Contains(s, "interface") && jsInterfaceOpen.MatchString(s)) ||
 			(strings.Contains(s, "type") && jsTypeAliasOpen.MatchString(s)) {
 			typeDepth = jsBracketDelta(s)
-			if typeDepth > 0 {
+			// An alias head that neither opens a bracket nor terminates —
+			// `type H =` with the function type on the NEXT line — is still
+			// inside a type position. Keying only on the bracket delta let that
+			// continuation line be read as an ordinary value arrow and bind its
+			// parameter, which is a false negative for every reference to that
+			// name in the file.
+			if typeDepth > 0 || !strings.Contains(s, ";") {
 				inTypeStmt = true
 			}
 			return
@@ -2533,41 +2540,93 @@ func JSParamNames(lines []AddedLine) []string {
 
 		// --- continuation of a parameter list already open ------------------
 		if sigDepth > 0 {
-			sig.WriteByte(' ')
-			sig.WriteString(s)
-			if idx, closed := jsConsumeParens(s, &sigDepth); closed {
-				// Test BEFORE materialising the accumulated text: sig.String()
-				// copies the whole buffer, and for a multi-line call that copy
-				// is thrown away immediately.
-				if sigIsFunction || jsArrowFollows(s[idx+1:]) {
-					full := sig.String()
-					// Trim back to the closing paren so a trailing `=> { body }`
-					// is not parsed as a parameter.
-					inner := full[:len(full)-(len(s)-idx)]
-					out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
-				}
-				sigDepth = 0
+			// A real parameter list does not run for dozens of lines, but an
+			// unbalanced `(` can latch this state forever — and one source of
+			// those is not hypothetical: stripLiteralsStateful does NOT strip
+			// JS regex literals, so `const OPEN = /\(/;` contributes a naked
+			// open paren. Left unbounded, a single such line at the top of a
+			// file silenced EVERY binding below it, reopening #302's false
+			// positive for the whole file. Bounding the run contains that to
+			// the lines it actually spans. (Stripping regex literals properly
+			// belongs in the shared scanner, where it would affect every
+			// check — filed rather than done here.)
+			// A line that starts a new top-level statement cannot be the
+			// continuation of a parameter list. This is what actually contains
+			// the unstripped-regex case: `const OPEN = /\(/;` latches sigDepth
+			// on line 1, and without this the `export function Picker({…})`
+			// below it is swallowed rather than parsed — silencing every
+			// binding in the file and reopening #302 for it. The line bound
+			// below is the backstop for a latch inside a nested block, where
+			// no column-zero statement follows.
+			if jsTopLevelStatementStart(s) {
+				sigDepth, sigLines = 0, 0
 				sig.Reset()
+				// Fall through to the opener scan: this line may itself open a
+				// real parameter list, which is exactly the repro above.
+			} else {
+				if sigLines++; sigLines > maxJSSigLines {
+					sigDepth, sigLines = 0, 0
+					sig.Reset()
+					return
+				}
+				sig.WriteByte(' ')
+				sig.WriteString(s)
+				if idx, closed := jsConsumeParens(s, &sigDepth); closed {
+					// Test BEFORE materialising the accumulated text: sig.String()
+					// copies the whole buffer, and for a multi-line call that copy
+					// is thrown away immediately.
+					if sigIsFunction || jsArrowFollows(s[idx+1:]) {
+						full := sig.String()
+						// Trim back to the closing paren so a trailing `=> { body }`
+						// is not parsed as a parameter.
+						inner := full[:len(full)-(len(s)-idx)]
+						out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
+					}
+					sigDepth, sigLines = 0, 0
+					sig.Reset()
+				}
+				return
 			}
-			return
 		}
 
 		// --- a parameter list may open on this line -------------------------
-		open, isFn := jsParamListOpen(s)
-		if open < 0 {
-			return
-		}
-		sigIsFunction = isFn
-		sigDepth = 1
-		rest := s[open+1:]
-		if idx, closed := jsConsumeParens(rest, &sigDepth); closed {
+		// Scan openers left to right rather than committing to the first. A
+		// parameter list is often not the first `(` on its line — `function
+		// mk() { return (a) => a; }` and `await (async (tok) => tok)` both put
+		// a call or an empty list ahead of the real one — and stopping at the
+		// first cost those bindings entirely. Retry is only possible for a list
+		// that CLOSES on this line; once one runs past the line end the scanner
+		// is committed to it.
+		from := 0
+		for {
+			open, isFn := jsParamListOpen(s[from:])
+			if open < 0 {
+				return
+			}
+			open += from
+			sigIsFunction = isFn
+			sigDepth = 1
+			rest := s[open+1:]
+			idx, closed := jsConsumeParens(rest, &sigDepth)
+			if !closed {
+				sigLines = 1
+				sig.Reset()
+				sig.WriteString(rest)
+				return
+			}
+			before := len(out)
 			out = appendJSParams(out, rest[:idx], sigIsFunction, rest[idx+1:])
-			sigDepth = 0
+			sigDepth, sigLines = 0, 0
 			sig.Reset()
-			return
+			if len(out) > before {
+				return
+			}
+			// Bound nothing: this `(` was a call or an empty list. Keep looking.
+			from = open + 1 + idx + 1
+			if from >= len(s) {
+				return
+			}
 		}
-		sig.Reset()
-		sig.WriteString(rest)
 	})
 	return out
 }
@@ -2610,24 +2669,27 @@ func jsParamListOpen(s string) (int, bool) {
 			j--
 		}
 		// Preceded by `:` at any distance of whitespace → type annotation or
-		// object-literal property. Bind nothing (see doc above).
+		// object-literal property. Skip THIS paren and keep scanning: abandoning
+		// the whole line here would let one object-literal arrow property
+		// suppress a legitimate parameter list later on the same line.
 		if j >= 0 && s[j] == ':' {
-			return -1, false
+			continue
 		}
-		// Preceded directly by an identifier character → a CALL (`foo(`) or a
-		// method shorthand (`m(a) {`), never an arrow's parameter list, whose
-		// `(` can only follow `=`, `,`, `(`, `[`, `>` or line start.
+		// Preceded directly by an identifier character → usually a CALL
+		// (`foo(`) or a method shorthand (`m(a) {`), neither of which is a
+		// parameter list. Skipping those before the line-accumulator runs is a
+		// worthwhile saving (measured on the 400 KB TS corpus: 4.42 → 4.78 ms
+		// and 961 → 1205 KB per run without it).
 		//
-		// PERFORMANCE ONLY — deliberately NOT a correctness rule, and no
-		// fixture can kill a mutation of it. Everything it rejects here is
-		// rejected again downstream by jsArrowFollows (a call's `)` is followed
-		// by `;`/`,`/`)`, a method's by `{` — never by `=>`), so removing it
-		// changes no result. It exists to reject the most common unclosed `(`
-		// in real code BEFORE the line-accumulator does the work: measured on
-		// the 400 KB TS corpus, 4.42 ms → 4.78 ms and 961 KB → 1205 KB per run
-		// with it removed. Kept for that, claimed as unkillable, not annotated
-		// as a gap.
-		if j >= 0 && isJSIdentByte(s[j]) {
+		// But the preceding word is NOT always a callee. A keyword can sit
+		// directly before a genuine arrow's parameter list — `async (url) => …`
+		// above all, which is ubiquitous in the TS/React code this extractor
+		// exists for, plus `await (`, `return (`, `yield (`. Rejecting on the
+		// raw byte dropped every one of them, so this is a CORRECTNESS rule
+		// with a performance motive, not the pure optimisation an earlier
+		// revision of this comment claimed. TestJSParamNamesKeywordLedArrows
+		// pins it.
+		if j >= 0 && isJSIdentByte(s[j]) && !jsKeywordEndsAt(s, j) {
 			continue
 		}
 		return i, false
@@ -2651,10 +2713,92 @@ func appendJSParams(out []string, inner string, isFunction bool, after string) [
 	if !isFunction && !jsArrowFollows(after) {
 		return out
 	}
+	// splitTopLevelCommas tracks ()/[]/{} but NOT <>, so a generic type argument
+	// containing a comma is split mid-type: `m: Map<string, Handler>` becomes
+	// `m: Map<string` and `Handler>`. The first still binds `m` correctly, but
+	// the second is a type fragment, and binding `Handler` from it would fold a
+	// TYPE NAME into the resolvable set — masking a genuine hallucinated
+	// `Handler(...)` call. That is the exact leak JSDeclaredNames' doc warns
+	// about, arriving by a different route.
+	//
+	// Rejoining is not needed — only the LEADING element of a split-apart
+	// parameter carries the binding — so the fragments are simply skipped, by
+	// tracking angle depth across elements. The depth is measured only on the
+	// annotation side (after a top-level `:`), so an ordinary comparison in a
+	// default value (`a = b < c`) cannot be mistaken for an open generic.
+	angle := 0
 	for _, el := range splitTopLevelCommas(inner) {
+		if angle > 0 {
+			angle += jsAngleDelta(el)
+			continue // a continuation of the previous parameter's type
+		}
 		out = append(out, jsBindingTargets(el)...)
+		if i := jsTopLevelColon(el); i >= 0 {
+			angle += jsAngleDelta(el[i+1:])
+		}
 	}
 	return out
+}
+
+// jsAngleDelta is the net `<`/`>` balance of s, ignoring the arrow token `=>`
+// and the comparison-like `<=`/`>=`, which are not generic delimiters.
+func jsAngleDelta(s string) int {
+	d := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			if i+1 < len(s) && s[i+1] == '=' {
+				i++
+				continue
+			}
+			d++
+		case '>':
+			if i > 0 && s[i-1] == '=' {
+				continue // part of `=>` or `>=`
+			}
+			if i+1 < len(s) && s[i+1] == '=' {
+				i++
+				continue
+			}
+			d--
+		}
+	}
+	return d
+}
+
+// jsTopLevelStatementStart reports whether s begins, at column zero, a new
+// top-level statement — the boundary at which an unclosed parameter list must
+// be abandoned rather than extended across it.
+func jsTopLevelStatementStart(s string) bool {
+	if s == "" || s[0] == ' ' || s[0] == '\t' {
+		return false
+	}
+	if s[0] == '}' {
+		// A column-zero `}` usually closes a block — but it also closes a
+		// destructured parameter pattern, and `}: PickerProps) {` is the
+		// CLOSING line of the very signature this extractor exists to read.
+		// Treating that as a statement boundary abandoned the parameter list
+		// one line before it completed, which silenced #302's headline case.
+		// A pattern close is followed by `:`, `)`, `,` or `=`; a block close by
+		// nothing or `;`.
+		i := 1
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '}') {
+			i++
+		}
+		if i < len(s) {
+			switch s[i] {
+			case ':', ')', ',', '=':
+				return false
+			}
+		}
+		return true
+	}
+	for _, kw := range []string{"export ", "function ", "class ", "const ", "let ", "var ", "import ", "interface ", "type ", "async function"} {
+		if strings.HasPrefix(s, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // jsArrowFollows reports whether `=>` appears in s before any `{` or `;` —
@@ -2720,4 +2864,34 @@ func jsOpenParamListLoose(s string) (int, bool) {
 		return i, false
 	}
 	return -1, false
+}
+
+// maxJSSigLines bounds how many lines one parameter list may span before
+// JSParamNames abandons it. Chosen well above any real signature (the widest in
+// the 400 KB TS corpus is single digits) and well below "the rest of the file",
+// which is what an unbalanced `(` from an unstripped regex literal would
+// otherwise consume. See the continuation branch for why that case is real.
+const maxJSSigLines = 40
+
+// jsKeywordsBeforeParams are the words that may sit directly before a genuine
+// parameter list's `(`. Without this exemption the identifier-byte rejection in
+// jsParamListOpen reads `async (url) => …` as a call to something named `async`
+// and binds nothing — and `async` arrows are the dominant form in the TS/React
+// code this extractor exists to serve.
+var jsKeywordsBeforeParams = map[string]struct{}{
+	"async": {}, "await": {}, "return": {}, "yield": {},
+	"typeof": {}, "void": {}, "delete": {}, "in": {}, "of": {},
+	"case": {}, "do": {}, "else": {}, "new": {},
+}
+
+// jsKeywordEndsAt reports whether the identifier ending at s[j] (inclusive) is
+// one of jsKeywordsBeforeParams.
+func jsKeywordEndsAt(s string, j int) bool {
+	end := j + 1
+	i := j
+	for i >= 0 && isJSIdentByte(s[i]) {
+		i--
+	}
+	_, ok := jsKeywordsBeforeParams[s[i+1:end]]
+	return ok
 }

@@ -262,3 +262,133 @@ func TestLocallyBoundNamesMultilineJSParams(t *testing.T) {
 		}
 	})
 }
+
+// TestJSParamNamesKeywordLedArrows pins review finding 1. The identifier-byte
+// rejection in jsParamListOpen exists to skip calls before the line accumulator
+// runs, but a KEYWORD may also sit directly before a real parameter list —
+// `async (url) => …` above all, which is the dominant arrow form in the TS/React
+// code this extractor serves. Rejecting on the raw byte dropped every one, while
+// the identical non-async form bound correctly.
+func TestJSParamNamesKeywordLedArrows(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"async arrow", `const fetchData = async (url) => { return url; };`, "url"},
+		{"async arrow multi-line", `const fetchData = async (
+  url,
+  opts
+) => url;`, "opts"},
+		{"async destructured arrow", `const load = async ({ id, signal }) => id;`, "signal"},
+		{"return-led arrow", `function mk() { return (a) => a; }`, "a"},
+		{"async function keeps working", `async function load({ id }) {}`, "id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+				t.Errorf("%q not bound (got %v) — a keyword-led parameter list was "+
+					"read as a call", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestJSParamNamesUnbalancedParenContainment pins review finding 2.
+// stripLiteralsStateful does not strip JS regex literals, so `/\(/` contributes
+// a naked open paren. Unbounded, that latched the multi-line accumulator and
+// swallowed every subsequent line — silencing all bindings in the file and
+// reopening #302 for it.
+func TestJSParamNamesUnbalancedParenContainment(t *testing.T) {
+	src := `const OPEN = /\(/;
+
+export function Picker({ value, onChange }) {
+  return onChange(value);
+}
+`
+	got := jsParams(t, src)
+	for _, want := range []string{"value", "onChange"} {
+		if !hasName(got, want) {
+			t.Fatalf("%q not bound (got %v): an unbalanced paren from a regex "+
+				"literal swallowed the rest of the file", want, got)
+		}
+	}
+
+	// The backstop for a latch with no column-zero statement after it.
+	var deep strings.Builder
+	deep.WriteString("function outer() {\n  const OPEN = /\\(/;\n")
+	for i := 0; i < maxJSSigLines+5; i++ {
+		deep.WriteString("  noop();\n")
+	}
+	deep.WriteString("  const inner = ({ bound }) => bound;\n}\n")
+	if got := jsParams(t, deep.String()); !hasName(got, "bound") {
+		t.Errorf("line bound did not release the accumulator (got %v)", got)
+	}
+}
+
+// TestJSParamNamesGenericCommaNoTypeLeak pins review finding 3.
+// splitTopLevelCommas tracks ()/[]/{} but not <>, so `m: Map<string, Handler>`
+// split into `m: Map<string` and `Handler>` — and binding the fragment folded a
+// TYPE NAME into the resolvable set, masking a hallucinated `Handler(...)`.
+func TestJSParamNamesGenericCommaNoTypeLeak(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, leak, keep string
+	}{
+		{"generic with comma", `function handle(m: Map<string, Handler>, next) {}`, "Handler", "next"},
+		{"nested generic", `function f(x: Record<string, Array<Widget>>, cb) {}`, "Widget", "cb"},
+		{"comparison default is not a generic", `function g(a = b < c, d) {}`, "", "d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := jsParams(t, tc.src)
+			if tc.leak != "" && hasName(got, tc.leak) {
+				t.Errorf("type name %q leaked from a split generic: %v", tc.leak, got)
+			}
+			if !hasName(got, tc.keep) {
+				t.Errorf("real binding %q lost: %v", tc.keep, got)
+			}
+		})
+	}
+}
+
+// TestJSParamNamesMultilineTypeAlias pins review finding 4: a type alias whose
+// function type starts on a CONTINUATION line escaped the type-position guard,
+// because that guard keyed only on the opening line's bracket delta.
+func TestJSParamNamesMultilineTypeAlias(t *testing.T) {
+	for _, src := range []string{
+		"type H =\n  (e: MouseEvent) => void;",
+		"export type Reducer =\n  (state: S, action: A) => S;",
+	} {
+		if got := jsParams(t, src); len(got) > 0 {
+			t.Errorf("bound %v from a multi-line type alias — masks real references", got)
+		}
+	}
+}
+
+// TestJSParamNamesSecondOpenerOnLine pins review finding 5: skipping a
+// `:`-preceded paren must not abandon the whole line, or one object-literal
+// arrow property suppresses every later parameter list on it.
+func TestJSParamNamesSecondOpenerOnLine(t *testing.T) {
+	src := `const routes = { '/x': (req) => h(req) }; const f = (a) => a;`
+	if got := jsParams(t, src); !hasName(got, "a") {
+		t.Errorf("second parameter list on the line was lost: %v", got)
+	}
+}
+
+// TestJSTopLevelStatementStartClosesPattern guards the near-miss found while
+// fixing finding 2: a column-zero `}` usually closes a block, but `}: Props) {`
+// closes a DESTRUCTURED PARAMETER — the closing line of #302's headline
+// signature. Treating it as a statement boundary abandoned the list one line
+// before it completed.
+func TestJSTopLevelStatementStartClosesPattern(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"}", true},
+		{"};", true},
+		{"}: PickerProps) {", false},
+		{"}) => a;", false},
+		{"}, next) {", false},
+		{"export function f() {", true},
+		{"  indented();", false},
+	} {
+		if got := jsTopLevelStatementStart(tc.line); got != tc.want {
+			t.Errorf("jsTopLevelStatementStart(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}

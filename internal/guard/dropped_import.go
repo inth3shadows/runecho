@@ -273,6 +273,7 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 	// untested resumable-depth rule for JS would be surface without a caller.
 	jsSigDepth := 0
 	jsSigIsFn := false
+	jsSigLines := 0
 	jsSigPrevNo := 0
 	var jsSig strings.Builder
 	// scanStripped threads multi-line string state (so a `x = Foo()` example inside
@@ -285,7 +286,7 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 		// A signature cannot be assumed to continue across a diff-hunk gap.
 		// The Python arm reseeds below; JS simply drops what it had.
 		if jsSigDepth > 0 && l.LineNo != jsSigPrevNo+1 {
-			jsSigDepth = 0
+			jsSigDepth, jsSigLines = 0, 0
 			jsSig.Reset()
 		}
 		jsSigPrevNo = l.LineNo
@@ -370,7 +371,16 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 			// It therefore fires only where the regexes cannot reach — a
 			// parameter list that does not close on the line that opens it —
 			// and add()s the raw region, identically to them.
+			if jsSigDepth > 0 && (jsTopLevelStatementStart(s) || jsSigLines >= maxJSSigLines) {
+				// Same containment as JSParamNames': an unbalanced `(` — from
+				// an unstripped regex literal, say — must not latch this state
+				// and swallow the rest of the file, which here would also grow
+				// jsSig to the file's remaining size.
+				jsSigDepth, jsSigLines = 0, 0
+				jsSig.Reset()
+			}
 			if jsSigDepth > 0 {
+				jsSigLines++
 				jsSig.WriteByte(' ')
 				jsSig.WriteString(s)
 				if idx, closed := jsConsumeParens(s, &jsSigDepth); closed {
@@ -383,16 +393,19 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 					if jsSigIsFn || jsArrowFollows(s[idx+1:]) {
 						add(inner)
 					}
-					jsSigDepth = 0
+					jsSigDepth, jsSigLines = 0, 0
 					jsSig.Reset()
 				}
-			} else if open, isFn := jsOpenParamListLoose(s); open >= 0 {
-				d := 1
-				rest := s[open+1:]
-				if _, closed := jsConsumeParens(rest, &d); !closed {
-					jsSigDepth, jsSigIsFn = d, isFn
-					jsSig.Reset()
-					jsSig.WriteString(rest)
+			}
+			if jsSigDepth == 0 {
+				if open, isFn := jsOpenParamListLoose(s); open >= 0 {
+					d := 1
+					rest := s[open+1:]
+					if _, closed := jsConsumeParens(rest, &d); !closed {
+						jsSigDepth, jsSigIsFn, jsSigLines = d, isFn, 1
+						jsSig.Reset()
+						jsSig.WriteString(rest)
+					}
 				}
 			}
 			// Bare single-arg arrow(s) (`x => …`) — an INDEPENDENT check (not an

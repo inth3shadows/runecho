@@ -1,19 +1,54 @@
 package guard
 
 import (
-	"os"
+	"fmt"
+	"strings"
 	"testing"
 )
 
-// benchJSFile measures JSParamNames over a real-world file. The hook budget is
-// ~12 ms for the whole guard run, and this extractor now runs on every JS/TS
-// edit via foldInFileSymbols, so its cost is paid unconditionally.
-func benchJSFile(b *testing.B, path string) {
-	src, err := os.ReadFile(path)
-	if err != nil {
-		b.Skipf("corpus file not present: %v", err)
+// synthTSX builds a TSX-shaped corpus of roughly n components. It exists so the
+// performance claims in this extractor's comments stay reproducible: an earlier
+// revision of this file benchmarked two absolute paths into ephemeral claudew
+// worktrees, which are removed by the worktree aftercare — so the numbers became
+// uncheckable by anyone, including the next session in this repo.
+//
+// The shape deliberately mixes what the extractor must actually handle: the
+// multi-line destructured component signature, interfaces and type aliases it
+// must skip, generics with commas, async arrows, and plenty of ordinary calls
+// (the case the identifier-byte rejection exists to skip cheaply).
+func synthTSX(n int) []AddedLine {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, `interface Props%d {
+  value: string | null;
+  onChange: (v: string | null) => void;
+}
+
+type Handler%d = (evt: MouseEvent) => void;
+
+export function Component%d({
+  value,
+  onChange,
+  disabled,
+}: Props%d) {
+  const rows = items.map((it) => transform(it, value));
+  const send = async (payload: Map<string, Handler%d>) => post(payload);
+  useEffect(() => {
+    subscribe(value, onChange);
+  }, [value, onChange]);
+  return render(rows, send, disabled);
+}
+
+`, i, i, i, i, i)
 	}
-	lines := TextToAddedLines(string(src))
+	return TextToAddedLines(b.String())
+}
+
+// BenchmarkJSParamNamesSynthetic is the reproducible headline number: ~120
+// components, ~2400 lines, comparable in size to the real 400 KB TS file the
+// original measurements used.
+func BenchmarkJSParamNamesSynthetic(b *testing.B) {
+	lines := synthTSX(120)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -21,22 +56,11 @@ func benchJSFile(b *testing.B, path string) {
 	}
 }
 
-func BenchmarkJSParamNamesSoloPage(b *testing.B) {
-	benchJSFile(b, "/home/ericm/personal_projects/coriolis-local/claude-20260815-150632/frontend/src/pages/SoloPage.tsx")
-}
-
-func BenchmarkJSParamNamesTrackBDB(b *testing.B) {
-	benchJSFile(b, "/home/ericm/personal_projects/frostline/claude-20260819-220901-829/template/src/lib/track-b-db.ts")
-}
-
-// Baselines on the same file: what the guard ALREADY pays for whole-file JS
-// scanning, so JSParamNames' cost can be read as incremental rather than absolute.
-func BenchmarkJSDeclaredNamesTrackBDB(b *testing.B) {
-	src, err := os.ReadFile("/home/ericm/personal_projects/frostline/claude-20260819-220901-829/template/src/lib/track-b-db.ts")
-	if err != nil {
-		b.Skip(err)
-	}
-	lines := TextToAddedLines(string(src))
+// Baselines on the SAME input, so JSParamNames' cost reads as incremental
+// against what the guard already pays for whole-file JS scanning rather than as
+// an absolute against a budget no existing extractor meets either.
+func BenchmarkJSDeclaredNamesSynthetic(b *testing.B) {
+	lines := synthTSX(120)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -44,12 +68,8 @@ func BenchmarkJSDeclaredNamesTrackBDB(b *testing.B) {
 	}
 }
 
-func BenchmarkLocallyBoundNamesTrackBDB(b *testing.B) {
-	src, err := os.ReadFile("/home/ericm/personal_projects/frostline/claude-20260819-220901-829/template/src/lib/track-b-db.ts")
-	if err != nil {
-		b.Skip(err)
-	}
-	lines := TextToAddedLines(string(src))
+func BenchmarkLocallyBoundNamesSynthetic(b *testing.B) {
+	lines := synthTSX(120)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

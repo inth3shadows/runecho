@@ -2638,6 +2638,17 @@ func JSParamNames(lines []AddedLine) []string {
 				// real parameter list, which is exactly the repro above.
 			} else {
 				if sigLines++; sigLines > maxJSSigLines {
+					// Rescan what was collected before discarding it. The close
+					// path already does this for a group that bound nothing;
+					// the bail did not, so a `export const X = (` wrapping a
+					// JSX body longer than the cap lost every arrow inside it —
+					// `early` in a 60-line body was flagged as a hallucination
+					// while the same code at 5 lines was clean. It also bounded
+					// the unstripped-regex-literal containment to 40 lines
+					// whenever the latch sits inside an indented block, where
+					// jsTopLevelStatementStart cannot fire and this bail is the
+					// only backstop.
+					out = append(out, jsParamsInText(sig.String())...)
 					sigDepth, sigLines = 0, 0
 					sig.Reset()
 					// Fall through rather than return: this line is what breaks
@@ -3178,7 +3189,7 @@ func jsKeywordEndsAt(s string, j int) (bool, bool, string) {
 // "has no semicolon" is the wrong test: under `semi: false` a complete
 // statement has none either.
 func jsHeadIsUnfinished(s string) bool {
-	t := strings.TrimRight(s, " \t")
+	t := strings.TrimRight(s, " \t\r")
 	if t == "" {
 		return false
 	}
@@ -3309,7 +3320,7 @@ func jsAmbientOrOverload(s string) bool {
 	if !strings.Contains(s, "function") {
 		return false
 	}
-	t := strings.TrimRight(s, " \t")
+	t := strings.TrimRight(s, " \t\r")
 	if !strings.HasSuffix(t, ";") || strings.ContainsAny(t, "{}") {
 		return false
 	}
@@ -3323,7 +3334,7 @@ func jsAmbientOrOverload(s string) bool {
 // never a `{`. That is an ambient declaration or a TS overload signature, whose
 // parameter names bind nothing at runtime.
 func jsBodylessAfter(after string) bool {
-	t := strings.TrimRight(after, " \t")
+	t := strings.TrimRight(after, " \t\r")
 	return strings.HasSuffix(t, ";") && !strings.ContainsAny(t, "{}")
 }
 

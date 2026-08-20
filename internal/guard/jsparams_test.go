@@ -916,3 +916,47 @@ func TestJSParamNamesRoundEightShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestJSParamNamesRoundNineShapes pins review-round-9.
+func TestJSParamNamesRoundNineShapes(t *testing.T) {
+	// Finding 1: the close path rescans a group that bound nothing, but the
+	// maxJSSigLines BAIL discarded the accumulator outright — so a JSX body
+	// longer than the cap lost every arrow inside it. Everyday React shape:
+	// `export const X = (` wrapping 40+ lines.
+	var b strings.Builder
+	b.WriteString("export const Panel = (\n  <div>\n    <Foo cb={(early) => early()} />\n")
+	for i := 0; i < maxJSSigLines+20; i++ {
+		b.WriteString("    <Row />\n")
+	}
+	b.WriteString("  </div>\n);\n")
+	if got := jsParams(t, b.String()); !hasName(got, "early") {
+		t.Errorf("early lost past the %d-line bail (got %v): the accumulator was "+
+			"discarded instead of rescanned", maxJSSigLines, got)
+	}
+
+	// Finding 2: three end-of-line tests asked "what is the last byte" using
+	// TrimRight(" \t"), which leaves a `\r`. readFileLines is a raw os.ReadFile
+	// and Windows is a shipped release target, so a CRLF checkout made every
+	// ambient/overload declaration and every unfinished type head read as
+	// finished — folding type-position parameter names into the resolvable set,
+	// which is a regression against master, where nothing bound parameters.
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	for _, tc := range []struct{ name, src, leak string }{
+		{"overload signature", "export function fmt(hidden: number): string;", "hidden"},
+		{"wrapped ambient", "declare function f(\n  xq: T\n): R;", "xq"},
+		{"unfinished type head", "type H =\n  (eq: MouseEvent) => void;", "eq"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, crlf(tc.src)); hasName(got, tc.leak) {
+				t.Errorf("CRLF leaked %q from a type position: %v", tc.leak, got)
+			}
+			if got := jsParams(t, tc.src); hasName(got, tc.leak) {
+				t.Errorf("LF leaked %q from a type position: %v", tc.leak, got)
+			}
+		})
+	}
+	// A real CRLF declaration must still bind.
+	if got := jsParams(t, crlf("export function real(keepq: number) { return keepq; }")); !hasName(got, "keepq") {
+		t.Errorf("CRLF real declaration lost its parameter: %v", got)
+	}
+}

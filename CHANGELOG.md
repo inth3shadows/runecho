@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-08-20
+
+### Changed
+- guard: record why a check abstained, not just that it found nothing (#359) (#363)
+
 ## [0.44.1] — 2026-08-20
 
 ### Changed

@@ -133,15 +133,15 @@
     {
       "id": "contract/inserted-lang-gate-unknown",
       "file": "cmd/runecho-guard/contract.go",
-      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif cw == nil {",
-      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif lang == guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks, checkReasons map[string]string) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks, checkReasons map[string]string) bool {\n\tif lang == guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
       "desc": "INSERTED fault: the check skips files with no parser (docs, configs) — half of 'keys on the path, not the language'"
     },
     {
       "id": "contract/inserted-lang-gate-known",
       "file": "cmd/runecho-guard/contract.go",
-      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif cw == nil {",
-      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {\n\tif lang != guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
+      "find": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks, checkReasons map[string]string) bool {\n\tif cw == nil {",
+      "replace": "func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks, checkReasons map[string]string) bool {\n\tif lang != guard.LangUnknown {\n\t\treturn false\n\t}\n\tif cw == nil {",
       "desc": "INSERTED fault: the check skips source files — the mirror half"
     },
     {
@@ -304,9 +304,9 @@
     {
       "id": "callshape/added-text-precedence",
       "file": "internal/guard/callshapecheck.go",
-      "find": "\tif !addedIsWholeFile && matchesPyDef(addedText, name) {",
-      "replace": "\tif false && matchesPyDef(addedText, name) {",
-      "desc": "a signature rewritten by this edit is read from the stale on-disk copy"
+      "find": "\teditDeclares := !addedIsWholeFile && matchesPyDef(addedText, name)",
+      "replace": "\teditDeclares := false && matchesPyDef(addedText, name)",
+      "desc": "a signature rewritten by this edit is read from the stale on-disk copy (#359: the condition moved into the editDeclares variable, which declaredHere also reads)"
     },
     {
       "id": "callshape/wholefile-read",
@@ -353,9 +353,9 @@
     {
       "id": "callshape/added-text-decorator-fold",
       "file": "internal/guard/callshapecheck.go",
-      "find": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated {",
-      "replace": "\t\t\tfor _, pre := range declIndex.shapesFor(name) {\n\t\t\t\tif pre.Decorated && false {",
-      "desc": "a decorator outside the hunk is no longer folded into the added-text shape"
+      "find": "\t\t\tfor _, pre := range declShapes {\n\t\t\t\tif pre.Decorated {",
+      "replace": "\t\t\tfor _, pre := range declShapes {\n\t\t\t\tif pre.Decorated && false {",
+      "desc": "a decorator outside the hunk is no longer folded into the added-text shape (#359: shapesFor(name) hoisted to declShapes)"
     },
     {
       "id": "callshape/dynamic-marker-boundary",
@@ -395,9 +395,9 @@
     {
       "id": "qualified/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)\n\t\t\tqualifiedResult = classifyResult(\"qualified\", len(qualifiedV) > 0, \"\")",
-      "replace": "qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)\n\t\t\tqualifiedResult = classifyResult(\"qualified\", false, \"\")",
-      "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket (#330: qualifiedResult replaces fired.Qualified)"
+      "find": "qualifiedResult = classifyResult(\"qualified\", len(qualifiedV) > 0, foldAbstainReason(reason, preEditReason))",
+      "replace": "qualifiedResult = classifyResult(\"qualified\", false, foldAbstainReason(reason, preEditReason))",
+      "desc": "the ask no longer records that qualified fired, so it logs in another check's bucket (#330: qualifiedResult replaces fired.Qualified; #359: the call now folds in an abstain reason)"
     },
     {
       "id": "qualified/repo-ir-lookup",

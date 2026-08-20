@@ -27,12 +27,21 @@ func recvMethodEnabled() bool { return os.Getenv("RUNECHO_GUARD_RECVMETHOD") == 
 // (pre-edit in hook mode); addedLines is the proposed new text. Returns nil when
 // the flag is off or the language is not Go.
 func recvMethodViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, known map[string]struct{}, path string) []guard.Violation {
+	vs, _ := recvMethodViolationsWithReason(lang, wholeFileLines, addedLines, known, path)
+	return vs
+}
+
+// recvMethodViolationsWithReason is recvMethodViolations plus the reason a
+// candidate `r.Method(` call was declined — see
+// guard.GoReceiverMethodViolationsWithReason, which this wraps. Empty for the
+// flag-off / wrong-language cases, which are Skipped, never Unknown.
+func recvMethodViolationsWithReason(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, known map[string]struct{}, path string) ([]guard.Violation, string) {
 	if !recvMethodEnabled() || lang != guard.LangGo {
-		return nil
+		return nil, ""
 	}
-	vs := guard.GoReceiverMethodViolations(wholeFileLines, addedLines, known)
+	vs, reason := guard.GoReceiverMethodViolationsWithReason(wholeFileLines, addedLines, known)
 	for i := range vs {
 		vs[i].File = path
 	}
-	return vs
+	return vs, reason
 }

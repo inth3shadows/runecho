@@ -65,6 +65,10 @@ const (
 	// callShapeMaxAccepted caps how many accepted keyword names are listed in one
 	// finding. A 30-parameter signature would otherwise bury the point.
 	callShapeMaxAccepted = 8
+	// callShapeMaxUnreliableNames caps how many unreadable callee names are kept
+	// for the abstain-reason test (#359). Each costs one regex match against the
+	// added text, and one is enough to record the reason.
+	callShapeMaxUnreliableNames = 8
 )
 
 // rePyDefNameTmpl matches a Python `def NAME(` (optionally `async`, any
@@ -83,13 +87,43 @@ const rePyDefNameTmpl = `(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+%s[ \t]*\(`
 // they are the authoritative declaration source and wholeFile is not consulted.
 //
 // Returns nil for any language other than Python.
+//
+// Thin wrapper over PyCallShapeMismatchesWithReason, discarding the abstain
+// reason — kept so every existing caller is untouched by #359.
 func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, removed []AddedLine, addedIsWholeFile bool) []CallShapeMismatch {
+	ms, _ := PyCallShapeMismatchesWithReason(lang, wholeFile, fd, removed, addedIsWholeFile)
+	return ms
+}
+
+// PyCallShapeMismatchesWithReason is PyCallShapeMismatches plus the reason a
+// candidate call was declined. A candidate is a kwarg-bearing call in the added
+// lines — the only thing this check can adjudicate — so an edit with no such
+// call yields no reason no matter what else it contains:
+//
+//   - "oversized-pre-edit-file" / "dynamic-binding" (degraded class): the
+//     declaration source was unreadable, or the file rebinds names in a way the
+//     decl index cannot follow.
+//   - "unreliable-call-shape": the extractor says its own kwarg parse for this
+//     call is not trustworthy (a lambda argument, an unbalanced span).
+//   - "shadowed-callee", "nested-def-shadow", "ambiguous-decl-shapes",
+//     "unusable-decl-shape", "unparseable-added-signature",
+//     "decl-edited-in-hunk": resolveDeclShape found more than one defensible
+//     answer for the callee's signature and refused to guess between them.
+//
+// A callee with NO module-level declaration in this file is not a decline: it
+// is a cross-file or third-party call, owned by the existence and file-scope
+// checks, and it is the common case for kwarg-bearing calls. Counting it would
+// make this reason fire on most Python edits while saying nothing about this
+// check's coverage.
+//
+// First reason encountered wins, matching GoDepQualifiedViolationsWithReason.
+func PyCallShapeMismatchesWithReason(lang Lang, wholeFile []AddedLine, fd FileDiff, removed []AddedLine, addedIsWholeFile bool) ([]CallShapeMismatch, string) {
 	if lang != LangPython {
-		return nil
+		return nil, ""
 	}
 	added := fd.AddedLines
 	if len(added) == 0 {
-		return nil
+		return nil, ""
 	}
 	// The declaration source. For Write, the added lines are the whole post-edit
 	// file, so they are strictly better than the pre-edit copy: a signature this
@@ -98,9 +132,6 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	declLines := wholeFile
 	if addedIsWholeFile {
 		declLines = added
-	}
-	if len(declLines) == 0 {
-		return nil
 	}
 	// Narrow to calls that could possibly be checked BEFORE anything touches the
 	// whole file. Ordering matters for latency, not just tidiness: this scan reads
@@ -117,18 +148,45 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	// no-kwargs arm below. A splat DOES matter to an arity or required-argument
 	// check, so this reasoning does not carry to a later slice.
 	var candidates []CallShape
+	var reason string
+	// unreliableNames are kwarg-bearing calls the extractor could not read.
+	// Their NAMES are kept, not just a bool: whether such a call is a candidate
+	// this check declined depends on whether this file declares the callee at
+	// all, and that question cannot be answered until the declaration index
+	// exists further down. Capped because it feeds a per-name regex below and a
+	// pathological diff must not turn that into an unbounded scan.
+	var unreliableNames []string
 	for _, c := range ExtractCallShapes(lang, added, seedFunc(lang, fd)) {
 		switch {
 		case len(c.Kwargs) == 0:
 			// Nothing to compare — positional arity is a later slice.
 		case c.HasLambda, c.Unreliable:
 			// The extractor says its own Pos/Kwargs are not trustworthy here.
+			if len(unreliableNames) < callShapeMaxUnreliableNames {
+				unreliableNames = append(unreliableNames, c.Name)
+			}
 		default:
 			candidates = append(candidates, c)
 		}
 	}
+	// An edit with no readable candidate returns here even when it holds an
+	// unreliable one. Deciding whether that unreliable call was ours needs the
+	// whole-file declaration index, and building it costs a full-file pass —
+	// the exact cost the candidate scan above is ordered to avoid (0.02 ms
+	// becomes 0.37 ms on a 2677-line file). A reason is diagnostic; it does not
+	// get to buy itself a scan the check would not otherwise run. Consequence,
+	// stated rather than implied: an edit whose ONLY kwarg call is unreadable
+	// records no reason.
 	if len(candidates) == 0 {
-		return nil
+		return nil, ""
+	}
+	// Checked here rather than beside declLines' assignment above so a degraded
+	// declaration source is reported only when this edit actually had something
+	// to check — an edit with no kwarg-bearing call is not "coverage lost", it
+	// is out of shape. The test itself is O(1), so the latency ordering the
+	// candidate scan protects is unaffected.
+	if len(declLines) == 0 {
+		return nil, "oversized-pre-edit-file"
 	}
 
 	// ONE masked pass over the declaration source yields everything the whole file
@@ -137,7 +195,7 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 	// latency requirement — see pyDeclIndex.
 	declIndex := newPyDeclIndex(declLines)
 	if declIndex.dynamic {
-		return nil
+		return nil, "dynamic-binding"
 	}
 	// The added text is the fresher declaration when this edit rewrites one. It is a
 	// hunk here (the whole-file case is addedIsWholeFile, already folded into
@@ -148,7 +206,7 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 		addedText = linesText(added)
 		addedIndex = newPyDeclIndex(added)
 		if addedIndex.dynamic {
-			return nil
+			return nil, "dynamic-binding"
 		}
 	}
 	removedText := linesText(removed)
@@ -191,6 +249,9 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 		// fromAdded records that shape came from the hunk, so its Line numbers the
 		// hunk rather than the file.
 		fromAdded bool
+		// why is the abstain reason when ok is false, "" when it resolved or
+		// when the callee simply is not declared in this file (#359).
+		why string
 	}
 	checked := make(map[string]resolved, len(candidates))
 	for _, c := range candidates {
@@ -199,10 +260,13 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 		}
 		r, seen := checked[c.Name]
 		if !seen {
-			r.shape, r.ok, r.fromAdded = resolveDeclShape(c.Name, shadowedSet, declIndex, addedIndex, addedText, removedText, addedIsWholeFile)
+			r.shape, r.ok, r.fromAdded, r.why = resolveDeclShape(c.Name, shadowedSet, declIndex, addedIndex, addedText, removedText, addedIsWholeFile)
 			checked[c.Name] = r
 		}
 		if !r.ok {
+			if r.why != "" && reason == "" {
+				reason = r.why
+			}
 			continue
 		}
 		accepted := make(map[string]struct{}, len(r.shape.Keywords))
@@ -236,13 +300,51 @@ func PyCallShapeMismatches(lang Lang, wholeFile []AddedLine, fd FileDiff, remove
 			}
 		}
 	}
-	return out
+	// The unreadable-call reason is a FALLBACK, evaluated only once no candidate
+	// produced one of its own. Two deliberate choices here:
+	//
+	//   - It is gated on declaredInFile, the same test resolveDeclShape uses.
+	//     `notify(text=f"hi {name}")` where notify is imported sets Unreliable
+	//     (an f-string prefix survives the mask), and reporting that would make
+	//     this reason fire on ordinary Python for a callee this check never
+	//     claimed — the failure the reasonIf gate exists to prevent, arrived at
+	//     from the other direction.
+	//   - It loses to a per-candidate decline rather than winning on scan order,
+	//     because "this file's own declaration was ambiguous" says more about
+	//     coverage than "one argument list was unreadable".
+	if reason == "" {
+		for _, name := range unreliableNames {
+			if declaredInFile(name, declIndex, addedText, addedIsWholeFile) {
+				reason = "unreliable-call-shape"
+				break
+			}
+		}
+	}
+	return out, reason
+}
+
+// declaredInFile reports whether the declaration source declares name at module
+// level, or this edit's own hunk declares it. It is the "was this ever our
+// candidate" test — every #359 abstain reason in this check is gated on it, so
+// an imported or third-party callee (most kwarg-bearing calls) records nothing.
+func declaredInFile(name string, declIndex *pyDeclIndex, addedText string, addedIsWholeFile bool) bool {
+	if len(declIndex.shapesFor(name)) > 0 {
+		return true
+	}
+	return !addedIsWholeFile && matchesPyDef(addedText, name)
 }
 
 // resolveDeclShape picks the single declaration shape for name that the call can
 // be compared against, or reports ok=false to abstain. Every abstain path is a
 // case where more than one answer is defensible, and the check's contract is that
 // it never guesses between them.
+//
+// The fourth return names which abstain fired (#359), or "" when the shape
+// resolved. It is also "" for every ok=false path on a name this file does not
+// declare at all: an imported or third-party callee is not a candidate this
+// check declined, it is one it never claimed — and since most kwarg-bearing
+// calls go to imported functions, reporting those would leave the reason firing
+// on nearly every Python edit while saying nothing about coverage.
 func resolveDeclShape(
 	name string,
 	shadowedSet func() map[string]struct{},
@@ -250,24 +352,40 @@ func resolveDeclShape(
 	addedText string,
 	removedText string,
 	addedIsWholeFile bool,
-) (shape pyDeclShape, ok bool, fromAdded bool) {
+) (shape pyDeclShape, ok bool, fromAdded bool, why string) {
 	var zero pyDeclShape
+	// Does this file declare the name at all? Every abstain below is reported
+	// only when it does — see the doc comment. Computed from data the paths
+	// below already need (the module-level shapes; whether the hunk declares
+	// it), so it costs no extra scan.
+	declShapes := declIndex.shapesFor(name)
+	editDeclares := !addedIsWholeFile && matchesPyDef(addedText, name)
+	// reasonIf keeps an abstain silent for a callee this file does not declare.
+	// Same test as declaredInFile (which the unreadable-call fallback uses),
+	// spelled against the values already computed here rather than re-reading
+	// them — the two must agree, so if this ever needs to change, change both.
+	reasonIf := func(r string) string {
+		if len(declShapes) > 0 || editDeclares {
+			return r
+		}
+		return ""
+	}
 	if _, bad := shadowedSet()[name]; bad {
-		return zero, false, false
+		return zero, false, false, reasonIf("shadowed-callee")
 	}
 	// A nested or conditionally-declared def of the same name means the column-zero
 	// signature may not be the one a call reaches. Methods are excluded — an
 	// unqualified call cannot reach one. Checked on the declaration source only: the
 	// hunk's own indentation is not a reliable guide to its enclosing block.
 	if declIndex.shadowedByNestedDef(name) {
-		return zero, false, false
+		return zero, false, false, reasonIf("nested-def-shadow")
 	}
 	// When the edit itself declares this name, its version of the signature is the
 	// one the post-edit file will have — the indexed/on-disk copy is stale by
 	// exactly this edit. Adding a parameter and using it in the same edit is a
 	// routine agent move, so getting this wrong would be a recurring false
 	// positive rather than a corner case.
-	if !addedIsWholeFile && matchesPyDef(addedText, name) {
+	if editDeclares {
 		added, ok := soleShape(addedIndex.shapesFor(name))
 		if ok {
 			// The hunk shows the parameter list but CANNOT show what sits above the
@@ -282,7 +400,7 @@ func resolveDeclShape(
 			//
 			// An edit that REMOVES a decorator therefore over-abstains for one edit.
 			// That is the safe direction and the rarer shape.
-			for _, pre := range declIndex.shapesFor(name) {
+			for _, pre := range declShapes {
 				if pre.Decorated {
 					added.Decorated = true
 					break
@@ -294,19 +412,25 @@ func resolveDeclShape(
 			// truncated parameter list, or two disagreeing branches). Its true shape
 			// is unknown and the on-disk copy is known-stale, so there is nothing to
 			// compare against.
-			return zero, false, false
+			return zero, false, false, "unparseable-added-signature"
 		}
-		return added, added.usable(), true
+		if !added.usable() {
+			return added, false, true, "unusable-decl-shape"
+		}
+		return added, true, true, ""
 	}
-	s, ok := soleShape(declIndex.shapesFor(name))
+	s, ok := soleShape(declShapes)
 	if !ok {
 		// No module-level def of this name in the file (a cross-file or third-party
 		// callee — the existence and file-scope checks own that), or two
-		// conditional branches with different accepted sets.
-		return zero, false, false
+		// conditional branches with different accepted sets. Only the second is an
+		// abstain; reasonIf collapses the first to "" (see the doc comment).
+		return zero, false, false, reasonIf("ambiguous-decl-shapes")
 	}
 	if !s.usable() {
-		return zero, false, false
+		// `**kwargs` accepts anything, a decorator can rewrite the signature, and
+		// an unbalanced span was never read — none can be argued against.
+		return zero, false, false, "unusable-decl-shape"
 	}
 	// Last abstain: this edit may be changing the declaration WITHOUT the hunk
 	// containing a whole `def` line — a MultiEdit that rewrites one line of a
@@ -323,9 +447,9 @@ func resolveDeclShape(
 	// Unknowable and returned above, and s.Line always exists in declLines because s
 	// came from an index built over them.
 	if removedText != "" && removesSignatureLine(declIndex, s.Line, removedText) {
-		return zero, false, false
+		return zero, false, false, "decl-edited-in-hunk"
 	}
-	return s, true, false
+	return s, true, false, ""
 }
 
 // soleShape returns the one shape in shapes, treating "several declarations that

@@ -56,6 +56,21 @@ type Decision struct {
 	// skipped" — see FPReport's tally loop in fpreport.go, which builds
 	// FPStats.CheckRuns from this field and is its only consumer.
 	Checks map[string]string
+	// CheckReasons is decisionRecord.CheckReasons (#359): check name -> why its
+	// verdict is Unknown or Skipped ("shadowed-qualifier",
+	// "name-known-elsewhere", "oversized-pre-edit-file", "no-module-path", …).
+	// Only the checks that recorded a reason appear, so this map is normally
+	// smaller than Checks and is nil on an edit where every check ran to a
+	// verdict. Also nil on every record from a guard older than #359, and on
+	// pre-commit records, whose four checks still pass no reason but the
+	// no-module-path Skipped — so nil means "no reason reported", never "this
+	// record predates #359" and never "nothing abstained".
+	//
+	// Checks says a check abstained; this says which gate ate it, which is what
+	// separates "var-type is off" from "var-type ran and declined every
+	// candidate". No report aggregates it yet; it is read via jq and by
+	// whichever slice of #243/#315 needs it.
+	CheckReasons map[string]string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
@@ -74,6 +89,7 @@ type rawDecision struct {
 	LearnSymbols []string          `json:"learn_symbols,omitempty"`
 	Edit         string            `json:"edit,omitempty"`
 	Checks       map[string]string `json:"checks,omitempty"`
+	CheckReasons map[string]string `json:"check_reasons,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -110,6 +126,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						LearnSymbols: raw.LearnSymbols,
 						Edit:         raw.Edit,
 						Checks:       raw.Checks,
+						CheckReasons: raw.CheckReasons,
 					})
 				}
 			}

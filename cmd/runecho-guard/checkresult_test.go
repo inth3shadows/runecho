@@ -118,23 +118,6 @@ func TestAskReason_ViaFiredChecksFrom(t *testing.T) {
 	}
 }
 
-// TestCountUnknown covers the replacement for the hand-rolled `degraded int`.
-func TestCountUnknown(t *testing.T) {
-	results := []CheckResult{
-		{Check: "violations", Verdict: VerdictOK},
-		{Check: "qualified", Verdict: VerdictSkipped, Reason: "no-module-path"},
-		{Check: "deps-go", Verdict: VerdictUnknown, Reason: "go.work workspace"},
-		{Check: "file-scope", Verdict: VerdictUnknown, Reason: "star-import"},
-		{Check: "dangling", Verdict: VerdictViolation},
-	}
-	if got := countUnknown(results); got != 2 {
-		t.Errorf("countUnknown = %d, want 2", got)
-	}
-	if got := countUnknown(nil); got != 0 {
-		t.Errorf("countUnknown(nil) = %d, want 0", got)
-	}
-}
-
 // TestClassifyResult covers the Violation > Unknown > OK precedence
 // (checkresult.go's documented invariant) and the reason-carries-through
 // case.
@@ -298,5 +281,106 @@ func TestFileScope_NewFileWrite_NotDegraded(t *testing.T) {
 	}
 	if rec := readLastDecisionLog(t); rec != nil && rec["reason"] == "check-degraded" {
 		t.Errorf("decision log reason = check-degraded for a brand-new file, want something else")
+	}
+}
+
+// TestCountDegradedUnknown pins #359's class split: every Unknown is recorded
+// in decisions.jsonl, but only the degraded ones — missing input or a failed
+// query, not a check declining one candidate on its own gate — raise the
+// strict-mode "coverage was incomplete" advisory.
+func TestCountDegradedUnknown(t *testing.T) {
+	results := []CheckResult{
+		{Check: "violations", Verdict: VerdictOK},
+		{Check: "dangling", Verdict: VerdictUnknown, Reason: "store-query-failed"},
+		{Check: "var-type", Verdict: VerdictUnknown, Reason: "name-known-elsewhere"},
+		{Check: "qualified", Verdict: VerdictUnknown, Reason: "unexported-selector"},
+		{Check: "recv-method", Verdict: VerdictUnknown, Reason: "no-indexed-members"},
+		{Check: "file-scope", Verdict: VerdictUnknown, Reason: "star-import"},
+		{Check: "lint", Verdict: VerdictSkipped, Reason: "not-python"},
+	}
+	// checkStatusMap is what records the abstains; every one of the five here
+	// persists as "unknown" regardless of class.
+	if got := len(checkStatusMap(results)); got != len(results) {
+		t.Errorf("checkStatusMap kept %d of %d results — every abstain is still recorded", got, len(results))
+	}
+	if got := countDegradedUnknown(results); got != 2 {
+		t.Errorf("countDegradedUnknown = %d, want 2 (store-query-failed, star-import)", got)
+	}
+	// An unregistered reason counts as degraded: a new gate reason that forgets
+	// to register itself must fail loudly (an advisory that fires too often),
+	// never by silently dropping coverage from the count.
+	novel := []CheckResult{{Check: "x", Verdict: VerdictUnknown, Reason: "brand-new-reason"}}
+	if got := countDegradedUnknown(novel); got != 1 {
+		t.Errorf("countDegradedUnknown(unregistered reason) = %d, want 1", got)
+	}
+	// A hand-built Unknown with no reason (runHookMode's oversized-pre-edit-file
+	// arms) is degraded by nature.
+	bare := []CheckResult{{Check: "x", Verdict: VerdictUnknown}}
+	if got := countDegradedUnknown(bare); got != 1 {
+		t.Errorf("countDegradedUnknown(no reason) = %d, want 1", got)
+	}
+	if got := countDegradedUnknown(nil); got != 0 {
+		t.Errorf("countDegradedUnknown(nil) = %d, want 0", got)
+	}
+}
+
+// TestCheckReasonMap pins the projection behind decisionRecord.CheckReasons:
+// only checks that recorded a reason appear, and no reasons at all yields nil
+// so omitempty drops the field entirely.
+func TestCheckReasonMap(t *testing.T) {
+	results := []CheckResult{
+		{Check: "violations", Verdict: VerdictOK},
+		{Check: "qualified", Verdict: VerdictSkipped, Reason: "no-module-path"},
+		{Check: "var-type", Verdict: VerdictUnknown, Reason: "name-known-elsewhere"},
+		{Check: "dangling", Verdict: VerdictViolation},
+	}
+	got := checkReasonMap(results)
+	want := map[string]string{
+		"qualified": "no-module-path",
+		"var-type":  "name-known-elsewhere",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("checkReasonMap = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("checkReasonMap[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if checkReasonMap([]CheckResult{{Check: "violations", Verdict: VerdictOK}}) != nil {
+		t.Error("checkReasonMap with no reasons must return nil, not an empty map")
+	}
+	if checkReasonMap(nil) != nil {
+		t.Error("checkReasonMap(nil) must return nil")
+	}
+}
+
+// TestFoldAbstainReason pins the precedence: the shared degraded pre-edit
+// reason outranks a check's own gate reason, so a genuinely degraded edit still
+// raises the strict advisory instead of being masked by a routine gate.
+func TestFoldAbstainReason(t *testing.T) {
+	if got := foldAbstainReason("name-known-elsewhere", "oversized-pre-edit-file"); got != "oversized-pre-edit-file" {
+		t.Errorf("both set: got %q, want the degraded reason", got)
+	}
+	if got := foldAbstainReason("name-known-elsewhere", ""); got != "name-known-elsewhere" {
+		t.Errorf("own only: got %q", got)
+	}
+	if got := foldAbstainReason("", "oversized-pre-edit-file"); got != "oversized-pre-edit-file" {
+		t.Errorf("degraded only: got %q", got)
+	}
+	if got := foldAbstainReason("", ""); got != "" {
+		t.Errorf("neither: got %q, want empty", got)
+	}
+}
+
+// TestGateAbstainReasonsAreNotVerdictTokens guards a collision that would be
+// silent: a reason string that happens to equal one of Verdict.String()'s four
+// tokens would read as a verdict in any jq that greps both maps.
+func TestGateAbstainReasonsAreNotVerdictTokens(t *testing.T) {
+	tokens := map[string]struct{}{"ok": {}, "violation": {}, "unknown": {}, "skipped": {}}
+	for reason := range gateAbstainReasons {
+		if _, clash := tokens[reason]; clash {
+			t.Errorf("gate reason %q collides with a verdict token", reason)
+		}
 	}
 }

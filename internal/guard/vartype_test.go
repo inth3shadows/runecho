@@ -416,7 +416,37 @@ func run() {
 	_ = r
 }
 `
-	if got := goVarTypes(TextToAddedLines(src)); len(got) != 0 {
+	got, _ := goVarTypes(TextToAddedLines(src))
+	if len(got) != 0 {
 		t.Errorf("a call-result assignment binds no type this function can read, got %v", got)
+	}
+
+	// A binding form this pass cannot read was never a candidate, so it must not
+	// be reported as a DECLINED one either (#359). Asserting that on the source
+	// above alone is inert: with `types` empty, goVarTypes returns at its early
+	// exit before `dropped` is computed, so nothing could ever appear there
+	// (found by adversarial review). The mixed source below is what makes the
+	// claim observable — `v2` is bound twice, so the drop loop really runs, and
+	// `r` must still be absent from its result.
+	mixed := `package p
+
+func a() {
+	r := open()
+	_ = r
+	var v2 *Reader
+	_ = v2
+}
+
+func b() {
+	v2 := Reader{}
+	_ = v2
+}
+`
+	_, dropped := goVarTypes(TextToAddedLines(mixed))
+	if _, ok := dropped["v2"]; !ok {
+		t.Fatalf("control: a twice-bound local must be dropped, got %v", dropped)
+	}
+	if _, bad := dropped["r"]; bad {
+		t.Errorf("an unreadable binding form must not count as a dropped local, got %v", dropped)
 	}
 }

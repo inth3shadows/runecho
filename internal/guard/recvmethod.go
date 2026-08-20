@@ -69,9 +69,16 @@ var reGoVarBinding = regexp.MustCompile(`(?:^|[^\w.])var\s+([A-Za-z_]\w*)\b`)
 // goReceiverTypes maps a receiver variable name to the type it receives, for the
 // names that are unambiguous and never re-bound in ctx. A name that fails either
 // condition is absent from the result, which makes every consumer abstain on it.
-func goReceiverTypes(ctx []AddedLine) map[string]string {
+//
+// The second return is exactly those dropped names — every name ctx binds as a
+// method receiver that gates 1/2 removed. A call on one of them is a candidate
+// this check declined (#359's "ambiguous-receiver"), which is a different thing
+// from a call on a name that was never a receiver at all and so was never this
+// check's shape.
+func goReceiverTypes(ctx []AddedLine) (map[string]string, map[string]struct{}) {
 	types := make(map[string]string)
 	ambiguous := make(map[string]struct{})
+	receivers := make(map[string]struct{})
 	open := ""
 	for _, l := range ctx {
 		scan, newOpen := stripLiteralsStateful(LangGo, l.Text, open)
@@ -84,6 +91,7 @@ func goReceiverTypes(ctx []AddedLine) map[string]string {
 		if recv == "_" {
 			continue
 		}
+		receivers[recv] = struct{}{}
 		if prev, seen := types[recv]; seen && prev != typ {
 			ambiguous[recv] = struct{}{}
 			continue
@@ -91,7 +99,7 @@ func goReceiverTypes(ctx []AddedLine) map[string]string {
 		types[recv] = typ
 	}
 	if len(types) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Second pass for rebinding. It runs over the same ctx rather than being
 	// folded into the loop above because a rebinding can appear before the method
@@ -110,10 +118,16 @@ func goReceiverTypes(ctx []AddedLine) map[string]string {
 	for name := range ambiguous {
 		delete(types, name)
 	}
-	if len(types) == 0 {
-		return nil
+	dropped := make(map[string]struct{})
+	for name := range receivers {
+		if _, kept := types[name]; !kept {
+			dropped[name] = struct{}{}
+		}
 	}
-	return types
+	if len(types) == 0 {
+		return nil, dropped
+	}
+	return types, dropped
 }
 
 // goTypesWithMethods returns the set of receiver type names that have at least
@@ -148,7 +162,36 @@ func goTypesWithMembers(known map[string]struct{}) map[string]struct{} {
 // file binds a usable receiver.
 //
 // See the file header for the gate stack and what each gate is protecting.
+//
+// Thin wrapper over GoReceiverMethodViolationsWithReason, discarding the
+// abstain reason — kept so every existing caller is untouched by #359.
 func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[string]struct{}) []Violation {
+	vs, _ := GoReceiverMethodViolationsWithReason(wholeFile, addedLines, known)
+	return vs
+}
+
+// GoReceiverMethodViolationsWithReason is GoReceiverMethodViolations plus the
+// reason a candidate `r.Method(` call was declined, where r is (or was) a
+// method receiver in this file — the only calls this check ever adjudicates:
+//
+//   - "ambiguous-receiver" — gates 1/2: r names a receiver, but of two
+//     different types, or it is re-bound elsewhere in the file.
+//   - "no-indexed-members" — gate 4: the receiver type has no member recorded
+//     in the index at all, so absence of this method proves nothing. Common on
+//     an edit that adds the type and the method together, since the known set
+//     is built from the PRE-edit file — which is why it is registered as a gate
+//     reason rather than a degraded one (cmd/runecho-guard/checkresult.go).
+//   - "name-known-elsewhere" — gate 5, either half: the name exists in the repo
+//     as some other symbol or as another type's method, so it could be promoted
+//     from an embedded field.
+//
+// Empty when the check ran to completion, and empty for every selector that is
+// not a receiver call (`fmt.Println`, `x.field.Method()`, a local variable) —
+// those were never this check's shape, and reporting them would make the reason
+// fire on nearly every Go edit while saying nothing about coverage.
+//
+// First reason encountered wins, matching GoDepQualifiedViolationsWithReason.
+func GoReceiverMethodViolationsWithReason(wholeFile, addedLines []AddedLine, known map[string]struct{}) ([]Violation, string) {
 	// Both slices feed the binding scan for the same reason GoQualifiedViolations
 	// concatenates them: a receiver declaration or a rebinding introduced by THIS
 	// edit has to be seen, or the check judges the call against a stale file.
@@ -156,13 +199,24 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 	ctx = append(ctx, wholeFile...)
 	ctx = append(ctx, addedLines...)
 
-	recvTypes := goReceiverTypes(ctx)
-	if len(recvTypes) == 0 {
-		return nil
+	recvTypes, droppedRecvs := goReceiverTypes(ctx)
+	if len(recvTypes) == 0 && len(droppedRecvs) == 0 {
+		return nil, ""
 	}
-	typesWithMembers := goTypesWithMembers(known)
+	// Only when a usable receiver survived: with recvTypes empty every call
+	// below stops at the recvTypes lookup, so this map would be built and never
+	// read. It is O(|known|) over the whole repo symbol set — ~1-2 ms on a 30k
+	// symbol index against a ~12 ms hook budget — and the all-dropped case is
+	// not exotic, since a single-letter receiver (`s`, `r`, `c`) collides with a
+	// `:=` binding of the same name constantly. Measured by adversarial review
+	// of #359, which is what made the removed early return affordable.
+	var typesWithMembers map[string]struct{}
+	if len(recvTypes) > 0 {
+		typesWithMembers = goTypesWithMembers(known)
+	}
 
 	var violations []Violation
+	var reason string
 	seen := make(map[string]struct{})
 	open := ""
 	prevNo := 0
@@ -191,21 +245,38 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 			}
 			typ, ok := recvTypes[q]
 			if !ok {
-				continue // gate 1/2: not an unambiguous, never-rebound receiver
+				// gate 1/2: not an unambiguous, never-rebound receiver. Only a
+				// name this file DOES bind as a receiver is a declined
+				// candidate; any other qualifier is out of shape entirely.
+				if _, wasRecv := droppedRecvs[q]; wasRecv && reason == "" {
+					reason = "ambiguous-receiver"
+				}
+				continue
 			}
 			if _, ok := typesWithMembers[typ]; !ok {
-				continue // gate 4: T has no indexed member set to argue from
+				// gate 4: T has no indexed member set to argue from.
+				if reason == "" {
+					reason = "no-indexed-members"
+				}
+				continue
 			}
 			if _, ok := known[typ+"."+sym]; ok {
 				continue // the method exists on this type
 			}
 			if _, ok := known[sym]; ok {
-				continue // gate 5: the name exists somewhere — could be promoted
+				// gate 5: the name exists somewhere — could be promoted.
+				if reason == "" {
+					reason = "name-known-elsewhere"
+				}
+				continue
 			}
 			// Gate 5, second half: the name is not a method of any other type
 			// either. A name the repository has never used in any form is the
 			// hallucination profile; anything else is abstained on.
 			if goNameUsedAsAnyMethod(known, sym) {
+				if reason == "" {
+					reason = "name-known-elsewhere"
+				}
 				continue
 			}
 			key := typ + "." + sym
@@ -222,7 +293,7 @@ func GoReceiverMethodViolations(wholeFile, addedLines []AddedLine, known map[str
 			})
 		}
 	}
-	return violations
+	return violations, reason
 }
 
 // goNameUsedAsAnyMethod reports whether sym appears as the method half of any

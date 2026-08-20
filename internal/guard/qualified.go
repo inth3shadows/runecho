@@ -230,7 +230,34 @@ func onlySelectorQualifiers(wholeFile []AddedLine, candidates map[string]struct{
 // (used for import parsing and the shadow gate); known is the flat repo symbol
 // set; modulePath is the repo's go.mod module path ("" → no violations).
 // See the file header for the full gate stack. Go only.
+//
+// Thin wrapper over GoQualifiedViolationsWithReason, discarding the abstain
+// reason — kept so every existing caller (bench/score.go, the differential
+// tests, this package's own tests) is untouched by #359's reason-surfacing.
 func GoQualifiedViolations(wholeFile, addedLines []AddedLine, known map[string]struct{}, modulePath string) []Violation {
+	vs, _ := GoQualifiedViolationsWithReason(wholeFile, addedLines, known, modulePath)
+	return vs
+}
+
+// GoQualifiedViolationsWithReason is GoQualifiedViolations plus the reason a
+// candidate `q.Sym(` call was declined: "shadowed-qualifier" (q IS a same-repo
+// import here, but appears bare somewhere in the file, so a local of the same
+// name could be shadowing it — the shadow gate cannot tell) or
+// "unexported-selector" (q resolves, but the flat symbol set records no
+// per-package attribution for a lowercase field/method access). Both are
+// gate-class abstains: a candidate existed and this check declined to judge it.
+//
+// Empty when the check ran to completion, and empty for the cases that are not
+// candidates at all: a qualifier that is not a same-repo import (stdlib, an
+// external dep, or a local variable — other checks own those), a deeper
+// selector caught by the left-guard, and the module-path/language cases callers
+// already gate on. Reporting those would make the reason fire on essentially
+// every Go edit while saying nothing about this check's coverage.
+//
+// Only the FIRST reason encountered is kept (scan order = addedLines order),
+// matching GoDepQualifiedViolationsWithReason: #330/#359 need one
+// distinguishable reason per check per edit, not a full account.
+func GoQualifiedViolationsWithReason(wholeFile, addedLines []AddedLine, known map[string]struct{}, modulePath string) ([]Violation, string) {
 	// Import parsing AND the shadow gate run over the pre-edit file PLUS the added
 	// lines: a same-repo import or a shadowing binding introduced IN this same edit
 	// must be seen. Concatenating (not just wholeFile) is what makes an in-edit
@@ -240,16 +267,19 @@ func GoQualifiedViolations(wholeFile, addedLines []AddedLine, known map[string]s
 	ctx = append(ctx, wholeFile...)
 	ctx = append(ctx, addedLines...)
 
-	aliases := sameRepoGoAliases(ctx, modulePath)
-	if len(aliases) == 0 {
-		return nil
+	imported := sameRepoGoAliases(ctx, modulePath)
+	if len(imported) == 0 {
+		return nil, ""
 	}
-	aliases = onlySelectorQualifiers(ctx, aliases)
-	if len(aliases) == 0 {
-		return nil
-	}
+	aliases := onlySelectorQualifiers(ctx, imported)
+	// No early return when every alias was shadowed out: the scan below is what
+	// tells "this edit called a shadowed same-repo package" (an abstain worth
+	// recording) apart from "this edit never touched one" (nothing to record).
+	// It costs one hunk-sized regex pass in a case that needs a same-repo import
+	// AND a bare use of its alias to arise at all.
 
 	var violations []Violation
+	var reason string
 	seen := make(map[string]struct{})
 	open := ""
 	prevNo := 0
@@ -277,10 +307,21 @@ func GoQualifiedViolations(wholeFile, addedLines []AddedLine, known map[string]s
 				}
 			}
 			if _, ok := aliases[q]; !ok {
+				// A qualifier that IS imported from this repo but was dropped by
+				// the shadow gate is a candidate this check declined; anything
+				// else (stdlib, external dep, a local variable) was never this
+				// check's shape and is not an abstain.
+				if _, wasImported := imported[q]; wasImported && reason == "" {
+					reason = "shadowed-qualifier"
+				}
 				continue
 			}
 			if sym[0] < 'A' || sym[0] > 'Z' {
-				continue // unexported selector — field/method access, abstain
+				// Unexported selector — field/method access, abstain.
+				if reason == "" {
+					reason = "unexported-selector"
+				}
+				continue
 			}
 			if _, ok := known[sym]; ok {
 				continue // exists somewhere in the repo — not a hallucination
@@ -299,5 +340,5 @@ func GoQualifiedViolations(wholeFile, addedLines []AddedLine, known map[string]s
 			})
 		}
 	}
-	return violations
+	return violations, reason
 }

@@ -275,15 +275,21 @@ func contractRepoRoot(contractPath string) string {
 // outcome can be joined precisely (#300). Empty for the pre-commit surface,
 // which has no PostToolUse outcome to join.
 //
-// checks is checkStatusMap(results) (#333) from a caller that already built a
-// full per-check results slice before falling through to this ask — today
-// only runHookMode's post-lookup path, where every fact check ran clean and
-// the contract is the only reason this edit asks. nil from callers with no
-// such slice to hand it (the empty-input/unknown-lang early-return paths in
+// checks is checkStatusMap(results) (#333) and checkReasons is
+// checkReasonMap(results) (#359), from a caller that already built a full
+// per-check results slice before falling through to this ask — today only
+// runHookMode's post-lookup path, where every fact check ran clean and the
+// contract is the only reason this edit asks. Both are nil from callers with no
+// such slice to hand them (the empty-input/unknown-lang early-return paths in
 // runHookMode, and askWithoutIndex's degraded-store delegation, which has no
 // results slice by construction — see answerDegradedStore's doc). Passing nil
 // is correct there, not a gap: there is nothing true to report.
-func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks map[string]string) bool {
+//
+// They travel together on purpose: a record carrying checks but no reasons is
+// indistinguishable from one written by a pre-#359 guard (see
+// guardstats.Decision.CheckReasons), so this path silently looked older than it
+// is when it passed only the first — found by review before it shipped.
+func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang guard.Lang, editHash string, checks, checkReasons map[string]string) bool {
 	if cw == nil {
 		return false
 	}
@@ -299,6 +305,7 @@ func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang g
 		ContractHash: shortHash(cw.ActivatedHash),
 		Edit:         editHash,
 		Checks:       checks,
+		CheckReasons: checkReasons,
 	})
 	return true
 }

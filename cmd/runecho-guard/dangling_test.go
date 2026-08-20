@@ -516,7 +516,7 @@ func TestDangling_WriteOversizedOldFile_StrictAdvisory(t *testing.T) {
 	// "could not run to completion" is the stable substring every
 	// check-degraded advisory contains, regardless of WHICH check(s) went
 	// Unknown (#330 widened this from a deletion-side-only count to any of
-	// the eleven checks — see checkresult.go's countUnknown).
+	// the eleven checks — see checkresult.go's countDegradedUnknown).
 	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
 		t.Errorf("strict mode should surface a degraded-coverage advisory, got context %q", d.Hook.AdditionalContext)
 	}

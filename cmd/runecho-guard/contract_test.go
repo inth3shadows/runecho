@@ -167,6 +167,18 @@ func TestContract_OnlyAskStillCarriesChecks(t *testing.T) {
 	if got, _ := checks["violations"].(string); got != "ok" {
 		t.Errorf("checks[violations] = %q, want %q — the edit itself is clean, only scope fired", got, "ok")
 	}
+	// #359: the reasons travel with the verdicts on this record too. Passing
+	// only `checks` here made a contract-only ask indistinguishable from one
+	// written by a pre-#359 guard, which is what guardstats documents an absent
+	// check_reasons to mean. This fixture's repo has no go.mod, so `qualified`
+	// is Skipped for a reason that is recorded rather than inferred.
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	if reasons == nil {
+		t.Fatalf("contract-only ask record has no \"check_reasons\" field: %v", rec)
+	}
+	if got, _ := reasons["qualified"].(string); got != "no-module-path" {
+		t.Errorf("check_reasons[qualified] = %q, want %q", got, "no-module-path")
+	}
 }
 
 // With no contract activated for the session the check must be invisible even

@@ -36,14 +36,23 @@ func callShapeEnabled() bool { return os.Getenv("RUNECHO_GUARD_CALLSHAPE") == "1
 // direction would compare calls against a partial hunk's declarations; in the
 // false direction it merely costs reach on Write edits.
 func callShapeMismatches(lang guard.Lang, wholeFileLines []guard.AddedLine, fd guard.FileDiff, toolName, removedText string) []guard.CallShapeMismatch {
+	ms, _ := callShapeMismatchesWithReason(lang, wholeFileLines, fd, toolName, removedText)
+	return ms
+}
+
+// callShapeMismatchesWithReason is callShapeMismatches plus the reason a
+// candidate kwarg-bearing call was declined — see
+// guard.PyCallShapeMismatchesWithReason, which this wraps. Empty for the
+// flag-off / wrong-language cases, which are Skipped, never Unknown.
+func callShapeMismatchesWithReason(lang guard.Lang, wholeFileLines []guard.AddedLine, fd guard.FileDiff, toolName, removedText string) ([]guard.CallShapeMismatch, string) {
 	if !callShapeEnabled() || lang != guard.LangPython {
-		return nil
+		return nil, ""
 	}
 	var removed []guard.AddedLine
 	if removedText != "" {
 		removed = guard.TextToAddedLines(removedText)
 	}
-	return guard.PyCallShapeMismatches(lang, wholeFileLines, fd, removed, toolName == "Write")
+	return guard.PyCallShapeMismatchesWithReason(lang, wholeFileLines, fd, removed, toolName == "Write")
 }
 
 // callShapeSection appends the call-shape section of an ask to sb and returns
@@ -109,7 +118,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 	if len(ms) == 0 && len(lints) == 0 {
 		// nil checks: this whole function is the degraded-store path, which has
 		// no per-check results slice to project (see answerDegradedStore's doc).
-		return askContractOnly(out, cw, filePath, lang, editHash, nil)
+		return askContractOnly(out, cw, filePath, lang, editHash, nil, nil)
 	}
 	var sb strings.Builder
 	// Contract first, matching the full ask's ordering: "should you be editing

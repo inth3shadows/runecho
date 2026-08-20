@@ -267,6 +267,15 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 	var pyDefParams strings.Builder
 	pyDefPrevNo := 0
 	pyFirst := true
+	// JS counterpart of pyDefDepth/pyDefParams: a parameter list whose parens
+	// span lines. No seed callback (contrast the Python arm's defSigDepthSeed):
+	// that machinery exists for #294's hunk-only callers, and adding an
+	// untested resumable-depth rule for JS would be surface without a caller.
+	jsSigDepth := 0
+	jsSigIsFn := false
+	jsSigLines := 0
+	jsSigPrevNo := 0
+	var jsSig strings.Builder
 	// scanStripped threads multi-line string state (so a `x = Foo()` example inside
 	// a multi-line docstring/template is not read as a real binding) AND resets it
 	// on a line-number gap (so an unterminated string in one MultiEdit block does
@@ -274,6 +283,13 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 	// stripping must be stateful, the latter is why gap-separated lines
 	// (AddedLinesWithGap) reset correctly.
 	scanStripped(lang, lines, func(s string, l AddedLine) {
+		// A signature cannot be assumed to continue across a diff-hunk gap.
+		// The Python arm reseeds below; JS simply drops what it had.
+		if jsSigDepth > 0 && l.LineNo != jsSigPrevNo+1 {
+			jsSigDepth, jsSigLines = 0, 0
+			jsSig.Reset()
+		}
+		jsSigPrevNo = l.LineNo
 		if lhs := assignLHS(s); lhs != "" {
 			add(lhs)
 		}
@@ -341,6 +357,61 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 			}
 			if mm := reJSArrowParams.FindStringSubmatch(s); mm != nil {
 				add(mm[1])
+			}
+			// Both regexes above are single-line: their `[^)]*` cannot cross a
+			// newline, so a wrapped signature — the standard React component
+			// shape — bound nothing. Python's twin had exactly this bug and was
+			// fixed (see rePyDefOpen's comment); the JS pair was left behind.
+			//
+			// This accumulator is purely ADDITIVE to them rather than a
+			// replacement: LocallyBoundNames is deliberately over-inclusive
+			// (it only SUPPRESSES dropped-import warnings, so a name too many
+			// costs nothing while a name too few is a false positive), and
+			// swapping in the precise JSParamNames would shrink the set.
+			// It therefore fires only where the regexes cannot reach — a
+			// parameter list that does not close on the line that opens it —
+			// and add()s the raw region, identically to them.
+			if jsSigDepth > 0 && (jsTopLevelStatementStart(s) || jsSigLines >= maxJSSigLines) {
+				// Same containment as JSParamNames': an unbalanced `(` — from
+				// an unstripped regex literal, say — must not latch this state
+				// and swallow the rest of the file, which here would also grow
+				// jsSig to the file's remaining size.
+				jsSigDepth, jsSigLines = 0, 0
+				jsSig.Reset()
+			}
+			if jsSigDepth > 0 {
+				jsSigLines++
+				jsSig.WriteByte(' ')
+				// Capped, as the JSParamNames sibling is: parseDiffOutput
+				// applies no capLine and its scanner accepts up to 4 MB, so
+				// accumulating raw lines up to maxJSSigLines could build a
+				// ~160 MB buffer and then run reIdentAll over all of it, on the
+				// pre-commit path that carries no deadline.
+				jsSig.WriteString(capLine(s))
+				if idx, closed := jsConsumeParens(s, &jsSigDepth); closed {
+					full := jsSig.String()
+					inner := full[:len(full)-(len(s)-idx)]
+					// Same arrow/function test the regexes encode: without it
+					// a multi-line CALL's arguments would be bound as if they
+					// were parameters, which would suppress a genuine dropped
+					// import passed as an argument.
+					if jsSigIsFn || jsArrowFollows(s[idx+1:]) {
+						add(inner)
+					}
+					jsSigDepth, jsSigLines = 0, 0
+					jsSig.Reset()
+				}
+			}
+			if jsSigDepth == 0 {
+				if open, isFn := jsOpenParamListLoose(s); open >= 0 {
+					d := 1
+					rest := s[open+1:]
+					if _, closed := jsConsumeParens(rest, &d); !closed {
+						jsSigDepth, jsSigIsFn, jsSigLines = d, isFn, 1
+						jsSig.Reset()
+						jsSig.WriteString(rest)
+					}
+				}
 			}
 			// Bare single-arg arrow(s) (`x => …`) — an INDEPENDENT check (not an
 			// `else if` off the parenthesized form) over ALL matches, not just the

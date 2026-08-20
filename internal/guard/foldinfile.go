@@ -37,6 +37,15 @@ func FoldInFileDefs(symbols map[string]struct{}, fileLines []AddedLine, lang Lan
 		for _, name := range JSDeclaredNames(fileLines) {
 			symbols[name] = struct{}{}
 		}
+		// Parameters — see the PyParamNames fold below and GoDeclaredNames
+		// above; JS was the only language whose parameters bound nothing, so a
+		// bare call to a callback prop declared on a signature OUTSIDE the
+		// edited hunk was flagged (#302). Whole-file, so the multi-line React
+		// component signature is visible even when the hunk is one line inside
+		// the body.
+		for _, name := range JSParamNames(fileLines) {
+			symbols[name] = struct{}{}
+		}
 	}
 	// Go: locals, parameters, named returns, range and type-switch bindings. A
 	// bare `foo()` in Go resolves to any of these without a package-level

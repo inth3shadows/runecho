@@ -100,12 +100,25 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// destructuring (`const [x, setX] = useState()`), object destructure, and
 		// computed-assign (`const fn = handlers[k]`). A bare call to one of those is
 		// not a hallucination, so fold the declarator binding targets in. JSDeclared-
-		// Names (not the over-inclusive LocallyBoundNames) is used precisely so a
-		// param type annotation can't leak a type name and mask a real undefined ref.
+		// Names (not the over-inclusive LocallyBoundNames) is used because the latter
+		// binds every identifier it sees, including type names.
+		//
+		// That is a statement about which EXTRACTOR is used, not a guarantee that no
+		// type name can ever be folded: JSParamNames below binds parameters, and
+		// keeping a TS annotation out of that is an ongoing property of
+		// splitJSParamList and jsBindingTargets, not a structural impossibility.
 		// This sees only the added lines here; the hook path additionally folds
 		// whole-file bindings via addInFileDefs for pre-existing binding lines.
 		if lang == LangJS {
 			for _, name := range JSDeclaredNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
+			// Parameters, the JS sibling of the PyParamNames fold below and the
+			// GoDeclaredNames fold above — both of which have bound parameters
+			// since they shipped. Without this a destructured callback prop
+			// (`function C({onChange}) { … onChange(v) }`) resolves nowhere and
+			// its bare call is reported as a hallucination (#302).
+			for _, name := range JSParamNames(fd.AddedLines) {
 				known[name] = struct{}{}
 			}
 		}

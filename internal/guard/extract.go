@@ -2569,10 +2569,25 @@ func JSParamNames(lines []AddedLine) []string {
 				// continuation bounds that: a continuation starts with an
 				// operator or an opener, never with a keyword or a bare
 				// identifier-led statement. That line is then scanned normally.
-				if typeDepth <= 0 && !typeOpenedBrackets && !jsTypeContinuationStart(s) {
+				// A line that OPENS a nesting is still part of the type
+				// statement even when it does not read as a continuation — a
+				// wrapped `extends B,` / `C {` puts the interface body's brace
+				// on an identifier-led line, and ending the statement there
+				// scanned the body as ordinary code.
+				if typeDepth <= 0 && !typeOpenedBrackets &&
+					!jsTypeContinuationStart(s) && jsTypeDelta(s) <= 0 {
 					typeDepth, inTypeStmt = 0, false
 				} else {
 					typeDepth += jsTypeDelta(s)
+					// No typeOpenedBrackets update here. A nesting opened on a
+					// LATER line than the head does not need one: when it
+					// closes, the next line that does not read as a
+					// continuation ends the statement via the branch above.
+					// Setting the flag was written first and then deleted for
+					// being unkillable — no fixture could distinguish it,
+					// including one built specifically to try (an indented
+					// wrapped interface inside a namespace, where the
+					// column-zero escape cannot mask the difference).
 					if typeDepth <= 0 {
 						typeDepth = 0
 						if typeOpenedBrackets {
@@ -2906,7 +2921,20 @@ func jsParamListOpen(s string, from, fnOpen, lastGT int) (int, bool, bool) {
 			angle = 0
 			continue
 		case '<':
-			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+			// This function tracks a type PARAMETER clause (`f<T extends …>(`),
+			// not a type argument list — so require the conventional uppercase
+			// type-parameter name after `<`. An unspaced COMPARISON is
+			// lowercase on the right (`count<max`, `i<n`, `m<n`), and treating
+			// one as a generic opened a depth that hid every later `(` on the
+			// line, losing a real parameter and flagging a bare call to it.
+			// A `(` also opens one: a function type may sit in a type
+			// argument position (`Array<(z: number) => void>`), and rejecting
+			// that let its parameter name bind.
+			//
+			// splitJSParamList deliberately uses a different rule: it tracks
+			// type ARGUMENTS (`Map<string, Handler>`), which are lowercase.
+			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) &&
+				((s[i+1] >= 'A' && s[i+1] <= 'Z') || s[i+1] == '(') {
 				angle++
 			}
 			continue
@@ -3050,7 +3078,7 @@ func splitJSParamList(s string) []string {
 			// non-space AFTER `<` rejected the legal `Map< string, Handler >`,
 			// which then split mid-type and bound `Handler` — the type-name
 			// leak this tracking exists to prevent.
-			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' {
+			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && jsGenericArgsClose(s, i) {
 				angle++
 			}
 		case '>':
@@ -3237,6 +3265,14 @@ func jsHeadIsUnfinished(s string) bool {
 	}
 	switch t[len(t)-1] {
 	case '=', '|', '&', ',', '(', '<', '+', '-', '?', ':', '.':
+		return true
+	}
+	// A head that opens no body brace and does not terminate is unfinished even
+	// when it ends on an identifier — prettier wraps a long extends clause, so
+	// `export interface Props` / `  extends Base {` and `type Result = Success`
+	// / `  | (...)` both leave one. Without this the body was scanned as
+	// ordinary code and bound its type-only parameter names.
+	if !strings.ContainsAny(t, "{;") {
 		return true
 	}
 	// A conditional type's head ends on an IDENTIFIER (`type A = B extends C`)
@@ -3518,4 +3554,34 @@ func jsAssignLHS(decl string) string {
 		}
 	}
 	return ""
+}
+
+// jsGenericArgsClose reports whether the `<` at s[i] opens a type ARGUMENT list
+// that actually closes — i.e. a `>` is reached over type-ish text only.
+//
+// The bare "is there a later `>` somewhere" test was too weak: in a declarator
+// list an unspaced comparison latched the depth and suppressed all further
+// top-level comma splitting, so `let i = 0, ok = i<n, more = x>y;` dropped
+// `more` entirely and a bare call to it was then flagged — a false positive of
+// the class this file exists to close. An assignment `=` inside the candidate
+// span is the tell: a type argument list has no assignment in it, while
+// `i<n, more = x>` does. `=>` is not an assignment and is allowed, since a
+// function type may legitimately appear among type arguments.
+func jsGenericArgsClose(s string, i int) bool {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case '>':
+			if s[j-1] != '=' {
+				return true
+			}
+		case '=':
+			if j+1 >= len(s) || s[j+1] != '>' {
+				return false // an assignment: this was a comparison, not a generic
+			}
+			j++ // skip the arrow
+		case '(', ')', '{', '}', ';':
+			return false
+		}
+	}
+	return false
 }

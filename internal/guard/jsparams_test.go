@@ -1077,3 +1077,77 @@ func TestJSParamNamesRoundElevenShapes(t *testing.T) {
 		t.Errorf("generic-constraint handling regressed: %v", p)
 	}
 }
+
+// TestJSParamNamesRoundTwelveShapes pins review-round-12. Two of the three
+// mediums were false positives introduced by the round-10/11 angle tracking,
+// which is why both directions are asserted here.
+func TestJSParamNamesRoundTwelveShapes(t *testing.T) {
+	// Finding 1: prettier wraps a long extends clause, leaving a head that ends
+	// on an IDENTIFIER with no body brace. jsHeadIsUnfinished reported it
+	// finished, so the body was scanned as ordinary code and bound its
+	// type-only parameter names. Only single-line heads were covered before.
+	for _, tc := range []struct{ name, src, leak string }{
+		{"wrapped interface extends", "export interface Props\n  extends Base {\n  h: A | ((zLeak: number) => void);\n}", "zLeak"},
+		{"wrapped type union", "type Result = Success\n  | ((zLeak3: number) => void);", "zLeak3"},
+		{"wrapped multi-parent extends", "export interface P\n  extends B,\n  C {\n  h: ((zLeak4: number) => void);\n}", "zLeak4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); hasName(got, tc.leak) {
+				t.Errorf("bound %q from a wrapped type head: %v", tc.leak, got)
+			}
+		})
+	}
+
+	// The nesting a wrapped head opens on a LATER line must still end the type
+	// statement when it closes, with no `;` required. Indented throughout, so
+	// the column-zero jsTopLevelStatementStart escape cannot mask the defect —
+	// without the flag being set at that point, everything after the interface
+	// stays in type position.
+	if got := jsParams(t, `namespace NS {
+  export interface P
+    extends B,
+    C {
+    h: number
+  }
+  export function go(bq) { return bq(1); }
+}`); !hasName(got, "bq") {
+		t.Errorf("bq not bound after a wrapped interface whose body brace opened "+
+			"on a later line: %v", got)
+	}
+
+	// Finding 2: in a DECLARATOR list an unspaced comparison latched the angle
+	// depth (any later `>` satisfied lastGT), suppressing all further top-level
+	// comma splitting — so every declarator after it was lost and a bare call
+	// to one was flagged. A type argument list contains no assignment; the
+	// comparison form does.
+	for _, tc := range []struct{ src, want string }{
+		{`let i = 0, ok = i<n, more = x>y;`, "more"},
+		{`const isOlder = ver<prev, isNewer = ver>prev;`, "isNewer"},
+	} {
+		got := JSDeclaredNames(TextToAddedLines(tc.src))
+		if !hasName(got, tc.want) {
+			t.Errorf("%q lost to a latched generic depth: %v", tc.want, got)
+		}
+	}
+	// The type-argument tracking it exists for must survive.
+	for _, tc := range []struct{ src, leak string }{
+		{`function h(m: Map<string, Handler>, next) {}`, "Handler"},
+		{`const m = new Map<string, Bogus>();`, "Bogus"},
+	} {
+		if got := JSDeclaredNames(TextToAddedLines(tc.src)); hasName(got, tc.leak) {
+			t.Errorf("type name %q leaked: %v", tc.leak, got)
+		}
+	}
+
+	// Finding 3: the same latch in the opener scan hid every parameter list
+	// until the next `)`. A type PARAMETER clause is uppercase-led (or opens a
+	// function type); an unspaced comparison is lowercase on the right.
+	for _, tc := range []struct{ src, want string }{
+		{`return <div>{count<max && items.map((it) => it())}</div>;`, "it"},
+		{`const q = m<n ? p((cb) => cb()) : 0; let r = 5 > 4;`, "cb"},
+	} {
+		if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+			t.Errorf("%q hidden by a spurious generic depth: %v", tc.want, got)
+		}
+	}
+}

@@ -382,7 +382,12 @@ func LocallyBoundNames(lang Lang, lines []AddedLine, defSigDepthSeed func(lineNo
 			if jsSigDepth > 0 {
 				jsSigLines++
 				jsSig.WriteByte(' ')
-				jsSig.WriteString(s)
+				// Capped, as the JSParamNames sibling is: parseDiffOutput
+				// applies no capLine and its scanner accepts up to 4 MB, so
+				// accumulating raw lines up to maxJSSigLines could build a
+				// ~160 MB buffer and then run reIdentAll over all of it, on the
+				// pre-commit path that carries no deadline.
+				jsSig.WriteString(capLine(s))
 				if idx, closed := jsConsumeParens(s, &jsSigDepth); closed {
 					full := jsSig.String()
 					inner := full[:len(full)-(len(s)-idx)]

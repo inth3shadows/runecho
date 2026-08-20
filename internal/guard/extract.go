@@ -2509,6 +2509,10 @@ func JSParamNames(lines []AddedLine) []string {
 		first = false
 		prevNo = l.LineNo
 
+		// Where this line's opener scan begins. Nonzero only when a multi-line
+		// signature closed partway through it, so the remainder is still scanned.
+		lineFrom := 0
+
 		// --- type positions bind nothing -----------------------------------
 		if typeDepth > 0 || inTypeStmt {
 			// A new top-level statement ends any type statement outright, so a
@@ -2547,6 +2551,15 @@ func JSParamNames(lines []AddedLine) []string {
 					if strings.Contains(s, ";") {
 						inTypeStmt = false
 					}
+					// NOT followed by a fall-through into the opener scan.
+					// The line carrying the `;` is the type statement's own
+					// last line — for `type H =` / `(e: MouseEvent) => void;`
+					// it is the function type itself — so scanning it would
+					// bind `e`, a name from a pure type position. Review round
+					// 5 read this as the same early-exit defect fixed on the
+					// jsTopLevelStatementStart path; it is not, and the case
+					// that prompted it (a COMPLETE one-line conditional type
+					// latching at all) is fixed in jsHeadIsUnfinished instead.
 				}
 				return
 			}
@@ -2611,21 +2624,29 @@ func JSParamNames(lines []AddedLine) []string {
 				}
 				sig.WriteByte(' ')
 				sig.WriteString(s)
-				if idx, closed := jsConsumeParens(s, &sigDepth); closed {
-					// Test BEFORE materialising the accumulated text: sig.String()
-					// copies the whole buffer, and for a multi-line call that copy
-					// is thrown away immediately.
-					if sigIsFunction || jsArrowFollows(s[idx+1:]) {
-						full := sig.String()
-						// Trim back to the closing paren so a trailing `=> { body }`
-						// is not parsed as a parameter.
-						inner := full[:len(full)-(len(s)-idx)]
-						out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
-					}
-					sigDepth, sigLines = 0, 0
-					sig.Reset()
+				idx, closed := jsConsumeParens(s, &sigDepth)
+				if !closed {
+					return
 				}
-				return
+				// Test BEFORE materialising the accumulated text: sig.String()
+				// copies the whole buffer, and for a multi-line call that copy
+				// is thrown away immediately.
+				if sigIsFunction || jsArrowFollows(s[idx+1:]) {
+					full := sig.String()
+					// Trim back to the closing paren so a trailing `=> { body }`
+					// is not parsed as a parameter.
+					inner := full[:len(full)-(len(s)-idx)]
+					out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
+				}
+				sigDepth, sigLines = 0, 0
+				sig.Reset()
+				// Do NOT return: the rest of the closing line is ordinary code
+				// and may hold its own parameter lists. Returning here was the
+				// same early exit the single-line loop below was changed to
+				// avoid, and it cost both the body of `function f(\n a,\n) {
+				// const g = (bb) => bb(); }` and the inner half of a multi-line
+				// curried arrow, `(\n store,\n) => (next) => …`.
+				lineFrom = idx + 1
 			}
 		}
 
@@ -2651,7 +2672,7 @@ func JSParamNames(lines []AddedLine) []string {
 				fnOpen = jsFunctionParenAfter(s, loc[0])
 			}
 		}
-		from := 0
+		from := lineFrom
 		for {
 			open, isFn, mayLatch := jsParamListOpen(s, from, fnOpen)
 			if open < 0 {
@@ -2678,6 +2699,7 @@ func JSParamNames(lines []AddedLine) []string {
 				sig.WriteString(rest)
 				return
 			}
+			before := len(out)
 			out = appendJSParams(out, rest[:idx], sigIsFunction, rest[idx+1:])
 			sigDepth, sigLines = 0, 0
 			sig.Reset()
@@ -2689,7 +2711,20 @@ func JSParamNames(lines []AddedLine) []string {
 			// exit was justified by, and it is the standard redux-middleware /
 			// HOC shape. Every later candidate still passes jsArrowFollows, so
 			// continuing cannot bind a call's arguments.
-			from = open + 1 + idx + 1
+			//
+			// Where to resume depends on what this group turned out to be. A
+			// group that BOUND is a parameter list, and its interior holds
+			// nothing further of interest, so resume after its close. A group
+			// that bound nothing was a call or a parenthesised expression, and
+			// an arrow can be nested INSIDE it — `await (async (tok) => tok)`
+			// and `return (foo.map((x) => x))` both hide the real list there —
+			// so resume just past its opening paren instead. Skipping the whole
+			// group in that case is what lost them.
+			if len(out) > before {
+				from = open + 1 + idx + 1
+			} else {
+				from = open + 1
+			}
 			if from >= len(s) {
 				return
 			}
@@ -2731,9 +2766,11 @@ func JSParamNames(lines []AddedLine) []string {
 // -1 — computed once by the caller, since re-deriving it per call made the
 // opener loop quadratic in line length.
 func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
-	if fnOpen >= from {
-		return fnOpen, true, true
-	}
+	// fnOpen is NOT short-circuited ahead of the scan. Returning it immediately
+	// skipped any arrow parameter list EARLIER on the same line —
+	// `const g = (aaa) => 0; function f(bbb) {}` bound only `bbb` — and left
+	// the second of two `function` expressions unreachable, since only the first
+	// one's index is precomputed. It is matched in position below instead.
 	// Generic depth, so a parameter list inside a type-parameter clause is not
 	// mistaken for the real one. jsFunctionParenAfter does this for the
 	// `function` form; the arrow form needs it too, for a NESTED generic —
@@ -2756,6 +2793,9 @@ func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
 		}
 		if s[i] != '(' || angle > 0 {
 			continue
+		}
+		if i == fnOpen {
+			return i, true, true
 		}
 		j := i - 1
 		for j >= 0 && (s[j] == ' ' || s[j] == '\t') {
@@ -2793,8 +2833,8 @@ func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
 			}
 			return i, false, true
 		}
-		if kw, mayLatch := jsKeywordEndsAt(s, j); kw {
-			return i, false, mayLatch
+		if kw, mayLatch, word := jsKeywordEndsAt(s, j); kw {
+			return i, word == "function", mayLatch
 		}
 	}
 	return -1, false, false
@@ -2857,7 +2897,13 @@ func splitJSParamList(s string) []string {
 			depth--
 		case '<':
 			// `=>`'s `>` never reaches here, and `<=` is a comparison.
-			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+			// The discriminator is the byte BEFORE `<`, not after it: a
+			// generic follows its constructor directly (`Map<`), while a
+			// comparison is spaced on the left (`x < y`). Also requiring a
+			// non-space AFTER `<` rejected the legal `Map< string, Handler >`,
+			// which then split mid-type and bound `Handler` — the type-name
+			// leak this tracking exists to prevent.
+			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' {
 				angle++
 			}
 		case '>':
@@ -3016,21 +3062,30 @@ var jsKeywordsBeforeParams = map[string]bool{
 	"return": false, "yield": false, "typeof": false, "void": false,
 	"delete": false, "in": false, "of": false, "case": false,
 	"do": false, "else": false, "new": false,
+	// `export default (props) => …` is a real arrow, and a `function`
+	// EXPRESSION may appear anywhere an argument may (`foo(function (a) {},
+	// function (b) {})`), where the regex finds only the first.
+	"default": true, "function": true,
 }
 
 // jsKeywordEndsAt reports whether the identifier ending at s[j] (inclusive) is
 // one of jsKeywordsBeforeParams, and whether it may latch across lines.
-func jsKeywordEndsAt(s string, j int) (bool, bool) {
+// The third result is the keyword itself, so the caller can tell a `function`
+// EXPRESSION (`foo(function (a) {…})`) from an arrow-leading keyword: its body
+// opens with `{`, which jsArrowFollows rightly rejects, so it must be marked as
+// a function opener rather than left to that test.
+func jsKeywordEndsAt(s string, j int) (bool, bool, string) {
 	if j < 0 {
-		return false, false
+		return false, false, ""
 	}
 	end := j + 1
 	i := j
 	for i >= 0 && isJSIdentByte(s[i]) {
 		i--
 	}
-	latch, ok := jsKeywordsBeforeParams[s[i+1:end]]
-	return ok, latch
+	word := s[i+1 : end]
+	latch, ok := jsKeywordsBeforeParams[word]
+	return ok, latch, word
 }
 
 // jsHeadIsUnfinished reports whether a stripped line ends mid-statement — its
@@ -3049,8 +3104,11 @@ func jsHeadIsUnfinished(s string) bool {
 	}
 	// A conditional type's head ends on an IDENTIFIER (`type A = B extends C`)
 	// with the `?`/`:` arms on following lines, so the trailing-operator test
-	// alone lets it out of type position after one line.
-	return strings.Contains(t, "extends")
+	// alone lets it out of type position after one line. But a conditional type
+	// written wholly on one line (`type R = A extends B ? C : D`) is FINISHED,
+	// and treating it as open latched the extractor over the code after it.
+	// The `?` arm is what distinguishes the two.
+	return strings.Contains(t, "extends") && !strings.Contains(t, "?")
 }
 
 // jsPrecededByArrowOrTernary reports whether the byte at s[j] (the last

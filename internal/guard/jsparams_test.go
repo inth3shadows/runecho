@@ -670,3 +670,75 @@ func TestJSParamNamesArrowGenericClause(t *testing.T) {
 		t.Errorf("real parameter x not bound: %v", got)
 	}
 }
+
+// TestJSParamNamesRoundFiveShapes pins review-round-5. Findings 1, 3 and 5 were
+// one root cause — an early return that stopped scanning a line before its end —
+// so they are grouped; the rest are independent.
+func TestJSParamNamesRoundFiveShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		want      []string
+		absent    string
+	}{
+		// Finding 2 (which subsumes finding 1): a COMPLETE one-line conditional
+		// type latched the extractor, because jsHeadIsUnfinished keyed on
+		// "contains extends" alone. The `?` arm distinguishes finished from not.
+		{"complete one-line conditional type", `function o() {
+  type R = A extends B ? C : D;
+  const run = (cb) => cb();
+}`, []string{"cb"}, ""},
+		{"conditional type, no semicolon", `function o() {
+  type R = A extends any[] ? T[0] : T
+  const pick = (row) => row
+}`, []string{"row"}, ""},
+
+		// Finding 3: a multi-line signature closing mid-line left the rest of
+		// that line unscanned.
+		{"code after a multi-line close", `function f(
+  a,
+) { const g = (bb) => bb(); }`, []string{"a", "bb"}, ""},
+		{"multi-line curried arrow", `export const mw = (
+  store,
+) => (next) => next(store);`, []string{"store", "next"}, ""},
+
+		// Finding 5: resuming past a whole group skipped arrows nested inside a
+		// parenthesised expression.
+		{"arrow nested in a group", `const q = await (async (tok) => tok);`, []string{"tok"}, ""},
+		{"arrow nested in a return group", `function z() { return (foo.map((x) => x)); }`, []string{"x"}, ""},
+
+		// Finding 4: the precomputed `function` opener was returned ahead of the
+		// left-to-right scan, skipping any arrow earlier on the line.
+		{"arrow before a function keyword", `const g = (aaa) => 0; function f(bbb) {}`, []string{"aaa", "bbb"}, ""},
+
+		// Finding 7: `default` and a second `function` EXPRESSION.
+		{"export default arrow", `export default (props) => props();`, []string{"props"}, ""},
+		{"two function expressions", `foo(function (a) {}, function (b) {});`, []string{"a", "b"}, ""},
+
+		// Finding 6: a space-padded generic must not split mid-type.
+		{"space-padded generic", `function f(m: Map< string, Handler >, cb) {}`, []string{"m", "cb"}, "Handler"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := jsParams(t, tc.src)
+			for _, w := range tc.want {
+				if !hasName(got, w) {
+					t.Errorf("%q not bound: %v", w, got)
+				}
+			}
+			if tc.absent != "" && hasName(got, tc.absent) {
+				t.Errorf("type name %q leaked: %v", tc.absent, got)
+			}
+		})
+	}
+
+	// The type-alias cases that motivated the ROUND-3 fixes must not regress:
+	// the line carrying a type statement's `;` is the type's own last line, and
+	// scanning it would bind a name from a pure type position.
+	for _, src := range []string{
+		"type H =\n  (e: MouseEvent) => void;",
+		"export type Reducer =\n  (state: S, action: A) => S;",
+	} {
+		if got := jsParams(t, src); len(got) > 0 {
+			t.Errorf("bound %v from a multi-line type alias", got)
+		}
+	}
+}

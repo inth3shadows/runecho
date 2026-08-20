@@ -213,11 +213,31 @@ func (s *Set[T]) Add() {
 }
 
 func TestGoReceiverTypesIgnoresBlankReceiver(t *testing.T) {
+	// The second method is what makes this test able to fail: with only the
+	// blank receiver, goReceiverTypes returns at its `len(types) == 0` exit
+	// before `dropped` is ever computed, so the assertion below could not
+	// observe `_` being counted (found by adversarial review of #359). `w` is
+	// re-bound so it reaches the drop loop and `dropped` is non-empty for a
+	// legitimate reason.
 	src := `package p
 
 func (_ *Reader) Fetch() {}
+
+func (w *Writer) Flush() {
+	w := other()
+	_ = w
+}
 `
-	if got := goReceiverTypes(TextToAddedLines(src)); len(got) != 0 {
+	got, dropped := goReceiverTypes(TextToAddedLines(src))
+	if _, blank := got["_"]; blank || len(got) != 0 {
 		t.Errorf("blank receiver must bind nothing, got %v", got)
+	}
+	// `_` is not a name a call site can use, so it is not a declined candidate
+	// either — it must not show up as an abstain (#359).
+	if _, blank := dropped["_"]; blank {
+		t.Errorf("blank receiver must not count as a dropped receiver, got %v", dropped)
+	}
+	if _, ok := dropped["w"]; !ok {
+		t.Fatalf("control: the re-bound receiver must be dropped, got %v", dropped)
 	}
 }

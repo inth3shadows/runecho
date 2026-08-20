@@ -650,3 +650,249 @@ func TestDecisionLog_MultiLineAppend(t *testing.T) {
 		t.Errorf("last two decisions = %v, want [defer ask]", last2)
 	}
 }
+
+// TestRunHookMode_CheckReasonsPersisted is #359's integration proof: a check
+// that declines a candidate now records "unknown" plus WHY, end-to-end, where
+// before it was indistinguishable from a clean pass. It also pins the class
+// split — a gate-class abstain must NOT raise the strict-mode degraded advisory.
+func TestRunHookMode_CheckReasonsPersisted(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	enrolledStore(t, repoRoot, []string{"KnownFunc"})
+	// The qualified check needs a module path and a same-repo import to have a
+	// candidate at all; a lowercase selector on one is its unexported-selector
+	// abstain (guard.GoQualifiedViolationsWithReason).
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/m\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	goFile := filepath.Join(repoRoot, "main.go")
+	if err := os.WriteFile(goFile, []byte("package main\n\nimport \"example.com/m/internal/snap\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Strict on: this is the mode whose advisory the class split protects.
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	code, _, d := runHook(t, payload(t, "Edit", goFile, "\tsnap.missing()", "", nil))
+	if code != 0 || d.Hook.PermissionDec == "ask" {
+		t.Fatalf("expected a defer, got code=%d permission=%q", code, d.Hook.PermissionDec)
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("decisions.jsonl: no record written")
+	}
+	checks, _ := rec["checks"].(map[string]any)
+	if got, _ := checks["qualified"].(string); got != "unknown" {
+		t.Errorf("checks[qualified] = %q, want %q — the abstain used to log as \"ok\"", got, "unknown")
+	}
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	if reasons == nil {
+		t.Fatalf("record has no \"check_reasons\" field: %v", rec)
+	}
+	if got, _ := reasons["qualified"].(string); got != "unexported-selector" {
+		t.Errorf("check_reasons[qualified] = %q, want %q", got, "unexported-selector")
+	}
+	// The class split: a gate abstain is recorded but must not tell the user
+	// coverage was incomplete, or the advisory would fire on ordinary edits.
+	if strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("gate-class abstain raised the strict degraded advisory: %q", d.Hook.AdditionalContext)
+	}
+	if got, _ := rec["reason"].(string); got == "check-degraded" {
+		t.Error("gate-class abstain logged reason=check-degraded, want the ordinary defer reason")
+	}
+}
+
+// TestRunHookMode_DegradedReasonRaisesStrictAdvisory is the other half of
+// #359's class split: an unreadable pre-edit file is degraded coverage, and it
+// must still reach the strict advisory that gate abstains are kept out of.
+func TestRunHookMode_DegradedReasonRaisesStrictAdvisory(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	enrolledStore(t, repoRoot, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/m\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A file past readFileLines' maxInFileBytes cap: it EXISTS but reads as
+	// nil, which is exactly the state preEditReason has to tell apart from a
+	// brand-new file (which is definitively empty, not degraded).
+	goFile := filepath.Join(repoRoot, "main.go")
+	big := "package main\n\n" + strings.Repeat("// pad pad pad pad pad pad pad pad\n", (2<<20)/35+1)
+	if err := os.WriteFile(goFile, []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, d := runHook(t, payload(t, "Edit", goFile, "\tz := KnownFunc()", "", nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("decisions.jsonl: no record written")
+	}
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	if got, _ := reasons["qualified"].(string); got != "oversized-pre-edit-file" {
+		t.Fatalf("check_reasons[qualified] = %q, want oversized-pre-edit-file (reasons=%v)", got, reasons)
+	}
+	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("degraded abstain did not raise the strict advisory: %q", d.Hook.AdditionalContext)
+	}
+}
+
+// bigPreEditFile writes a file past readFileLines' maxInFileBytes cap at
+// repoRoot/name and returns its path. Such a file EXISTS but reads as nil,
+// which is the only production state that sets preEditReason (#359) — a
+// brand-new file is nil for a different reason and must not be reported.
+func bigPreEditFile(t *testing.T, repoRoot, name, header string) string {
+	t.Helper()
+	path := filepath.Join(repoRoot, name)
+	pad := "// pad pad pad pad pad pad pad pad\n"
+	if strings.HasSuffix(name, ".py") {
+		pad = "# pad pad pad pad pad pad pad pad\n"
+	}
+	if err := os.WriteFile(path, []byte(header+strings.Repeat(pad, (2<<20)/len(pad)+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// goModRepo is enrolledStore plus a go.mod, which the qualified check needs
+// before it has any candidate at all.
+func goModRepo(t *testing.T, repoRoot string, funcs []string) {
+	t.Helper()
+	enrolledStore(t, repoRoot, funcs)
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/m\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunHookMode_WriteIsNotDegradedByAnUnreadablePreEditFile pins the
+// `edit.ToolName != "Write"` half of preEditReason. A Write carries the whole
+// proposed file as its added text, so the checks that concatenate pre-edit and
+// added lines still have complete context even when the on-disk copy is past
+// the read cap — reporting lost coverage there would put the strict advisory on
+// every Write to a large file. Removing that clause leaves every other test
+// green (found by adversarial review of #359).
+func TestRunHookMode_WriteIsNotDegradedByAnUnreadablePreEditFile(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+	goFile := bigPreEditFile(t, repoRoot, "main.go", "package main\n\n")
+
+	code, _, d := runHook(t, payload(t, "Write", goFile, "", "package main\n\nfunc F() { KnownFunc() }\n", nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("decisions.jsonl: no record written")
+	}
+	if reasons, _ := rec["check_reasons"].(map[string]any); len(reasons) != 0 {
+		t.Errorf("a Write reported degraded pre-edit context: %v", reasons)
+	}
+	if strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("a Write raised the strict degraded advisory: %q", d.Hook.AdditionalContext)
+	}
+}
+
+// TestRunHookMode_MissingFileIsNotDegraded pins the os.Stat half: readFileLines
+// returns nil both for a file past the cap and for one that does not exist, and
+// only the first is lost coverage. Dropping the existence test leaves every
+// other test green (found by adversarial review of #359).
+func TestRunHookMode_MissingFileIsNotDegraded(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	// An Edit against a path that does not exist: nil fileLines, but the file is
+	// definitively empty rather than unreadable.
+	absent := filepath.Join(repoRoot, "absent.go")
+	code, _, d := runHook(t, payload(t, "Edit", absent, "\tz := KnownFunc()", "", nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := readLastDecisionLog(t)
+	if reasons, _ := rec["check_reasons"].(map[string]any); len(reasons) != 0 {
+		t.Errorf("a nonexistent file reported degraded pre-edit context: %v", reasons)
+	}
+	if strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("a nonexistent file raised the strict degraded advisory: %q", d.Hook.AdditionalContext)
+	}
+
+	// call-shape derives its own "oversized-pre-edit-file" inside the guard
+	// package, where the file's existence is not visible — runHookMode blanks it
+	// using the one os.Stat it already made. Without that, a kwarg-bearing edit
+	// to a file that does not exist reports lost coverage for a file that is
+	// definitively empty.
+	t.Setenv("RUNECHO_GUARD_CALLSHAPE", "1")
+	absentPy := filepath.Join(repoRoot, "absent.py")
+	if code, _, _ := runHook(t, payload(t, "Edit", absentPy, "notify(text=1)\n", "", nil)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec = readLastDecisionLog(t)
+	if reasons, _ := rec["check_reasons"].(map[string]any); len(reasons) != 0 {
+		t.Errorf("call-shape reported degraded context for a nonexistent file: %v", reasons)
+	}
+}
+
+// TestRunHookMode_DegradedContextOutranksAGateReason pins foldAbstainReason at
+// the recv-method and var-type call sites: when the pre-edit file is unreadable
+// AND the check declined a candidate on its own gate, the DEGRADED reason is
+// the one recorded — otherwise a routine gate reason masks real lost coverage
+// and the strict advisory goes silent. Passing the check's own reason straight
+// through leaves every other test green (found by adversarial review of #359).
+func TestRunHookMode_DegradedContextOutranksAGateReason(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_RECVMETHOD", "1")
+	t.Setenv("RUNECHO_GUARD_VARTYPE", "1")
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+	goFile := bigPreEditFile(t, repoRoot, "main.go", "package main\n\n")
+
+	// The hunk alone binds `r` as two different receivers (recv-method's
+	// ambiguous-receiver) and `v` twice (var-type's ambiguous-local), so each
+	// check has a gate reason of its own to be outranked.
+	hunk := "func (r *Reader) Fetch() {\n\tr.Parse()\n}\n\n" +
+		"func (r *Writer) Flush() {}\n\n" +
+		"func run() {\n\tvar v *Reader\n\tv.Parse()\n}\n\n" +
+		"func run2() {\n\tv := Reader{}\n\t_ = v\n}\n"
+	code, _, d := runHook(t, payload(t, "Edit", goFile, hunk, "", nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := readLastDecisionLog(t)
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	for _, check := range []string{"recv-method", "var-type"} {
+		if got, _ := reasons[check].(string); got != "oversized-pre-edit-file" {
+			t.Errorf("check_reasons[%s] = %q, want oversized-pre-edit-file (reasons=%v)", check, got, reasons)
+		}
+	}
+	if !strings.Contains(d.Hook.AdditionalContext, "could not run to completion") {
+		t.Errorf("degraded context did not raise the strict advisory: %q", d.Hook.AdditionalContext)
+	}
+}
+
+// TestRunHookMode_DroppedImportRecordsDegradedContext pins the one reason that
+// check has. Its own declines are all definitive, but on an Edit its bound-name
+// context comes from the pre-edit file, so an unreadable one really is lost
+// coverage. Passing "" there leaves every other test green (found by
+// adversarial review of #359).
+func TestRunHookMode_DroppedImportRecordsDegradedContext(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	enrolledStore(t, repoRoot, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_DROPPED_IMPORT", "1")
+	pyFile := bigPreEditFile(t, repoRoot, "m.py", "import os\n\n")
+
+	code, _, _ := runHook(t, payload(t, "Edit", pyFile, "x = 1\n", "", nil))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	rec := readLastDecisionLog(t)
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	if got, _ := reasons["dropped-import"].(string); got != "oversized-pre-edit-file" {
+		t.Errorf("check_reasons[dropped-import] = %q, want oversized-pre-edit-file (reasons=%v)", got, reasons)
+	}
+}

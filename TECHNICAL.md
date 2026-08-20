@@ -640,6 +640,37 @@ long the decision took, so `fpreport` and `runecho-guard` now join on it first
 `cmd/runecho-guard/declog.go` and `internal/guardstats/fpreport.go`) and fall
 back to the original 5-minute window only when no fingerprint match exists.
 
+`checks` (#333) and `check_reasons` (#359) are the per-check half of the record,
+written on hook ask/defer and pre-commit ask records. `checks` maps each check
+name to `ok` / `violation` / `unknown` / `skipped`; `check_reasons` maps the
+subset that abstained to why. Together they answer "did this check adjudicate
+anything", which `reason` alone cannot: an ask reason names only the checks that
+FIRED, so a check that ran and declined every candidate looked identical to one
+that never ran at all.
+
+`unknown` has two classes, and only the first raises the
+`RUNECHO_GUARD_STRICT` "coverage was incomplete" advisory:
+
+| Class | Reasons | Meaning |
+|---|---|---|
+| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dynamic-binding`, `go-work` and the other `depindex` lookup reasons | The input or the environment was missing — coverage really was lost for this edit |
+| gate | `shadowed-qualifier`, `unexported-selector`, `ambiguous-receiver`, `ambiguous-local`, `name-known-elsewhere`, `no-indexed-members`, `unreliable-call-shape`, `shadowed-callee`, `nested-def-shadow`, `ambiguous-decl-shapes`, `unusable-decl-shape`, `unparseable-added-signature`, `decl-edited-in-hunk` | A candidate existed and the check declined it on its own precision gate |
+
+The gate list is registered in `cmd/runecho-guard/checkresult.go`
+(`gateAbstainReasons`); an unregistered reason counts as degraded, so a new gate
+reason that forgets to register itself shows up as advisory noise rather than
+disappearing from the count. Gate abstains are the expected common case for
+`var-type` and `recv-method` — a Go method name that exists anywhere else in the
+repo could be promoted from an embedded type, and that is unresolvable without a
+type checker — which is why they are recorded but kept out of the advisory.
+
+Reasons are also recorded for a `skipped` verdict where one exists
+(`no-module-path`). A record with no abstaining check omits `check_reasons`
+entirely, so an absent field means "nothing reported a reason" — not "this
+record predates the field". Pre-commit records are the case to watch: that path
+runs four checks and still passes no abstain reason but `no-module-path`, so
+read a quiet pre-commit record as unmeasured rather than as clean.
+
 ## Exit Code Contract
 
 Every `runecho-ir` subcommand returns one of three values, defined as constants

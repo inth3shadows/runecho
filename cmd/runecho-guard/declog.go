@@ -86,6 +86,17 @@ type decisionRecord struct {
 	// in memory (checkresult.go) and discarded every time. Read back via
 	// guardstats.Decision.Checks / guardstats.FPStats.CheckRuns.
 	Checks map[string]string `json:"checks,omitempty"`
+	// CheckReasons is checkReasonMap(results) (#359): check name -> the reason
+	// its verdict is Unknown or Skipped ("shadowed-qualifier",
+	// "name-known-elsewhere", "oversized-pre-edit-file", "no-module-path", …).
+	// Present only for the checks that recorded one, so it is absent entirely on
+	// an edit where every check ran to a verdict.
+	//
+	// Checks alone says a check abstained; this says why, which is the
+	// difference between "var-type never adjudicates anything" and knowing WHICH
+	// gate is eating it. Written alongside Checks on the same records, and read
+	// back via guardstats.Decision.CheckReasons.
+	CheckReasons map[string]string `json:"check_reasons,omitempty"`
 }
 
 // editFingerprint returns a 12-hex-character fingerprint of a tool call's edit

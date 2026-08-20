@@ -37,12 +37,22 @@ func qualifiedEnabled() bool { return os.Getenv("RUNECHO_GUARD_QUALIFIED") != "0
 // (unread) local shadows — a rare corner on an 8 MiB+ file, degraded exactly as the
 // rest of the guard degrades on oversized input.
 func qualifiedViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, symbols map[string]struct{}, modulePath, path string) []guard.Violation {
+	vs, _ := qualifiedViolationsWithReason(lang, wholeFileLines, addedLines, symbols, modulePath, path)
+	return vs
+}
+
+// qualifiedViolationsWithReason is qualifiedViolations plus the reason a
+// candidate `q.Sym(` call was declined — see
+// guard.GoQualifiedViolationsWithReason, which this wraps. Empty for the
+// flag-off / wrong-language / no-module-path cases, which are Skipped
+// (not applicable), never Unknown.
+func qualifiedViolationsWithReason(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, symbols map[string]struct{}, modulePath, path string) ([]guard.Violation, string) {
 	if !qualifiedEnabled() || lang != guard.LangGo || modulePath == "" {
-		return nil
+		return nil, ""
 	}
-	vs := guard.GoQualifiedViolations(wholeFileLines, addedLines, symbols, modulePath)
+	vs, reason := guard.GoQualifiedViolationsWithReason(wholeFileLines, addedLines, symbols, modulePath)
 	for i := range vs {
 		vs[i].File = path
 	}
-	return vs
+	return vs, reason
 }

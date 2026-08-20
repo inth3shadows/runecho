@@ -22,12 +22,21 @@ func varTypeEnabled() bool { return os.Getenv("RUNECHO_GUARD_VARTYPE") == "1" }
 // on-disk file (pre-edit in hook mode); addedLines is the proposed new text.
 // Returns nil when the flag is off or the language is not Go.
 func varTypeViolations(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, known map[string]struct{}, path string) []guard.Violation {
+	vs, _ := varTypeViolationsWithReason(lang, wholeFileLines, addedLines, known, path)
+	return vs
+}
+
+// varTypeViolationsWithReason is varTypeViolations plus the reason a candidate
+// `v.Method(` call was declined — see guard.GoVarTypeMethodViolationsWithReason,
+// which this wraps. Empty for the flag-off / wrong-language cases, which are
+// Skipped, never Unknown.
+func varTypeViolationsWithReason(lang guard.Lang, wholeFileLines, addedLines []guard.AddedLine, known map[string]struct{}, path string) ([]guard.Violation, string) {
 	if !varTypeEnabled() || lang != guard.LangGo {
-		return nil
+		return nil, ""
 	}
-	vs := guard.GoVarTypeMethodViolations(wholeFileLines, addedLines, known)
+	vs, reason := guard.GoVarTypeMethodViolationsWithReason(wholeFileLines, addedLines, known)
 	for i := range vs {
 		vs[i].File = path
 	}
-	return vs
+	return vs, reason
 }

@@ -387,12 +387,13 @@ func runArgs(args []string) int {
 
 	// Log after the stderr report — fail-open: log errors are silently discarded.
 	logDecision(decisionRecord{
-		Mode:     "precommit",
-		Repo:     repo.Name,
-		Decision: "ask",
-		Reason:   askReason(fired),
-		Symbols:  syms,
-		Checks:   checkStatusMap(results),
+		Mode:         "precommit",
+		Repo:         repo.Name,
+		Decision:     "ask",
+		Reason:       askReason(fired),
+		Symbols:      syms,
+		Checks:       checkStatusMap(results),
+		CheckReasons: checkReasonMap(results),
 	})
 
 	if *dryRun {
@@ -689,7 +690,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// contract at all. This path costs a single store open, only for a
 		// session that named a contract, and leaves the log alone when it
 		// abstains.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath), editFingerprint(edit), nil) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, guard.LangFor(filePath), editFingerprint(edit), nil, nil) {
 			return 0
 		}
 		hookDefer()
@@ -713,7 +714,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// pays for its own store open; every other edit picks it up from
 		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
 		// session explicitly activated a contract AND the path fell outside it.
-		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang, editFingerprint(edit), nil) {
+		if askContractOnly(out, contractWarningFor(filePath, payload.SessionID), filePath, lang, editFingerprint(edit), nil, nil) {
 			return 0
 		}
 		hookDefer()
@@ -750,6 +751,32 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// whole-file bound set below — same snapshot, one read/scan per hook.
 	fileLines := readFileLines(filePath)
 	addInFileDefs(symbols, fileLines, lang)
+
+	// One answer to "was the pre-edit file's context available to the checks that
+	// need it", shared by every check below (#359). readFileLines returns nil for
+	// BOTH "the file does not exist yet" and "it exists but is oversized or
+	// unreadable", and only the second is degraded coverage — a brand-new file
+	// this edit creates is DEFINITIVELY empty, so an ordinary new-file Write must
+	// not report lost coverage (the same distinction the file-scope arm below
+	// used to re-derive inline).
+	//
+	// Write is excluded even when the pre-edit copy is unreadable: its newLines
+	// ARE the whole proposed file, so every check that concatenates
+	// fileLines+newLines (qualified, recv-method, var-type) or reads
+	// addedIsWholeFile (call-shape) still sees complete context. Only a
+	// hunk-scoped Edit/MultiEdit actually loses anything.
+	//
+	// file-scope deliberately does NOT use this and keeps its own inline
+	// re-derivation below: fileLines is its only whole-file source (it never
+	// concatenates newLines), so an unreadable pre-edit copy degrades it for a
+	// Write too. Same root cause, different reach — folding them into one rule
+	// would either under-report file-scope or over-report the other four.
+	preEditReason := ""
+	if len(fileLines) == 0 && edit.ToolName != "Write" {
+		if _, err := os.Stat(filePath); err == nil {
+			preEditReason = "oversized-pre-edit-file"
+		}
+	}
 
 	// C3 learned-allow: fold in symbols this repo has approved often enough to
 	// trust (count>=N, within TTL) so the guard stops re-asking about them.
@@ -837,8 +864,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	qualifiedResult := CheckResult{Check: "qualified", Verdict: VerdictSkipped}
 	if qualifiedEnabled() && lang == guard.LangGo {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
-			qualifiedV = qualifiedViolations(lang, fileLines, newLines, symbols, modulePath, filePath)
-			qualifiedResult = classifyResult("qualified", len(qualifiedV) > 0, "")
+			var reason string
+			qualifiedV, reason = qualifiedViolationsWithReason(lang, fileLines, newLines, symbols, modulePath, filePath)
+			qualifiedResult = classifyResult("qualified", len(qualifiedV) > 0, foldAbstainReason(reason, preEditReason))
 		} else {
 			// No go.mod anywhere upward: this check validates a call against
 			// the repo's OWN module IR, so with no module there is no
@@ -857,8 +885,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// has to be visible, or the check judges the call against a stale file.
 	recvMethodResult := CheckResult{Check: "recv-method", Verdict: VerdictSkipped}
 	if recvMethodEnabled() && lang == guard.LangGo {
-		rv := recvMethodViolations(lang, fileLines, newLines, symbols, filePath)
-		recvMethodResult = classifyResult("recv-method", len(rv) > 0, "")
+		rv, reason := recvMethodViolationsWithReason(lang, fileLines, newLines, symbols, filePath)
+		recvMethodResult = classifyResult("recv-method", len(rv) > 0, foldAbstainReason(reason, preEditReason))
 		violations = append(violations, rv...)
 	}
 	results = append(results, recvMethodResult)
@@ -869,8 +897,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// vartype.go for why it is not folded into RECVMETHOD.
 	varTypeResult := CheckResult{Check: "var-type", Verdict: VerdictSkipped}
 	if varTypeEnabled() && lang == guard.LangGo {
-		vv := varTypeViolations(lang, fileLines, newLines, symbols, filePath)
-		varTypeResult = classifyResult("var-type", len(vv) > 0, "")
+		vv, reason := varTypeViolationsWithReason(lang, fileLines, newLines, symbols, filePath)
+		varTypeResult = classifyResult("var-type", len(vv) > 0, foldAbstainReason(reason, preEditReason))
 		violations = append(violations, vv...)
 	}
 	results = append(results, varTypeResult)
@@ -932,10 +960,27 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// dangling and duplicate do. Store-free: it resolves against the same file's own
 	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
 	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
-	callShapes := callShapeMismatches(lang, fileLines, diffs[0], edit.ToolName, removedText)
+	callShapes, callShapeReason := callShapeMismatchesWithReason(lang, fileLines, diffs[0], edit.ToolName, removedText)
 	callShapeResult := CheckResult{Check: "call-shape", Verdict: VerdictSkipped}
 	if callShapeEnabled() && lang == guard.LangPython {
-		callShapeResult = classifyResult("call-shape", len(callShapes) > 0, "")
+		// preEditReason is NOT folded in here: this check reads its own
+		// declaration source (added lines for a Write, fileLines otherwise) and
+		// already reports "oversized-pre-edit-file" itself when that source is
+		// empty AND the edit had a candidate — which is the narrower, more
+		// accurate answer than the shared per-edit one.
+		//
+		// It IS consulted for the one thing the guard package cannot see: the
+		// check receives a nil declaration source for a file that does not
+		// exist and for one that is unreadable alike (readFileLines collapses
+		// them), and only the second is lost coverage. preEditReason has
+		// already made that os.Stat call, so an empty preEditReason on a
+		// non-Write edit means the file is definitively empty — the same
+		// re-derivation the file-scope arm above does, reusing the one stat
+		// rather than making a third.
+		if callShapeReason == "oversized-pre-edit-file" && preEditReason == "" {
+			callShapeReason = ""
+		}
+		callShapeResult = classifyResult("call-shape", len(callShapes) > 0, callShapeReason)
 	}
 
 	// Pre-write ruff lint substrate (RUNECHO_GUARD_LINT=1, default off; #333):
@@ -1043,7 +1088,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 				// hookDefSigDepthByLine a second time.
 				defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
 				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
-				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, "")
+				// No check-specific reason: every decline inside
+				// DroppedImportRefsLinesWithBound is definitive (the import
+				// survived in the new text, or the name is rebound there), so
+				// this check has no candidate-level abstain to report (#359).
+				// preEditReason still applies: for an Edit/MultiEdit, preBound
+				// above is built from fileLines, so an unreadable pre-edit file
+				// leaves a rebind on an untouched line invisible.
+				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, preEditReason)
 			}
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in
@@ -1068,7 +1120,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	results = append(results, danglingResult, droppedResult, duplicateResult, callShapeResult)
 
 	fired := firedChecksFrom(results)
-	degraded := countUnknown(results)
+	// Degraded-class Unknowns only (#359): a check that declined one candidate on
+	// its own precision gate is recorded in decisions.jsonl but does not raise the
+	// strict advisory — see countDegradedUnknown for why the two questions parted
+	// ways.
+	degraded := countDegradedUnknown(results)
 
 	// Gated on BOTH len(violations) and fired.anyNonViolation(): violations
 	// covers additive/recv-method/var-type (still merged into that slice), and
@@ -1084,7 +1140,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// touch is precisely the case this check exists for — so it is answered
 		// here, ahead of the degraded and stale advisories, because an ask is a
 		// stronger signal than either and the hook emits only one decision.
-		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit), checkStatusMap(results)) {
+		if askContractOnly(out, cw, filePath, lang, editFingerprint(edit), checkStatusMap(results), checkReasonMap(results)) {
 			return 0
 		}
 		// Nothing flagged. A degraded check means "found nothing" is not the
@@ -1102,15 +1158,22 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// (#330), not just the three deletion-side ones — a qualified/deps-go/
 		// file-scope abstain (no module path, go.work, a star-import, …) that
 		// used to log identically to a clean pass now surfaces here too.
+		//
+		// DEGRADED-class only since #359: a check that saw a candidate and
+		// declined it on its own precision gate is recorded in decisions.jsonl
+		// but says nothing here. Measured on golang.org/x/text, gate abstains
+		// are ~100% of all abstains and hit 17.8% of files for recv-method, so
+		// counting them would put this advisory on roughly one in five Go edits
+		// — the noise that trains a user to stop reading it.
 		if degraded > 0 && strictMode() {
-			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check-specific abstain) — coverage was incomplete for this edit.", degraded))
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded", Checks: checkStatusMap(results)})
+			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check abstained on degraded input) — coverage was incomplete for this edit.", degraded))
+			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded", Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
 			return 0
 		}
 		// If the IR is stale the check may be incomplete — say so via
 		// additionalContext (which informs Claude without forcing an allow/deny).
 		staleReason := hookDeferStale(out, latest)
-		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason, Checks: checkStatusMap(results)})
+		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason, Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
 		return 0
 	}
 
@@ -1186,7 +1249,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	syms = append(syms, lintSection(&sb, lintFindingsList)...)
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results)}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

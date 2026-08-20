@@ -186,7 +186,15 @@ func goFuncSignatureIdents(ctx []AddedLine) map[string]struct{} {
 // while still catching a REAL rebinding (necessarily different text, even to
 // the same type) — the same conservative "never rebound" discipline
 // goReceiverTypes applies, just tolerant of this one duplication source.
-func goVarTypes(ctx []AddedLine) map[string]string {
+//
+// The second return is the names this pass BOUND and then dropped — rebound
+// more than once, or shadowed by a function-signature identifier. A call on one
+// of them is a candidate this check declined (#359's "ambiguous-local"), as
+// distinct from a selector on a name it never bound at all, which was never
+// this check's shape. A name whose binding line was itself unreadable (a
+// chained call, a truncated type) never enters the map and is deliberately NOT
+// reported: nothing distinguishes it from any other qualifier at the call site.
+func goVarTypes(ctx []AddedLine) (map[string]string, map[string]struct{}) {
 	types := make(map[string]string)
 	bindingTexts := make(map[string]map[string]struct{})
 	mark := func(name, text string) {
@@ -263,20 +271,22 @@ func goVarTypes(ctx []AddedLine) map[string]string {
 		}
 	}
 	if len(types) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Computed only once there is at least one candidate binding to filter —
 	// this is a second full pass over ctx, and most files have none.
 	reserved := goFuncSignatureIdents(ctx)
+	dropped := make(map[string]struct{})
 	for name := range types {
 		if _, isReserved := reserved[name]; len(bindingTexts[name]) > 1 || isReserved {
 			delete(types, name)
+			dropped[name] = struct{}{}
 		}
 	}
 	if len(types) == 0 {
-		return nil
+		return nil, dropped
 	}
-	return types
+	return types, dropped
 }
 
 // GoVarTypeMethodViolations reports calls in addedLines of the form
@@ -290,18 +300,46 @@ func goVarTypes(ctx []AddedLine) map[string]string {
 // file's header for what each protects against. The two checks are kept
 // separate (not merged into one type map) so each has its own env gate and
 // decision-log reason; see cmd/runecho-guard/vartype.go for why.
+//
+// Thin wrapper over GoVarTypeMethodViolationsWithReason, discarding the
+// abstain reason — kept so every existing caller is untouched by #359.
 func GoVarTypeMethodViolations(wholeFile, addedLines []AddedLine, known map[string]struct{}) []Violation {
+	vs, _ := GoVarTypeMethodViolationsWithReason(wholeFile, addedLines, known)
+	return vs
+}
+
+// GoVarTypeMethodViolationsWithReason is GoVarTypeMethodViolations plus the
+// reason a candidate `v.Method(` call was declined, where v is a local this
+// file binds to a repo type — the only calls this check ever adjudicates:
+// "ambiguous-local" (bound more than once, or shadowed by a signature
+// identifier), "no-indexed-members" (the type has no member set in the index —
+// routine when this edit introduces the type, so it is a gate reason, not a
+// degraded one), "name-known-elsewhere" (the method name exists elsewhere in
+// the repo, so it could be promoted from an embedded field).
+//
+// Empty when the check ran to completion, and empty for selectors that were
+// never this check's shape — see GoReceiverMethodViolationsWithReason, whose
+// rule this mirrors exactly. First reason encountered wins.
+func GoVarTypeMethodViolationsWithReason(wholeFile, addedLines []AddedLine, known map[string]struct{}) ([]Violation, string) {
 	ctx := make([]AddedLine, 0, len(wholeFile)+len(addedLines))
 	ctx = append(ctx, wholeFile...)
 	ctx = append(ctx, addedLines...)
 
-	varTypes := goVarTypes(ctx)
-	if len(varTypes) == 0 {
-		return nil
+	varTypes, droppedVars := goVarTypes(ctx)
+	if len(varTypes) == 0 && len(droppedVars) == 0 {
+		return nil, ""
 	}
-	typesWithMembers := goTypesWithMembers(known)
+	// Built only when a usable binding survived — see the identical guard in
+	// GoReceiverMethodViolationsWithReason for why (an unread O(|known|) pass on
+	// the all-dropped path, which #359's removal of the early return made
+	// reachable).
+	var typesWithMembers map[string]struct{}
+	if len(varTypes) > 0 {
+		typesWithMembers = goTypesWithMembers(known)
+	}
 
 	var violations []Violation
+	var reason string
 	seen := make(map[string]struct{})
 	open := ""
 	prevNo := 0
@@ -330,19 +368,36 @@ func GoVarTypeMethodViolations(wholeFile, addedLines []AddedLine, known map[stri
 			}
 			typ, ok := varTypes[q]
 			if !ok {
-				continue // not a single unambiguous typed local binding
+				// Not a single unambiguous typed local binding. Only a name
+				// this file DID bind and then dropped is a declined candidate.
+				if _, wasBound := droppedVars[q]; wasBound && reason == "" {
+					reason = "ambiguous-local"
+				}
+				continue
 			}
 			if _, ok := typesWithMembers[typ]; !ok {
-				continue // T has no indexed member set to argue from
+				// T has no indexed member set to argue from.
+				if reason == "" {
+					reason = "no-indexed-members"
+				}
+				continue
 			}
 			if _, ok := known[typ+"."+sym]; ok {
 				continue // the method exists on this type
 			}
 			if _, ok := known[sym]; ok {
-				continue // the name exists somewhere — could be promoted
+				// The name exists somewhere — could be promoted.
+				if reason == "" {
+					reason = "name-known-elsewhere"
+				}
+				continue
 			}
 			if goNameUsedAsAnyMethod(known, sym) {
-				continue // the name is a method of some other type
+				// The name is a method of some other type — could be promoted.
+				if reason == "" {
+					reason = "name-known-elsewhere"
+				}
+				continue
 			}
 			key := typ + "." + sym
 			if _, dup := seen[key]; dup {
@@ -358,5 +413,5 @@ func GoVarTypeMethodViolations(wholeFile, addedLines []AddedLine, known map[stri
 			})
 		}
 	}
-	return violations
+	return violations, reason
 }

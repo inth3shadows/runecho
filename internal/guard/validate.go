@@ -108,6 +108,14 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			for _, name := range JSDeclaredNames(fd.AddedLines) {
 				known[name] = struct{}{}
 			}
+			// Parameters, the JS sibling of the PyParamNames fold below and the
+			// GoDeclaredNames fold above — both of which have bound parameters
+			// since they shipped. Without this a destructured callback prop
+			// (`function C({onChange}) { … onChange(v) }`) resolves nowhere and
+			// its bare call is reported as a hallucination (#302).
+			for _, name := range JSParamNames(fd.AddedLines) {
+				known[name] = struct{}{}
+			}
 		}
 		// Go's sibling gap, and it is not optional. This branch used to be absent
 		// with the note "Go already skips bare lowercase refs, so this fold belongs

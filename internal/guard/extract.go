@@ -2435,3 +2435,289 @@ func isImportLine(lang Lang, text string) bool {
 	}
 	return false
 }
+
+// jsTypeAliasOpen matches the head of a TS type alias (`type H = …`,
+// `export type H<T> = …`). Everything a type alias binds is a TYPE, so a
+// parameter list inside one — `type Handler = (evt: MouseEvent) => void` — binds
+// NOTHING. Without this, that arrow reads exactly like a value arrow (its `(` is
+// preceded by `=`, the same as `const f = (evt) => …`) and JSParamNames would
+// bind `evt`, masking a genuine undefined `evt` reference elsewhere in the file.
+var jsTypeAliasOpen = regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?type\s+[A-Za-z_$][\w$]*\s*[=<]`)
+
+// jsInterfaceOpen matches the head of a TS interface body. Same reasoning as
+// jsTypeAliasOpen: an interface body is a pure type position.
+var jsInterfaceOpen = regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?interface\s+[A-Za-z_$][\w$]*`)
+
+// jsFunctionOpen matches a `function` keyword whose parameter list opens on the
+// same line — `function f(`, `async function <T>(`, `export default function(`.
+// The `function` keyword is the one opener that is unambiguously a VALUE
+// position, so it needs no lookahead past the closing paren to be trusted.
+var jsFunctionOpen = regexp.MustCompile(`\bfunction\b[^(]*\(`)
+
+// JSParamNames returns the identifiers bound by JS/TS function and arrow
+// PARAMETER lists, across lines. It is the JS sibling of PyParamNames and
+// GoDeclaredNames, both of which have folded parameters into the resolvable set
+// since they shipped; the JS arm folded only JSDeclaredNames (const/let/var
+// declarators), so a parameter — most visibly a destructured callback prop —
+// resolved nowhere and a bare call to it was reported as a hallucination:
+//
+//	function Picker({          // <- `onChange` bound here, multi-line
+//	  value,
+//	  onChange,
+//	}: PickerProps) {
+//	  return <button onClick={() => onChange(value)} />;   // <- flagged (#302)
+//	}
+//
+// JSDeclaredNames' doc says parameters are "deliberately EXCLUDED" because a TS
+// annotation (`ctx: RouteContext`) "would leak the type name". That reason no
+// longer holds: jsBindingTargets takes the LEADING identifier of an annotated
+// element and jsPatternInner discards a whole-pattern annotation, so
+// `{value, onChange}: PickerProps` yields exactly [value onChange] and never
+// `PickerProps`. Type leakage is handled by the shared helpers; what is NOT
+// handled by them — and is this function's real hazard — is a parameter list
+// sitting in a TYPE position, where nothing is bound at all. Those are excluded
+// structurally below, not by annotation-stripping.
+//
+// Precision follows JSDeclaredNames, not LocallyBoundNames: folding a name into
+// the additive known set means a genuine hallucination of that name stops being
+// caught, so every ambiguous construct binds nothing rather than guessing.
+func JSParamNames(lines []AddedLine) []string {
+	var out []string
+	// sigDepth > 0 means a parameter list's parens are open across lines; sig
+	// accumulates the stripped text, exactly as PyParamNames does for a def.
+	sigDepth := 0
+	var sig strings.Builder
+	sigIsFunction := false // opener carried the `function` keyword
+	typeDepth := 0         // >0 while inside an interface body or type alias
+	inTypeStmt := false
+	prevNo := 0
+	first := true
+	scanStripped(LangJS, lines, func(s string, l AddedLine) {
+		// A diff hunk's added lines may be non-contiguous, so no cross-line
+		// state may be assumed to survive a gap. Unlike PyParamNames there is
+		// no seed callback here: this extractor's callers pass whole,
+		// contiguous files (see foldinfile.go / validate.go), and inventing a
+		// resumable-depth rule for a state nobody currently reaches would be
+		// untestable surface. Reset and move on.
+		if first || l.LineNo != prevNo+1 {
+			sigDepth, typeDepth, inTypeStmt = 0, 0, false
+			sig.Reset()
+		}
+		first = false
+		prevNo = l.LineNo
+
+		// --- type positions bind nothing -----------------------------------
+		if typeDepth > 0 || inTypeStmt {
+			typeDepth += jsBracketDelta(s)
+			if typeDepth <= 0 {
+				typeDepth = 0
+				// A one-line alias (`type H = (e: E) => void;`) never opens a
+				// brace, so statement end is the line end, not a closing brace.
+				inTypeStmt = false
+			}
+			return
+		}
+		// Substring-gated: these two regexes are anchored but still cost real
+		// backtracking on a deeply-indented line, and running them unguarded on
+		// every line of a large file was 89% of this extractor's total runtime
+		// (CPU profile, 400 KB TS corpus). The keyword test is exact — both
+		// patterns require the literal word — so gating changes no result.
+		if (strings.Contains(s, "interface") && jsInterfaceOpen.MatchString(s)) ||
+			(strings.Contains(s, "type") && jsTypeAliasOpen.MatchString(s)) {
+			typeDepth = jsBracketDelta(s)
+			if typeDepth > 0 {
+				inTypeStmt = true
+			}
+			return
+		}
+
+		// --- continuation of a parameter list already open ------------------
+		if sigDepth > 0 {
+			sig.WriteByte(' ')
+			sig.WriteString(s)
+			if idx, closed := jsConsumeParens(s, &sigDepth); closed {
+				// Test BEFORE materialising the accumulated text: sig.String()
+				// copies the whole buffer, and for a multi-line call that copy
+				// is thrown away immediately.
+				if sigIsFunction || jsArrowFollows(s[idx+1:]) {
+					full := sig.String()
+					// Trim back to the closing paren so a trailing `=> { body }`
+					// is not parsed as a parameter.
+					inner := full[:len(full)-(len(s)-idx)]
+					out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
+				}
+				sigDepth = 0
+				sig.Reset()
+			}
+			return
+		}
+
+		// --- a parameter list may open on this line -------------------------
+		open, isFn := jsParamListOpen(s)
+		if open < 0 {
+			return
+		}
+		sigIsFunction = isFn
+		sigDepth = 1
+		rest := s[open+1:]
+		if idx, closed := jsConsumeParens(rest, &sigDepth); closed {
+			out = appendJSParams(out, rest[:idx], sigIsFunction, rest[idx+1:])
+			sigDepth = 0
+			sig.Reset()
+			return
+		}
+		sig.Reset()
+		sig.WriteString(rest)
+	})
+	return out
+}
+
+// jsParamListOpen finds the first parameter list opener on a line, returning the
+// index of its `(` and whether the opener carried the `function` keyword.
+// Returns -1 when the line opens no parameter list that may be trusted.
+//
+// Two openers are recognised, and the asymmetry between them is deliberate:
+//
+//   - `function` — unambiguously a value position, trusted on sight.
+//   - a bare `(` — only MAYBE an arrow's parameter list. It is trusted only if
+//     the closing paren is followed by `=>` (decided in appendJSParams, which
+//     is the first point the closer is known), and only if the `(` is not
+//     preceded by `:`. That `:` test drops two constructs at once: a type
+//     annotation (`onChange: (v: X) => void`) and an object-literal arrow
+//     property (`{ onChange: (v) => … }`). The second IS a real value binding
+//     and is knowingly given up — separating the two needs to know whether the
+//     enclosing braces are a type or an object literal, which is parsing, and
+//     the cost of guessing wrong is a false negative.
+//
+// A method shorthand (`handleClick(e) { … }`) is deliberately NOT recognised:
+// it is indistinguishable from a call (`handleClick(e);`) without knowing
+// whether a `{` that follows opens a body or a block. Documented gap.
+//
+// Only the FIRST eligible opener on a line is returned. Two function
+// definitions sharing one line is not a shape worth the state to handle.
+func jsParamListOpen(s string) (int, bool) {
+	if strings.Contains(s, "function") {
+		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
+			return loc[1] - 1, true
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '(' {
+			continue
+		}
+		j := i - 1
+		for j >= 0 && (s[j] == ' ' || s[j] == '\t') {
+			j--
+		}
+		// Preceded by `:` at any distance of whitespace → type annotation or
+		// object-literal property. Bind nothing (see doc above).
+		if j >= 0 && s[j] == ':' {
+			return -1, false
+		}
+		// Preceded directly by an identifier character → a CALL (`foo(`) or a
+		// method shorthand (`m(a) {`), never an arrow's parameter list, whose
+		// `(` can only follow `=`, `,`, `(`, `[`, `>` or line start.
+		//
+		// PERFORMANCE ONLY — deliberately NOT a correctness rule, and no
+		// fixture can kill a mutation of it. Everything it rejects here is
+		// rejected again downstream by jsArrowFollows (a call's `)` is followed
+		// by `;`/`,`/`)`, a method's by `{` — never by `=>`), so removing it
+		// changes no result. It exists to reject the most common unclosed `(`
+		// in real code BEFORE the line-accumulator does the work: measured on
+		// the 400 KB TS corpus, 4.42 ms → 4.78 ms and 961 KB → 1205 KB per run
+		// with it removed. Kept for that, claimed as unkillable, not annotated
+		// as a gap.
+		if j >= 0 && isJSIdentByte(s[j]) {
+			continue
+		}
+		return i, false
+	}
+	return -1, false
+}
+
+// isJSIdentByte reports whether b may appear in a JS/TS identifier.
+func isJSIdentByte(b byte) bool {
+	return b == '_' || b == '$' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// appendJSParams parses one complete parameter list and appends its bindings.
+// after is the text following the closing paren, used to confirm that a
+// non-`function` opener really was an arrow: `(a, b) => …` binds, `foo(a, b);`
+// and `method(a) { … }` do not. An optional TS return annotation may sit between
+// the `)` and the `=>` (`(a): Foo => a`), so the test is that `=>` appears
+// before any `{` or `;`, not that it appears immediately.
+func appendJSParams(out []string, inner string, isFunction bool, after string) []string {
+	if !isFunction && !jsArrowFollows(after) {
+		return out
+	}
+	for _, el := range splitTopLevelCommas(inner) {
+		out = append(out, jsBindingTargets(el)...)
+	}
+	return out
+}
+
+// jsArrowFollows reports whether `=>` appears in s before any `{` or `;` —
+// i.e. whether the parameter list just closed belongs to an arrow function
+// rather than to a call or a method body.
+func jsArrowFollows(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{', ';':
+			return false
+		case '=':
+			if i+1 < len(s) && s[i+1] == '>' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// jsConsumeParens advances *depth over s's parens and returns the index of the
+// paren that balanced it (and true) when the list closes on this line.
+func jsConsumeParens(s string, depth *int) (int, bool) {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			*depth++
+		case ')':
+			*depth--
+			if *depth <= 0 {
+				return i, true
+			}
+		}
+	}
+	return -1, false
+}
+
+// jsBracketDelta is the net change in ()/[]/{} nesting across s.
+func jsBracketDelta(s string) int {
+	d := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			d++
+		case ')', ']', '}':
+			d--
+		}
+	}
+	return d
+}
+
+// jsOpenParamListLoose is jsParamListOpen's over-inclusive twin, for
+// LocallyBoundNames. It drops the `:`-preceded exclusion (a type annotation's
+// parameter names cost nothing in a set that only suppresses warnings) and does
+// no type-block tracking. Precision belongs to JSParamNames; this one's job is
+// reach. Returns the index of the `(` and whether a `function` keyword led it.
+func jsOpenParamListLoose(s string) (int, bool) {
+	if strings.Contains(s, "function") {
+		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
+			return loc[1] - 1, true
+		}
+	}
+	if i := strings.IndexByte(s, '('); i >= 0 {
+		return i, false
+	}
+	return -1, false
+}

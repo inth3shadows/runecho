@@ -1027,3 +1027,53 @@ func TestJSParamNamesRoundTenShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestJSParamNamesOverlongLineNoPanic pins review-round-11's two HIGH findings.
+// A previous revision capped the line INSIDE jsParenMatches while
+// jsParamListOpen went on scanning the full string, so `match[open]` indexed
+// past the table. parseDiffOutput applies no capLine and its scanner accepts up
+// to 4 MB, and pre-commit mode is not wrapped in deferOnPanic — so this aborted
+// `git commit` with a Go stack trace. The cap is applied once at entry now.
+//
+// Constructs the AddedLine directly: TextToAddedLines caps, so it cannot reach
+// the uncapped path that panicked.
+func TestJSParamNamesOverlongLineNoPanic(t *testing.T) {
+	long := "const x = [" + strings.Repeat("\"aaaaaaaaaa\",", 9000) + "]; const f = (pq) => pq;"
+	if len(long) <= 64<<10 {
+		t.Fatalf("probe line is only %d bytes — it must exceed the cap to test it", len(long))
+	}
+	// Would panic with "index out of range" before the fix.
+	_ = JSParamNames([]AddedLine{{LineNo: 1, Text: long}})
+
+	// The same defect in jsParamsInText, reachable even on the CAPPED
+	// whole-file path because its input is an accumulated multi-line signature.
+	var b strings.Builder
+	b.WriteString("export const Panel = (\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString("  " + strings.Repeat("z", 3000) + ",\n")
+	}
+	b.WriteString(");\n")
+	_ = JSParamNames(TextToAddedLines(b.String()))
+}
+
+// TestJSParamNamesRoundElevenShapes pins the remaining round-11 findings.
+func TestJSParamNamesRoundElevenShapes(t *testing.T) {
+	// Finding 3: splitJSParamList decremented depth unguarded, unlike the
+	// splitTopLevelCommas it replaced, so a stray unmatched closer — regex
+	// literals are not stripped — drove depth negative and stopped all further
+	// top-level splitting.
+	got := JSDeclaredNames(TextToAddedLines(`const re = /[)]/, handler = () => 1;`))
+	if !hasName(got, "handler") {
+		t.Errorf("handler lost after an unmatched closer: %v", got)
+	}
+
+	// Finding 4: an unspaced comparison opened a generic depth that only `{` and
+	// `;` reset, so every later `(` on the line was hidden.
+	if p := jsParams(t, `while (i<n) list.forEach((cb) => cb(x>0));`); !hasName(p, "cb") {
+		t.Errorf("cb hidden by a latched generic depth: %v", p)
+	}
+	// Resetting on `)` must not break the generic constraint it exists for.
+	if p := jsParams(t, `const f = <T extends Array<(zzz: number) => void>>(x: T) => x;`); hasName(p, "zzz") || !hasName(p, "x") {
+		t.Errorf("generic-constraint handling regressed: %v", p)
+	}
+}

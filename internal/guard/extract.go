@@ -523,7 +523,15 @@ func JSDeclaredNames(lines []AddedLine) []string {
 		}
 		// splitJSParamList, not splitTopLevelCommas: the latter is not
 		// angle-aware, so a generic in the INITIALISER split mid-type and its
-		// tail bound the type name — `const m = new Map<string, Bogus>();`
+		// tail bound the type name.
+		//
+		// KNOWN RESIDUAL GAP: a generic ARROW declarator is still open, because
+		// its `<` follows a space rather than an identifier and so opens no
+		// angle depth — `const f = <T, Bogus>(x: T, y: Bogus) => x` binds
+		// `Bogus`. Requiring an identifier before `<` is what keeps an ordinary
+		// `a = b < c` from being read as a generic, and relaxing it here would
+		// trade this leak for that false positive. Recorded rather than
+		// hidden — `const m = new Map<string, Bogus>();`
 		// yielded `[m Bogus]`, and `const [a, setA] = useState<Map<string,
 		// Bogus>>(…)` yielded `[a setA Bogus]`. The nested split inside
 		// jsBindingTargets was already fixed for this; the frame above it was
@@ -2523,6 +2531,16 @@ func JSParamNames(lines []AddedLine) []string {
 		first = false
 		prevNo = l.LineNo
 
+		// Capped HERE, once, before anything derives from it. The cap used to
+		// live inside jsParenMatches, which truncated the match table while
+		// jsParamListOpen went on scanning the full line — so `match[open]`
+		// indexed past the table and PANICKED on any line over 64 KiB.
+		// parseDiffOutput (unlike TextToAddedLines) applies no capLine and its
+		// scanner accepts up to 4 MB, and pre-commit mode is not wrapped in
+		// deferOnPanic, so that aborted `git commit` with a stack trace.
+		// One cap, one string, every derived index in range.
+		s = capLine(s)
+
 		// Where this line's opener scan begins. Nonzero only when a multi-line
 		// signature closed partway through it, so the remainder is still scanned.
 		lineFrom := 0
@@ -2874,12 +2892,17 @@ func jsParamListOpen(s string, from, fnOpen, lastGT int) (int, bool, bool) {
 	angle := 0
 	for i := from; i < len(s); i++ {
 		switch s[i] {
-		case '{', ';':
-			// A generic parameter clause never spans a block or statement
-			// boundary. Without this, an unspaced comparison or left shift —
-			// `if (i<n) {` — opened a depth that never closed, and the
-			// `angle > 0` guard below then hid every later `(` on the line,
-			// silently disabling the fix for it.
+		case '{', ';', ')':
+			// A generic parameter clause never spans a block, a statement, or a
+			// closing paren. Without this an unspaced comparison or shift —
+			// `if (i<n) {`, `while (i<n) list.forEach((cb) => …)` — opened a
+			// depth that never closed, and the `angle > 0` guard below then hid
+			// every later `(` on the line, silently disabling the fix there.
+			//
+			// `)` is safe to reset on even though a generic constraint may
+			// CONTAIN parens (`<T extends Array<(z: number) => void>>`): that
+			// inner `(` is already skipped while the depth is open, and by the
+			// time its `)` resets the depth the clause has nothing left to hide.
 			angle = 0
 			continue
 		case '<':
@@ -3010,7 +3033,15 @@ func splitJSParamList(s string) []string {
 		case '(', '[', '{':
 			depth++
 		case ')', ']', '}':
-			depth--
+			// Guarded, as the splitTopLevelCommas this replaced is: a stray
+			// unmatched closer drives depth negative, after which NO top-level
+			// comma splits again and every later declarator is lost. Regex
+			// literals are not stripped, so `const re = /[)]/, handler = …`
+			// reaches here with an unbalanced `)` and dropped `handler` — a
+			// fresh false positive of the class this file exists to close.
+			if depth > 0 {
+				depth--
+			}
 		case '<':
 			// `=>`'s `>` never reaches here, and `<=` is a comparison.
 			// The discriminator is the byte BEFORE `<`, not after it: a
@@ -3258,11 +3289,6 @@ func jsFunctionParenAfter(s string, kw int) int {
 // not close on this line. One left-to-right pass, so the opener loop can look a
 // group's extent up instead of re-walking it per nesting level.
 func jsParenMatches(s string) []int {
-	// Bounded: this is 8 bytes per input byte, and parseDiffOutput (unlike
-	// TextToAddedLines) does not apply capLine — so a staged 2 MB minified line
-	// would allocate a 16 MB table. Past the cap the line is generated code that
-	// no binding is usefully read from anyway.
-	s = capLine(s)
 	m := make([]int, len(s))
 	for i := range m {
 		m[i] = -1
@@ -3360,6 +3386,14 @@ func jsBodylessAfter(after string) bool {
 // positions or latch across anything — the text it is given is already one
 // group's interior.
 func jsParamsInText(s string) []string {
+	// ALLOCATION BOUND ONLY — no fixture can kill a mutation of this line, and
+	// it is not the panic fix. The panic came from jsParenMatches capping while
+	// its caller did not, so table and string disagreed; that is fixed by there
+	// being exactly one cap, in JSParamNames. This input is an accumulated
+	// multi-line signature (up to maxJSSigLines lines) and so can still be large
+	// on its own, and jsParenMatches allocates 8 bytes per input byte. Kept for
+	// that, claimed as unkillable rather than annotated as a gap.
+	s = capLine(s)
 	var out []string
 	out = append(out, jsBareArrowParams(s)...)
 	match := jsParenMatches(s)

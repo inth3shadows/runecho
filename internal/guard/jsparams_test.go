@@ -857,3 +857,62 @@ func TestJSParamNamesRoundSevenShapes(t *testing.T) {
 		t.Errorf("generic-clause guard broke: %v", got)
 	}
 }
+
+// TestJSParamNamesRoundEightShapes pins review-round-8.
+func TestJSParamNamesRoundEightShapes(t *testing.T) {
+	// Finding 1: jsAmbientOrOverload is a per-line check consulted BEFORE the
+	// latch, so a WRAPPED ambient declaration or overload signature — exactly
+	// the shape the multi-line accumulator exists to read — escaped it. Judged
+	// at close time now, from the text after the `)`.
+	for _, tc := range []struct{ src, leak string }{
+		{"declare function fmtQ(\n  valq: number\n): string;", "valq"},
+		{"export function fmtR(\n  valr: number\n): string;", "valr"},
+	} {
+		if got := jsParams(t, tc.src); hasName(got, tc.leak) {
+			t.Errorf("bound %q from a wrapped ambient/overload declaration: %v", tc.leak, got)
+		}
+	}
+	// A real wrapped declaration must still bind.
+	if got := jsParams(t, "export function real(\n  keep: number\n) { return keep; }"); !hasName(got, "keep") {
+		t.Errorf("real wrapped declaration lost its parameter: %v", got)
+	}
+
+	// Finding 2: `= (` latches, and a wrapped-JSX assignment then swallowed
+	// every arrow inside it — the same hazard `return (` and `=> (` were
+	// exempted for, arriving through the value-position path.
+	if got := jsParams(t, "export const Panel = (\n  <List render={(rowq) => rowq()} />\n);"); !hasName(got, "rowq") {
+		t.Errorf("rowq lost inside a wrapped-JSX assignment: %v", got)
+	}
+	// The real multi-line arrow signature must still bind.
+	if got := jsParams(t, "const cb = (\n  err,\n  data\n) => data;"); !hasName(got, "data") {
+		t.Errorf("multi-line arrow signature regressed: %v", got)
+	}
+
+	// Finding 3: the unparenthesized single-arg arrow has no `(` for the opener
+	// scan to find. LocallyBoundNames covered it from the start; this extractor
+	// did not, leaving #302 open for the concise form.
+	for _, tc := range []struct{ src, want string }{
+		{`export const wrap = cbq => cbq();`, "cbq"},
+		{`items.forEach(itq => itq());`, "itq"},
+		{`const curried = aq => bq => bq(aq);`, "bq"},
+	} {
+		if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+			t.Errorf("%q not bound from %q: %v", tc.want, tc.src, got)
+		}
+	}
+	// ...but a RETURN TYPE before the arrow is not a parameter.
+	if got := jsParams(t, `const f = (a): Foo => a;`); hasName(got, "Foo") {
+		t.Errorf("return type Foo bound as a bare-arrow parameter: %v", got)
+	}
+
+	// Finding 4: the generic-depth guard needs the last `>` that is NOT the
+	// arrow's, or an unspaced comparison/shift latches and hides every later `(`.
+	for _, tc := range []struct{ src, want string }{
+		{`const ok = compute(a.n<max).map((yyq) => yyq);`, "yyq"},
+		{`const m = flags(v<<2).map((wwq) => wwq);`, "wwq"},
+	} {
+		if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+			t.Errorf("%q lost to a latched generic depth: %v", tc.want, got)
+		}
+	}
+}

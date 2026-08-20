@@ -2655,12 +2655,23 @@ func JSParamNames(lines []AddedLine) []string {
 				// Test BEFORE materialising the accumulated text: sig.String()
 				// copies the whole buffer, and for a multi-line call that copy
 				// is thrown away immediately.
+				full := sig.String()
+				// Trim back to the closing paren so a trailing `=> { body }`
+				// is not parsed as a parameter.
+				inner := full[:len(full)-(len(s)-idx)]
+				before := len(out)
 				if sigIsFunction || jsArrowFollows(s[idx+1:]) {
-					full := sig.String()
-					// Trim back to the closing paren so a trailing `=> { body }`
-					// is not parsed as a parameter.
-					inner := full[:len(full)-(len(s)-idx)]
 					out = appendJSParams(out, inner, sigIsFunction, s[idx+1:])
+				}
+				if len(out) == before {
+					// The group bound nothing, so it was a parenthesised
+					// EXPRESSION, not a parameter list — `export const Panel = (`
+					// followed by multi-line JSX is the common one. Its interior
+					// was swallowed by the latch, and every arrow inside it would
+					// be lost. The single-line scan handles this by resuming
+					// inside an unbound group; do the same here, over the text
+					// the accumulator collected.
+					out = append(out, jsParamsInText(inner)...)
 				}
 				sigDepth, sigLines = 0, 0
 				sig.Reset()
@@ -2675,6 +2686,17 @@ func JSParamNames(lines []AddedLine) []string {
 		}
 
 	openerScan:
+		// The unparenthesized single-arg arrow (`cb => cb()`, `items.forEach(it
+		// => it())`) has no `(` at all, so the opener scan below can never see
+		// it. LocallyBoundNames — the sibling this change also edits — has
+		// covered the shape since it shipped, via reJSArrowParamsBare; only
+		// this extractor did not, leaving #302's false positive open for the
+		// concise form, which is at least as common in TS/React as the
+		// destructured-prop form. Precision is the same rule that regex
+		// documents: the identifier must be directly followed by `=>`, so the
+		// parenthesized form (whose `=>` follows a `)`) cannot match here.
+		out = append(out, jsBareArrowParams(s[lineFrom:])...)
+
 		// --- a parameter list may open on this line -------------------------
 		// Scan openers left to right rather than committing to the first. A
 		// parameter list is often not the first `(` on its line — `function
@@ -2708,9 +2730,14 @@ func JSParamNames(lines []AddedLine) []string {
 		// its input is the shape where every group BINDS, and a bound group is
 		// skipped whole.
 		match := jsParenMatches(s)
+		// Hoisted for the same reason fnOpen is: jsLastGenericClose is an O(n)
+		// scan, and computing it inside jsParamListOpen put that scan inside the
+		// opener loop — quadratic in line length all over again, which the two
+		// linearity tests caught immediately.
+		lastGT := jsLastGenericClose(s)
 		from := lineFrom
 		for {
-			open, isFn, mayLatch := jsParamListOpen(s, from, fnOpen)
+			open, isFn, mayLatch := jsParamListOpen(s, from, fnOpen, lastGT)
 			if open < 0 {
 				return
 			}
@@ -2814,7 +2841,7 @@ func JSParamNames(lines []AddedLine) []string {
 // fnOpen is the index of the `function` form's parameter `(` on this line, or
 // -1 — computed once by the caller, since re-deriving it per call made the
 // opener loop quadratic in line length.
-func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
+func jsParamListOpen(s string, from, fnOpen, lastGT int) (int, bool, bool) {
 	// fnOpen is NOT short-circuited ahead of the scan. Returning it immediately
 	// skipped any arrow parameter list EARLIER on the same line —
 	// `const g = (aaa) => 0; function f(bbb) {}` bound only `bbb` — and left
@@ -2838,7 +2865,7 @@ func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
 			angle = 0
 			continue
 		case '<':
-			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+			if i < lastGT && i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
 				angle++
 			}
 			continue
@@ -2913,6 +2940,16 @@ func appendJSParams(out []string, inner string, isFunction bool, after string) [
 	if !isFunction && !jsArrowFollows(after) {
 		return out
 	}
+	// An ambient declaration or a bodyless overload signature binds nothing at
+	// runtime. jsAmbientOrOverload catches the single-line form before the line
+	// is ever scanned, but a WRAPPED one (`declare function f(\n x: T\n): R;`)
+	// latches across lines and never re-consults it — precisely the shape the
+	// multi-line accumulator exists to read. Decided here instead, where the
+	// whole signature has closed: no body brace and a trailing `;` after the
+	// `)` means there is no function, only its type.
+	if isFunction && jsBodylessAfter(after) {
+		return out
+	}
 	// splitJSParamList, not splitTopLevelCommas: the latter tracks ()/[]/{} but
 	// NOT <>, so a generic type argument containing a comma is split mid-type
 	// (`m: Map<string, Handler>` → `m: Map<string` + `Handler>`) and the
@@ -2948,7 +2985,7 @@ func splitJSParamList(s string) []string {
 	// A `<` with no `>` after it anywhere is a comparison or a shift, never a
 	// generic. Without this an unspaced `f(a = i<n, cb)` latched the depth and
 	// stopped splitting, losing `cb`.
-	lastGT := strings.LastIndexByte(s, '>')
+	lastGT := jsLastGenericClose(s)
 	depth, angle, start := 0, 0, 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; c {
@@ -3279,4 +3316,108 @@ func jsAmbientOrOverload(s string) bool {
 	// `const f = function (a) { … };` is a value; it carries a body brace and is
 	// already excluded above. What remains is a declaration head with no body.
 	return jsFunctionOpen.MatchString(t)
+}
+
+// jsBodylessAfter reports whether the text following a function's `)` shows a
+// declaration with no body — an optional return-type annotation and then a `;`,
+// never a `{`. That is an ambient declaration or a TS overload signature, whose
+// parameter names bind nothing at runtime.
+func jsBodylessAfter(after string) bool {
+	t := strings.TrimRight(after, " \t")
+	return strings.HasSuffix(t, ";") && !strings.ContainsAny(t, "{}")
+}
+
+// jsParamsInText runs the single-line opener scan over an arbitrary span of
+// stripped code, for recovering parameter lists nested inside a multi-line
+// group that turned out not to be one. It deliberately does NOT track type
+// positions or latch across anything — the text it is given is already one
+// group's interior.
+func jsParamsInText(s string) []string {
+	var out []string
+	out = append(out, jsBareArrowParams(s)...)
+	match := jsParenMatches(s)
+	lastGT := jsLastGenericClose(s)
+	fnOpen := -1
+	if strings.Contains(s, "function") {
+		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
+			fnOpen = jsFunctionParenAfter(s, loc[0])
+		}
+	}
+	for from := 0; from < len(s); {
+		open, isFn, _ := jsParamListOpen(s, from, fnOpen, lastGT)
+		if open < 0 {
+			break
+		}
+		m := match[open]
+		if m < 0 {
+			break
+		}
+		before := len(out)
+		out = appendJSParams(out, s[open+1:m], isFn, s[m+1:])
+		if len(out) > before {
+			from = m + 1
+		} else {
+			from = open + 1
+		}
+	}
+	return out
+}
+
+// jsLastGenericClose returns the index of the last `>` that could close a
+// generic — i.e. one not forming the arrow token `=>`. A plain LastIndexByte
+// was not enough: on `compute(a.n<max).map((y) => y)` the only `>` is the
+// arrow's, which `case '>'` correctly refuses to treat as a close, so the
+// unspaced `<` opened a depth that could never close and hid every later `(`.
+func jsLastGenericClose(s string) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '>' && (i == 0 || s[i-1] != '=') {
+			return i
+		}
+	}
+	return -1
+}
+
+// jsBareArrowParams returns the parameters of unparenthesized single-argument
+// arrows on a line (`cb => cb()`, `items.forEach(it => it())`). The opener scan
+// cannot see these — there is no `(` at all — and LocallyBoundNames has covered
+// the shape since it shipped, so only this extractor left #302's false positive
+// open for the concise form.
+//
+// Hand-rolled rather than reJSArrowParamsBare: that regex is unanchored, so on
+// a long line it backtracks from every identifier — 31 ms on the 1500-unit
+// linearity corpus, against ~800 us for the rest of the extractor. This is one
+// backward walk per `=>`.
+//
+// Precision comes from what precedes the identifier. A `)` means the
+// parenthesized form, already handled by the opener scan. A `:` means a RETURN
+// TYPE — `(a): Foo => a` would otherwise bind `Foo`, folding a type name into
+// the resolvable set, which is the leak this file exists to avoid. A `.` means
+// a member expression, not a binding.
+func jsBareArrowParams(s string) []string {
+	var out []string
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '=' || s[i+1] != '>' {
+			continue
+		}
+		j := i - 1
+		for j >= 0 && (s[j] == ' ' || s[j] == '\t') {
+			j--
+		}
+		if j < 0 || !isJSIdentByte(s[j]) {
+			continue
+		}
+		end := j + 1
+		for j >= 0 && isJSIdentByte(s[j]) {
+			j--
+		}
+		k := j
+		for k >= 0 && (s[k] == ' ' || s[k] == '\t') {
+			k--
+		}
+		if k >= 0 && (s[k] == ':' || s[k] == '.') {
+			continue
+		}
+		out = append(out, s[j+1:end])
+	}
+	return out
 }

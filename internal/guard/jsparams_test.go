@@ -742,3 +742,76 @@ func TestJSParamNamesRoundFiveShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestJSParamNamesNestedParenNotQuadratic pins review-round-6 finding 1. The
+// round-5 change to resume INSIDE a group that bound nothing made
+// jsConsumeParens re-walk the same region once per nesting level — 835 ms on a
+// 40 KB line of bare nested parens, 1.88 s at 60 KB, both under capLine and so
+// reachable, on a path pre-commit mode runs with no deadline.
+//
+// TestJSParamNamesLinearInLineLength cannot catch this: its input is the shape
+// where every group BINDS, and a bound group is skipped whole. This one uses
+// the shape where none bind.
+func TestJSParamNamesNestedParenNotQuadratic(t *testing.T) {
+	measure := func(depth int) time.Duration {
+		lines := TextToAddedLines(strings.Repeat("(", depth) + strings.Repeat(")", depth) + ";")
+		best := time.Hour
+		for i := 0; i < 3; i++ {
+			st := time.Now()
+			_ = JSParamNames(lines)
+			if d := time.Since(st); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	small, large := measure(5000), measure(20000)
+	// 4x the depth. Linear predicts ~4x; the quadratic version was ~16x.
+	if large > 8*small+2*time.Millisecond {
+		t.Errorf("nested-paren scan is superlinear: depth 5000 %v, depth 20000 %v", small, large)
+	}
+}
+
+// TestJSParamNamesNestedPatternGenericLeak pins review-round-6 finding 2.
+// appendJSParams was made angle-aware, but jsBindingTargets' recursion into a
+// nested pattern still split with splitTopLevelCommas — so the identical
+// type-name leak survived one level down, in a destructured default value.
+func TestJSParamNamesNestedPatternGenericLeak(t *testing.T) {
+	for _, tc := range []struct{ src, leak string }{
+		{`function f({ reg = new Map<string, TotallyMadeUp>() }) {}`, "TotallyMadeUp"},
+		{`function f([reg = new Map<string, Bogus>()]) {}`, "Bogus"},
+		{`function f({ a: { reg = mk<Alpha, Beta>() } }) {}`, "Beta"},
+	} {
+		got := jsParams(t, tc.src)
+		if hasName(got, tc.leak) {
+			t.Errorf("type name %q leaked from a nested pattern: %v", tc.leak, got)
+		}
+		if !hasName(got, "reg") {
+			t.Errorf("real binding reg lost from %q: %v", tc.src, got)
+		}
+	}
+}
+
+// TestJSParamNamesSemiFreeUnionInBlock pins review-round-6 finding 3: a
+// `semi: false` multi-line alias with no bracket body, declared inside a block,
+// cleared on none of the three exits and latched the extractor until a
+// column-zero statement. Same class as the round-4 nested-type-body finding,
+// whose fix covered only the bracket arm.
+func TestJSParamNamesSemiFreeUnionInBlock(t *testing.T) {
+	src := `function f() {
+  type H =
+    | A
+    | B
+  const cb = (xxx) => xxx
+  return cb(1)
+}`
+	if got := jsParams(t, src); !hasName(got, "xxx") {
+		t.Errorf("xxx not bound (got %v): an indented semicolon-less union "+
+			"latched the extractor for the rest of the block", got)
+	}
+	// The wrapped generic must still hold: its head opens a `<` nesting, which
+	// jsTypeDelta counts even when the `<` ends the line.
+	if got := jsParams(t, "type Reg = Record<\n  string,\n  (v: W) => void\n>;"); len(got) > 0 {
+		t.Errorf("bound %v from a wrapped generic", got)
+	}
+}

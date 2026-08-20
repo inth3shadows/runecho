@@ -534,7 +534,14 @@ func JSDeclaredNames(lines []AddedLine) []string {
 
 // jsBindingTargets returns the identifiers a single binding pattern introduces:
 // a bare name (annotation/default dropped), an array pattern (`[a, setA]` → a,
-// setA), or an object pattern (`{a, b: c}` → a, c). reIdentAll.FindString takes
+// setA), or an object pattern (`{a, b: c}` → a, c).
+//
+// Splits with splitJSParamList, not splitTopLevelCommas: the latter does not
+// track `<>`, so a generic in a nested pattern's DEFAULT value split mid-type
+// and bound the type name — `function f({ reg = new Map<string, Bogus>() })`
+// yielded `[reg Bogus]`. appendJSParams was made angle-aware at the top level
+// for exactly this reason; the leak simply survived one level down in the
+// recursion. reIdentAll.FindString takes
 // the leftmost identifier of each element, which also absorbs a default value
 // (`a = 1` → a) since the binding name leads. Nested patterns recurse.
 func jsBindingTargets(p string) []string {
@@ -546,14 +553,14 @@ func jsBindingTargets(p string) []string {
 	case '[':
 		inner, _ := jsPatternInner(p)
 		var out []string
-		for _, el := range splitTopLevelCommas(inner) {
+		for _, el := range splitJSParamList(inner) {
 			out = appendJSBindElem(out, el, false)
 		}
 		return out
 	case '{':
 		inner, _ := jsPatternInner(p)
 		var out []string
-		for _, el := range splitTopLevelCommas(inner) {
+		for _, el := range splitJSParamList(inner) {
 			out = appendJSBindElem(out, el, true)
 		}
 		return out
@@ -2524,44 +2531,49 @@ func JSParamNames(lines []AddedLine) []string {
 			if jsTopLevelStatementStart(s) {
 				typeDepth, inTypeStmt, typeOpenedBrackets = 0, false, false
 			} else {
-				typeDepth += jsBracketDelta(s)
-				if typeDepth <= 0 {
-					typeDepth = 0
-					// A head that OPENED a bracket nesting ends when that
-					// nesting closes — its `}` needs no `;`, and requiring one
-					// latched the extractor for the rest of the enclosing block
-					// whenever the type body was indented (inside a namespace,
-					// or a local type in a function body). Nothing after it
-					// bound, which reopened #302 for that whole region. A head
-					// that opened NO nesting (`type A = B extends C`) has only
-					// the `;` to end it.
-					if typeOpenedBrackets {
-						typeOpenedBrackets = false
-						inTypeStmt = false
+				// A head that OPENED a bracket or generic nesting ends when that
+				// nesting closes — its `}`/`>` needs no `;`. Requiring one
+				// latched the extractor for the rest of the enclosing block
+				// whenever the type body was indented (inside a namespace, or a
+				// local type in a function body), reopening #302 for that region.
+				//
+				// A head that opened NO nesting has only its `;`, and under
+				// `semi: false` inside a block there is none — an indented
+				// multi-line union (`type H =` / `| A` / `| B`) latched the same
+				// way. Ending it at the first line that does not READ as a type
+				// continuation bounds that: a continuation starts with an
+				// operator or an opener, never with a keyword or a bare
+				// identifier-led statement. That line is then scanned normally.
+				if typeDepth <= 0 && !typeOpenedBrackets && !jsTypeContinuationStart(s) {
+					typeDepth, inTypeStmt = 0, false
+				} else {
+					typeDepth += jsTypeDelta(s)
+					if typeDepth <= 0 {
+						typeDepth = 0
+						if typeOpenedBrackets {
+							typeOpenedBrackets = false
+							inTypeStmt = false
+						}
+						// A type STATEMENT ends at its `;`, not merely when
+						// brackets balance — that is what keeps a conditional
+						// type or a wrapped generic in type position across
+						// lines.
+						//
+						// No fall-through into the opener scan here: the line
+						// carrying the `;` is the type statement's own last
+						// line — for `type H =` / `(e: MouseEvent) => void;` it
+						// IS the function type — so scanning it would bind `e`
+						// from a pure type position. Review round 5 read this as
+						// the early-exit defect fixed on the
+						// jsTopLevelStatementStart path; it is not, and the case
+						// that prompted it (a COMPLETE one-line conditional type
+						// latching at all) is fixed in jsHeadIsUnfinished.
+						if strings.Contains(s, ";") {
+							inTypeStmt = false
+						}
 					}
-					// A type STATEMENT ends at its `;`, not merely when
-					// brackets balance. Clearing on balance alone dropped out
-					// of type position after one line for any head that spans
-					// lines without nesting — a conditional type
-					// (`type A = B extends C` / `? (x: D) => void`) or a
-					// wrapped generic (`type Reg = Record<` … `>;`, whose `<>`
-					// jsBracketDelta does not count) — and the continuation was
-					// then read as a value arrow, binding a parameter name from
-					// a pure type position.
-					if strings.Contains(s, ";") {
-						inTypeStmt = false
-					}
-					// NOT followed by a fall-through into the opener scan.
-					// The line carrying the `;` is the type statement's own
-					// last line — for `type H =` / `(e: MouseEvent) => void;`
-					// it is the function type itself — so scanning it would
-					// bind `e`, a name from a pure type position. Review round
-					// 5 read this as the same early-exit defect fixed on the
-					// jsTopLevelStatementStart path; it is not, and the case
-					// that prompted it (a COMPLETE one-line conditional type
-					// latching at all) is fixed in jsHeadIsUnfinished instead.
+					return
 				}
-				return
 			}
 		}
 		// Substring-gated: these two regexes are anchored but still cost real
@@ -2571,7 +2583,7 @@ func JSParamNames(lines []AddedLine) []string {
 		// patterns require the literal word — so gating changes no result.
 		if (strings.Contains(s, "interface") && jsInterfaceOpen.MatchString(s)) ||
 			(strings.Contains(s, "type") && jsTypeAliasOpen.MatchString(s)) {
-			typeDepth = jsBracketDelta(s)
+			typeDepth = jsTypeDelta(s)
 			// An alias head that neither opens a bracket nor terminates —
 			// `type H =` with the function type on the NEXT line — is still
 			// inside a type position. Keying only on the bracket delta let that
@@ -2672,6 +2684,17 @@ func JSParamNames(lines []AddedLine) []string {
 				fnOpen = jsFunctionParenAfter(s, loc[0])
 			}
 		}
+		// Matching close for every `(` on the line, computed in ONE pass. The
+		// loop below resumes INSIDE a group that bound nothing (an arrow can be
+		// nested in a call or a parenthesised expression), and re-deriving each
+		// group's close with jsConsumeParens then re-walked the same region per
+		// nesting level — O(n^2). A chain of bare nested parens hit 835 ms at
+		// 40 KB and 1.88 s at 60 KB, both under capLine and so reachable, on a
+		// path the pre-commit mode runs with no deadline. The table makes the
+		// close a lookup. TestJSParamNamesLinearInLineLength missed it because
+		// its input is the shape where every group BINDS, and a bound group is
+		// skipped whole.
+		match := jsParenMatches(s)
 		from := lineFrom
 		for {
 			open, isFn, mayLatch := jsParamListOpen(s, from, fnOpen)
@@ -2681,7 +2704,10 @@ func JSParamNames(lines []AddedLine) []string {
 			sigIsFunction = isFn
 			sigDepth = 1
 			rest := s[open+1:]
-			idx, closed := jsConsumeParens(rest, &sigDepth)
+			idx, closed := -1, false
+			if m := match[open]; m >= 0 {
+				idx, closed = m-open-1, true
+			}
 			if !closed {
 				if !mayLatch {
 					// An expression keyword's `(` that runs past the line end
@@ -3145,4 +3171,73 @@ func jsFunctionParenAfter(s string, kw int) int {
 		}
 	}
 	return -1
+}
+
+// jsParenMatches returns, for each byte of s, the index of the `)` matching a
+// `(` at that position — or -1 for every other position and for a `(` that does
+// not close on this line. One left-to-right pass, so the opener loop can look a
+// group's extent up instead of re-walking it per nesting level.
+func jsParenMatches(s string) []int {
+	m := make([]int, len(s))
+	for i := range m {
+		m[i] = -1
+	}
+	var stack []int
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			stack = append(stack, i)
+		case ')':
+			if n := len(stack); n > 0 {
+				m[stack[n-1]] = i
+				stack = stack[:n-1]
+			}
+		}
+	}
+	return m
+}
+
+// jsTypeDelta is jsBracketDelta plus generic `<…>`, which type syntax nests in
+// and ()[]{}-counting cannot see. Used only inside a type position, where a `<`
+// after an identifier is always a generic rather than a comparison.
+func jsTypeDelta(s string) int {
+	d := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[', '{':
+			d++
+		case ')', ']', '}':
+			d--
+		case '<':
+			// A `<` ENDING the line still opens a generic — `type Reg = Record<`
+			// is the wrapped-generic head. Requiring a following byte (to
+			// exclude `<=`) silently excluded it, so the head opened no nesting
+			// and its continuation lines were read as ordinary code.
+			if i > 0 && isJSIdentByte(s[i-1]) && (i+1 >= len(s) || s[i+1] != '=') {
+				d++
+			}
+		case '>':
+			if i > 0 && s[i-1] != '=' {
+				d--
+			}
+		}
+	}
+	return d
+}
+
+// jsTypeContinuationStart reports whether a line reads as the continuation of a
+// type statement rather than as new code: it begins with an operator or an
+// opener (`| A`, `? X`, `: never`, `(e: E) => void`, `string[]`) rather than
+// with a keyword or an identifier-led statement (`const cb = …`).
+func jsTypeContinuationStart(s string) bool {
+	t := strings.TrimLeft(s, " \t")
+	if t == "" {
+		return true // a blank line does not end a type statement
+	}
+	switch t[0] {
+	case '|', '&', '?', ':', ',', '(', '[', '{', '<', '>', ')', ']', '}':
+		return true
+	}
+	return strings.HasPrefix(t, "extends") || strings.HasPrefix(t, "infer") ||
+		strings.HasPrefix(t, "keyof") || strings.HasPrefix(t, "readonly")
 }

@@ -72,7 +72,22 @@ type PackageSymbols struct {
 	// Reason explains a non-Resolved result (and is empty when Resolved). It is
 	// surfaced under RUNECHO_DEBUG so an abstain is diagnosable rather than
 	// silent — "why didn't the guard catch this" is otherwise unanswerable.
+	//
+	// It is PROSE, built with fmt.Sprintf from local state: import paths, the
+	// module cache directory, a go.work path, an os.PathError. Fine for a debug
+	// line; not fine for anything persisted or aggregated — use Code for that.
 	Reason string
+	// Code is the same fact as Reason as a stable kebab-case token, with no
+	// path, module name, or error text in it ("go-work", "not-in-module-cache",
+	// "replace-directive"). Empty when Resolved.
+	//
+	// The two exist separately because they answer to different readers. #359
+	// persists a check's abstain reason to decisions.jsonl, where Reason would
+	// have written an absolute filesystem path into a shared artifact and given
+	// every group-by-reason tally one bucket per import path per machine. Code
+	// is what guard.GoDepQualifiedViolationsWithReason propagates; Reason stays
+	// the human diagnostic it always was.
+	Code string
 }
 
 // Has reports whether name is present in a RESOLVED package's export set. It
@@ -99,12 +114,13 @@ type Index interface {
 }
 
 // unknown is the canonical abstain result, used at every failure return so the
-// reason string is the only thing that varies.
-func unknown(format string, args ...any) PackageSymbols {
-	return PackageSymbols{Res: Unknown, Reason: fmt.Sprintf(format, args...)}
+// reason string is the only thing that varies. code is the stable token half —
+// see PackageSymbols.Code for why both exist.
+func unknown(code, format string, args ...any) PackageSymbols {
+	return PackageSymbols{Res: Unknown, Reason: fmt.Sprintf(format, args...), Code: code}
 }
 
 // partial is the canonical "found but not enumerable" result.
-func partial(format string, args ...any) PackageSymbols {
-	return PackageSymbols{Res: Partial, Reason: fmt.Sprintf(format, args...)}
+func partial(code, format string, args ...any) PackageSymbols {
+	return PackageSymbols{Res: Partial, Reason: fmt.Sprintf(format, args...), Code: code}
 }

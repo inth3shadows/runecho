@@ -286,12 +286,29 @@ func a() {
 		{
 			// A local bound by a form this check cannot read was never a
 			// candidate — it must not be reported as a declined one.
+			//
+			// The v2 pair is what makes this case able to fail. With only the
+			// unreadable binding, goVarTypes returns (nil, nil) and
+			// GoVarTypeMethodViolationsWithReason early-returns before the
+			// selector scan runs at all, so the assertion could only ever
+			// observe "" — the wasBound gate itself stayed unpinned, and
+			// removing it survived the whole suite (found by review of #363).
 			name: "unreadable binding form is not an abstain",
 			src: `package p
 
 func a() {
-	v := open()
-	v.Parse()
+	var v2 *Reader
+	_ = v2
+}
+
+func b() {
+	v2 := Reader{}
+	_ = v2
+}
+
+func c() {
+	r := open()
+	r.Parse()
 }
 `,
 			known: knownSetOf("Reader.Fetch"),
@@ -515,5 +532,94 @@ func TestPyCallShapeForeignUnreliableIsSilent(t *testing.T) {
 		if _, got := PyCallShapeMismatchesWithReason(LangPython, nil, fd, nil, false); got != "" {
 			t.Errorf("%s (no pre-edit file): reason = %q, want empty", added, got)
 		}
+	}
+}
+
+// TestPyCallShapeIndentedDefIsNotADeclaration reproduces the round-two review
+// finding: matchesPyDef permits any indentation, so a hunk that merely adds a
+// CLASS with a method named like an imported callee opened the abstain gate for
+// a module-level call that resolves to the import. Both strings below are
+// gate-class, so nothing user-visible changed — it corrupted the check_reasons
+// measurement, which is the whole point of #359.
+func TestPyCallShapeIndentedDefIsNotADeclaration(t *testing.T) {
+	const file = `from lib import notify
+
+
+def bar(b=2):
+    pass
+`
+	cases := []struct {
+		name  string
+		added string
+	}{
+		{
+			"unreadable call to an imported callee, with a same-named method in the hunk",
+			"bar(b=3)\n\nclass C:\n    def notify(self, text=None):\n        pass\n\nnotify(text=f\"hello {name}\")",
+		},
+		{
+			"readable call to an imported callee, with a same-named method in the hunk",
+			"bar(b=3)\n\nclass C:\n    def notify(self, text=None):\n        pass\n\nnotify(text=\"hi\")",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := FileDiff{Path: "m.py", AddedLines: TextToAddedLines(tc.added)}
+			ms, got := PyCallShapeMismatchesWithReason(LangPython, TextToAddedLines(file), fd, nil, false)
+			if len(ms) != 0 {
+				t.Fatalf("mismatches = %+v, want none — notify is imported", ms)
+			}
+			if got != "" {
+				t.Errorf("reason = %q, want empty — an indented def is not a declaration this call can reach", got)
+			}
+		})
+	}
+}
+
+// TestPyCallShapeUnreliableCapCountsDistinctNames pins the dedup: the cap is
+// meant to bound regex work, not to let one repeated foreign callee crowd out
+// the single declared-in-file name that actually earns the reason.
+func TestPyCallShapeUnreliableCapCountsDistinctNames(t *testing.T) {
+	const file = `from lib import log
+
+
+def bar(b=2):
+    pass
+
+
+def build_row(col=1):
+    pass
+`
+	added := "bar(b=3)\n"
+	for i := 0; i < callShapeMaxUnreliableNames*3; i++ {
+		added += "log(msg=f\"line {i}\")\n"
+	}
+	added += "build_row(col=f\"{x}\")\n"
+	fd := FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)}
+	if _, got := PyCallShapeMismatchesWithReason(LangPython, TextToAddedLines(file), fd, nil, false); got != "unreliable-call-shape" {
+		t.Errorf("reason = %q, want unreliable-call-shape — build_row is declared here and must not be crowded out by repeats of log", got)
+	}
+}
+
+// TestPyCallShapeDeclineOutranksTheUnreadableFallback pins the documented
+// precedence: a per-candidate decline says more about coverage than "one
+// argument list was unreadable", so it wins even though the unreadable call is
+// scanned first.
+func TestPyCallShapeDeclineOutranksTheUnreadableFallback(t *testing.T) {
+	const file = `def foo(a=1):
+    pass
+
+
+def foo(b=2):
+    pass
+
+
+def bar(c=3):
+    pass
+`
+	// bar's call is unreadable (lambda); foo has two disagreeing declarations.
+	added := "bar(c=lambda x, y: x)\nfoo(bad=1)"
+	fd := FileDiff{Path: "m.py", AddedLines: TextToAddedLines(added)}
+	if _, got := PyCallShapeMismatchesWithReason(LangPython, TextToAddedLines(file), fd, nil, false); got != "ambiguous-decl-shapes" {
+		t.Errorf("reason = %q, want ambiguous-decl-shapes — a real decline outranks the fallback", got)
 	}
 }

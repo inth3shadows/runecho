@@ -896,3 +896,33 @@ func TestRunHookMode_DroppedImportRecordsDegradedContext(t *testing.T) {
 		t.Errorf("check_reasons[dropped-import] = %q, want oversized-pre-edit-file (reasons=%v)", got, reasons)
 	}
 }
+
+// TestRunHookMode_CheckReasonsOnAnAskRecord pins check_reasons on the hook ASK
+// record specifically. The defer records are covered above, but deleting the
+// field from the ask record survived the whole suite (found by review of #363)
+// — and asks are the records fpreport rates, so a reason missing there is
+// missing from the population that matters most.
+func TestRunHookMode_CheckReasonsOnAnAskRecord(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	goFile := filepath.Join(repoRoot, "main.go")
+	if err := os.WriteFile(goFile, []byte("package main\n\nimport \"example.com/m/internal/snap\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// One edit that both ASKS (a hallucinated bare call) and ABSTAINS (a
+	// lowercase selector on a same-repo package, qualified's unexported-selector).
+	code, _, d := runHook(t, payload(t, "Edit", goFile, "\tsnap.missing()\n\tHallucinatedFunc()", "", nil))
+	if code != 0 || d.Hook.PermissionDec != "ask" {
+		t.Fatalf("expected an ask, got code=%d permission=%q", code, d.Hook.PermissionDec)
+	}
+	rec := readLastDecisionLog(t)
+	if got, _ := rec["decision"].(string); got != "ask" {
+		t.Fatalf("log decision = %q, want ask", got)
+	}
+	reasons, _ := rec["check_reasons"].(map[string]any)
+	if got, _ := reasons["qualified"].(string); got != "unexported-selector" {
+		t.Errorf("check_reasons[qualified] = %q on an ask record, want unexported-selector (reasons=%v)", got, reasons)
+	}
+}

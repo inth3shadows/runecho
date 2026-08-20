@@ -65,9 +65,9 @@ const (
 	// callShapeMaxAccepted caps how many accepted keyword names are listed in one
 	// finding. A 30-parameter signature would otherwise bury the point.
 	callShapeMaxAccepted = 8
-	// callShapeMaxUnreliableNames caps how many unreadable callee names are kept
-	// for the abstain-reason test (#359). Each costs one regex match against the
-	// added text, and one is enough to record the reason.
+	// callShapeMaxUnreliableNames caps how many DISTINCT unreadable callee names
+	// are kept for the abstain-reason test (#359). Each costs one regex match
+	// against the added text, and one is enough to record the reason.
 	callShapeMaxUnreliableNames = 8
 )
 
@@ -75,6 +75,20 @@ const (
 // indentation) so the check can tell that a name's SIGNATURE is being touched by
 // this very edit, as opposed to merely being called by it.
 const rePyDefNameTmpl = `(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+%s[ \t]*\(`
+
+// rePyTopLevelDefNameTmpl is rePyDefNameTmpl restricted to COLUMN ZERO — the
+// only defs an unqualified call can reach, and the same set pyDeclIndex.shapesFor
+// indexes.
+//
+// The two are not interchangeable and the difference is load-bearing. Control
+// flow uses the indented-permitting form: a hunk that rewrites a nested or
+// method signature makes the on-disk copy stale, and judging the call against
+// it would risk a false positive. The ABSTAIN REASON uses this one: a hunk that
+// merely adds `class C:` with a method named `notify` must not make an
+// unqualified `notify()` — which resolves to an import — look like a candidate
+// this check declined. Round one of #363's review closed that hole for
+// module-level declarations; round two found it still open through indentation.
+const rePyTopLevelDefNameTmpl = `(?m)^(?:async[ \t]+)?def[ \t]+%s[ \t]*\(`
 
 // PyCallShapeMismatches reports keyword arguments passed by calls in fd's added
 // lines that the same file's module-level declaration does not accept.
@@ -155,14 +169,21 @@ func PyCallShapeMismatchesWithReason(lang Lang, wholeFile []AddedLine, fd FileDi
 	// all, and that question cannot be answered until the declaration index
 	// exists further down. Capped because it feeds a per-name regex below and a
 	// pathological diff must not turn that into an unbounded scan.
+	//
+	// DISTINCT names, via seenUnreliable: the cap counting duplicates let eight
+	// repeats of one imported callee fill the list and crowd out the single
+	// declared-in-file name that actually earns the reason, which is the only
+	// name in it that can (found by review of #363).
 	var unreliableNames []string
+	seenUnreliable := map[string]struct{}{}
 	for _, c := range ExtractCallShapes(lang, added, seedFunc(lang, fd)) {
 		switch {
 		case len(c.Kwargs) == 0:
 			// Nothing to compare — positional arity is a later slice.
 		case c.HasLambda, c.Unreliable:
 			// The extractor says its own Pos/Kwargs are not trustworthy here.
-			if len(unreliableNames) < callShapeMaxUnreliableNames {
+			if _, dup := seenUnreliable[c.Name]; !dup && len(unreliableNames) < callShapeMaxUnreliableNames {
+				seenUnreliable[c.Name] = struct{}{}
 				unreliableNames = append(unreliableNames, c.Name)
 			}
 		default:
@@ -324,14 +345,18 @@ func PyCallShapeMismatchesWithReason(lang Lang, wholeFile []AddedLine, fd FileDi
 }
 
 // declaredInFile reports whether the declaration source declares name at module
-// level, or this edit's own hunk declares it. It is the "was this ever our
-// candidate" test — every #359 abstain reason in this check is gated on it, so
-// an imported or third-party callee (most kwarg-bearing calls) records nothing.
+// level, or this edit's own hunk declares it at module level. It is the "was
+// this ever our candidate" test — every #359 abstain reason in this check is
+// gated on it, so an imported or third-party callee (most kwarg-bearing calls)
+// records nothing.
+//
+// Module level on BOTH halves: shapesFor is column-zero-only, and the hunk half
+// uses matchesPyTopLevelDef for the reason given on rePyTopLevelDefNameTmpl.
 func declaredInFile(name string, declIndex *pyDeclIndex, addedText string, addedIsWholeFile bool) bool {
 	if len(declIndex.shapesFor(name)) > 0 {
 		return true
 	}
-	return !addedIsWholeFile && matchesPyDef(addedText, name)
+	return !addedIsWholeFile && matchesPyTopLevelDef(addedText, name)
 }
 
 // resolveDeclShape picks the single declaration shape for name that the call can
@@ -359,13 +384,16 @@ func resolveDeclShape(
 	// below already need (the module-level shapes; whether the hunk declares
 	// it), so it costs no extra scan.
 	declShapes := declIndex.shapesFor(name)
+	// Control flow: any indentation. A hunk rewriting a nested or method
+	// signature still makes the on-disk copy stale for this edit.
 	editDeclares := !addedIsWholeFile && matchesPyDef(addedText, name)
 	// reasonIf keeps an abstain silent for a callee this file does not declare.
-	// Same test as declaredInFile (which the unreadable-call fallback uses),
-	// spelled against the values already computed here rather than re-reading
-	// them — the two must agree, so if this ever needs to change, change both.
+	// Deliberately a NARROWER test than editDeclares above — module-level only,
+	// exactly declaredInFile's (which the unreadable-call fallback uses). An
+	// indented def named like an imported callee is not a declaration this call
+	// could ever reach, so it must not make the call look like our candidate.
 	reasonIf := func(r string) string {
-		if len(declShapes) > 0 || editDeclares {
+		if len(declShapes) > 0 || declaredInFile(name, declIndex, addedText, addedIsWholeFile) {
 			return r
 		}
 		return ""
@@ -412,10 +440,13 @@ func resolveDeclShape(
 			// truncated parameter list, or two disagreeing branches). Its true shape
 			// is unknown and the on-disk copy is known-stale, so there is nothing to
 			// compare against.
-			return zero, false, false, "unparseable-added-signature"
+			// reasonIf, not a bare string: editDeclares above permits an
+			// indented def, so this arm is reachable for a callee this file
+			// does not declare at module level — which is not our candidate.
+			return zero, false, false, reasonIf("unparseable-added-signature")
 		}
 		if !added.usable() {
-			return added, false, true, "unusable-decl-shape"
+			return added, false, true, reasonIf("unusable-decl-shape")
 		}
 		return added, true, true, ""
 	}
@@ -489,10 +520,21 @@ func boolChar(b bool) string {
 // regexp.QuoteMeta is applied because name comes from repo text, which the #212
 // red-team pass established is attacker-influenced input, not a trusted literal.
 func matchesPyDef(text, name string) bool {
+	return matchesPyDefTmpl(rePyDefNameTmpl, text, name)
+}
+
+// matchesPyTopLevelDef is matchesPyDef restricted to a column-zero `def` — the
+// declaration set an unqualified call can actually reach. See
+// rePyTopLevelDefNameTmpl for why the two are kept apart.
+func matchesPyTopLevelDef(text, name string) bool {
+	return matchesPyDefTmpl(rePyTopLevelDefNameTmpl, text, name)
+}
+
+func matchesPyDefTmpl(tmpl, text, name string) bool {
 	if !strings.Contains(text, name) {
 		return false // cheap reject before compiling anything
 	}
-	re, err := regexp.Compile(strings.ReplaceAll(rePyDefNameTmpl, "%s", regexp.QuoteMeta(name)))
+	re, err := regexp.Compile(strings.ReplaceAll(tmpl, "%s", regexp.QuoteMeta(name)))
 	if err != nil {
 		return true // unexpected; abstain rather than compare against a stale shape
 	}

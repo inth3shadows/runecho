@@ -653,8 +653,16 @@ that never ran at all.
 
 | Class | Reasons | Meaning |
 |---|---|---|
-| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dynamic-binding`, `go-work` and the other `depindex` lookup reasons | The input or the environment was missing — coverage really was lost for this edit |
+| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dynamic-binding`, and `depindex`'s lookup tokens (`go-work`, `no-go-mod`, `not-in-module-cache`, `replace-directive`, `not-vendored`, `scan-budget-exhausted`, …) | The input or the environment was missing — coverage really was lost for this edit |
 | gate | `shadowed-qualifier`, `unexported-selector`, `ambiguous-receiver`, `ambiguous-local`, `name-known-elsewhere`, `no-indexed-members`, `unreliable-call-shape`, `shadowed-callee`, `nested-def-shadow`, `ambiguous-decl-shapes`, `unusable-decl-shape`, `unparseable-added-signature`, `decl-edited-in-hunk` | A candidate existed and the check declined it on its own precision gate |
+
+Every reason is a stable kebab-case token with no path, module name, or error
+text in it. `deps-go` is the one that had to be made so: `depindex` computes a
+prose `PackageSymbols.Reason` for `RUNECHO_DEBUG` (`"go.work workspace at
+/home/…/go.work can redirect modules"`), and persisting that would put an
+absolute path in a shared artifact and give a group-by-reason tally one bucket
+per import path per machine. `PackageSymbols.Code` is the token half, and it is
+what the check propagates.
 
 The gate list is registered in `cmd/runecho-guard/checkresult.go`
 (`gateAbstainReasons`); an unregistered reason counts as degraded, so a new gate

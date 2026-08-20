@@ -15,7 +15,7 @@ func (s stubIndex) Lookup(importPath string) depindex.PackageSymbols {
 	if ps, ok := s[importPath]; ok {
 		return ps
 	}
-	return depindex.PackageSymbols{Res: depindex.Unknown, Reason: "not in stub"}
+	return depindex.PackageSymbols{Res: depindex.Unknown, Reason: "not in stub", Code: "not-in-stub"}
 }
 
 func resolvedPkg(names ...string) depindex.PackageSymbols {
@@ -39,7 +39,7 @@ func symbolList(vs []Violation) []string {
 var httpStub = stubIndex{
 	"net/http":                    resolvedPkg("Get", "Post", "Client", "NewRequest", "StatusOK"),
 	"github.com/google/uuid":      resolvedPkg("New", "NewString", "Parse"),
-	"github.com/vendor/lazything": {Res: depindex.Partial, Reason: "not scannable"},
+	"github.com/vendor/lazything": {Res: depindex.Partial, Reason: "not scannable", Code: "not-scannable"},
 }
 
 const goMod = "github.com/inth3shadows/runecho"
@@ -163,11 +163,16 @@ func TestGoDepQualified_NeverFlags(t *testing.T) {
 }
 
 // TestGoDepQualified_WithReasonCapturesAbstain pins #330: the abstain reason
-// idx.Lookup already computes (depindex.PackageSymbols.Reason) was silently
-// discarded by GoDepQualifiedViolations' `continue`. GoDepQualifiedViolationsWithReason
-// must surface it so cmd/runecho-guard can classify the deps-go check as
-// Unknown (a real go.work/not-in-cache abstain) rather than indistinguishable
-// from OK (nothing to report).
+// idx.Lookup already computes was silently discarded by
+// GoDepQualifiedViolations' `continue`. GoDepQualifiedViolationsWithReason must
+// surface it so cmd/runecho-guard can classify the deps-go check as Unknown (a
+// real go.work/not-in-cache abstain) rather than indistinguishable from OK
+// (nothing to report).
+//
+// It surfaces PackageSymbols.Code, the stable token — never .Reason, which is
+// prose carrying absolute paths and would be persisted verbatim to
+// decisions.jsonl by #359. The stub above sets both, differently, so a
+// regression to .Reason fails here rather than only in production logs.
 func TestGoDepQualified_WithReasonCapturesAbstain(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -178,12 +183,12 @@ func TestGoDepQualified_WithReasonCapturesAbstain(t *testing.T) {
 			// Gate 4 in TestGoDepQualified_NeverFlags: Partial resolution.
 			"partial resolution",
 			"package main\n\nimport \"github.com/vendor/lazything\"\n\nfunc f() { lazything.Whatever() }\n",
-			"not scannable",
+			"not-scannable",
 		},
 		{
 			"unknown package",
 			"package main\n\nimport \"github.com/nobody/nothing\"\n\nfunc f() { nothing.Whatever() }\n",
-			"not in stub",
+			"not-in-stub",
 		},
 	}
 	for _, tt := range tests {

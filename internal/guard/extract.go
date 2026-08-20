@@ -2491,6 +2491,7 @@ func JSParamNames(lines []AddedLine) []string {
 	sigLines := 0          // lines the open parameter list has spanned
 	typeDepth := 0         // >0 while inside an interface body or type alias
 	inTypeStmt := false
+	typeOpenedBrackets := false // the type head opened a bracket nesting
 	prevNo := 0
 	first := true
 	scanStripped(LangJS, lines, func(s string, l AddedLine) {
@@ -2502,6 +2503,7 @@ func JSParamNames(lines []AddedLine) []string {
 		// untestable surface. Reset and move on.
 		if first || l.LineNo != prevNo+1 {
 			sigDepth, typeDepth, inTypeStmt, sigLines = 0, 0, false, 0
+			typeOpenedBrackets = false
 			sig.Reset()
 		}
 		first = false
@@ -2516,11 +2518,23 @@ func JSParamNames(lines []AddedLine) []string {
 			// earlier revision cleared the flag and returned anyway, which lost
 			// the very first declaration after every unterminated type head.
 			if jsTopLevelStatementStart(s) {
-				typeDepth, inTypeStmt = 0, false
+				typeDepth, inTypeStmt, typeOpenedBrackets = 0, false, false
 			} else {
 				typeDepth += jsBracketDelta(s)
 				if typeDepth <= 0 {
 					typeDepth = 0
+					// A head that OPENED a bracket nesting ends when that
+					// nesting closes — its `}` needs no `;`, and requiring one
+					// latched the extractor for the rest of the enclosing block
+					// whenever the type body was indented (inside a namespace,
+					// or a local type in a function body). Nothing after it
+					// bound, which reopened #302 for that whole region. A head
+					// that opened NO nesting (`type A = B extends C`) has only
+					// the `;` to end it.
+					if typeOpenedBrackets {
+						typeOpenedBrackets = false
+						inTypeStmt = false
+					}
 					// A type STATEMENT ends at its `;`, not merely when
 					// brackets balance. Clearing on balance alone dropped out
 					// of type position after one line for any head that spans
@@ -2559,6 +2573,7 @@ func JSParamNames(lines []AddedLine) []string {
 			// every type alias and brought #302's false positive back.
 			if typeDepth > 0 || jsHeadIsUnfinished(s) {
 				inTypeStmt = true
+				typeOpenedBrackets = typeDepth > 0
 			}
 			return
 		}
@@ -2622,13 +2637,26 @@ func JSParamNames(lines []AddedLine) []string {
 		// first cost those bindings entirely. Retry is only possible for a list
 		// that CLOSES on this line; once one runs past the line end the scanner
 		// is committed to it.
+		//
+		// The `function` opener is located ONCE, before the loop. Re-deriving it
+		// per iteration meant a `strings.Contains(s[from:], "function")` scan of
+		// the whole remaining line on every pass, which is O(n) work inside an
+		// O(k) loop — quadratic in line length. On a single generated line of
+		// `f0((x0)=>x0),…` that was 4x per doubling and 156 ms at the 64 KiB
+		// capLine ceiling, against a ~12 ms budget; uncapped (ParseUnifiedDiff
+		// does not cap) it reached seconds.
+		fnOpen := -1
+		if strings.Contains(s, "function") {
+			if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
+				fnOpen = jsFunctionParenAfter(s, loc[0])
+			}
+		}
 		from := 0
 		for {
-			open, isFn, mayLatch := jsParamListOpen(s[from:])
+			open, isFn, mayLatch := jsParamListOpen(s, from, fnOpen)
 			if open < 0 {
 				return
 			}
-			open += from
 			sigIsFunction = isFn
 			sigDepth = 1
 			rest := s[open+1:]
@@ -2650,11 +2678,9 @@ func JSParamNames(lines []AddedLine) []string {
 				sig.WriteString(rest)
 				return
 			}
-			before := len(out)
 			out = appendJSParams(out, rest[:idx], sigIsFunction, rest[idx+1:])
 			sigDepth, sigLines = 0, 0
 			sig.Reset()
-			_ = before
 			// Keep scanning even after a successful bind. Stopping at the first
 			// list that bound anything lost the inner half of a single-line
 			// curried arrow — `const mw = (store) => (next) => next(store);`
@@ -2701,22 +2727,34 @@ func JSParamNames(lines []AddedLine) []string {
 // multi-line JSX far more often than by a wrapped arrow signature, and latching
 // on one swallowed the whole JSX body — including every arrow inside it, which
 // is exactly the binding this extractor exists to find.
-func jsParamListOpen(s string) (int, bool, bool) {
-	if strings.Contains(s, "function") {
-		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
-			// `\bfunction\b[^(]*\(` takes the FIRST `(` after the keyword,
-			// which is the wrong one when a generic constraint contains a
-			// function type: `function apply<T extends (a: number) => void>(cb)`
-			// bound `a` — a name from a pure type position — and never reached
-			// the real list, so `cb` was then flagged. Both error directions
-			// from one mismatch. Re-find the opener at generic depth 0.
-			if open := jsFunctionParenAfter(s, loc[0]); open >= 0 {
-				return open, true, true
-			}
-		}
+// fnOpen is the index of the `function` form's parameter `(` on this line, or
+// -1 — computed once by the caller, since re-deriving it per call made the
+// opener loop quadratic in line length.
+func jsParamListOpen(s string, from, fnOpen int) (int, bool, bool) {
+	if fnOpen >= from {
+		return fnOpen, true, true
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] != '(' {
+	// Generic depth, so a parameter list inside a type-parameter clause is not
+	// mistaken for the real one. jsFunctionParenAfter does this for the
+	// `function` form; the arrow form needs it too, for a NESTED generic —
+	// `const f = <T extends Array<(zzz: number) => void>>(x: T) => x` bound
+	// `zzz`, a name from a pure type position that binds nothing at runtime,
+	// masking a hallucinated `zzz(...)` elsewhere in the file.
+	angle := 0
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+				angle++
+			}
+			continue
+		case '>':
+			if angle > 0 && (i == 0 || s[i-1] != '=') {
+				angle--
+			}
+			continue
+		}
+		if s[i] != '(' || angle > 0 {
 			continue
 		}
 		j := i - 1

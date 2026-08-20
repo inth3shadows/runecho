@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func jsParams(t *testing.T, src string) []string {
@@ -588,5 +589,84 @@ func TestJSParamNamesMultilineTypeStatements(t *testing.T) {
 	src := "type A = B extends C\nexport function P({ onChange }) { return onChange(1); }"
 	if got := jsParams(t, src); !hasName(got, "onChange") {
 		t.Errorf("onChange lost after an unterminated type head: %v", got)
+	}
+}
+
+// TestJSParamNamesLinearInLineLength pins review-round-4 finding 1. The opener
+// retry loop re-derived the `function` opener on every iteration, so a
+// `strings.Contains(s[from:], "function")` scan of the whole remaining line ran
+// inside the loop — O(n) work per iteration, quadratic in line length. On a
+// generated arrow-heavy line that was 4x per doubling and 156 ms at the 64 KiB
+// capLine ceiling, against a ~12 ms budget. ParseUnifiedDiff does not cap at
+// all, and the pre-commit path has no deferOnPanic deadline, so it could stall
+// a commit outright.
+//
+// Asserts the SHAPE (growth ratio), not a wall-clock threshold, so it does not
+// flake on a loaded machine.
+func TestJSParamNamesLinearInLineLength(t *testing.T) {
+	measure := func(n int) time.Duration {
+		lines := TextToAddedLines(strings.Repeat("f0((x0)=>x0),", n))
+		best := time.Hour
+		for i := 0; i < 5; i++ { // min of several runs: resistant to scheduler noise
+			st := time.Now()
+			_ = JSParamNames(lines)
+			if d := time.Since(st); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	small, large := measure(1500), measure(6000)
+	// 4x the input. Linear predicts ~4x; the quadratic version was ~16x.
+	if large > 8*small+2*time.Millisecond {
+		t.Errorf("growth is superlinear: 1500 units %v, 6000 units %v (>8x)", small, large)
+	}
+}
+
+// TestJSParamNamesNestedTypeBody pins review-round-4 finding 2. Exit from type
+// position required a column-zero statement or a `;`, so an INDENTED closing
+// brace — a type body inside a namespace, or a local type inside a function —
+// satisfied neither and latched the extractor for the rest of the enclosing
+// block. Nothing after it bound, reopening #302 for that whole region. Only
+// top-level type bodies were covered before, which is why this was missed.
+func TestJSParamNamesNestedTypeBody(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"interface in a namespace", `export namespace NS {
+  interface Props {
+    a: string
+  }
+  export function handler(cb) { return cb(1); }
+}`, "cb"},
+		{"local type alias in a function body", `function outer() {
+  type Local = {
+    a: string
+  }
+  const g = (aaa) => aaa;
+}`, "aaa"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); !hasName(got, tc.want) {
+				t.Errorf("%q not bound (got %v): an indented type body latched "+
+					"the extractor into type position", tc.want, got)
+			}
+		})
+	}
+	// The head that opens NO nesting must still need its `;` — round-3's case.
+	if got := jsParams(t, "type A = B extends C\n  ? (x: D) => void\n  : never;"); len(got) > 0 {
+		t.Errorf("bound %v from a conditional type", got)
+	}
+}
+
+// TestJSParamNamesArrowGenericClause pins review-round-4 finding 3: the arrow
+// form had no generic-clause guard, so a parameter name inside a NESTED generic
+// leaked. `zzz` binds nothing at runtime, so folding it masks a hallucinated
+// `zzz(...)` — the failure the doc says is excluded structurally.
+func TestJSParamNamesArrowGenericClause(t *testing.T) {
+	got := jsParams(t, `const f = <T extends Array<(zzz: number) => void>>(x: T) => x;`)
+	if hasName(got, "zzz") {
+		t.Errorf("bound `zzz` from inside an arrow's generic clause: %v", got)
+	}
+	if !hasName(got, "x") {
+		t.Errorf("real parameter x not bound: %v", got)
 	}
 }

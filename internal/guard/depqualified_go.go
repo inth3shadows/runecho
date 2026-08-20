@@ -114,10 +114,11 @@ func GoDepQualifiedViolations(wholeFile, addedLines []AddedLine, modulePath stri
 
 // GoDepQualifiedViolationsWithReason is GoDepQualifiedViolations plus the
 // reason a candidate call was skipped because its package could not be
-// resolved (go.work overlay, no go.mod, not in the module cache — see
-// depindex.GoIndex.Lookup, which already returns idx.reason uniformly for
-// every call in the index-level cases, so this only has to capture what
-// Lookup already computed). Empty when nothing was skipped for that reason,
+// resolved, as one of depindex's stable tokens — "go-work", "no-go-mod",
+// "not-in-module-cache", "replace-directive", … (see
+// depindex.PackageSymbols.Code, which Lookup already computes for every
+// index-level and per-package case, so this only has to capture it). Empty
+// when nothing was skipped for that reason,
 // which includes the idx==nil and language-mismatch cases callers already
 // gate on before calling this.
 //
@@ -189,7 +190,13 @@ func GoDepQualifiedViolationsWithReason(wholeFile, addedLines []AddedLine, modul
 			pkg := idx.Lookup(importPath)
 			if pkg.Res != depindex.Resolved {
 				if reason == "" {
-					reason = pkg.Reason
+					// Code, not Reason: this value is persisted to
+					// decisions.jsonl (#359), and Reason is prose built from
+					// local state — it would write an absolute go.work or
+					// module-cache path into a shared artifact and give every
+					// group-by-reason tally one bucket per import path per
+					// machine. Reason remains the RUNECHO_DEBUG diagnostic.
+					reason = pkg.Code
 				}
 				continue
 			}

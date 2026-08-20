@@ -773,7 +773,15 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// would either under-report file-scope or over-report the other four.
 	preEditReason := ""
 	if len(fileLines) == 0 && edit.ToolName != "Write" {
-		if _, err := os.Stat(filePath); err == nil {
+		// os.IsNotExist, not err == nil: ONLY a file that does not exist is
+		// definitively empty. Any other stat failure (EACCES on a parent
+		// directory, ELOOP, ENOTDIR) means readFileLines failed for a reason
+		// that IS lost coverage, and testing err == nil silently classified
+		// those as clean — while the file-scope arm below, using this same
+		// distinction, correctly reported them as degraded. Two spellings of
+		// one question that disagreed on everything but ENOENT (found by
+		// review of #363).
+		if _, err := os.Stat(filePath); !os.IsNotExist(err) {
 			preEditReason = "oversized-pre-edit-file"
 		}
 	}
@@ -918,7 +926,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
 			var reason string
 			depsGoV, reason = goDepQualifiedViolationsWithReason(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
-			depsGoResult = classifyResult("deps-go", len(depsGoV) > 0, reason)
+			// preEditReason folds in here for the same reason it does for
+			// qualified/recv-method/var-type: this check builds its context by
+			// concatenating fileLines with newLines, so an unreadable pre-edit
+			// file leaves it with the hunk alone — no import block, therefore no
+			// aliases, therefore "found nothing" from a check that never saw the
+			// imports. It was the one context-concatenating check still missing
+			// the fold (found by review of #363).
+			depsGoResult = classifyResult("deps-go", len(depsGoV) > 0, foldAbstainReason(reason, preEditReason))
 		}
 	}
 	results = append(results, depsGoResult)

@@ -84,7 +84,8 @@ type GoIndex struct {
 	vendorDir  string            // non-empty when the build uses vendoring
 	modCache   string
 	goroot     string
-	reason     string // why the index is inert ("" when usable)
+	reason     string // why the index is inert ("" when usable), as prose
+	code       string // the same fact as a stable token (PackageSymbols.Code)
 
 	mu           sync.Mutex
 	cache        map[string]PackageSymbols
@@ -104,19 +105,19 @@ func NewGoIndex(startDir string) *GoIndex {
 	}
 	root := findGoModRoot(startDir)
 	if root == "" {
-		idx.reason = "no go.mod found"
+		idx.reason, idx.code = "no go.mod found", "no-go-mod"
 		return idx
 	}
 	// A go.work overlay can redirect any module in the workspace to a local
 	// directory that go.mod knows nothing about. Rather than reimplement its
 	// resolution, refuse to index at all — a wrong package is worse than none.
 	if workRoot := findFileUpward(startDir, "go.work"); workRoot != "" {
-		idx.reason = "go.work workspace at " + workRoot + " can redirect modules"
+		idx.reason, idx.code = "go.work workspace at "+workRoot+" can redirect modules", "go-work"
 		return idx
 	}
 	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
-		idx.reason = "go.mod unreadable: " + err.Error()
+		idx.reason, idx.code = "go.mod unreadable: "+err.Error(), "go-mod-unreadable"
 		return idx
 	}
 	idx.modulePath = parseGoModulePath(string(data))
@@ -131,7 +132,7 @@ func NewGoIndex(startDir string) *GoIndex {
 // Lookup resolves a Go import path to the exported names of that package.
 func (idx *GoIndex) Lookup(importPath string) PackageSymbols {
 	if idx.reason != "" {
-		return unknown("%s", idx.reason)
+		return unknown(idx.code, "%s", idx.reason)
 	}
 	idx.mu.Lock()
 	if ps, ok := idx.cache[importPath]; ok {
@@ -140,7 +141,7 @@ func (idx *GoIndex) Lookup(importPath string) PackageSymbols {
 	}
 	if idx.resolves >= maxResolvesPerRun {
 		idx.mu.Unlock()
-		return unknown("resolve budget exhausted (%d packages)", maxResolvesPerRun)
+		return unknown("resolve-budget-exhausted", "resolve budget exhausted (%d packages)", maxResolvesPerRun)
 	}
 	idx.resolves++
 	idx.mu.Unlock()
@@ -162,13 +163,13 @@ func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 	}
 	files, size, ok, reason := goPackageFiles(dir)
 	if !ok {
-		return unknown("%s: %s", importPath, reason)
+		return unknown("package-dir-unreadable", "%s: %s", importPath, reason)
 	}
 	if len(files) == 0 {
-		return unknown("%s: no Go source in %s", importPath, dir)
+		return unknown("no-go-source", "%s: no Go source in %s", importPath, dir)
 	}
 	if !idx.spendBytes(size) {
-		return unknown("%s: would exceed the %d-byte scan budget for this run", importPath, maxGoBytesPerRun)
+		return unknown("scan-budget-exhausted", "%s: would exceed the %d-byte scan budget for this run", importPath, maxGoBytesPerRun)
 	}
 
 	// Reading precedes the memo lookup because the key is a hash of the source
@@ -183,7 +184,7 @@ func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 	// correctness problem.
 	sources, ok, reason := readGoPackageSources(dir, files)
 	if !ok {
-		return unknown("%s: %s", importPath, reason)
+		return unknown("package-source-unreadable", "%s: %s", importPath, reason)
 	}
 
 	key := packageCacheKey(importPath, files, sources)
@@ -193,7 +194,7 @@ func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 
 	exports, ok := GoPackageExports(sources)
 	if !ok {
-		return partial("%s: source did not parse", importPath)
+		return partial("source-parse-failed", "%s: source did not parse", importPath)
 	}
 	writeCachedExports(key, exports)
 	return PackageSymbols{Res: Resolved, Exports: exports}
@@ -202,13 +203,13 @@ func (idx *GoIndex) resolve(importPath string) PackageSymbols {
 // packageDir maps an import path to the directory holding its source.
 func (idx *GoIndex) packageDir(importPath string) (string, PackageSymbols, bool) {
 	if importPath == "" || strings.Contains(importPath, "..") {
-		return "", unknown("malformed import path %q", importPath), false
+		return "", unknown("malformed-import-path", "malformed import path %q", importPath), false
 	}
 	// The repo's own packages are the same-repo case, already covered by
 	// GoQualifiedViolations against the repo's IR. Not this index's job.
 	if idx.modulePath != "" && (importPath == idx.modulePath ||
 		strings.HasPrefix(importPath, idx.modulePath+"/")) {
-		return "", unknown("%s is a same-repo package", importPath), false
+		return "", unknown("same-repo-package", "%s is a same-repo package", importPath), false
 	}
 
 	// Standard library: no dot in the first path element (net/http, encoding/json).
@@ -218,11 +219,11 @@ func (idx *GoIndex) packageDir(importPath string) (string, PackageSymbols, bool)
 	}
 	if !strings.Contains(first, ".") {
 		if idx.goroot == "" {
-			return "", unknown("GOROOT unknown; cannot resolve stdlib %q", importPath), false
+			return "", unknown("goroot-unknown", "GOROOT unknown; cannot resolve stdlib %q", importPath), false
 		}
 		dir := filepath.Join(idx.goroot, "src", filepath.FromSlash(importPath))
 		if !isDir(dir) {
-			return "", unknown("%s: not found in GOROOT/src", importPath), false
+			return "", unknown("not-in-goroot", "%s: not found in GOROOT/src", importPath), false
 		}
 		return dir, PackageSymbols{}, true
 	}
@@ -231,7 +232,7 @@ func (idx *GoIndex) packageDir(importPath string) (string, PackageSymbols, bool)
 	if idx.vendorDir != "" {
 		dir := filepath.Join(idx.vendorDir, filepath.FromSlash(importPath))
 		if !isDir(dir) {
-			return "", unknown("%s: not vendored", importPath), false
+			return "", unknown("not-vendored", "%s: not vendored", importPath), false
 		}
 		return dir, PackageSymbols{}, true
 	}
@@ -240,13 +241,13 @@ func (idx *GoIndex) packageDir(importPath string) (string, PackageSymbols, bool)
 	// module github.com/a/b, not github.com/a.
 	modPath, version := idx.moduleFor(importPath)
 	if modPath == "" {
-		return "", unknown("%s: no module in go.mod provides it", importPath), false
+		return "", unknown("no-module-provides", "%s: no module in go.mod provides it", importPath), false
 	}
 	if idx.replaced[modPath] {
-		return "", unknown("%s: module %s has a replace directive", importPath, modPath), false
+		return "", unknown("replace-directive", "%s: module %s has a replace directive", importPath, modPath), false
 	}
 	if idx.modCache == "" {
-		return "", unknown("module cache location unknown"), false
+		return "", unknown("modcache-unknown", "module cache location unknown"), false
 	}
 	rest := strings.TrimPrefix(strings.TrimPrefix(importPath, modPath), "/")
 	dir := filepath.Join(idx.modCache, filepath.FromSlash(escapeGoModulePath(modPath)+"@"+version))
@@ -254,7 +255,7 @@ func (idx *GoIndex) packageDir(importPath string) (string, PackageSymbols, bool)
 		dir = filepath.Join(dir, filepath.FromSlash(rest))
 	}
 	if !isDir(dir) {
-		return "", unknown("%s: not in module cache (%s)", importPath, dir), false
+		return "", unknown("not-in-module-cache", "%s: not in module cache (%s)", importPath, dir), false
 	}
 	return dir, PackageSymbols{}, true
 }

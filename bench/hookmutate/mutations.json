@@ -423,9 +423,9 @@
     {
       "id": "deps-go/provenance",
       "file": "cmd/runecho-guard/main.go",
-      "find": "depsGoResult = classifyResult(\"deps-go\", len(depsGoV) > 0, reason)",
-      "replace": "depsGoResult = classifyResult(\"deps-go\", false, reason)",
-      "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket (#330: depsGoResult replaces fired.DepsGo)"
+      "find": "depsGoResult = classifyResult(\"deps-go\", len(depsGoV) > 0, foldAbstainReason(reason, preEditReason))",
+      "replace": "depsGoResult = classifyResult(\"deps-go\", false, foldAbstainReason(reason, preEditReason))",
+      "desc": "the ask no longer records that deps-go fired, so it logs in another check's bucket (#330: depsGoResult replaces fired.DepsGo) (#363 follow-up: the call now folds in the shared degraded pre-edit reason)"
     },
     {
       "id": "deps-go/exported-membership",
@@ -497,7 +497,7 @@
       "find": "read as clean and pass silently. See firedChecks.anyNonViolation.\n\tif len(violations) == 0 && !fired.anyNonViolation() {",
       "replace": "read as clean and pass silently. See firedChecks.anyNonViolation.\n\tif !fired.Violations && !fired.anyNonViolation() {",
       "desc": "the pre-commit clean-path gate reads the provenance flag instead of the findings slice -- the runArgs twin of gate/merged-slice-hook",
-      "known_gap": "Equivalent mutant in isolation, for the same reason as gate/merged-slice-hook: fired.Violations is assigned from len(violations)>0, so the two spellings agree on unmutated bookkeeping. This corpus has no pre-commit-mode fixture (precommit_test.go documents a staged-diff test harness as impractical without a live git commit), so unlike the hook-mode twin there is no compounding fixture available here to prove the dropped-commit-block failure mode directly -- recorded as a known gap rather than implied away, not verified by a second mutation the way the hook-mode entry is."
+      "known_gap": "Equivalent mutant in isolation, for the same reason as gate/merged-slice-hook: fired.Violations is assigned from len(violations)>0, so the two spellings agree on unmutated bookkeeping. This CORPUS has no pre-commit-mode fixture -- mutate.py scores TestHookCorpus only, and its fixtures are hook-mode payloads -- so unlike the hook-mode twin there is no compounding fixture available here to prove the dropped-commit-block failure mode directly. (A real staged-diff harness does now exist in precommit_test.go, added in #363's follow-up; it is a plain Go test, which this runner does not score.) -- recorded as a known gap rather than implied away, not verified by a second mutation the way the hook-mode entry is."
     }
   ]
 }

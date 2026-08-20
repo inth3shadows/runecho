@@ -2509,14 +2509,33 @@ func JSParamNames(lines []AddedLine) []string {
 
 		// --- type positions bind nothing -----------------------------------
 		if typeDepth > 0 || inTypeStmt {
-			typeDepth += jsBracketDelta(s)
-			if typeDepth <= 0 {
-				typeDepth = 0
-				// A one-line alias (`type H = (e: E) => void;`) never opens a
-				// brace, so statement end is the line end, not a closing brace.
-				inTypeStmt = false
+			// A new top-level statement ends any type statement outright, so a
+			// head with no `;` cannot swallow the rest of the file. Checked
+			// FIRST and fallen through, not merely cleared: this line is real
+			// code and must still be scanned for its own parameter list. An
+			// earlier revision cleared the flag and returned anyway, which lost
+			// the very first declaration after every unterminated type head.
+			if jsTopLevelStatementStart(s) {
+				typeDepth, inTypeStmt = 0, false
+			} else {
+				typeDepth += jsBracketDelta(s)
+				if typeDepth <= 0 {
+					typeDepth = 0
+					// A type STATEMENT ends at its `;`, not merely when
+					// brackets balance. Clearing on balance alone dropped out
+					// of type position after one line for any head that spans
+					// lines without nesting — a conditional type
+					// (`type A = B extends C` / `? (x: D) => void`) or a
+					// wrapped generic (`type Reg = Record<` … `>;`, whose `<>`
+					// jsBracketDelta does not count) — and the continuation was
+					// then read as a value arrow, binding a parameter name from
+					// a pure type position.
+					if strings.Contains(s, ";") {
+						inTypeStmt = false
+					}
+				}
+				return
 			}
-			return
 		}
 		// Substring-gated: these two regexes are anchored but still cost real
 		// backtracking on a deeply-indented line, and running them unguarded on
@@ -2635,10 +2654,15 @@ func JSParamNames(lines []AddedLine) []string {
 			out = appendJSParams(out, rest[:idx], sigIsFunction, rest[idx+1:])
 			sigDepth, sigLines = 0, 0
 			sig.Reset()
-			if len(out) > before {
-				return
-			}
-			// Bound nothing: this `(` was a call or an empty list. Keep looking.
+			_ = before
+			// Keep scanning even after a successful bind. Stopping at the first
+			// list that bound anything lost the inner half of a single-line
+			// curried arrow — `const mw = (store) => (next) => next(store);`
+			// bound only `store` and then flagged `next`. That is one
+			// definition, not the "two definitions sharing a line" the early
+			// exit was justified by, and it is the standard redux-middleware /
+			// HOC shape. Every later candidate still passes jsArrowFollows, so
+			// continuing cannot bind a call's arguments.
 			from = open + 1 + idx + 1
 			if from >= len(s) {
 				return
@@ -2680,7 +2704,15 @@ func JSParamNames(lines []AddedLine) []string {
 func jsParamListOpen(s string) (int, bool, bool) {
 	if strings.Contains(s, "function") {
 		if loc := jsFunctionOpen.FindStringIndex(s); loc != nil {
-			return loc[1] - 1, true, true
+			// `\bfunction\b[^(]*\(` takes the FIRST `(` after the keyword,
+			// which is the wrong one when a generic constraint contains a
+			// function type: `function apply<T extends (a: number) => void>(cb)`
+			// bound `a` — a name from a pure type position — and never reached
+			// the real list, so `cb` was then flagged. Both error directions
+			// from one mismatch. Re-find the opener at generic depth 0.
+			if open := jsFunctionParenAfter(s, loc[0]); open >= 0 {
+				return open, true, true
+			}
 		}
 	}
 	for i := 0; i < len(s); i++ {
@@ -2712,6 +2744,15 @@ func jsParamListOpen(s string) (int, bool, bool) {
 		// optimisation an earlier revision of this comment claimed.
 		// TestJSParamNamesKeywordLedArrows pins it.
 		if j < 0 || !isJSIdentByte(s[j]) {
+			// A `(` directly after a fat arrow or a `?` opens the arrow's BODY
+			// or a ternary branch, never a parameter list — so it must not
+			// latch across lines. `=> (\n  list.map((row) => row())\n)` is the
+			// same wrapped-JSX hazard `return (` is exempted for, and latching
+			// swallowed every arrow inside it. The same-line close path is left
+			// intact, which is what binds a curried arrow.
+			if jsPrecededByArrowOrTernary(s, j) {
+				return i, false, false
+			}
 			return i, false, true
 		}
 		if kw, mayLatch := jsKeywordEndsAt(s, j); kw {
@@ -2737,66 +2778,62 @@ func appendJSParams(out []string, inner string, isFunction bool, after string) [
 	if !isFunction && !jsArrowFollows(after) {
 		return out
 	}
-	// splitTopLevelCommas tracks ()/[]/{} but NOT <>, so a generic type argument
-	// containing a comma is split mid-type: `m: Map<string, Handler>` becomes
-	// `m: Map<string` and `Handler>`. The first still binds `m` correctly, but
-	// the second is a type fragment, and binding `Handler` from it would fold a
-	// TYPE NAME into the resolvable set — masking a genuine hallucinated
-	// `Handler(...)` call. That is the exact leak JSDeclaredNames' doc warns
-	// about, arriving by a different route.
+	// splitJSParamList, not splitTopLevelCommas: the latter tracks ()/[]/{} but
+	// NOT <>, so a generic type argument containing a comma is split mid-type
+	// (`m: Map<string, Handler>` → `m: Map<string` + `Handler>`) and the
+	// fragment binds `Handler`, folding a TYPE NAME into the resolvable set and
+	// masking a hallucinated `Handler(...)`.
 	//
-	// Rejoining is not needed — only the LEADING element of a split-apart
-	// parameter carries the binding — so the fragments are simply skipped, by
-	// tracking angle depth across elements. The depth is measured only on the
-	// annotation side (after a top-level `:`), so an ordinary comparison in a
-	// default value (`a = b < c`) cannot be mistaken for an open generic.
-	angle := 0
-	for _, el := range splitTopLevelCommas(inner) {
-		if angle > 0 {
-			if angle += jsAngleDelta(el); angle < 0 {
-				angle = 0
-			}
-			continue // a continuation of the previous parameter's type
-		}
+	// An earlier revision skipped fragments by accumulating angle depth ACROSS
+	// elements, measured only after a top-level `:`. That heuristic was wrong in
+	// both directions and shipped one bug of each kind: a generic in a DEFAULT
+	// value never opened the guard (`reg = new Map<string, TotallyMadeUp>()`
+	// bound the type name), and a `<` COMPARISON in an annotated default opened
+	// it spuriously (`a: number = x < y, cb` swallowed `cb`, a fresh false
+	// positive of exactly the class this file exists to close). Splitting
+	// correctly in the first place removes the need to guess afterwards.
+	for _, el := range splitJSParamList(inner) {
 		out = append(out, jsBindingTargets(el)...)
-		if i := jsTopLevelColon(el); i >= 0 {
-			// Clamped: a lone `>` from a comparison in a default value
-			// (`a: number = n > 0 ? 1 : 2`) drives this negative, and a later
-			// real generic's `<` would then only bring it back to 0 — leaving
-			// that generic's split-off type fragment to be bound as a
-			// parameter, which is precisely the leak this tracking prevents.
-			if angle += jsAngleDelta(el[i+1:]); angle < 0 {
-				angle = 0
-			}
-		}
 	}
 	return out
 }
 
-// jsAngleDelta is the net `<`/`>` balance of s, ignoring the arrow token `=>`
-// and the comparison-like `<=`/`>=`, which are not generic delimiters.
-func jsAngleDelta(s string) int {
-	d := 0
+// splitJSParamList splits a parameter list on its top-level commas, tracking
+// generic `<…>` in addition to the ()/[]/{} that splitTopLevelCommas handles.
+//
+// `<` and `>` are ambiguous in JS — they are also comparison operators — so a
+// `<` opens a generic only in the position a generic can occupy: directly after
+// an identifier byte (`Map<`, `Record<`, `Array<`), with no space between. A
+// comparison is conventionally spaced (`x < y`), and an unspaced `x<y` inside a
+// parameter default is rare enough to trade against the type-name leak. A `>`
+// closes only when a generic is actually open, so a stray `n > 0` cannot drive
+// the depth negative — the failure mode of the accumulator this replaces.
+func splitJSParamList(s string) []string {
+	var out []string
+	depth, angle, start := 0, 0, 0
 	for i := 0; i < len(s); i++ {
-		switch s[i] {
+		switch c := s[i]; c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
 		case '<':
-			if i+1 < len(s) && s[i+1] == '=' {
-				i++
-				continue
+			// `=>`'s `>` never reaches here, and `<=` is a comparison.
+			if i > 0 && isJSIdentByte(s[i-1]) && i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+				angle++
 			}
-			d++
 		case '>':
-			if i > 0 && s[i-1] == '=' {
-				continue // part of `=>` or `>=`
+			if angle > 0 && (i == 0 || s[i-1] != '=') {
+				angle--
 			}
-			if i+1 < len(s) && s[i+1] == '=' {
-				i++
-				continue
+		case ',':
+			if depth == 0 && angle == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
 			}
-			d--
 		}
 	}
-	return d
+	return append(out, s[start:])
 }
 
 // jsTopLevelStatementStart reports whether s begins, at column zero, a new
@@ -2972,5 +3009,44 @@ func jsHeadIsUnfinished(s string) bool {
 	case '=', '|', '&', ',', '(', '<', '+', '-', '?', ':', '.':
 		return true
 	}
-	return strings.HasSuffix(t, "extends")
+	// A conditional type's head ends on an IDENTIFIER (`type A = B extends C`)
+	// with the `?`/`:` arms on following lines, so the trailing-operator test
+	// alone lets it out of type position after one line.
+	return strings.Contains(t, "extends")
+}
+
+// jsPrecededByArrowOrTernary reports whether the byte at s[j] (the last
+// non-space byte before a `(`) ends a fat arrow or is a ternary `?`.
+func jsPrecededByArrowOrTernary(s string, j int) bool {
+	if j < 0 {
+		return false
+	}
+	if s[j] == '?' {
+		return true
+	}
+	return s[j] == '>' && j > 0 && s[j-1] == '='
+}
+
+// jsFunctionParenAfter returns the index of the parameter list's `(` for the
+// `function` keyword starting at kw, skipping a generic parameter clause whose
+// constraint may itself contain parentheses. Returns -1 if none is on the line.
+func jsFunctionParenAfter(s string, kw int) int {
+	angle := 0
+	for i := kw; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			if i+1 < len(s) && s[i+1] != '=' && s[i+1] != ' ' {
+				angle++
+			}
+		case '>':
+			if angle > 0 && (i == 0 || s[i-1] != '=') {
+				angle--
+			}
+		case '(':
+			if angle == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }

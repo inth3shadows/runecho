@@ -482,3 +482,111 @@ func TestJSParamNamesReturnParenJSX(t *testing.T) {
 		t.Errorf("async multi-line parameter list stopped latching: %v", g)
 	}
 }
+
+// TestJSParamNamesGenericSplitBothDirections pins review-round-3 findings 1
+// and 2. An earlier revision skipped generic fragments by accumulating angle
+// depth ACROSS split elements, measured only after a top-level `:`. That
+// heuristic was wrong in both directions and shipped one bug of each kind, so
+// both are pinned here: splitJSParamList replaced it by never splitting inside
+// a generic in the first place.
+func TestJSParamNamesGenericSplitBothDirections(t *testing.T) {
+	// Direction 1 — a generic in a DEFAULT value never opened the guard, so the
+	// type name leaked into the known set and masked a real hallucination.
+	src := `function build(reg = new Map<string, TotallyMadeUp>()) { return TotallyMadeUp(reg); }`
+	if got := jsParams(t, src); hasName(got, "TotallyMadeUp") {
+		t.Errorf("type name leaked from a generic in a default value: %v", got)
+	}
+	viol := Run(map[string]struct{}{}, "", []FileDiff{{Path: "x.ts", AddedLines: TextToAddedLines(src)}})
+	var flagged bool
+	for _, v := range viol {
+		if v.Symbol == "TotallyMadeUp" {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Errorf("hallucinated TotallyMadeUp(...) no longer flagged: %v", viol)
+	}
+
+	// Direction 2 — a `<` COMPARISON in an annotated default opened the guard
+	// spuriously and swallowed every later parameter, producing a FRESH false
+	// positive of exactly the class this file exists to close.
+	src2 := `function f(a: number = x < y, cb) { cb(); }`
+	if got := jsParams(t, src2); !hasName(got, "cb") {
+		t.Errorf("cb lost to a comparison mistaken for an open generic: %v", got)
+	}
+	if v := Run(map[string]struct{}{}, "", []FileDiff{{Path: "x.ts", AddedLines: TextToAddedLines(src2)}}); len(v) > 0 {
+		t.Errorf("fresh false positive: %v", v)
+	}
+
+	// The annotated generic that motivated the tracking must still be handled.
+	if got := jsParams(t, `function h(m: Map<string, Handler>, next) {}`); hasName(got, "Handler") {
+		t.Errorf("type name leaked from an annotated generic: %v", got)
+	}
+}
+
+// TestJSParamNamesArrowBodyParen pins review-round-3 finding 3: a `(` directly
+// after a fat arrow or a `?` opens a BODY or a ternary branch, never a
+// parameter list, so it must not latch across lines — the same wrapped-JSX
+// hazard `return (` is exempted for.
+func TestJSParamNamesArrowBodyParen(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"arrow body paren", "export const run = () => (\n  list.map((row) => row())\n);"},
+		{"ternary branch paren", "const v = cond ? (\n  list.map((row) => row())\n) : null;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); !hasName(got, "row") {
+				t.Errorf("row lost — the wrapped block was swallowed: %v", got)
+			}
+		})
+	}
+}
+
+// TestJSParamNamesCurriedArrow pins review-round-3 finding 4. The opener retry
+// loop used to stop at the first list that bound anything, which lost the inner
+// half of a single-line curried arrow — one definition, not two, and the
+// standard redux-middleware / HOC shape.
+func TestJSParamNamesCurriedArrow(t *testing.T) {
+	got := jsParams(t, `const mw = (store) => (next) => next(store);`)
+	for _, want := range []string{"store", "next"} {
+		if !hasName(got, want) {
+			t.Errorf("%q not bound from a curried arrow: %v", want, got)
+		}
+	}
+}
+
+// TestJSParamNamesGenericFunctionConstraint pins review-round-3 finding 5.
+// jsFunctionOpen's `[^(]*` took the first `(` after the keyword, which is the
+// wrong paren when a generic constraint contains a function type — binding a
+// name from a pure type position AND missing the real list, both error
+// directions from one mismatch.
+func TestJSParamNamesGenericFunctionConstraint(t *testing.T) {
+	got := jsParams(t, `function apply<T extends (a: number) => void>(cb: T) { return cb(); }`)
+	if hasName(got, "a") {
+		t.Errorf("bound `a` from inside a generic constraint: %v", got)
+	}
+	if !hasName(got, "cb") {
+		t.Errorf("real parameter cb not bound: %v", got)
+	}
+}
+
+// TestJSParamNamesMultilineTypeStatements pins review-round-3 finding 6: a type
+// STATEMENT ends at its `;`, not merely when brackets balance. Clearing on
+// balance dropped out of type position after one line for heads that span lines
+// without nesting.
+func TestJSParamNamesMultilineTypeStatements(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"conditional type", "type A = B extends C\n  ? (x: D) => void\n  : never;"},
+		{"wrapped generic", "type Reg = Record<\n  string,\n  (v: W) => void\n>;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jsParams(t, tc.src); len(got) > 0 {
+				t.Errorf("bound %v from a pure type position", got)
+			}
+		})
+	}
+	// A missing `;` must not swallow the file: a new top-level statement ends it.
+	src := "type A = B extends C\nexport function P({ onChange }) { return onChange(1); }"
+	if got := jsParams(t, src); !hasName(got, "onChange") {
+		t.Errorf("onChange lost after an unterminated type head: %v", got)
+	}
+}

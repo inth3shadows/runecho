@@ -89,7 +89,37 @@ func repoSchema(desc string) map[string]any {
 type structArg struct {
 	Repo   string   `json:"repo"`
 	Paths  []string `json:"paths"`
-	Detail string   `json:"detail"`
+	Detail Detail   `json:"detail"`
+}
+
+// Detail is a validated structure tool detail level. A Detail value is one of
+// the four enum members from structureSchema (tree/symbols/hashes/full) — the
+// same vocabulary the schema advertises. Distilled by ParseDetail at the tool
+// boundary, so the per-call-site switch no longer re-validates a raw string:
+// by the time a Detail reaches the structure projection, it has already
+// survived the parse gate. Zero Detail is invalid (the zero value is not a
+// member of the enum).
+type Detail string
+
+const (
+	DetailTree    Detail = "tree"
+	DetailSymbols Detail = "symbols"
+	DetailHashes  Detail = "hashes"
+	DetailFull    Detail = "full"
+)
+
+// ParseDetail turns a raw wire string into a Detail, or "" plus an error naming
+// the expected members. An empty raw string is NOT valid (structure never sends
+// one — the default is applied before parsing by the schema's absence of a
+// default, then again here only as defense-in-depth); callers that need the
+// symbols default apply it before calling.
+func ParseDetail(raw string) (Detail, error) {
+	switch Detail(raw) {
+	case DetailTree, DetailSymbols, DetailHashes, DetailFull:
+		return Detail(raw), nil
+	default:
+		return "", fmt.Errorf("bad detail %q: want tree|symbols|hashes|full", raw)
+	}
 }
 
 func structureSchema() map[string]any {
@@ -262,14 +292,17 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	detail := a.Detail
-	if detail == "" {
-		detail = "symbols"
+	// Parse, don't validate: the wire's detail string becomes a Detail at the
+	// boundary, so every branch below (and the schema's enum) reads one
+	// canonical vocabulary. Default applied here once, before the parse gate —
+	// the one place structure may legitimately want symbols with no input.
+	dv := string(a.Detail)
+	if dv == "" {
+		dv = "symbols"
 	}
-	switch detail {
-	case "tree", "symbols", "hashes", "full":
-	default:
-		return "", fmt.Errorf("bad detail %q: want tree|symbols|hashes|full", detail)
+	detail, err := ParseDetail(dv)
+	if err != nil {
+		return "", err
 	}
 	irData, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
 	if err != nil {
@@ -300,13 +333,13 @@ func (o *Oracle) structure(args json.RawMessage) (string, error) {
 		visible := ir.VisibleSymbols(f.Symbols)
 		symCount += len(visible)
 		switch detail {
-		case "tree":
+		case DetailTree:
 			files[p] = map[string]any{"hash": f.Hash, "symbol_count": len(visible)}
-		case "symbols":
+		case DetailSymbols:
 			files[p] = symbolFile(f, withoutSymbolHashes(visible))
-		case "hashes":
+		case DetailHashes:
 			files[p] = symbolFile(f, visible)
-		case "full":
+		case DetailFull:
 			files[p] = f // FileIR.MarshalJSON -> legacy arrays + symbols
 		}
 	}

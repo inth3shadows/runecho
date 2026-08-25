@@ -631,3 +631,42 @@ func TestSymlinkedWalkRootIsFollowed(t *testing.T) {
 		t.Error("SupportedSeen == 0 makes Coverage() report a vacuous 100%")
 	}
 }
+
+// TestDanglingSymlinkRespectsTheCodeFilter.
+//
+// `skipped` is fail-closed on, and the contract is that non-code is never in it.
+// The dangling-symlink branch recorded unconditionally, with no extension check,
+// while both sibling branches had one — so a single stale `latest -> build-123`
+// or a `README-link.md` pointing nowhere blocked every build in the repo. That
+// is the `.git` defect from the previous review, arriving through a third door.
+func TestDanglingSymlinkRespectsTheCodeFilter(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	links := map[string]string{
+		"DANGLING.txt":   "/nonexistent/nope.txt",
+		"README-link.md": "/nonexistent/nope.md",
+		"latest":         "/nonexistent/build-123", // no extension at all
+		"broken.go":      "/nonexistent/lib.go",    // code: SHOULD be reported
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+
+	for _, quiet := range []string{"DANGLING.txt", "README-link.md", "latest"} {
+		if reason, reported := got[quiet]; reported {
+			t.Errorf("%s is not code and must not reach the fail-closed array (got %q)", quiet, reason)
+		}
+	}
+	if got["broken.go"] != SkipUnreadable {
+		t.Errorf("broken.go: got %q, want %q — an unresolvable CODE link is a real blind spot",
+			got["broken.go"], SkipUnreadable)
+	}
+}

@@ -230,13 +230,21 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			target, serr := os.Stat(path)
 			switch {
 			case serr != nil:
-				record(path, SkipUnreadable)
+				// A dangling or looping link. It resolves to nothing, so it is
+				// not a directory and the code filter applies exactly as it does
+				// to a live symlink below -- without it, one stale `latest ->
+				// build-123` or a `README-link.md` pointing nowhere put a non-code
+				// path into the fail-closed array and blocked every build in the
+				// repo. That is the `.git` defect again, through a third door.
+				if g.isCode(path) {
+					record(path, SkipUnreadable)
+				}
 			case target.IsDir():
 				record(path, SkipSymlinkDir)
 			default:
 				// Only code: a symlinked README is not a blind spot in a symbol
 				// index, and this list is fail-closed on.
-				if ext := filepath.Ext(path); IsKnownSourceExtension(ext) || g.supportsExtension(ext) {
+				if g.isCode(path) {
 					record(path, SkipSymlink)
 				}
 			}
@@ -558,6 +566,20 @@ func normalizePath(relPath string) string {
 	normalized = norm.NFC.String(normalized)
 
 	return normalized
+}
+
+// isCode reports whether path looks like source, by either measure: a language
+// we parse, or one we know of but do not. It is the guard on every capability
+// skip that names a FILE.
+//
+// The rule it enforces is the one the whole contract rests on -- non-code is
+// never in `skipped` -- because a consumer fails closed on that array, and a
+// README or a PNG in it blocks a documentation-only change. Every branch that
+// records a file skip must go through here; the dangling-symlink branch did not,
+// and that was enough to reintroduce the false block.
+func (g *Generator) isCode(path string) bool {
+	ext := filepath.Ext(path)
+	return g.supportsExtension(ext) || IsKnownSourceExtension(ext)
 }
 
 // supportsExtension returns true if any registered parser handles this extension.

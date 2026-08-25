@@ -78,6 +78,7 @@ func (db *DB) DiffLiveWithStats(a SnapshotMeta, liveIR *ir.IR, stats ir.Stats) (
 	res.Skipped = stats.Skipped
 	res.SkippedKnown = true
 	res.SkippedTruncated = stats.SkippedTruncated
+	res.SkippedCap = stats.SkippedCap
 	return res, nil
 }
 
@@ -337,8 +338,8 @@ func TruncateSkips(d DiffResult, n int) DiffResult {
 const maxShownSkips = 20
 
 // writeSkipBlock renders one labelled group of skips, or nothing when empty.
-func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool) {
-	if len(entries) == 0 {
+func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool, cap int) {
+	if len(entries) == 0 && !truncated {
 		return
 	}
 	count := plural(len(entries), "path")
@@ -356,8 +357,11 @@ func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile
 		fmt.Fprintf(sb, "  %s  [%s]\n", sk.Path, sk.Reason)
 	}
 	if truncated {
+		if cap == 0 {
+			cap = ir.MaxRecordedSkips
+		}
 		fmt.Fprintf(sb, "  WARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
-			ir.MaxRecordedSkips)
+			cap)
 	}
 }
 
@@ -392,7 +396,7 @@ func formatSkipped(d DiffResult) string {
 	}
 	var sb strings.Builder
 	writeSkipBlock(&sb, "NOT EXAMINED — a symbol removed here would be invisible to this diff",
-		capability, d.SkippedTruncated)
+		capability, d.SkippedTruncated, d.SkippedCap)
 	return sb.String()
 }
 

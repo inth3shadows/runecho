@@ -318,3 +318,51 @@ func TestFormatTrail_NamesWhatWentUnexamined(t *testing.T) {
 		t.Errorf("the drift branch must name it too:\n%s", noisy)
 	}
 }
+
+// TestFormatFull_TruncationWarningSurvivesAnEmptyList.
+//
+// writeSkipBlock returned early on an empty slice, and it is the only thing that
+// prints the WARNING — so a truncated run with nothing in the capability list
+// printed a bare "No structural changes." while skipped_truncated was true
+// underneath. Reachable: the recorder is first-come, so a monorepo with >1000
+// pruned directories (node_modules, __pycache__, .venv per package, all in
+// DefaultIgnoredPaths) fills the list with ignored_dir entries and every .java
+// seen afterwards is dropped. The text surface then silently asserted
+// completeness for a repo where nothing had been examined.
+func TestFormatFull_TruncationWarningSurvivesAnEmptyList(t *testing.T) {
+	out := FormatFull(DiffResult{
+		SnapshotA:        SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:        SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown:     true,
+		Skipped:          []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}},
+		SkippedTruncated: true,
+		SkippedCap:       ir.MaxRecordedSkips,
+	})
+	if !strings.Contains(out, "WARNING") {
+		t.Errorf("a truncated run must warn even with an empty capability list:\n%s", out)
+	}
+}
+
+// TestFormatFull_WarningNamesTheCapThatFired. Two caps can truncate: the overall
+// list and the cap_reached sub-cap. Hard-coding MaxRecordedSkips printed
+// "hit its cap (1000)" next to a list of ~101 entries, telling the operator a
+// 1000-entry list had been exceeded and mis-scoping the blind spot.
+func TestFormatFull_WarningNamesTheCapThatFired(t *testing.T) {
+	base := DiffResult{
+		SnapshotA:        SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:        SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown:     true,
+		Skipped:          []ir.SkippedFile{{Path: "a.go", Reason: ir.SkipCapReached}},
+		SkippedTruncated: true,
+	}
+	base.SkippedCap = 100
+	if out := FormatFull(base); !strings.Contains(out, "hit its cap (100)") {
+		t.Errorf("expected the sub-cap named:\n%s", out)
+	}
+	// Unknown cap (an older DiffResult, or one built by hand) falls back rather
+	// than printing 0.
+	base.SkippedCap = 0
+	if out := FormatFull(base); !strings.Contains(out, fmt.Sprintf("hit its cap (%d)", ir.MaxRecordedSkips)) {
+		t.Errorf("expected the fallback cap:\n%s", out)
+	}
+}

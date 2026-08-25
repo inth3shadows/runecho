@@ -102,7 +102,10 @@ type DiffResult struct {
 	// the fail-open this field exists to prevent. False means "unknown";
 	// DiffPayload omits the key entirely rather than emitting an empty list.
 	SkippedKnown bool
-	// SkippedTruncated forwards ir.Stats.SkippedTruncated: the skip list hit its
+	// SkippedTruncated forwards ir.Stats.SkippedTruncated: the skip list hit a
 	// cap, so absence from Skipped no longer implies "indexed".
 	SkippedTruncated bool
+	// SkippedCap is the cap that was hit, for a message that names the right
+	// number. 0 means "unknown"; renderers fall back to ir.MaxRecordedSkips.
+	SkippedCap int
 }

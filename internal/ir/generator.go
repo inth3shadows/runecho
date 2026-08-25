@@ -85,10 +85,14 @@ type Stats struct {
 	// invisible to Coverage() by construction (the denominator counts supported
 	// extensions only). That is the gap this field closes -- see skipped.go.
 	Skipped []SkippedFile
-	// SkippedTruncated reports that Skipped hit maxRecordedSkips. A consumer that
-	// fails closed on "was this path examined?" must treat a truncated list as
+	// SkippedTruncated reports that Skipped hit a cap. A consumer that fails
+	// closed on "was this path examined?" must treat a truncated list as
 	// "unknown", never as "not skipped".
 	SkippedTruncated bool
+	// SkippedCap is the cap that was hit, 0 when nothing truncated. Two caps can
+	// fire (the overall list and the cap_reached sub-cap), and a message naming
+	// the wrong one mis-scopes the blind spot for whoever reads it.
+	SkippedCap int
 }
 
 // Coverage returns Indexed as a percentage of SupportedSeen.
@@ -335,7 +339,7 @@ func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stat
 
 	result.RootHash = ComputeRootHash(result.Files)
 	stats.Indexed = len(result.Files)
-	stats.Skipped, stats.SkippedTruncated = rec.result()
+	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
 	return result, stats, nil
 }
 
@@ -419,7 +423,7 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 
 	updated.RootHash = ComputeRootHash(updated.Files)
 	stats.Indexed = len(updated.Files)
-	stats.Skipped, stats.SkippedTruncated = rec.result()
+	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
 	return updated, stats, nil
 }
 

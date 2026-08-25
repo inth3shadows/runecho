@@ -136,6 +136,11 @@ type skipRecorder struct {
 	items      []SkippedFile
 	capReached int
 	truncated  bool
+	// cap the recorder actually hit, for a message that names the right number.
+	// Two different caps can truncate; reporting MaxRecordedSkips when the
+	// cap_reached sub-cap fired told an operator a 1000-entry list had been
+	// exceeded next to a list of 101 entries, mis-scoping the blind spot.
+	hitCap int
 }
 
 func (r *skipRecorder) add(path, reason string) {
@@ -144,13 +149,13 @@ func (r *skipRecorder) add(path, reason string) {
 	}
 	if reason == SkipCapReached {
 		if r.capReached >= maxCapReachedSkips {
-			r.truncated = true
+			r.truncated, r.hitCap = true, maxCapReachedSkips
 			return
 		}
 		r.capReached++
 	}
 	if len(r.items) >= maxRecordedSkips {
-		r.truncated = true
+		r.truncated, r.hitCap = true, maxRecordedSkips
 		return
 	}
 	r.items = append(r.items, SkippedFile{Path: path, Reason: reason})
@@ -160,9 +165,9 @@ func (r *skipRecorder) add(path, reason string) {
 // already lexical, but the ordering is part of a machine contract whose bytes
 // are compared, so it is asserted here rather than inherited from a walk
 // implementation detail.
-func (r *skipRecorder) result() ([]SkippedFile, bool) {
+func (r *skipRecorder) result() ([]SkippedFile, bool, int) {
 	if r == nil {
-		return nil, false
+		return nil, false, 0
 	}
 	out := r.items
 	sort.Slice(out, func(i, j int) bool {
@@ -171,7 +176,7 @@ func (r *skipRecorder) result() ([]SkippedFile, bool) {
 		}
 		return out[i].Reason < out[j].Reason
 	})
-	return out, r.truncated
+	return out, r.truncated, r.hitCap
 }
 
 // knownSourceExtensions lists extensions that ARE source code but that no

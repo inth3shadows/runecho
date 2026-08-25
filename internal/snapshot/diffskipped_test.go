@@ -194,6 +194,48 @@ func TestTruncateSkips_CopiesAndFlags(t *testing.T) {
 	}
 }
 
+// TestTruncateSkips_BudgetsEachBucketSeparately.
+//
+// Clipping the MERGED list let policy entries evict capability ones. result()
+// sorts lexically, so on a workspace layout the `packages/pNN/node_modules`
+// entries interleave with the `packages/pNN/src/App.vue` ones — a 50-entry clip
+// discarded real blind spots to make room for ignored directories, and with
+// enough of them `skipped` came back EMPTY for a repo that was entirely
+// unindexed. That is a silent, total fail-open on the array a gate trusts.
+func TestTruncateSkips_BudgetsEachBucketSeparately(t *testing.T) {
+	var all []ir.SkippedFile
+	for i := range 60 {
+		// Sorts before the .vue files, exactly as a real workspace does.
+		all = append(all, ir.SkippedFile{
+			Path:   fmt.Sprintf("packages/p%02d/node_modules", i),
+			Reason: ir.SkipIgnoredDir,
+		})
+	}
+	for i := range 40 {
+		all = append(all, ir.SkippedFile{
+			Path:   fmt.Sprintf("packages/p%02d/src/App.vue", i),
+			Reason: ir.SkipUnsupportedLanguage,
+		})
+	}
+	d := TruncateSkips(DiffResult{SkippedKnown: true, Skipped: all}, 50)
+	capability, policy := SplitSkips(d.Skipped)
+
+	// Every blind spot fits inside its own budget, so none is lost.
+	if len(capability) != 40 {
+		t.Errorf("capability entries = %d, want all 40 — policy noise must not eat "+
+			"the fail-closed budget", len(capability))
+	}
+	if len(policy) != 50 {
+		t.Errorf("policy entries = %d, want the 50-entry budget", len(policy))
+	}
+	if !d.SkippedTruncated {
+		t.Error("policy entries were dropped, so the flag must be set")
+	}
+	if d.SkippedCap != 50 {
+		t.Errorf("SkippedCap = %d, want 50 so the warning names the cap that fired", d.SkippedCap)
+	}
+}
+
 // TestFormatFull_ZeroDriftStillNamesSkips is the human-output half of the same
 // point. "No structural changes." is the exact sentence a Java repo gets today
 // while nothing in it was ever indexed; unqualified, it is the failure this

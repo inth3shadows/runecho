@@ -314,23 +314,60 @@ func SplitSkips(all []ir.SkippedFile) (capability, policy []ir.SkippedFile) {
 	return capability, policy
 }
 
-// TruncateSkips returns d with its skip list clipped to at most n entries,
-// flagging the truncation. For surfaces with a tighter budget than the payload
-// cap — the MCP oracle, whose whole purpose is context economy, would otherwise
-// inject up to MaxRecordedSkips objects into an agent's context on every call
-// against a C or Java repo.
+// TruncateSkips returns d with its skip list clipped so that neither bucket
+// exceeds n entries, flagging the truncation. For surfaces with a tighter budget
+// than the payload cap -- the MCP oracle, whose whole purpose is context
+// economy, would otherwise inject up to MaxRecordedSkips objects into an agent's
+// context on every call against a C or Java repo.
+//
+// Budgeted PER BUCKET, not over the merged list. Clipping the merged list let
+// policy entries evict capability ones: result() sorts lexically, so on a
+// 50-package workspace the `packages/pNN/node_modules` entries interleave with
+// the `packages/pNN/src/App.vue` ones and a 50-entry clip discarded 15 of 40
+// real blind spots to make room for 25 ignored directories. With enough ignored
+// directories, `skipped` came back empty for a repo that was entirely
+// unindexed. The converse was equally wrong: clipping only policy entries set
+// skipped_truncated, telling a gate the fail-closed array was incomplete when
+// it was not.
+//
+// This is the same crowding-out the maxCapReachedSkips sub-cap prevents one
+// layer down, and it wants the same answer: give each class its own budget.
 func TruncateSkips(d DiffResult, n int) DiffResult {
-	if !d.SkippedKnown || len(d.Skipped) <= n {
+	if !d.SkippedKnown {
+		return d
+	}
+	capability, policy := SplitSkips(d.Skipped)
+	clippedCap, cutCap := clipSkips(capability, n)
+	clippedPol, cutPol := clipSkips(policy, n)
+	if !cutCap && !cutPol {
 		return d
 	}
 	// Copy: d.Skipped aliases the recorder's backing array, and a re-slice that
 	// the caller then treats as complete is exactly the "absence means indexed"
 	// fail-open this whole feature exists to close.
-	clipped := make([]ir.SkippedFile, n)
-	copy(clipped, d.Skipped[:n])
-	d.Skipped = clipped
+	merged := make([]ir.SkippedFile, 0, len(clippedCap)+len(clippedPol))
+	merged = append(merged, clippedCap...)
+	merged = append(merged, clippedPol...)
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Path != merged[j].Path {
+			return merged[i].Path < merged[j].Path
+		}
+		return merged[i].Reason < merged[j].Reason
+	})
+	d.Skipped = merged
 	d.SkippedTruncated = true
+	if d.SkippedCap == 0 || n < d.SkippedCap {
+		d.SkippedCap = n
+	}
 	return d
+}
+
+// clipSkips returns at most n entries and whether anything was dropped.
+func clipSkips(entries []ir.SkippedFile, n int) ([]ir.SkippedFile, bool) {
+	if len(entries) <= n {
+		return entries, false
+	}
+	return entries[:n], true
 }
 
 // maxShownSkips bounds each list in human output. The machine payload carries

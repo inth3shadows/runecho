@@ -535,9 +535,15 @@ func TestIgnoredWalkRootIsIndexed(t *testing.T) {
 // list was never empty and a consumer prefix-matching it blocked a
 // testdata/README.md edit.
 func TestPolicyAndCapabilitySkipsAreDistinguishable(t *testing.T) {
-	policy := []string{SkipIgnoredDir, SkipSymlinkDir, SkipUnreadableDir}
+	// Exactly one policy reason: the operator's own ignore list. Everything else
+	// is a limit of the tool, INCLUDING the two directory reasons -- a directory
+	// the walk could not read took its whole subtree with it, and nothing
+	// recorded those files because nothing ever saw them. Classifying that as
+	// informational is how CI without read permission on src/legacy/ produced
+	// `skipped: []` and exit 0 for a tree it never opened.
+	policy := []string{SkipIgnoredDir}
 	capability := []string{SkipUnsupportedLanguage, SkipParseError, SkipOversized,
-		SkipCapReached, SkipSymlink, SkipUnreadable}
+		SkipCapReached, SkipSymlink, SkipUnreadable, SkipSymlinkDir, SkipUnreadableDir}
 	for _, r := range policy {
 		if !IsPolicySkip(r) {
 			t.Errorf("%q names a pruned directory and must classify as policy", r)

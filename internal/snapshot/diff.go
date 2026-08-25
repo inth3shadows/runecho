@@ -377,27 +377,22 @@ func formatSkipped(d DiffResult) string {
 	if !d.SkippedKnown {
 		return ""
 	}
-	capability, policy := SplitSkips(d.Skipped)
-	// The human surface drops plain `ignored_dir` entries. They are the
-	// operator's OWN configuration echoed back -- `.git` is in
-	// DefaultIgnoredPaths, so every repo would print a NOT ENTERED block on every
-	// diff, and a note that fires every time stops being read. What survives is
-	// what the operator did NOT configure: a directory that turned out to be a
-	// symlink, or one we could not read. The full list, ignored_dir included,
-	// stays in --json, where a consumer applies its own policy.
-	surprises := make([]ir.SkippedFile, 0, len(policy))
-	for _, sk := range policy {
-		if sk.Reason != ir.SkipIgnoredDir {
-			surprises = append(surprises, sk)
-		}
-	}
-	if len(capability) == 0 && len(surprises) == 0 && !d.SkippedTruncated {
+	capability, _ := SplitSkips(d.Skipped)
+	// The human surface shows capability skips only. The policy array holds
+	// exactly one reason -- the operator's OWN ignore list -- and `.git` is in
+	// DefaultIgnoredPaths, so rendering it would print a block on every diff of
+	// every repo. A note that fires every time stops being read. It stays in
+	// --json, where a consumer applies its own policy.
+	//
+	// Everything a reader would call a surprise (an unreadable directory, an
+	// unfollowable link) is now classified as capability, so it appears above
+	// rather than needing a second block to rescue it.
+	if len(capability) == 0 && !d.SkippedTruncated {
 		return ""
 	}
 	var sb strings.Builder
 	writeSkipBlock(&sb, "NOT EXAMINED — a symbol removed here would be invisible to this diff",
 		capability, d.SkippedTruncated)
-	writeSkipBlock(&sb, "NOT ENTERED — a directory the walk could not descend", surprises, false)
 	return sb.String()
 }
 

@@ -56,23 +56,40 @@ const (
 	SkipUnreadableDir = "unreadable_dir"
 )
 
-// policySkips are the reasons that name a directory the indexer was told (or
-// chose, for safety) not to enter, as opposed to a file it could not read.
+// policySkips are the reasons the operator CONFIGURED. There is exactly one, and
+// the narrowness is the point.
+//
+// The first cut split on files-versus-directories, which put `unreadable_dir`
+// and `symlink_dir` here. That was wrong, and dangerously so: a directory the
+// walk could not read is a blind spot -- its whole subtree went unvisited and
+// nothing recorded the individual files, because nothing ever saw them -- yet it
+// landed in the array USAGE.md tells consumers to treat as informational. CI
+// running without read permission on `src/legacy/` therefore produced
+// `skipped: []` and exit 0 for a tree it never opened.
+//
+// The real discriminator is not "file or directory", it is "did the operator ask
+// for this". An ignore rule is a decision they made. A permission error and an
+// unfollowable link are limits of the tool.
 var policySkips = map[string]bool{
-	SkipIgnoredDir:    true,
-	SkipSymlinkDir:    true,
-	SkipUnreadableDir: true,
+	SkipIgnoredDir: true,
 }
 
-// IsPolicySkip reports whether reason names a pruned DIRECTORY (policy) rather
-// than an unreadable FILE (capability).
+// IsPolicySkip reports whether reason names something the operator configured
+// away (policy), as opposed to something the indexer could not read
+// (capability).
 //
 // This is the discriminator a consumer needs, and the reason the diff payload
-// carries two arrays instead of one. Capability entries are exact paths: match
-// them by equality and fail closed. Policy entries are directory prefixes:
-// match them by prefix, and treat them as information, because the operator
-// configured the ignore list on purpose and a repo that ignores `testdata`
-// still expects its documentation edits to pass.
+// carries two arrays instead of one. Fail closed on the capability array; treat
+// the policy array as information, because a repo that ignores `testdata` still
+// expects its documentation edits to pass.
+//
+// Capability entries may name a FILE or a DIRECTORY, so a consumer matches a
+// changed path against an entry with:
+//
+//	changed == entry || strings.HasPrefix(changed, entry+"/")
+//
+// which is correct for both -- a file entry can never be a directory prefix of
+// another path.
 func IsPolicySkip(reason string) bool {
 	return policySkips[reason]
 }

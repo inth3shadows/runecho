@@ -105,8 +105,13 @@ func TestDiffPayload_SkippedEntryKeys(t *testing.T) {
 // repo. A consumer following the documented prefix rule then blocked an edit to
 // `testdata/README.md` — a documentation-only false block, which is exactly what
 // the language table was built to prevent, arriving through the other reason
-// code. Files a consumer fails closed on and directories it merely notes must
-// not share an array.
+// code.
+//
+// The split is by "did the operator ask for this", NOT by file-versus-directory.
+// An earlier cut used the latter, which filed `symlink_dir` and `unreadable_dir`
+// as informational — so a directory the walk could not read, whose whole subtree
+// went unrecorded because nothing ever saw it, was reported in the array
+// consumers are told to ignore.
 func TestDiffPayload_PolicySkipsGoToTheirOwnArray(t *testing.T) {
 	got := payloadOf(t, DiffResult{
 		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
@@ -115,17 +120,25 @@ func TestDiffPayload_PolicySkipsGoToTheirOwnArray(t *testing.T) {
 		Skipped: []ir.SkippedFile{
 			{Path: ".git", Reason: ir.SkipIgnoredDir},
 			{Path: "Widget.java", Reason: ir.SkipUnsupportedLanguage},
+			{Path: "locked", Reason: ir.SkipUnreadableDir},
 			{Path: "shared", Reason: ir.SkipSymlinkDir},
 			{Path: "testdata", Reason: ir.SkipIgnoredDir},
 		},
 	})
 	skipped, _ := got["skipped"].([]any)
-	if len(skipped) != 1 || skipped[0].(map[string]any)["Path"] != "Widget.java" {
-		t.Errorf("`skipped` must carry only unreadable FILES, got %v", skipped)
+	wantCapability := map[string]bool{"Widget.java": true, "locked": true, "shared": true}
+	if len(skipped) != len(wantCapability) {
+		t.Fatalf("`skipped` must carry every blind spot, including unreadable and "+
+			"unfollowable DIRECTORIES; got %v", skipped)
+	}
+	for _, e := range skipped {
+		if !wantCapability[e.(map[string]any)["Path"].(string)] {
+			t.Errorf("unexpected entry in `skipped`: %v", e)
+		}
 	}
 	ignored, _ := got["ignored_paths"].([]any)
-	if len(ignored) != 3 {
-		t.Errorf("`ignored_paths` must carry the three pruned directories, got %v", ignored)
+	if len(ignored) != 2 {
+		t.Errorf("`ignored_paths` must carry ONLY the operator's configured ignores, got %v", ignored)
 	}
 }
 
@@ -247,7 +260,8 @@ func TestFormatFull_TruncationIsShouted(t *testing.T) {
 // TestFormatFull_ConfiguredIgnoresAreNotHumanNoise. `.git` is in
 // DefaultIgnoredPaths, so echoing configured ignores into the text output would
 // print a block on every diff of every repo — and a note that fires every time
-// stops being read. What the operator did NOT configure still shows.
+// stops being read. Everything the operator did NOT configure is a capability
+// skip now, so it shows in NOT EXAMINED rather than needing a second block.
 func TestFormatFull_ConfiguredIgnoresAreNotHumanNoise(t *testing.T) {
 	base := DiffResult{
 		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
@@ -255,12 +269,14 @@ func TestFormatFull_ConfiguredIgnoresAreNotHumanNoise(t *testing.T) {
 		SkippedKnown: true,
 	}
 	base.Skipped = []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}}
-	if out := FormatFull(base); strings.Contains(out, "NOT ENTERED") {
+	if out := FormatFull(base); strings.Contains(out, "NOT EXAMINED") {
 		t.Errorf("a configured ignore must not print:\n%s", out)
 	}
-	base.Skipped = []ir.SkippedFile{{Path: "shared", Reason: ir.SkipSymlinkDir}}
-	out := FormatFull(base)
-	if !strings.Contains(out, "NOT ENTERED") || !strings.Contains(out, "shared") {
-		t.Errorf("an unconfigured prune must print:\n%s", out)
+	for _, reason := range []string{ir.SkipSymlinkDir, ir.SkipUnreadableDir} {
+		base.Skipped = []ir.SkippedFile{{Path: "shared", Reason: reason}}
+		out := FormatFull(base)
+		if !strings.Contains(out, "NOT EXAMINED") || !strings.Contains(out, "shared") {
+			t.Errorf("an unconfigured prune (%s) must print:\n%s", reason, out)
+		}
 	}
 }

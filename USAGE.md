@@ -185,8 +185,8 @@ NOT EXAMINED — a symbol removed here would be invisible to this diff (1 path):
 
 | Key | Contains | How to match | What to do |
 |---|---|---|---|
-| `skipped` | **Files** the indexer could not read | Exact path | Fail closed |
-| `ignored_paths` | **Directories** it did not enter | Path prefix | Informational |
+| `skipped` | Everything it **could not read** | `p == e \|\| strings.HasPrefix(p, e+"/")` | Fail closed |
+| `ignored_paths` | What **you configured away** | Same | Informational |
 
 Reasons in `skipped`:
 
@@ -198,17 +198,24 @@ Reasons in `skipped`:
 | `cap_reached` | The repo's file cap stopped indexing before this file |
 | `symlink` | A symlinked source file; the walk does not follow symlinks |
 | `unreadable` | The walk could not stat or open it |
+| `symlink_dir` | A symlinked directory; its subtree is unexamined under this path |
+| `unreadable_dir` | A directory the walk could not read; its whole subtree went unvisited |
 
-Reasons in `ignored_paths`: `ignored_dir` (matched the ignore list),
-`symlink_dir`, `unreadable_dir`. The directory is listed, never its contents —
-the walk never descends, and enumerating it would defeat the pruning.
+`ignored_paths` carries exactly one reason: `ignored_dir`. Directory entries in
+either array name the directory, never its contents — the walk never descends,
+and enumerating it would defeat the pruning.
 
 Why two arrays and not one: `.git` is in the default ignore list, so a merged
 list is non-empty in *every* repo. A consumer prefix-matching it would block an
 edit to `testdata/README.md` — a documentation-only false block, which is exactly
 what the language table exists to prevent, arriving through the other reason
-code. Ignoring a directory is the operator's own policy; being unable to read a
-file is a limit of the tool. Only the second is a blind spot.
+code.
+
+The split is **"did you ask for this?"**, not "file or directory". An ignore rule
+is a decision you made. A permission error or an unfollowable link is a limit of
+the tool — and a directory it could not read took its whole subtree with it,
+recording none of the files inside, because it never saw them. That is a blind
+spot, so it is in `skipped`.
 
 Three rules for machine consumers:
 
@@ -222,10 +229,10 @@ Three rules for machine consumers:
 * **`skipped_truncated: true` means the list hit its cap**, so absence from it no
   longer implies "indexed". Treat it as "unknown".
 
-The text output deliberately shows `NOT EXAMINED` always, but `NOT ENTERED` only
-for directories you did *not* configure — a symlink or an unreadable directory.
-Echoing your own ignore list back on every run would make the note unreadable.
-The full list is always in `--json`.
+The text output shows `skipped` only. `ignored_paths` is your own configuration
+echoed back, and with `.git` always in it, printing it would put a block on every
+diff of every repo — a note that fires every time stops being read. It is always
+in `--json`.
 
 ### Locate symbols (repo map)
 

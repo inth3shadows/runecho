@@ -208,16 +208,18 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
-			// An unreadable DIRECTORY takes its whole subtree with it, and nothing
-			// records those files because nothing ever saw them -- so silence here
-			// makes their absence from the skip list read as "examined". info is
-			// nil for a stat failure on the entry itself, in which case the safe
-			// classification is the directory one: it may have been a directory,
-			// and over-reporting a file as a prunable prefix is harmless where
-			// under-reporting a subtree is a fail-open.
+			// Both classifications are capability skips now, so the choice only
+			// affects whether a consumer matches this entry exactly or as a
+			// directory prefix. When info is nil the stat failed and we cannot
+			// tell which it was, so take the prefix reading: it covers a subtree
+			// if there was one, and for a plain file it degrades to the exact
+			// path plus a prefix that matches nothing else. The reverse mistake
+			// -- calling an unreadable directory a file -- silently drops its
+			// whole subtree from the consumer's view, and nothing recorded those
+			// files because nothing ever saw them.
 			if info == nil || info.IsDir() {
 				record(path, SkipUnreadableDir)
-			} else {
+			} else if g.isCode(path) {
 				record(path, SkipUnreadable)
 			}
 			return nil

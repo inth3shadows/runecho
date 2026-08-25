@@ -728,3 +728,36 @@ func TestSymlinkedIgnoredDirIsTreatedAsAnIgnore(t *testing.T) {
 			"link is still a configured ignore", got["node_modules"], SkipIgnoredDir)
 	}
 }
+
+// TestUnreadableDirectoryIsAFailClosedBlindSpot. A directory the walk cannot
+// read takes its whole subtree with it, and nothing records the files inside
+// because nothing ever sees them. It must land in the array a consumer fails
+// closed on, matched as a prefix.
+func TestUnreadableDirectoryIsAFailClosedBlindSpot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still readable")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	locked := filepath.Join(dir, "legacy")
+	writeFile(t, dir, "legacy/Foo.java", "class Foo { }\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	_, stats, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	if got["legacy"] != SkipUnreadableDir {
+		t.Fatalf("legacy: got %q, want %q", got["legacy"], SkipUnreadableDir)
+	}
+	if IsPolicySkip(SkipUnreadableDir) {
+		t.Error("an unreadable directory is a limit of the tool, not something the " +
+			"operator configured — it must not be filed as informational")
+	}
+}

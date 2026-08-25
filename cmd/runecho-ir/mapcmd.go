@@ -160,9 +160,11 @@ func changedSymbols(db *snapshot.DB, root, since, sessionID string, irData *ir.I
 		fmt.Fprintf(os.Stderr, "No snapshot found with label %q for root %q\n", since, root)
 		return nil, ExitNoData
 	}
-	// `map --since` only reads res.Files, so the skip list changes nothing here
-	// -- but DiffLive and DiffLiveWithStats must not diverge by accident at some
-	// future call site, and the stats are already in hand upstream.
+	// DiffLive, not DiffLiveWithStats, and deliberately: `map --since` uses the
+	// diff only to compute a changed-symbol set from res.Files, and never renders
+	// a "nothing changed" claim that a skip list would need to qualify. Passing
+	// stats here would populate SkippedKnown on a result whose payload is never
+	// emitted.
 	res, err := db.DiffLive(*meta, irData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

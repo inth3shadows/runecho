@@ -280,3 +280,41 @@ func TestFormatFull_ConfiguredIgnoresAreNotHumanNoise(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatTrail_NamesWhatWentUnexamined.
+//
+// 97643cf added an ir.Stats parameter to TruthTrail and updated four test call
+// sites to pass it, with a doc comment claiming the receipt "can name what the
+// indexer never read". FormatTrail never referenced Diff.Skipped, so the
+// plumbing was inert: `truth-trail` on a Java-only repo printed "No structural
+// changes since <label>." at exit 0 while `verify` on the same tree named
+// Widget.java. A receipt is read as a settled account, which makes it the worst
+// surface to leave unqualified.
+func TestFormatTrail_NamesWhatWentUnexamined(t *testing.T) {
+	skipped := []ir.SkippedFile{{Path: "Widget.java", Reason: ir.SkipUnsupportedLanguage}}
+
+	// The zero-drift branch: the one that returns early.
+	quiet := FormatTrail(TrailResult{
+		SnapshotRef: SnapshotMeta{Label: "session-start"},
+		Diff:        DiffResult{SkippedKnown: true, Skipped: skipped},
+	})
+	if !strings.Contains(quiet, "No structural changes") {
+		t.Fatalf("expected the zero-drift branch, got:\n%s", quiet)
+	}
+	if !strings.Contains(quiet, "NOT EXAMINED") || !strings.Contains(quiet, "Widget.java") {
+		t.Errorf("a receipt reporting no changes must say what it did not read:\n%s", quiet)
+	}
+
+	// And the branch that does report drift.
+	noisy := FormatTrail(TrailResult{
+		SnapshotRef: SnapshotMeta{Label: "session-start"},
+		Diff: DiffResult{
+			SkippedKnown: true,
+			Skipped:      skipped,
+			Files:        []FileDiff{{Path: "main.go", Status: "modified"}},
+		},
+	})
+	if !strings.Contains(noisy, "NOT EXAMINED") || !strings.Contains(noisy, "Widget.java") {
+		t.Errorf("the drift branch must name it too:\n%s", noisy)
+	}
+}

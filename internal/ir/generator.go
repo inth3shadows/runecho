@@ -602,8 +602,17 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	// waste a syscall and race file modification between read and hash.
 	hash := HashBytes(content)
 
-	// Dispatch to the right parser by extension
-	ext := filepath.Ext(path)
+	// Dispatch to the right parser by extension.
+	//
+	// Lowercased HERE, not just in parserFor. The extension is used twice: to
+	// pick the parser, and (below) to pick the GRAMMAR inside an ExtAwareParser.
+	// Lowercasing only the first made `A.TS` newly indexable while
+	// jsLanguageFor's exact-match switch still fell through to the JavaScript
+	// grammar -- so the file was parsed with the wrong grammar and silently lost
+	// symbols (a TypeScript class method vanished). That is strictly worse than
+	// the old behaviour of not indexing it at all: unindexed is reported as a
+	// blind spot, mis-parsed is reported as a clean diff.
+	ext := strings.ToLower(filepath.Ext(path))
 	p := g.parserFor(ext)
 	if p == nil {
 		return FileIR{}, fmt.Errorf("no parser for extension %s", ext)

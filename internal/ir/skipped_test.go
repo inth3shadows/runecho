@@ -550,3 +550,45 @@ func TestPolicyAndCapabilitySkipsAreDistinguishable(t *testing.T) {
 		}
 	}
 }
+
+// TestExtensionCaseDoesNotChangeTheSymbolSet.
+//
+// parserFor was lowercased but parseFile was not, so `A.TS` became indexable
+// while jsLanguageFor's exact-match switch still fell through to the JavaScript
+// grammar. The file was parsed with the wrong grammar and lost symbols a
+// TypeScript grammar would have found — and a mis-parsed file reports a CLEAN
+// diff, where an unindexed one at least reports a blind spot. Strictly worse
+// than the bug the case fix was closing.
+func TestExtensionCaseDoesNotChangeTheSymbolSet(t *testing.T) {
+	const src = "export class Widget {\n  bar(): number { return 1 }\n}\n"
+	names := func(name string) []string {
+		dir := t.TempDir()
+		writeFile(t, dir, name, src)
+		irData, _, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, ok := irData.Files[name]
+		if !ok {
+			t.Fatalf("%s was not indexed at all", name)
+		}
+		var out []string
+		for _, sym := range file.Symbols {
+			out = append(out, sym.Kind+":"+sym.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	lower, upper := names("a.ts"), names("A.TS")
+	if len(lower) != len(upper) {
+		t.Errorf("case changed the symbol set: .ts => %v, .TS => %v — the grammar, "+
+			"not just the parser, is selected by extension", lower, upper)
+		return
+	}
+	for i := range lower {
+		if lower[i] != upper[i] {
+			t.Errorf("case changed the symbol set: .ts => %v, .TS => %v", lower, upper)
+			return
+		}
+	}
+}

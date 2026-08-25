@@ -38,8 +38,8 @@ install time from `git describe --tags` (see `install.sh`).
 - File extensions are matched case-insensitively when selecting a parser.
   `A.GO` and `B.PY` were previously neither indexed (parsers match exactly) nor
   reported (the source-extension table deliberately omits languages we parse).
-- `.mts`, `.cts`, `.pyi`, `.pyx`, `.pxd`, `.rake`, `.gemspec`, `.ru`, `.zsh`,
-  `.fish`, `.ksh` and `.hcl` are now recognised as source. Several belong to
+- `.mts`, `.cts`, `.pyi`, `.pyx`, `.pxd`, `.rake`, `.gemspec`, `.zsh`,
+  `.fish` and `.ksh` are now recognised as source. Several belong to
   language families RunEcho advertises support for, where a silent hole is least
   expected; a new test requires every advertised family to be either parsed or
   named.

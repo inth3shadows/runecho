@@ -195,7 +195,10 @@ func (r *skipRecorder) result() ([]SkippedFile, bool, int) {
 // file that never needed indexing. Under-inclusion is therefore the safe error,
 // and ambiguous extensions are left out on purpose — `.d` (D source, but also
 // the make dependency files every C build litters a tree with) is the worked
-// example.
+// example. Two entries were removed after review found them matching non-code by
+// the same accident `.d` would: `.hcl` (`.terraform.lock.hcl`) and `.ru`
+// (`README.ru`). A table entry is only safe when its extension implies source
+// for essentially every file that bears it.
 //
 // The exception, and it is not optional: an extension in a language family
 // RunEcho ADVERTISES support for must never be missing. `.java` going unindexed
@@ -215,8 +218,11 @@ var knownSourceExtensions = map[string]bool{
 	".mts": true, ".cts": true,
 	// Python: stubs and Cython.
 	".pyi": true, ".pyx": true, ".pxd": true,
-	// Ruby: ShellParser-adjacent Ruby dialects the RubyParser does not claim.
-	".rake": true, ".gemspec": true, ".ru": true,
+	// Ruby: dialects the RubyParser does not claim. `.ru` is deliberately absent
+	// -- its only common use is the single file `config.ru`, while `README.ru`,
+	// `LICENSE.ru` are the <name>.<lang> translated-doc convention, and a
+	// translated README in the fail-closed array blocks a docs-only change.
+	".rake": true, ".gemspec": true,
 	// Shell: ShellParser handles .sh/.bash only.
 	".zsh": true, ".fish": true, ".ksh": true,
 
@@ -245,7 +251,11 @@ var knownSourceExtensions = map[string]bool{
 	".r": true, ".jl": true, ".f": true, ".for": true, ".f90": true, ".f95": true, ".f03": true,
 	// Declarative code — no functions, but named blocks whose removal is
 	// structural drift a reader would call a change.
-	".sql": true, ".proto": true, ".tf": true, ".hcl": true, ".sol": true,
+	// `.hcl` is deliberately absent: filepath.Ext(".terraform.lock.hcl") is
+	// ".hcl", so a generated lockfile -- rewritten on every provider bump --
+	// would be reported as unexamined source and block any consumer that fails
+	// closed. `.tf` already covers the hand-written case.
+	".sql": true, ".proto": true, ".tf": true, ".sol": true,
 	// Assembly
 	".asm": true, ".s": true,
 }

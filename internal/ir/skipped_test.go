@@ -361,10 +361,16 @@ var advertisedFamilies = map[string][]string{
 	"TypeScript": {".ts", ".tsx", ".mts", ".cts"},
 	"JavaScript": {".js", ".mjs", ".cjs", ".jsx"},
 	"Python":     {".py", ".pyi", ".pyx", ".pxd"},
-	"Ruby":       {".rb", ".rake", ".gemspec", ".ru"},
-	"Shell":      {".sh", ".bash", ".zsh", ".fish", ".ksh"},
-	"Go":         {".go"},
-	"Rust":       {".rs"},
+	// `.ru` is deliberately absent. It is not an extension convention -- its one
+	// common use is the single filename `config.ru` -- while `README.ru` is the
+	// <name>.<lang> translated-doc pattern. Listing it would put translated docs
+	// in the fail-closed array, and the two rules this file enforces genuinely
+	// conflict there: TestTableEntriesDoNotMatchCommonNonCode wins, because a
+	// false block is louder and more frequent than one unreported Rack config.
+	"Ruby":  {".rb", ".rake", ".gemspec"},
+	"Shell": {".sh", ".bash", ".zsh", ".fish", ".ksh"},
+	"Go":    {".go"},
+	"Rust":  {".rs"},
 }
 
 // TestAdvertisedLanguageFamiliesAreAccountedFor is the regression test for the
@@ -668,5 +674,29 @@ func TestDanglingSymlinkRespectsTheCodeFilter(t *testing.T) {
 	if got["broken.go"] != SkipUnreadable {
 		t.Errorf("broken.go: got %q, want %q — an unresolvable CODE link is a real blind spot",
 			got["broken.go"], SkipUnreadable)
+	}
+}
+
+// TestTableEntriesDoNotMatchCommonNonCode.
+//
+// `skipped` is fail-closed on, so a table entry that also matches a common
+// non-code filename blocks builds. Two got in and were removed after review:
+// `.hcl` matches `.terraform.lock.hcl`, a generated lockfile rewritten on every
+// provider bump; `.ru` matches `README.ru`, the <name>.<lang> translated-doc
+// convention. Both are the same accident the table's `.d` rule already names.
+func TestTableEntriesDoNotMatchCommonNonCode(t *testing.T) {
+	for _, name := range []string{
+		".terraform.lock.hcl", // generated, touched on every provider bump
+		"README.ru",           // translated docs
+		"README.md",
+		"config.yaml",
+		"package-lock.json",
+		"go.sum",
+	} {
+		if IsKnownSourceExtension(filepath.Ext(name)) {
+			t.Errorf("%s is matched by knownSourceExtensions via %q — it would enter the "+
+				"fail-closed array and block a change that touches it",
+				name, filepath.Ext(name))
+		}
 	}
 }

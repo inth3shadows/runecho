@@ -281,11 +281,16 @@ func TestVerify_NamesTheUnindexedLanguage(t *testing.T) {
 	}
 }
 
-// TestDiffText_CleanRepoHasNoTrailingBlankLine pins the most common output in
-// the tool. The zero-drift branch briefly gained an unconditional "\n%s", so a
-// fully-indexed repo grew a trailing blank line that nothing asked for and no
-// exact-equality test would have caught.
-func TestDiffText_CleanRepoHasNoTrailingBlankLine(t *testing.T) {
+// TestDiffText_CleanRepoIsTerminatedByExactlyOneNewline pins the most common
+// output in the tool, in both directions.
+//
+// Both readings have been wrong once. The zero-drift branch first gained an
+// unconditional "\n%s", adding a blank line for a fully-indexed repo; the
+// over-correction dropped the terminator entirely, so `diff` and `verify` (both
+// fmt.Print) ran the shell prompt onto the last line. An earlier version of this
+// test only checked for the absence of "\n\n", which zero newlines also
+// satisfies -- so it pinned one direction and missed the other.
+func TestDiffText_CleanRepoIsTerminatedByExactlyOneNewline(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
 	irGitInit(t, dir) // stub.go only: fully indexed, nothing declined
@@ -296,11 +301,32 @@ func TestDiffText_CleanRepoHasNoTrailingBlankLine(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("diff: %d", code)
 	}
+	if !strings.HasSuffix(out, "No structural changes.\n") {
+		t.Errorf("clean-repo output must end with the sentence and exactly one newline:\n%q", out)
+	}
 	if strings.HasSuffix(out, "\n\n") {
 		t.Errorf("clean-repo output ends with a blank line:\n%q", out)
 	}
-	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "No structural changes.") {
-		t.Errorf("unexpected clean-repo output:\n%q", out)
+}
+
+// TestDiffText_SkipBlockIsAlsoTerminated: the same guarantee on the other
+// branch, so a fix to one cannot silently regress the other.
+func TestDiffText_SkipBlockIsAlsoTerminated(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "Widget.java"), []byte("class Widget { }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=gate-base", dir}); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, stderr)
+	}
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "diff", "--since=gate-base", dir})
+	if code != 0 {
+		t.Fatalf("diff: %d", code)
+	}
+	if !strings.HasSuffix(out, "\n") || strings.HasSuffix(out, "\n\n") {
+		t.Errorf("skip-block output must end with exactly one newline:\n%q", out)
 	}
 }
 

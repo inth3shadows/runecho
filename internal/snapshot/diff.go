@@ -404,18 +404,19 @@ func formatSkipped(d DiffResult) string {
 // FormatFull returns a human-readable per-file breakdown.
 func FormatFull(d DiffResult) string {
 	if len(d.Files) == 0 {
-		// The skip block, when there is one, is prefixed with its own newline;
-		// appending an unconditional "\n" here would add a trailing blank line to
-		// the most common output in the tool (a clean repo), which nothing asked
-		// for and no test would have caught.
-		base := fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.",
+		// Terminated with exactly one newline, with or without a skip block.
+		//
+		// Both readings of this have been wrong once. The original
+		// "...changes.\n%s" appended a blank line on the common clean-repo path;
+		// the over-correction dropped the terminator entirely, so `diff` and
+		// `verify` (both fmt.Print) ran the shell prompt onto the output's last
+		// line and handed line-oriented consumers a partial final line. The skip
+		// block already begins with its own "\n" and ends with one.
+		base := fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.\n",
 			shortHash(d.SnapshotA.RootHash),
 			shortHash(d.SnapshotB.RootHash),
 		)
-		if block := formatSkipped(d); block != "" {
-			return base + "\n" + block
-		}
-		return base
+		return base + formatSkipped(d)
 	}
 
 	var sb strings.Builder

@@ -222,6 +222,23 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			}
 			return nil
 		}
+		// A symlink whose NAME is in the ignore list is a configured ignore first
+		// and a symlink second. pnpm and yarn workspaces routinely make
+		// node_modules a link, and classifying that as a symlink put it in the
+		// capability array -- a permanent, unfixable entry in the array a gate
+		// fails closed on, for a directory the operator explicitly excluded. The
+		// ignore rule is the operator's decision either way; how the directory
+		// happens to be stored is not their problem.
+		if path != absRoot && g.ignoredPaths[filepath.Base(path)] {
+			record(path, SkipIgnoredDir)
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			// A symlink is not a directory to Walk, so SkipDir here would skip
+			// the remaining siblings in the containing directory. Walk does not
+			// descend through a link anyway.
+			return nil
+		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			// filepath.Walk lstats, so info.IsDir() is ALWAYS false here even when
 			// the link points at a directory -- the mode bits describe the link,
@@ -255,18 +272,13 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			return nil
 		}
 		if info.IsDir() {
-			// The walk root is exempt from the ignore list. The rule exists to
-			// prune subdirectories; applying it to the directory the operator
-			// explicitly pointed at prunes the entire walk, indexes zero files,
-			// and -- because SupportedSeen is then 0 -- reports a vacuous 100%
-			// coverage. It also produced a skip entry of "." , a prefix that
-			// matches no path a consumer could hold. Found by review: a checkout
-			// literally named `testdata`, `vendor`, or `dist` silently indexed
-			// nothing.
-			if path != absRoot && g.ignoredPaths[filepath.Base(path)] {
-				record(path, SkipIgnoredDir)
-				return filepath.SkipDir
-			}
+			// The ignore check happened above, before the symlink branch, so that
+			// an ignored directory stored AS a link is still treated as an
+			// ignore. The walk root is exempt from it: the rule exists to prune
+			// subdirectories, and applying it to the directory the operator
+			// explicitly pointed at pruned the entire walk, indexed zero files,
+			// and -- because SupportedSeen was then 0 -- reported a vacuous 100%
+			// coverage.
 			return nil
 		}
 		ext := filepath.Ext(path)

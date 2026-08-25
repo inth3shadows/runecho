@@ -700,3 +700,31 @@ func TestTableEntriesDoNotMatchCommonNonCode(t *testing.T) {
 		}
 	}
 }
+
+// TestSymlinkedIgnoredDirIsTreatedAsAnIgnore.
+//
+// pnpm and yarn workspaces routinely make node_modules a symlink. The symlink
+// branch ran before the ignore check, so such a directory was classified
+// symlink_dir — a capability skip, i.e. a permanent and unfixable entry in the
+// array a gate fails closed on, for a directory the operator explicitly
+// excluded. How a directory happens to be stored is not the operator's problem;
+// their ignore rule is a decision either way.
+func TestSymlinkedIgnoredDirIsTreatedAsAnIgnore(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, outside, "dep.js", "export function D() {}\n")
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	if err := os.Symlink(outside, filepath.Join(dir, "node_modules")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skipMap(t, stats); got["node_modules"] != SkipIgnoredDir {
+		t.Errorf("node_modules: got %q, want %q — a configured ignore stored as a "+
+			"link is still a configured ignore", got["node_modules"], SkipIgnoredDir)
+	}
+}

@@ -32,6 +32,13 @@ func (db *DB) Diff(a, b SnapshotMeta) (DiffResult, error) {
 
 // DiffLive diffs a stored snapshot against the current live IR (not yet saved).
 // b is synthesized as a sentinel SnapshotMeta with ID=-1.
+//
+// The result carries no skip information (SkippedKnown stays false). Callers
+// that HAVE the walk's ir.Stats -- every caller that just built the live IR --
+// should use DiffLiveWithStats instead, so the payload can say which files the
+// indexer declined. This signature is kept for callers that genuinely do not
+// have the stats, and because silently reporting "nothing skipped" for them
+// would be a fail-open.
 func (db *DB) DiffLive(a SnapshotMeta, liveIR *ir.IR) (DiffResult, error) {
 	aFiles, err := db.loadFilesBySnapshot(a.ID)
 	if err != nil {
@@ -53,6 +60,25 @@ func (db *DB) DiffLive(a SnapshotMeta, liveIR *ir.IR) (DiffResult, error) {
 		FileCount: len(liveIR.Files),
 	}
 	return computeDiff(a, b, aFiles, bFiles, aSymbols, bSymbols), nil
+}
+
+// DiffLiveWithStats is DiffLive plus the skip report from the walk that produced
+// liveIR.
+//
+// The two arguments must come from the SAME walk. A diff says what changed among
+// the files the indexer read; the stats say which files it never read. Pairing a
+// diff with a different walk's stats would answer "was my file examined?" about
+// the wrong tree -- which is worse than not answering, because the answer looks
+// authoritative.
+func (db *DB) DiffLiveWithStats(a SnapshotMeta, liveIR *ir.IR, stats ir.Stats) (DiffResult, error) {
+	res, err := db.DiffLive(a, liveIR)
+	if err != nil {
+		return res, err
+	}
+	res.Skipped = stats.Skipped
+	res.SkippedKnown = true
+	res.SkippedTruncated = stats.SkippedTruncated
+	return res, nil
 }
 
 // irToMaps converts an IR into the file and symbol maps used by computeDiff.
@@ -236,21 +262,71 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 	if files == nil {
 		files = []FileDiff{}
 	}
-	return map[string]interface{}{
+	payload := map[string]interface{}{
 		"summary":        FormatCompact(d),
 		"total_added":    d.TotalAdded,
 		"total_removed":  d.TotalRemoved,
 		"total_modified": d.TotalModified,
 		"files":          files,
 	}
+	// `skipped` answers a question `files` cannot: which paths the indexer never
+	// read, and therefore where a deleted symbol would be invisible at exit 0
+	// with empty stderr. It is present ONLY when a live walk actually measured
+	// it. A snapshot-to-snapshot diff never walks the filesystem, so emitting
+	// `"skipped": []` there would tell a consumer "nothing was skipped" on the
+	// strength of never having looked -- the key's absence is the honest answer,
+	// and consumers must treat absent as "unknown", not as "none".
+	if d.SkippedKnown {
+		skipped := d.Skipped
+		if skipped == nil {
+			skipped = []ir.SkippedFile{}
+		}
+		payload["skipped"] = skipped
+		payload["skipped_truncated"] = d.SkippedTruncated
+	}
+	return payload
+}
+
+// maxShownSkips bounds the skip list in human output. The machine payload
+// carries the whole list (up to its own cap); a terminal does not need it.
+const maxShownSkips = 20
+
+// formatSkipped renders the paths the indexer declined, or "" when there are
+// none or when this diff mode could not measure them.
+//
+// Deliberately loud, and deliberately attached to BOTH branches of FormatFull:
+// the zero-drift branch prints "No structural changes", which for a repo in an
+// unindexed language is true only in the sense that nothing was ever looked at.
+// That sentence unqualified is the entire failure this reporting exists to end.
+func formatSkipped(d DiffResult) string {
+	if !d.SkippedKnown || (len(d.Skipped) == 0 && !d.SkippedTruncated) {
+		return ""
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\nNOT EXAMINED (%s) — a symbol removed here would be invisible to this diff:\n",
+		plural(len(d.Skipped), "path"))
+	for i, sk := range d.Skipped {
+		if i >= maxShownSkips {
+			fmt.Fprintf(&sb, "  ... and %s (use --json for the full list)\n",
+				plural(len(d.Skipped)-maxShownSkips, "more"))
+			break
+		}
+		fmt.Fprintf(&sb, "  %s  [%s]\n", sk.Path, sk.Reason)
+	}
+	if d.SkippedTruncated {
+		fmt.Fprintf(&sb, "  WARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
+			ir.MaxRecordedSkips)
+	}
+	return sb.String()
 }
 
 // FormatFull returns a human-readable per-file breakdown.
 func FormatFull(d DiffResult) string {
 	if len(d.Files) == 0 {
-		return fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.",
+		return fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.\n%s",
 			shortHash(d.SnapshotA.RootHash),
 			shortHash(d.SnapshotB.RootHash),
+			formatSkipped(d),
 		)
 	}
 
@@ -305,6 +381,7 @@ func FormatFull(d DiffResult) string {
 		plural(d.TotalModified, "symbol"),
 		plural(len(d.Files), "file"),
 	)
+	sb.WriteString(formatSkipped(d))
 	return sb.String()
 }
 

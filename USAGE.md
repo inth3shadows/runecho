@@ -163,6 +163,47 @@ any label you created with `snapshot --label=<name>`, such as `session-start`.
 Empty diff output means nothing structural changed. Otherwise you get a per-file
 list of added, removed, and modified (`~`) functions, classes, exports, and imports.
 
+#### What the diff did NOT look at
+
+"Nothing structural changed" is only as strong as what was indexed. RunEcho does
+not parse every language, so a function deleted from a `.java`, `.c`, or `.php`
+file used to produce a clean diff at exit 0 with empty stderr — indistinguishable
+from a genuinely unchanged repo.
+
+`diff --since` now names what it declined:
+
+```
+IR DIFF  8f2a1c04... → b31d9e77...
+
+No structural changes.
+
+NOT EXAMINED (2 paths) — a symbol removed here would be invisible to this diff:
+  Widget.java  [unsupported_language]
+  vendor  [ignored_dir]
+```
+
+`--json` carries the same facts as a `skipped` array of `{Path, Reason}`, plus a
+`skipped_truncated` boolean. Reasons:
+
+| Reason | Meaning |
+|---|---|
+| `unsupported_language` | Source code in a language no parser handles |
+| `parse_error` | Supported extension, but the file could not be read or parsed |
+| `oversized` | Larger than the per-file parse limit |
+| `cap_reached` | The repo's file cap stopped indexing before this file |
+| `ignored_dir` | A directory matched the ignore list; the DIRECTORY is listed, never its contents |
+
+Two rules for machine consumers:
+
+* **Non-code is never listed.** A `README.md` or a `.png` is not a blind spot in
+  a symbol index, so a gate can fail closed on this list without blocking
+  documentation changes.
+* **An absent `skipped` key means "not measured", not "nothing skipped".** Only
+  `diff --since` walks the filesystem; the two-snapshot form
+  (`diff <id-a> <id-b>`) omits the key entirely rather than claim a clean bill of
+  health it never checked. Likewise, `skipped_truncated: true` means the list hit
+  its cap, so absence from it no longer implies "indexed".
+
 ### Locate symbols (repo map)
 
 A deterministic "where is X" map of every indexed symbol — no LLM, no guessing.

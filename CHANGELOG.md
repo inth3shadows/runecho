@@ -16,6 +16,17 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- `diff --since` now reports which paths the indexer declined and why, as a
+  `skipped` array of `{Path, Reason}` in `--json` (plus `skipped_truncated`) and
+  a `NOT EXAMINED` block in the text output. Closes the fail-open where a symbol
+  deleted from an unindexed language (`.java`, `.c`, `.php`, …) produced a clean
+  diff at exit 0 with empty stderr. Non-code files are never listed, so a
+  consumer can fail closed on the list without blocking documentation changes.
+  The two-snapshot form (`diff <id-a> <id-b>`) omits the key entirely — it never
+  walks the filesystem, so it cannot answer the question.
+  ([harness#21](https://github.com/inth3shadows/harness/issues/21))
+
 ## [0.46.0] — 2026-08-20
 
 ### Changed

@@ -80,6 +80,15 @@ type Stats struct {
 	ParseErrors   int // supported files that failed to parse (not in the IR)
 	SupportedSeen int // supported-extension files encountered, including beyond the cap
 	Indexed       int // files in the IR (== len(IR.Files))
+	// Skipped names the paths the walk declined and why. It is NOT the inverse of
+	// Indexed: an unindexed language never reaches SupportedSeen, so it is
+	// invisible to Coverage() by construction (the denominator counts supported
+	// extensions only). That is the gap this field closes -- see skipped.go.
+	Skipped []SkippedFile
+	// SkippedTruncated reports that Skipped hit maxRecordedSkips. A consumer that
+	// fails closed on "was this path examined?" must treat a truncated list as
+	// "unknown", never as "not skipped".
+	SkippedTruncated bool
 }
 
 // Coverage returns Indexed as a percentage of SupportedSeen.
@@ -147,7 +156,23 @@ type walkerFunc func(absPath, normalizedPath string) error
 // (deadline or explicit cancel) aborts it between files and propagates ctx.Err()
 // to the caller. Per-file granularity is sufficient: a single oversized file is
 // already bounded by maxParseBytes.
-func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc) error {
+//
+// rec records the paths declined along the way; nil disables recording. Only the
+// skips decided HERE are recorded (ignored directories, unindexed languages) --
+// the ones decided inside fn (oversized, parse error, file cap) are recorded by
+// fn, because only fn knows it took them.
+func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc, rec *skipRecorder) error {
+	// Skips are reported repo-relative, matching every other path in the IR and
+	// in a diff payload. A path that cannot be made relative is not reported at
+	// all rather than reported absolute: a consumer intersects these against its
+	// own repo-relative paths, and an absolute entry would silently never match.
+	relOf := func(path string) (string, error) {
+		r, rerr := filepath.Rel(absRoot, path)
+		if rerr != nil {
+			return "", rerr
+		}
+		return normalizePath(r), nil
+	}
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -164,19 +189,33 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		if info.IsDir() {
 			if g.ignoredPaths[filepath.Base(path)] {
+				if rel, rerr := relOf(path); rerr == nil {
+					rec.add(rel, SkipIgnoredDir)
+				}
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !g.supportsExtension(filepath.Ext(path)) {
+		ext := filepath.Ext(path)
+		if !g.supportsExtension(ext) {
+			// Only source code is reported. A README or a PNG is not a blind spot
+			// in the symbol index, and reporting it would make a consumer that
+			// fails closed on this list block every documentation change -- the
+			// exact false-block that kept this reporting out of the payload
+			// until the language table existed.
+			if IsKnownSourceExtension(ext) {
+				if rel, rerr := relOf(path); rerr == nil {
+					rec.add(rel, SkipUnsupportedLanguage)
+				}
+			}
 			return nil
 		}
-		relPath, err := filepath.Rel(absRoot, path)
-		if err != nil {
-			g.warn("Warning: failed to compute relative path for %s: %v\n", path, err)
+		relPath, rerr := relOf(path)
+		if rerr != nil {
+			g.warn("Warning: failed to compute relative path for %s: %v\n", path, rerr)
 			return nil
 		}
-		return fn(path, normalizePath(relPath))
+		return fn(path, relPath)
 	})
 }
 
@@ -206,26 +245,30 @@ func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stat
 
 	result := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
+	rec := &skipRecorder{}
 
 	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(result.Files)) {
+			rec.add(normPath, SkipCapReached)
 			return nil // count only; cap bounds parse work, not the denominator
 		}
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
+			rec.add(normPath, g.parseFailureReason(absPath))
 			return nil
 		}
 		result.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}, rec); err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	result.RootHash = ComputeRootHash(result.Files)
 	stats.Indexed = len(result.Files)
+	stats.Skipped, stats.SkippedTruncated = rec.result()
 	return result, stats, nil
 }
 
@@ -261,10 +304,12 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 
 	updated := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
+	rec := &skipRecorder{}
 
 	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(updated.Files)) {
+			rec.add(normPath, SkipCapReached)
 			return nil // count only; cap bounds parse work, not the denominator
 		}
 		// Guard size before hashing: HashFile streams the whole file through
@@ -275,11 +320,17 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 		if info, serr := os.Stat(absPath); serr == nil && info.Size() > g.maxParseBytes {
 			g.warn("Warning: failed to parse %s: skipping oversized file (%d bytes)\n", absPath, info.Size())
 			stats.ParseErrors++
+			rec.add(normPath, SkipOversized)
 			return nil
 		}
 		currentHash, err := HashFile(absPath)
 		if err != nil {
 			g.warn("Warning: failed to hash %s: %v\n", absPath, err)
+			// Unhashable means unreadable means not in the updated IR. It is not
+			// counted in ParseErrors (it never reached the parser) but it is
+			// still a file the walk declined, and a consumer asking "did you
+			// look at this?" is owed the same "no" as any other skip.
+			rec.add(normPath, SkipParseError)
 			return nil
 		}
 		if existing, ok := existingIR.Files[normPath]; ok && existing.Hash == currentHash {
@@ -290,17 +341,35 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 		if err != nil {
 			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
+			rec.add(normPath, g.parseFailureReason(absPath))
 			return nil
 		}
 		updated.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}, rec); err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	updated.RootHash = ComputeRootHash(updated.Files)
 	stats.Indexed = len(updated.Files)
+	stats.Skipped, stats.SkippedTruncated = rec.result()
 	return updated, stats, nil
+}
+
+// parseFailureReason classifies a parseFile failure for the skip list.
+//
+// Generate has no separate size guard -- parseFile itself rejects an oversized
+// file -- so on that path an oversized file and a syntactically broken one
+// arrive at the same error branch. Re-stat rather than string-match the error:
+// the message is a human diagnostic that is free to change, while the size is
+// the fact the reason is asserting. A stat failure here means the file went
+// away or became unreadable mid-walk; SkipParseError is the honest answer then,
+// since all the caller is entitled to conclude is "not indexed".
+func (g *Generator) parseFailureReason(absPath string) string {
+	if info, err := os.Stat(absPath); err == nil && info.Size() > g.maxParseBytes {
+		return SkipOversized
+	}
+	return SkipParseError
 }
 
 // UpdateFile refreshes a single file's entry in an existing IR and returns the

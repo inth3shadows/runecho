@@ -126,12 +126,16 @@ func runDiff(args []string) int {
 			fmt.Fprintf(os.Stderr, "No snapshot found with label %q%s for root %q\n", *since, suffix, root)
 			return ExitNoData
 		}
-		irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+		irData, stats, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 		if irCode != 0 {
 			return irCode
 		}
 		var diffErr error
-		result, diffErr = db.DiffLive(*meta, irData)
+		// WithStats: only this mode walks the filesystem, so only this mode can
+		// say which files the indexer declined. The two-ID branch below stays on
+		// plain Diff and reports no skip information at all -- see
+		// DiffResult.SkippedKnown.
+		result, diffErr = db.DiffLiveWithStats(*meta, irData, stats)
 		if diffErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", diffErr)
 			return ExitError

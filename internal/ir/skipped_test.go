@@ -592,3 +592,36 @@ func TestExtensionCaseDoesNotChangeTheSymbolSet(t *testing.T) {
 		}
 	}
 }
+
+// TestSymlinkedWalkRootIsFollowed. filepath.Walk lstats, so a root that is a
+// symlink to a directory reached the symlink branch, got recorded as pruned, and
+// the walk ended after one callback: zero files indexed, exit 0, and the only
+// trace was {"Path": "."} in the INFORMATIONAL array — a prefix matching no path
+// a consumer could hold. A repo reached through a link (`~/work ->
+// /mnt/checkouts/x`, a pnpm workspace link) was a total, silent fail-open.
+//
+// The symlink rule prunes links found INSIDE the tree. The directory the
+// operator named is what they asked to index.
+func TestSymlinkedWalkRootIsFollowed(t *testing.T) {
+	real := t.TempDir()
+	writeFile(t, real, "main.go", "package p\nfunc Critical() {}\n")
+
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	irData, stats, err := NewGenerator(GeneratorConfig{}).Generate(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := irData.Files["main.go"]; !ok {
+		t.Errorf("a symlinked root indexed nothing; files = %v", irData.Files)
+	}
+	if got := skipMap(t, stats); got["."] != "" {
+		t.Errorf(`walk root recorded as "." (reason %q) — a prefix that matches nothing`, got["."])
+	}
+	if stats.SupportedSeen == 0 {
+		t.Error("SupportedSeen == 0 makes Coverage() report a vacuous 100%")
+	}
+}

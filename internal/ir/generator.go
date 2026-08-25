@@ -162,6 +162,22 @@ type walkerFunc func(absPath, normalizedPath string) error
 // the ones decided inside fn (oversized, parse error, file cap) are recorded by
 // fn, because only fn knows it took them.
 func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc, rec *skipRecorder) error {
+	// A symlinked ROOT is resolved before walking, not pruned.
+	//
+	// filepath.Walk lstats, so a root that is a symlink to a directory arrives at
+	// the symlink branch, is recorded as pruned, and the walk ends after one
+	// callback: zero files indexed, and the only trace is {"Path": "."} in the
+	// INFORMATIONAL array -- a prefix matching no path a consumer could hold. A
+	// repo reached through a link (`~/work -> /mnt/checkouts/x`, a pnpm workspace
+	// link) was therefore a total, silent fail-open. The symlink rule exists to
+	// prune links found INSIDE the tree; the directory the operator named is what
+	// they asked to index, so follow it. Reporting stays relative to the resolved
+	// root, which is what every path in the IR is already relative to.
+	if info, serr := os.Stat(absRoot); serr == nil && info.IsDir() {
+		if resolved, rerr := filepath.EvalSymlinks(absRoot); rerr == nil {
+			absRoot = resolved
+		}
+	}
 	// Skips are reported repo-relative, matching every other path in the IR and
 	// in a diff payload. A path that cannot be made relative is not reported at
 	// all rather than reported absolute: a consumer intersects these against its

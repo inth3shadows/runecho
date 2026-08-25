@@ -83,16 +83,18 @@ func TestDiffJSON_NamesTheUnindexedLanguage(t *testing.T) {
 	}
 }
 
-// TestDiffJSON_NonCodeIsNotReported: the false-block guard. Reporting README.md
-// would make a consumer that fails closed on `skipped` block every docs change,
-// which is exactly why the reporting could not exist before the language table.
+// TestDiffJSON_NonCodeIsNotReported: the false-block guard, and the reason the
+// payload carries TWO arrays.
 //
-// `.git` DOES appear, and deliberately: it is an ignored DIRECTORY, a different
-// class of fact from a non-code file. The two reasons answer different
-// questions — "I have no parser for this" is a capability limit, "I was
-// configured not to look here" is policy — and filtering the latter would mean
-// runecho second-guessing which of the operator's own ignore rules matter. The
-// consumer decides that; the oracle reports what it did.
+// The first version of this feature put ignored directories in `skipped`
+// alongside unreadable files. Review found the consequence: `.git` is in
+// DefaultIgnoredPaths, so `skipped` was never empty in any repo, and a gate
+// prefix-matching it blocked an edit to `testdata/README.md` -- a
+// documentation-only false block, exactly what the language table exists to
+// prevent, arriving through the other reason code.
+//
+// `skipped` now carries only files the indexer could not read. Pruned
+// directories live in `ignored_paths`, where a consumer applies its own policy.
 func TestDiffJSON_NonCodeIsNotReported(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
@@ -108,26 +110,39 @@ func TestDiffJSON_NonCodeIsNotReported(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The path that produced the false block: non-code inside an ignored
+	// directory that a real repo (this one included) actually has.
+	if err := os.MkdirAll(filepath.Join(dir, "testdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "testdata", "README.md"), []byte("# fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=gate-base", dir}); code != 0 {
 		t.Fatalf("snapshot: %d %s", code, stderr)
 	}
 
 	payload := diffSkipped(t, home, "gate-base", dir)
+
 	skipped, ok := payload["skipped"].([]any)
 	if !ok {
 		t.Fatalf("`skipped` missing: %v", payload)
 	}
-	for _, entry := range skipped {
-		e := entry.(map[string]any)
-		if e["Reason"] != ir.SkipIgnoredDir {
-			t.Errorf("no source file was declined, so the only skips should be ignored "+
-				"directories; got %v", e)
-		}
+	if len(skipped) != 0 {
+		t.Errorf("no source file was declined, so `skipped` must be EMPTY -- a consumer "+
+			"fails closed on it. got %v", skipped)
 	}
-	// Named explicitly so a future filter that drops it is a deliberate change
+
+	ignored, ok := payload["ignored_paths"].([]any)
+	if !ok {
+		t.Fatalf("`ignored_paths` missing: %v", payload)
+	}
+	// Named explicitly so a future filter that drops them is a deliberate change
 	// with a failing test, not a silent one.
-	if !hasSkip(skipped, ".git", ir.SkipIgnoredDir) {
-		t.Errorf(".git should be reported as an ignored directory; got %v", skipped)
+	for _, want := range []string{".git", "testdata"} {
+		if !hasSkip(ignored, want, ir.SkipIgnoredDir) {
+			t.Errorf("%s should be reported in ignored_paths; got %v", want, ignored)
+		}
 	}
 }
 
@@ -140,6 +155,45 @@ func hasSkip(skipped []any, path, reason string) bool {
 		}
 	}
 	return false
+}
+
+// TestDiffJSON_IgnoredRootIsIndexedNotPruned pins the fix for a repo whose root
+// directory is itself named in the ignore list.
+//
+// The ignore rule prunes SUBdirectories. Applied to the directory the operator
+// explicitly pointed at, it pruned the entire walk: zero files indexed, a
+// vacuous 100% coverage (SupportedSeen == 0), and a skip entry of "." -- a
+// prefix that matches no path a consumer could hold. A checkout literally named
+// `testdata`, `vendor`, or `dist` silently indexed nothing.
+func TestDiffJSON_IgnoredRootIsIndexedNotPruned(t *testing.T) {
+	home := t.TempDir()
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "testdata") // basename is in DefaultIgnoredPaths
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	irGitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package p\nfunc Critical() {}\nfunc Other() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=gate-base", dir}); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, stderr)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package p\nfunc Other() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := diffSkipped(t, home, "gate-base", dir)
+
+	// The removal must be SEEN, not merely reported as unexamined.
+	if total, _ := payload["total_removed"].(float64); total != 1 {
+		t.Errorf("total_removed = %v, want 1 — the root was pruned, so nothing was indexed", total)
+	}
+	if ignored, _ := payload["ignored_paths"].([]any); hasSkip(ignored, ".", ir.SkipIgnoredDir) {
+		t.Error(`the walk root was recorded as "." — a prefix that matches nothing`)
+	}
 }
 
 // TestDiffJSON_TwoIDModeOmitsSkipped: the two-ID mode compares two stored
@@ -199,5 +253,80 @@ func TestDiffText_NamesTheUnindexedLanguage(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT EXAMINED") || !strings.Contains(out, "Widget.java") {
 		t.Errorf("text output must name what went unexamined, got:\n%s", out)
+	}
+}
+
+// TestVerify_NamesTheUnindexedLanguage: `verify` does its own live walk and is
+// the most gate-like command in the tool, so it was the worst place for the
+// headline bug to survive. It discarded the walk's stats and called DiffLive,
+// printing a bare "No structural changes." for a repo whose only code is
+// unparsed — the exact sentence `diff` was fixed to qualify.
+func TestVerify_NamesTheUnindexedLanguage(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "Widget.java"), []byte("class Widget { }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=session-start", dir}); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, stderr)
+	}
+
+	code, out, stderr := runWith(t, home, []string{"runecho-ir", "verify", dir})
+	if code != 0 {
+		t.Fatalf("verify: %d %s", code, stderr)
+	}
+	if !strings.Contains(out, "NOT EXAMINED") || !strings.Contains(out, "Widget.java") {
+		t.Errorf("verify must name what went unexamined, got:\n%s", out)
+	}
+}
+
+// TestDiffText_CleanRepoHasNoTrailingBlankLine pins the most common output in
+// the tool. The zero-drift branch briefly gained an unconditional "\n%s", so a
+// fully-indexed repo grew a trailing blank line that nothing asked for and no
+// exact-equality test would have caught.
+func TestDiffText_CleanRepoHasNoTrailingBlankLine(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir) // stub.go only: fully indexed, nothing declined
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=gate-base", dir}); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, stderr)
+	}
+	code, out, _ := runWith(t, home, []string{"runecho-ir", "diff", "--since=gate-base", dir})
+	if code != 0 {
+		t.Fatalf("diff: %d", code)
+	}
+	if strings.HasSuffix(out, "\n\n") {
+		t.Errorf("clean-repo output ends with a blank line:\n%q", out)
+	}
+	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "No structural changes.") {
+		t.Errorf("unexpected clean-repo output:\n%q", out)
+	}
+}
+
+// TestDiffJSON_UnindexedTypeScriptVariantIsNamed. `.mts` is TypeScript, JSParser
+// does not claim it, and it was missing from knownSourceExtensions too — so a
+// deleted export was invisible AND unreported, reproducing the original bug in a
+// language RunEcho advertises support for. `.java` going unindexed is a
+// capability limit a reader can reason about; this is not.
+func TestDiffJSON_UnindexedTypeScriptVariantIsNamed(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	mts := filepath.Join(dir, "mod.mts")
+	if err := os.WriteFile(mts, []byte("export function T(): number { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runWith(t, home, []string{"runecho-ir", "snapshot", "--label=gate-base", dir}); code != 0 {
+		t.Fatalf("snapshot: %d %s", code, stderr)
+	}
+	if err := os.WriteFile(mts, []byte("export const x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := diffSkipped(t, home, "gate-base", dir)
+	skipped, _ := payload["skipped"].([]any)
+	if !hasSkip(skipped, "mod.mts", ir.SkipUnsupportedLanguage) {
+		t.Errorf("mod.mts must be named in `skipped`; got %v", skipped)
 	}
 }

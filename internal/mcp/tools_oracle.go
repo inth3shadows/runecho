@@ -246,6 +246,10 @@ func liveIRWithStats(path string, fileCap int) (*ir.IR, ir.Stats, error) {
 	return gen.GenerateCtx(ctx, path)
 }
 
+// maxMCPSkips clips the skip list on the MCP surface. See the call site in the
+// diff tool for why it is tighter than snapshot's own cap.
+const maxMCPSkips = 50
+
 func jsonText(v any) (string, error) {
 	// Minified (no indentation): MCP responses are consumed by an LLM, which
 	// parses JSON identically regardless of whitespace. Dropping the 2-space
@@ -480,7 +484,14 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 
 	// Single source of truth for the diff JSON shape, shared with the
 	// `runecho-ir diff --json` CLI so the two surfaces cannot drift.
-	payload := snapshot.DiffPayload(result)
+	//
+	// The skip list is clipped harder here than on the CLI. This tool exists for
+	// context economy -- jsonText minifies for exactly that reason -- and an
+	// unclipped list would inject up to MaxRecordedSkips path objects into the
+	// agent's context on every diff of a C, Java, or PHP repo. The clip sets
+	// skipped_truncated, so the consumer still knows absence no longer implies
+	// "indexed"; it is a smaller honest answer, not a quieter one.
+	payload := snapshot.DiffPayload(snapshot.TruncateSkips(result, maxMCPSkips))
 	payload["repo"] = repo.Name
 	return jsonText(payload)
 }

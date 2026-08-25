@@ -173,25 +173,70 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		return normalizePath(r), nil
 	}
+	// record adds an entry, resolving the repo-relative path. A path that cannot
+	// be made relative is not reported rather than reported absolute: a consumer
+	// intersects these against its own repo-relative paths, and an absolute entry
+	// would silently never match.
+	record := func(path, reason string) {
+		if rel, rerr := relOf(path); rerr == nil {
+			rec.add(rel, reason)
+		}
+	}
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
+			// An unreadable DIRECTORY takes its whole subtree with it, and nothing
+			// records those files because nothing ever saw them -- so silence here
+			// makes their absence from the skip list read as "examined". info is
+			// nil for a stat failure on the entry itself, in which case the safe
+			// classification is the directory one: it may have been a directory,
+			// and over-reporting a file as a prunable prefix is harmless where
+			// under-reporting a subtree is a fail-open.
+			if info == nil || info.IsDir() {
+				record(path, SkipUnreadableDir)
+			} else {
+				record(path, SkipUnreadable)
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
+			// filepath.Walk lstats, so info.IsDir() is ALWAYS false here even when
+			// the link points at a directory -- the mode bits describe the link,
+			// not its target. The pre-existing `if info.IsDir() { return
+			// filepath.SkipDir }` in this branch was therefore unreachable, and
+			// reachable would have been a bug: Walk documents that SkipDir from a
+			// non-directory entry skips the remaining files in the CONTAINING
+			// directory. Resolve the target explicitly instead, and always return
+			// nil -- Walk does not descend through a symlink regardless.
+			target, serr := os.Stat(path)
+			switch {
+			case serr != nil:
+				record(path, SkipUnreadable)
+			case target.IsDir():
+				record(path, SkipSymlinkDir)
+			default:
+				// Only code: a symlinked README is not a blind spot in a symbol
+				// index, and this list is fail-closed on.
+				if ext := filepath.Ext(path); IsKnownSourceExtension(ext) || g.supportsExtension(ext) {
+					record(path, SkipSymlink)
+				}
 			}
 			return nil
 		}
 		if info.IsDir() {
-			if g.ignoredPaths[filepath.Base(path)] {
-				if rel, rerr := relOf(path); rerr == nil {
-					rec.add(rel, SkipIgnoredDir)
-				}
+			// The walk root is exempt from the ignore list. The rule exists to
+			// prune subdirectories; applying it to the directory the operator
+			// explicitly pointed at prunes the entire walk, indexes zero files,
+			// and -- because SupportedSeen is then 0 -- reports a vacuous 100%
+			// coverage. It also produced a skip entry of "." , a prefix that
+			// matches no path a consumer could hold. Found by review: a checkout
+			// literally named `testdata`, `vendor`, or `dist` silently indexed
+			// nothing.
+			if path != absRoot && g.ignoredPaths[filepath.Base(path)] {
+				record(path, SkipIgnoredDir)
 				return filepath.SkipDir
 			}
 			return nil
@@ -204,9 +249,7 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			// exact false-block that kept this reporting out of the payload
 			// until the language table existed.
 			if IsKnownSourceExtension(ext) {
-				if rel, rerr := relOf(path); rerr == nil {
-					rec.add(rel, SkipUnsupportedLanguage)
-				}
+				record(path, SkipUnsupportedLanguage)
 			}
 			return nil
 		}
@@ -502,7 +545,16 @@ func normalizePath(relPath string) string {
 }
 
 // supportsExtension returns true if any registered parser handles this extension.
+//
+// The extension is lowercased first. Every parser's SupportsExtension is an
+// exact match (`ext == ".go"`), while IsKnownSourceExtension lowercases — so
+// before this, `A.GO` fell through BOTH: not indexed (wrong case for the
+// parser) and not reported (`.go` is deliberately absent from the source table,
+// being a language we do parse). A file in a language RunEcho fully supports,
+// invisible and unnamed. Lowercasing here closes the crack at the one
+// chokepoint both the walk and parserFor already funnel through.
 func (g *Generator) supportsExtension(ext string) bool {
+	ext = strings.ToLower(ext)
 	for _, p := range g.parsers {
 		if p.SupportsExtension(ext) {
 			return true
@@ -512,7 +564,10 @@ func (g *Generator) supportsExtension(ext string) bool {
 }
 
 // parserFor returns the first parser that supports the given extension, or nil.
+// Lowercased for the same reason as supportsExtension: the two must agree, or a
+// file the walk accepted reaches parseFile with no parser to handle it.
 func (g *Generator) parserFor(ext string) parser.Parser {
+	ext = strings.ToLower(ext)
 	for _, p := range g.parsers {
 		if p.SupportsExtension(ext) {
 			return p

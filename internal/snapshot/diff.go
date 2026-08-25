@@ -277,19 +277,89 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 	// strength of never having looked -- the key's absence is the honest answer,
 	// and consumers must treat absent as "unknown", not as "none".
 	if d.SkippedKnown {
-		skipped := d.Skipped
-		if skipped == nil {
-			skipped = []ir.SkippedFile{}
-		}
-		payload["skipped"] = skipped
+		// TWO arrays, not one, and the split is the contract.
+		//
+		// `skipped` is exact paths of FILES the indexer could not read: the blind
+		// spots, the thing to fail closed on. `ignored_paths` is DIRECTORIES it
+		// was told (or chose, for safety) not to enter: prefix-matched, and
+		// informational because the operator configured the ignore list on
+		// purpose.
+		//
+		// The first draft merged them, and the merge was the defect: `.git` is in
+		// DefaultIgnoredPaths, so every repo produced a non-empty list, and a
+		// gate prefix-matching it blocked an edit to `testdata/README.md`. That is
+		// the documentation-only false block the language table exists to
+		// prevent, arriving through the other reason code.
+		capability, policy := SplitSkips(d.Skipped)
+		payload["skipped"] = capability
+		payload["ignored_paths"] = policy
 		payload["skipped_truncated"] = d.SkippedTruncated
 	}
 	return payload
 }
 
-// maxShownSkips bounds the skip list in human output. The machine payload
-// carries the whole list (up to its own cap); a terminal does not need it.
+// SplitSkips partitions a skip list into capability skips (files the indexer
+// could not read) and policy skips (directories it did not enter). Both are
+// non-nil so a machine consumer never has to null-guard.
+func SplitSkips(all []ir.SkippedFile) (capability, policy []ir.SkippedFile) {
+	capability, policy = []ir.SkippedFile{}, []ir.SkippedFile{}
+	for _, sk := range all {
+		if ir.IsPolicySkip(sk.Reason) {
+			policy = append(policy, sk)
+		} else {
+			capability = append(capability, sk)
+		}
+	}
+	return capability, policy
+}
+
+// TruncateSkips returns d with its skip list clipped to at most n entries,
+// flagging the truncation. For surfaces with a tighter budget than the payload
+// cap — the MCP oracle, whose whole purpose is context economy, would otherwise
+// inject up to MaxRecordedSkips objects into an agent's context on every call
+// against a C or Java repo.
+func TruncateSkips(d DiffResult, n int) DiffResult {
+	if !d.SkippedKnown || len(d.Skipped) <= n {
+		return d
+	}
+	// Copy: d.Skipped aliases the recorder's backing array, and a re-slice that
+	// the caller then treats as complete is exactly the "absence means indexed"
+	// fail-open this whole feature exists to close.
+	clipped := make([]ir.SkippedFile, n)
+	copy(clipped, d.Skipped[:n])
+	d.Skipped = clipped
+	d.SkippedTruncated = true
+	return d
+}
+
+// maxShownSkips bounds each list in human output. The machine payload carries
+// the whole list (up to its own cap); a terminal does not need it.
 const maxShownSkips = 20
+
+// writeSkipBlock renders one labelled group of skips, or nothing when empty.
+func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool) {
+	if len(entries) == 0 {
+		return
+	}
+	count := plural(len(entries), "path")
+	if truncated {
+		// "1000 paths" on a capped list reads as a total and contradicts the
+		// warning two lines down. The list is a floor, so say so.
+		count = fmt.Sprintf("%d+ paths", len(entries))
+	}
+	fmt.Fprintf(sb, "\n%s (%s):\n", header, count)
+	for i, sk := range entries {
+		if i >= maxShownSkips {
+			fmt.Fprintf(sb, "  ... and %d more (use --json for the full list)\n", len(entries)-maxShownSkips)
+			break
+		}
+		fmt.Fprintf(sb, "  %s  [%s]\n", sk.Path, sk.Reason)
+	}
+	if truncated {
+		fmt.Fprintf(sb, "  WARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
+			ir.MaxRecordedSkips)
+	}
+}
 
 // formatSkipped renders the paths the indexer declined, or "" when there are
 // none or when this diff mode could not measure them.
@@ -298,36 +368,54 @@ const maxShownSkips = 20
 // the zero-drift branch prints "No structural changes", which for a repo in an
 // unindexed language is true only in the sense that nothing was ever looked at.
 // That sentence unqualified is the entire failure this reporting exists to end.
+//
+// The two groups are rendered separately for the same reason the payload
+// carries two arrays: a pruned `vendor/` is not the same claim as an unreadable
+// `Widget.java`, and running them together is what made the merged list
+// unusable.
 func formatSkipped(d DiffResult) string {
-	if !d.SkippedKnown || (len(d.Skipped) == 0 && !d.SkippedTruncated) {
+	if !d.SkippedKnown {
+		return ""
+	}
+	capability, policy := SplitSkips(d.Skipped)
+	// The human surface drops plain `ignored_dir` entries. They are the
+	// operator's OWN configuration echoed back -- `.git` is in
+	// DefaultIgnoredPaths, so every repo would print a NOT ENTERED block on every
+	// diff, and a note that fires every time stops being read. What survives is
+	// what the operator did NOT configure: a directory that turned out to be a
+	// symlink, or one we could not read. The full list, ignored_dir included,
+	// stays in --json, where a consumer applies its own policy.
+	surprises := make([]ir.SkippedFile, 0, len(policy))
+	for _, sk := range policy {
+		if sk.Reason != ir.SkipIgnoredDir {
+			surprises = append(surprises, sk)
+		}
+	}
+	if len(capability) == 0 && len(surprises) == 0 && !d.SkippedTruncated {
 		return ""
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\nNOT EXAMINED (%s) — a symbol removed here would be invisible to this diff:\n",
-		plural(len(d.Skipped), "path"))
-	for i, sk := range d.Skipped {
-		if i >= maxShownSkips {
-			fmt.Fprintf(&sb, "  ... and %s (use --json for the full list)\n",
-				plural(len(d.Skipped)-maxShownSkips, "more"))
-			break
-		}
-		fmt.Fprintf(&sb, "  %s  [%s]\n", sk.Path, sk.Reason)
-	}
-	if d.SkippedTruncated {
-		fmt.Fprintf(&sb, "  WARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
-			ir.MaxRecordedSkips)
-	}
+	writeSkipBlock(&sb, "NOT EXAMINED — a symbol removed here would be invisible to this diff",
+		capability, d.SkippedTruncated)
+	writeSkipBlock(&sb, "NOT ENTERED — a directory the walk could not descend", surprises, false)
 	return sb.String()
 }
 
 // FormatFull returns a human-readable per-file breakdown.
 func FormatFull(d DiffResult) string {
 	if len(d.Files) == 0 {
-		return fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.\n%s",
+		// The skip block, when there is one, is prefixed with its own newline;
+		// appending an unconditional "\n" here would add a trailing blank line to
+		// the most common output in the tool (a clean repo), which nothing asked
+		// for and no test would have caught.
+		base := fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.",
 			shortHash(d.SnapshotA.RootHash),
 			shortHash(d.SnapshotB.RootHash),
-			formatSkipped(d),
 		)
+		if block := formatSkipped(d); block != "" {
+			return base + "\n" + block
+		}
+		return base
 	}
 
 	var sb strings.Builder

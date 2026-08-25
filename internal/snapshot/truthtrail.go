@@ -33,11 +33,16 @@ type TrailResult struct {
 // TruthTrail builds a fused change receipt for repoID using baseline meta and
 // live IR. churnN controls the lookback window (0 → 20). text is prose to
 // check for stale symbol refs; empty string skips that section.
-func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, churnN int, text string) (TrailResult, error) {
+//
+// stats must come from the same walk that produced liveIR, so the receipt can
+// name what the indexer never read. A receipt that lists removed symbols and
+// their callers, while silently omitting the files it could not parse, is
+// exactly the over-confident artifact this reporting exists to prevent.
+func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, stats ir.Stats, churnN int, text string) (TrailResult, error) {
 	result := TrailResult{SnapshotRef: meta}
 
 	// 1. Structural diff.
-	diff, err := db.DiffLive(meta, liveIR)
+	diff, err := db.DiffLiveWithStats(meta, liveIR, stats)
 	if err != nil {
 		return result, fmt.Errorf("diff: %w", err)
 	}

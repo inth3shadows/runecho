@@ -8,6 +8,20 @@ import (
 // Skip reasons recorded by a Generate/Update walk. Closed set: a consumer that
 // switches on these must be able to enumerate them, so new reasons are added
 // here and nowhere else.
+//
+// The set splits in two, and the split is the contract (see IsPolicySkip):
+//
+//   - CAPABILITY reasons name a FILE the indexer wanted to read and could not.
+//     They are the blind spots. A consumer fails closed on these.
+//   - POLICY reasons name a DIRECTORY the indexer was told, or chose for safety,
+//     not to descend into. They are informational, and a consumer must
+//     prefix-match them.
+//
+// Conflating the two was the defect that shipped in the first draft: `.git` is
+// in DefaultIgnoredPaths, so every repo produced a non-empty list, and a gate
+// prefix-matching it blocked a `testdata/README.md` edit -- the exact
+// false block the language table exists to prevent, arriving through the other
+// reason code.
 const (
 	// SkipUnsupportedLanguage — the file is source code in a language no
 	// registered parser handles. THE reason this type exists: such a file is
@@ -22,13 +36,46 @@ const (
 	// SkipCapReached — FileCap was hit; the walk kept counting but stopped
 	// parsing. The file is a supported language that simply never got read.
 	SkipCapReached = "cap_reached"
+	// SkipSymlink — a symlinked source FILE. The walk does not follow symlinks,
+	// so the file is not indexed under this path. Recorded only for code: a
+	// symlinked README is not a blind spot in a symbol index.
+	SkipSymlink = "symlink"
+	// SkipUnreadable — a FILE the walk could not stat or open.
+	SkipUnreadable = "unreadable"
+
 	// SkipIgnoredDir — a directory matched IgnoredPaths and was pruned. The
 	// DIRECTORY is recorded, never its contents: filepath.SkipDir means the walk
-	// never descends, and enumerating it would defeat the pruning entirely. A
-	// consumer asking "was my changed path examined?" must therefore test path
-	// prefixes against these entries, not just equality.
+	// never descends, and enumerating it would defeat the pruning entirely.
 	SkipIgnoredDir = "ignored_dir"
+	// SkipSymlinkDir — a symlinked directory. Not followed (cycle and
+	// escape safety), so its whole subtree is unexamined under this path.
+	SkipSymlinkDir = "symlink_dir"
+	// SkipUnreadableDir — a directory the walk could not read. Its entire
+	// subtree went unvisited, and unlike the reasons above nothing recorded the
+	// individual files, because nothing ever saw them.
+	SkipUnreadableDir = "unreadable_dir"
 )
+
+// policySkips are the reasons that name a directory the indexer was told (or
+// chose, for safety) not to enter, as opposed to a file it could not read.
+var policySkips = map[string]bool{
+	SkipIgnoredDir:    true,
+	SkipSymlinkDir:    true,
+	SkipUnreadableDir: true,
+}
+
+// IsPolicySkip reports whether reason names a pruned DIRECTORY (policy) rather
+// than an unreadable FILE (capability).
+//
+// This is the discriminator a consumer needs, and the reason the diff payload
+// carries two arrays instead of one. Capability entries are exact paths: match
+// them by equality and fail closed. Policy entries are directory prefixes:
+// match them by prefix, and treat them as information, because the operator
+// configured the ignore list on purpose and a repo that ignores `testdata`
+// still expects its documentation edits to pass.
+func IsPolicySkip(reason string) bool {
+	return policySkips[reason]
+}
 
 // SkippedFile is one path the indexer declined, with the reason it declined.
 //
@@ -53,17 +100,37 @@ const maxRecordedSkips = 1000
 // name the number rather than hard-coding a copy that drifts.
 const MaxRecordedSkips = maxRecordedSkips
 
+// maxCapReachedSkips sub-bounds the cap_reached reason.
+//
+// Without it, cap_reached crowds out the reason the feature exists for. The
+// walk is lexical and the recorder is first-come, so a 5000-file repo with
+// FileCap=2000 emits ~3000 cap_reached adds; the list fills at 1000 and every
+// .java file sorting after the fill point is dropped. The signal that survived
+// was "lexically earliest", not "most important". cap_reached is also the most
+// compressible reason -- it means "everything past the cap", and its count is
+// already implied by SupportedSeen minus Indexed -- so a sample plus the
+// truncation flag loses nothing a consumer can act on.
+const maxCapReachedSkips = 100
+
 // skipRecorder accumulates skips during one walk, bounded by maxRecordedSkips.
 // The zero value is ready to use, and a nil receiver is a no-op so a caller that
 // does not care about skips can pass nil.
 type skipRecorder struct {
-	items     []SkippedFile
-	truncated bool
+	items      []SkippedFile
+	capReached int
+	truncated  bool
 }
 
 func (r *skipRecorder) add(path, reason string) {
 	if r == nil {
 		return
+	}
+	if reason == SkipCapReached {
+		if r.capReached >= maxCapReachedSkips {
+			r.truncated = true
+			return
+		}
+		r.capReached++
 	}
 	if len(r.items) >= maxRecordedSkips {
 		r.truncated = true
@@ -101,18 +168,37 @@ func (r *skipRecorder) result() ([]SkippedFile, bool) {
 // the indexer can hold, and duplicating it in each consumer guarantees drift; it
 // lives here, beside parser registration, for that reason.
 //
-// BIAS: conservative. A missing entry degrades to the previous behaviour (a
-// silent skip, no worse than before). A wrong entry makes a consumer fail on a
+// BIAS: conservative, WITH ONE EXCEPTION. A missing entry degrades to the
+// previous behaviour (a silent skip); a wrong entry makes a consumer fail on a
 // file that never needed indexing. Under-inclusion is therefore the safe error,
 // and ambiguous extensions are left out on purpose — `.d` (D source, but also
 // the make dependency files every C build litters a tree with) is the worked
 // example.
+//
+// The exception, and it is not optional: an extension in a language family
+// RunEcho ADVERTISES support for must never be missing. `.java` going unindexed
+// is a capability limit a reader can reason about; `.mts` going unindexed in a
+// tool that says it parses TypeScript reproduces the original bug in the one
+// place nobody would look for it. TestAdvertisedLanguageFamiliesAreAccountedFor
+// enforces this.
 //
 // INVARIANT: no entry here may be supported by a registered parser. Enforced by
 // TestKnownSourceExtensionsAreNotParsed — when a parser gains an extension, its
 // entry must be deleted here, or the indexer will report files it did index as
 // unexamined.
 var knownSourceExtensions = map[string]bool{
+	// --- Family members of languages RunEcho advertises. Not optional; see the
+	// "exception" paragraph above and TestAdvertisedLanguageFamiliesAreAccountedFor.
+	// TypeScript: JSParser handles .ts/.tsx but not the ESM/CJS module variants.
+	".mts": true, ".cts": true,
+	// Python: stubs and Cython.
+	".pyi": true, ".pyx": true, ".pxd": true,
+	// Ruby: ShellParser-adjacent Ruby dialects the RubyParser does not claim.
+	".rake": true, ".gemspec": true, ".ru": true,
+	// Shell: ShellParser handles .sh/.bash only.
+	".zsh": true, ".fish": true, ".ksh": true,
+
+	// --- Languages with no parser at all.
 	// C / C++
 	".c": true, ".h": true, ".cc": true, ".cpp": true, ".cxx": true, ".c++": true,
 	".hpp": true, ".hh": true, ".hxx": true, ".h++": true,
@@ -130,16 +216,14 @@ var knownSourceExtensions = map[string]bool{
 	// Functional
 	".hs": true, ".ml": true, ".mli": true, ".ex": true, ".exs": true,
 	".erl": true, ".hrl": true, ".rkt": true, ".scm": true, ".lisp": true, ".el": true,
-	// Scripting. .zsh and .fish are here, not in the supported set: ShellParser
-	// handles .sh and .bash only, so a function deleted from a .zsh file is
-	// exactly the invisible removal this table exists to surface.
+	// Scripting
 	".lua": true, ".pl": true, ".pm": true, ".tcl": true, ".awk": true,
-	".ps1": true, ".psm1": true, ".zsh": true, ".fish": true, ".bat": true, ".cmd": true,
+	".ps1": true, ".psm1": true, ".bat": true, ".cmd": true,
 	// Scientific / numeric
 	".r": true, ".jl": true, ".f": true, ".for": true, ".f90": true, ".f95": true, ".f03": true,
 	// Declarative code — no functions, but named blocks whose removal is
 	// structural drift a reader would call a change.
-	".sql": true, ".proto": true, ".tf": true, ".sol": true,
+	".sql": true, ".proto": true, ".tf": true, ".hcl": true, ".sol": true,
 	// Assembly
 	".asm": true, ".s": true,
 }

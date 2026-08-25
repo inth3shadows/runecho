@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,6 +41,9 @@ func TestDiffPayload_SkippedOmittedWhenUnmeasured(t *testing.T) {
 	if _, present := got["skipped_truncated"]; present {
 		t.Error("`skipped_truncated` present without `skipped`")
 	}
+	if _, present := got["ignored_paths"]; present {
+		t.Error("`ignored_paths` present on a diff that never walked the filesystem")
+	}
 }
 
 // TestDiffPayload_SkippedEmptyWhenMeasuredAndClean: measured-and-none is a
@@ -73,12 +77,11 @@ func TestDiffPayload_SkippedEntryKeys(t *testing.T) {
 		SkippedKnown: true,
 		Skipped: []ir.SkippedFile{
 			{Path: "Widget.java", Reason: ir.SkipUnsupportedLanguage},
-			{Path: "vendor", Reason: ir.SkipIgnoredDir},
 		},
 		SkippedTruncated: true,
 	})
 	arr, ok := got["skipped"].([]any)
-	if !ok || len(arr) != 2 {
+	if !ok || len(arr) != 1 {
 		t.Fatalf("skipped shape wrong: %v", got["skipped"])
 	}
 	first := arr[0].(map[string]any)
@@ -92,6 +95,89 @@ func TestDiffPayload_SkippedEntryKeys(t *testing.T) {
 	}
 	if got["skipped_truncated"] != true {
 		t.Errorf("skipped_truncated = %v, want true", got["skipped_truncated"])
+	}
+}
+
+// TestDiffPayload_PolicySkipsGoToTheirOwnArray is the regression test for the
+// defect review found in the first cut.
+//
+// `.git` is in DefaultIgnoredPaths, so a merged list was non-empty in EVERY
+// repo. A consumer following the documented prefix rule then blocked an edit to
+// `testdata/README.md` — a documentation-only false block, which is exactly what
+// the language table was built to prevent, arriving through the other reason
+// code. Files a consumer fails closed on and directories it merely notes must
+// not share an array.
+func TestDiffPayload_PolicySkipsGoToTheirOwnArray(t *testing.T) {
+	got := payloadOf(t, DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown: true,
+		Skipped: []ir.SkippedFile{
+			{Path: ".git", Reason: ir.SkipIgnoredDir},
+			{Path: "Widget.java", Reason: ir.SkipUnsupportedLanguage},
+			{Path: "shared", Reason: ir.SkipSymlinkDir},
+			{Path: "testdata", Reason: ir.SkipIgnoredDir},
+		},
+	})
+	skipped, _ := got["skipped"].([]any)
+	if len(skipped) != 1 || skipped[0].(map[string]any)["Path"] != "Widget.java" {
+		t.Errorf("`skipped` must carry only unreadable FILES, got %v", skipped)
+	}
+	ignored, _ := got["ignored_paths"].([]any)
+	if len(ignored) != 3 {
+		t.Errorf("`ignored_paths` must carry the three pruned directories, got %v", ignored)
+	}
+}
+
+// TestDiffPayload_BothArraysAreEmptyNotNull: a machine consumer must never have
+// to null-guard either one.
+func TestDiffPayload_BothArraysAreEmptyNotNull(t *testing.T) {
+	got := payloadOf(t, DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown: true,
+	})
+	for _, key := range []string{"skipped", "ignored_paths"} {
+		arr, ok := got[key].([]any)
+		if !ok {
+			t.Errorf("%s should be an array, got %T (%v)", key, got[key], got[key])
+			continue
+		}
+		if len(arr) != 0 {
+			t.Errorf("%s should be empty, got %v", key, arr)
+		}
+	}
+}
+
+// TestTruncateSkips_CopiesAndFlags. TruncateSkips must not hand back a re-slice
+// of the recorder's backing array presented as complete — "absence means
+// indexed" is the fail-open this whole feature closes.
+func TestTruncateSkips_CopiesAndFlags(t *testing.T) {
+	original := []ir.SkippedFile{
+		{Path: "a.java", Reason: ir.SkipUnsupportedLanguage},
+		{Path: "b.java", Reason: ir.SkipUnsupportedLanguage},
+		{Path: "c.java", Reason: ir.SkipUnsupportedLanguage},
+	}
+	d := TruncateSkips(DiffResult{SkippedKnown: true, Skipped: original}, 2)
+	if len(d.Skipped) != 2 {
+		t.Fatalf("len = %d, want 2", len(d.Skipped))
+	}
+	if !d.SkippedTruncated {
+		t.Error("truncation must be flagged, or the clip silently asserts completeness")
+	}
+	d.Skipped[0].Path = "mutated"
+	if original[0].Path != "a.java" {
+		t.Error("TruncateSkips aliased the caller's slice")
+	}
+	// Under the limit: untouched, and NOT flagged.
+	same := TruncateSkips(DiffResult{SkippedKnown: true, Skipped: original}, 10)
+	if same.SkippedTruncated || len(same.Skipped) != 3 {
+		t.Errorf("a list under the limit must pass through unflagged, got %+v", same)
+	}
+	// Not measured: nothing to clip, and the flag must stay off.
+	unknown := TruncateSkips(DiffResult{Skipped: original}, 1)
+	if unknown.SkippedTruncated {
+		t.Error("an unmeasured diff must not be flagged as truncated")
 	}
 }
 
@@ -130,7 +216,7 @@ func TestFormatFull_SaysNothingWhenNothingSkipped(t *testing.T) {
 func TestFormatFull_TruncationIsShouted(t *testing.T) {
 	many := make([]ir.SkippedFile, maxShownSkips+5)
 	for i := range many {
-		many[i] = ir.SkippedFile{Path: "f.java", Reason: ir.SkipUnsupportedLanguage}
+		many[i] = ir.SkippedFile{Path: fmt.Sprintf("f%d.java", i), Reason: ir.SkipUnsupportedLanguage}
 	}
 	out := FormatFull(DiffResult{
 		SnapshotA:        SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
@@ -139,10 +225,42 @@ func TestFormatFull_TruncationIsShouted(t *testing.T) {
 		Skipped:          many,
 		SkippedTruncated: true,
 	})
-	if !strings.Contains(out, "and 5 mores") && !strings.Contains(out, "and 5 more") {
+	// Exact, not a Contains pair whose second clause subsumes the first — the
+	// earlier version of this assertion passed for "and 5 mores" and pinned
+	// neither spelling.
+	if !strings.Contains(out, "... and 5 more (use --json for the full list)") {
 		t.Errorf("expected an elision line for the paths beyond %d:\n%s", maxShownSkips, out)
+	}
+	if strings.Contains(out, "mores") {
+		t.Errorf(`plural() appended an "s" to "more":\n%s`, out)
+	}
+	// A truncated list is a floor, not a total; "25 paths" would contradict the
+	// warning two lines down.
+	if !strings.Contains(out, "(25+ paths)") {
+		t.Errorf("a truncated count must read as a floor:\n%s", out)
 	}
 	if !strings.Contains(out, "WARNING") {
 		t.Errorf("a truncated skip list must warn, got:\n%s", out)
+	}
+}
+
+// TestFormatFull_ConfiguredIgnoresAreNotHumanNoise. `.git` is in
+// DefaultIgnoredPaths, so echoing configured ignores into the text output would
+// print a block on every diff of every repo — and a note that fires every time
+// stops being read. What the operator did NOT configure still shows.
+func TestFormatFull_ConfiguredIgnoresAreNotHumanNoise(t *testing.T) {
+	base := DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown: true,
+	}
+	base.Skipped = []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}}
+	if out := FormatFull(base); strings.Contains(out, "NOT ENTERED") {
+		t.Errorf("a configured ignore must not print:\n%s", out)
+	}
+	base.Skipped = []ir.SkippedFile{{Path: "shared", Reason: ir.SkipSymlinkDir}}
+	out := FormatFull(base)
+	if !strings.Contains(out, "NOT ENTERED") || !strings.Contains(out, "shared") {
+		t.Errorf("an unconfigured prune must print:\n%s", out)
 	}
 }

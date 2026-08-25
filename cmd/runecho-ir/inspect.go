@@ -304,11 +304,15 @@ func runVerify(args []string) int {
 		return ExitNoData
 	}
 
-	irData, _, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
+	irData, stats, irCode := buildIR(root, repoFileCap(db, root)) // always fresh: snapshot/diff/verify reflect current code, never a stale ir.json
 	if irCode != 0 {
 		return irCode
 	}
-	result, err := db.DiffLive(*meta, irData)
+	// WithStats, like `diff --since`: this is a live walk, and `verify` is the
+	// most gate-like command in the tool. Printing a bare "No structural
+	// changes." for a repo whose only code is unparsed was the headline bug,
+	// surviving on the one surface most likely to be believed.
+	result, err := db.DiffLiveWithStats(*meta, irData, stats)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return ExitError
@@ -516,7 +520,7 @@ func runTruthTrail(args []string) int {
 		return ExitNoData
 	}
 
-	liveIR, _, irCode := buildIR(root, repoFileCap(db, root))
+	liveIR, stats, irCode := buildIR(root, repoFileCap(db, root))
 	if irCode != 0 {
 		return irCode
 	}
@@ -531,7 +535,7 @@ func runTruthTrail(args []string) int {
 		text = string(data)
 	}
 
-	trail, err := snapshot.TruthTrail(db, repoID, *meta, liveIR, 0, text)
+	trail, err := snapshot.TruthTrail(db, repoID, *meta, liveIR, stats, 0, text)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return ExitError

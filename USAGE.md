@@ -170,20 +170,25 @@ not parse every language, so a function deleted from a `.java`, `.c`, or `.php`
 file used to produce a clean diff at exit 0 with empty stderr — indistinguishable
 from a genuinely unchanged repo.
 
-`diff --since` now names what it declined:
+`diff --since` and `verify` now name what they declined:
 
 ```
 IR DIFF  8f2a1c04... → b31d9e77...
 
 No structural changes.
 
-NOT EXAMINED (2 paths) — a symbol removed here would be invisible to this diff:
+NOT EXAMINED — a symbol removed here would be invisible to this diff (1 path):
   Widget.java  [unsupported_language]
-  vendor  [ignored_dir]
 ```
 
-`--json` carries the same facts as a `skipped` array of `{Path, Reason}`, plus a
-`skipped_truncated` boolean. Reasons:
+`--json` carries two arrays, and **the split is the contract**:
+
+| Key | Contains | How to match | What to do |
+|---|---|---|---|
+| `skipped` | **Files** the indexer could not read | Exact path | Fail closed |
+| `ignored_paths` | **Directories** it did not enter | Path prefix | Informational |
+
+Reasons in `skipped`:
 
 | Reason | Meaning |
 |---|---|
@@ -191,18 +196,36 @@ NOT EXAMINED (2 paths) — a symbol removed here would be invisible to this diff
 | `parse_error` | Supported extension, but the file could not be read or parsed |
 | `oversized` | Larger than the per-file parse limit |
 | `cap_reached` | The repo's file cap stopped indexing before this file |
-| `ignored_dir` | A directory matched the ignore list; the DIRECTORY is listed, never its contents |
+| `symlink` | A symlinked source file; the walk does not follow symlinks |
+| `unreadable` | The walk could not stat or open it |
 
-Two rules for machine consumers:
+Reasons in `ignored_paths`: `ignored_dir` (matched the ignore list),
+`symlink_dir`, `unreadable_dir`. The directory is listed, never its contents —
+the walk never descends, and enumerating it would defeat the pruning.
 
-* **Non-code is never listed.** A `README.md` or a `.png` is not a blind spot in
-  a symbol index, so a gate can fail closed on this list without blocking
-  documentation changes.
+Why two arrays and not one: `.git` is in the default ignore list, so a merged
+list is non-empty in *every* repo. A consumer prefix-matching it would block an
+edit to `testdata/README.md` — a documentation-only false block, which is exactly
+what the language table exists to prevent, arriving through the other reason
+code. Ignoring a directory is the operator's own policy; being unable to read a
+file is a limit of the tool. Only the second is a blind spot.
+
+Three rules for machine consumers:
+
+* **Non-code is never in `skipped`.** A `README.md` or a `.png` is not a blind
+  spot in a symbol index, so a gate can fail closed on a non-empty `skipped`
+  without blocking documentation changes.
 * **An absent `skipped` key means "not measured", not "nothing skipped".** Only
-  `diff --since` walks the filesystem; the two-snapshot form
-  (`diff <id-a> <id-b>`) omits the key entirely rather than claim a clean bill of
-  health it never checked. Likewise, `skipped_truncated: true` means the list hit
-  its cap, so absence from it no longer implies "indexed".
+  `diff --since` and `verify` walk the filesystem; the two-snapshot form
+  (`diff <id-a> <id-b>`) omits both keys entirely rather than claim a clean bill
+  of health it never checked.
+* **`skipped_truncated: true` means the list hit its cap**, so absence from it no
+  longer implies "indexed". Treat it as "unknown".
+
+The text output deliberately shows `NOT EXAMINED` always, but `NOT ENTERED` only
+for directories you did *not* configure — a symlink or an unreadable directory.
+Echoing your own ignore list back on every run would make the note unreadable.
+The full list is always in `--json`.
 
 ### Locate symbols (repo map)
 

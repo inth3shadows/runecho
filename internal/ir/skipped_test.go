@@ -11,9 +11,10 @@ import (
 	"github.com/inth3shadows/runecho/internal/parser"
 )
 
-// registeredParsers mirrors the set wired in NewGenerator. If a parser is added
-// there, add it here too — TestKnownSourceExtensionsAreNotParsed is the reason
-// this duplicate exists, and it is only load-bearing if it stays in sync.
+// registeredParsers returns the REAL parser set from NewGenerator, not a copy of
+// it. That matters: a hand-maintained duplicate would pass
+// TestKnownSourceExtensionsAreNotParsed while the shipped generator drifted, so
+// the test would guard nothing at exactly the moment it was needed.
 func registeredParsers() []parser.Parser {
 	return NewGenerator(GeneratorConfig{}).parsers
 }
@@ -350,5 +351,202 @@ func TestNoSkipsOnAFullyIndexedRepo(t *testing.T) {
 	}
 	if stats.SkippedTruncated {
 		t.Error("SkippedTruncated set with nothing skipped")
+	}
+}
+
+// advertisedFamilies maps a language RunEcho claims to parse onto extensions a
+// reader would reasonably expect it to handle. Every one must be EITHER parsed
+// or named in knownSourceExtensions — never neither.
+var advertisedFamilies = map[string][]string{
+	"TypeScript": {".ts", ".tsx", ".mts", ".cts"},
+	"JavaScript": {".js", ".mjs", ".cjs", ".jsx"},
+	"Python":     {".py", ".pyi", ".pyx", ".pxd"},
+	"Ruby":       {".rb", ".rake", ".gemspec", ".ru"},
+	"Shell":      {".sh", ".bash", ".zsh", ".fish", ".ksh"},
+	"Go":         {".go"},
+	"Rust":       {".rs"},
+}
+
+// TestAdvertisedLanguageFamiliesAreAccountedFor is the regression test for the
+// sharpest defect review found in the first cut of this feature.
+//
+// `.mts` is TypeScript. JSParser did not claim it and knownSourceExtensions did
+// not list it, so a deleted export was invisible AND unreported — the original
+// bug, reproduced inside a language RunEcho advertises support for. The
+// conservative bias documented on the table is right for `.d`, where nobody
+// expects coverage; it is wrong here, because a user who reads "we parse
+// TypeScript" will not go looking for a silent hole in `.mts`.
+//
+// "Accounted for" deliberately allows either answer. Adding a parser satisfies
+// this test; so does admitting in the table that we do not index it. What is
+// forbidden is the third state — neither indexed nor named.
+func TestAdvertisedLanguageFamiliesAreAccountedFor(t *testing.T) {
+	g := NewGenerator(GeneratorConfig{})
+	for lang, exts := range advertisedFamilies {
+		for _, ext := range exts {
+			if g.supportsExtension(ext) || IsKnownSourceExtension(ext) {
+				continue
+			}
+			t.Errorf("%s: %q is neither parsed nor listed in knownSourceExtensions — a symbol "+
+				"deleted from a %s file is invisible AND unreported, which is the exact bug "+
+				"this package exists to close", lang, ext, ext)
+		}
+	}
+}
+
+// TestExtensionCaseIsNotACrack pins the fix for an asymmetry between the two
+// lookups: IsKnownSourceExtension lowercased its argument, every parser's
+// SupportsExtension is an exact match. `A.GO` therefore fell through BOTH — not
+// indexed (wrong case for the parser), not reported (`.go` is deliberately
+// absent from the source table, being a language we DO parse). A file in a fully
+// supported language, invisible and unnamed.
+func TestExtensionCaseIsNotACrack(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "A.GO", "package p\nfunc A() {}\n")
+	writeFile(t, dir, "B.JAVA", "class B { }\n")
+	writeFile(t, dir, "C.Py", "def c(): pass\n")
+
+	irData, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+
+	// Supported languages: indexed despite the casing.
+	for _, indexed := range []string{"A.GO", "C.Py"} {
+		if _, ok := irData.Files[indexed]; !ok {
+			t.Errorf("%s was not indexed; case must not decide whether a supported language is read", indexed)
+		}
+		if reason, reported := got[indexed]; reported {
+			t.Errorf("%s was indexed but also reported as %q", indexed, reason)
+		}
+	}
+	// Unsupported language: reported despite the casing.
+	if got["B.JAVA"] != SkipUnsupportedLanguage {
+		t.Errorf("B.JAVA: got %q, want %q", got["B.JAVA"], SkipUnsupportedLanguage)
+	}
+}
+
+// TestSymlinkedSourceIsRecorded. The walk does not follow symlinks, so a
+// symlinked source file is unindexed — and it used to be unrecorded too, which
+// under the prefix/exact match rule means a consumer reads its absence from the
+// list as "examined". Non-code symlinks stay unreported, for the same reason
+// README.md does.
+func TestSymlinkedSourceIsRecorded(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, outside, "lib.go", "package p\nfunc L() {}\n")
+	writeFile(t, outside, "notes.md", "# notes\n")
+	if err := os.MkdirAll(filepath.Join(outside, "shared"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	for _, ln := range []struct{ target, name string }{
+		{filepath.Join(outside, "lib.go"), "linked.go"},
+		{filepath.Join(outside, "notes.md"), "linked.md"},
+		{filepath.Join(outside, "shared"), "shared"},
+	} {
+		if err := os.Symlink(ln.target, filepath.Join(dir, ln.name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+
+	if got["linked.go"] != SkipSymlink {
+		t.Errorf("linked.go: got %q, want %q", got["linked.go"], SkipSymlink)
+	}
+	if got["shared"] != SkipSymlinkDir {
+		t.Errorf("shared: got %q, want %q", got["shared"], SkipSymlinkDir)
+	}
+	if reason, reported := got["linked.md"]; reported {
+		t.Errorf("a symlinked non-code file must stay unreported, got %q", reason)
+	}
+}
+
+// TestCapReachedCannotEvictTheHeadlineReason.
+//
+// The recorder is first-come and the walk is lexical, so before the per-reason
+// sub-cap a repo with FileCap set could fill all 1000 slots with cap_reached
+// entries and drop every unsupported_language entry sorting after the fill
+// point. The signal that survived was "lexically earliest", not "most
+// important" — and unsupported_language is the entire reason this list exists.
+func TestCapReachedCannotEvictTheHeadlineReason(t *testing.T) {
+	dir := t.TempDir()
+	// Thousands of supported files sorting BEFORE the .java file alphabetically.
+	for i := range maxRecordedSkips + 500 {
+		writeFile(t, dir, fmt.Sprintf("a%05d.go", i), "package p\n")
+	}
+	writeFile(t, dir, "zzz.java", "class Z { }\n")
+
+	_, stats, err := NewGenerator(GeneratorConfig{FileCap: 1}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skipMap(t, stats); got["zzz.java"] != SkipUnsupportedLanguage {
+		t.Errorf("zzz.java was evicted by cap_reached entries (got %q); the sub-cap exists "+
+			"so the headline reason always survives", got["zzz.java"])
+	}
+	if !stats.SkippedTruncated {
+		t.Error("the cap_reached sub-cap was hit, so truncation must be flagged")
+	}
+	capped := 0
+	for _, sk := range stats.Skipped {
+		if sk.Reason == SkipCapReached {
+			capped++
+		}
+	}
+	if capped > maxCapReachedSkips {
+		t.Errorf("cap_reached entries = %d, want at most %d", capped, maxCapReachedSkips)
+	}
+}
+
+// TestIgnoredWalkRootIsIndexed: the ignore rule prunes SUBdirectories. Applied
+// to the directory the operator explicitly named, it pruned the whole walk —
+// zero files indexed, a vacuous 100% coverage (SupportedSeen == 0), and a skip
+// entry of "." that prefix-matches nothing.
+func TestIgnoredWalkRootIsIndexed(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "vendor") // basename is in DefaultIgnoredPaths
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+
+	irData, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := irData.Files["main.go"]; !ok {
+		t.Errorf("the walk root was pruned by its own basename; indexed %v", irData.Files)
+	}
+	if stats.SupportedSeen == 0 {
+		t.Error("SupportedSeen == 0 makes Coverage() report a vacuous 100%")
+	}
+	if got := skipMap(t, stats); got["."] != "" {
+		t.Errorf(`walk root recorded as "." (reason %q) — a prefix that matches nothing`, got["."])
+	}
+}
+
+// TestPolicyAndCapabilitySkipsAreDistinguishable pins the split the diff payload
+// depends on. Merging them was the defect: `.git` is always ignored, so a merged
+// list was never empty and a consumer prefix-matching it blocked a
+// testdata/README.md edit.
+func TestPolicyAndCapabilitySkipsAreDistinguishable(t *testing.T) {
+	policy := []string{SkipIgnoredDir, SkipSymlinkDir, SkipUnreadableDir}
+	capability := []string{SkipUnsupportedLanguage, SkipParseError, SkipOversized,
+		SkipCapReached, SkipSymlink, SkipUnreadable}
+	for _, r := range policy {
+		if !IsPolicySkip(r) {
+			t.Errorf("%q names a pruned directory and must classify as policy", r)
+		}
+	}
+	for _, r := range capability {
+		if IsPolicySkip(r) {
+			t.Errorf("%q names an unreadable file and must classify as capability — a consumer "+
+				"fails closed on these", r)
+		}
 	}
 }

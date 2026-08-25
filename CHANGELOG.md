@@ -17,15 +17,32 @@ install time from `git describe --tags` (see `install.sh`).
 ## [Unreleased]
 
 ### Added
-- `diff --since` now reports which paths the indexer declined and why, as a
-  `skipped` array of `{Path, Reason}` in `--json` (plus `skipped_truncated`) and
-  a `NOT EXAMINED` block in the text output. Closes the fail-open where a symbol
-  deleted from an unindexed language (`.java`, `.c`, `.php`, …) produced a clean
-  diff at exit 0 with empty stderr. Non-code files are never listed, so a
-  consumer can fail closed on the list without blocking documentation changes.
-  The two-snapshot form (`diff <id-a> <id-b>`) omits the key entirely — it never
-  walks the filesystem, so it cannot answer the question.
+- `diff --since` and `verify` now report which paths the indexer declined and
+  why. `--json` carries two arrays — `skipped` (files it could not read; match
+  exactly, fail closed) and `ignored_paths` (directories it did not enter; match
+  by prefix, informational) — plus `skipped_truncated`. The text output gains a
+  `NOT EXAMINED` block. Closes the fail-open where a symbol deleted from an
+  unindexed language (`.java`, `.c`, `.php`, …) produced a clean diff at exit 0
+  with empty stderr. Non-code files are never in `skipped`, so a consumer can
+  fail closed on it without blocking documentation changes. The two-snapshot form
+  (`diff <id-a> <id-b>`) omits both keys — it never walks the filesystem, so it
+  cannot answer the question. The MCP `diff` tool clips its list harder, being a
+  context-economy surface.
   ([harness#21](https://github.com/inth3shadows/harness/issues/21))
+
+### Fixed
+- The ignore list is no longer applied to the walk root itself. A repo whose
+  directory is named `testdata`, `vendor`, `dist`, `venv`, or `node_modules` had
+  its entire walk pruned: zero files indexed, and a vacuous 100% coverage,
+  because `SupportedSeen` was also 0.
+- File extensions are matched case-insensitively when selecting a parser.
+  `A.GO` and `B.PY` were previously neither indexed (parsers match exactly) nor
+  reported (the source-extension table deliberately omits languages we parse).
+- `.mts`, `.cts`, `.pyi`, `.pyx`, `.pxd`, `.rake`, `.gemspec`, `.ru`, `.zsh`,
+  `.fish`, `.ksh` and `.hcl` are now recognised as source. Several belong to
+  language families RunEcho advertises support for, where a silent hole is least
+  expected; a new test requires every advertised family to be either parsed or
+  named.
 
 ## [0.46.0] — 2026-08-20
 

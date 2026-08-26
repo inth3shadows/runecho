@@ -150,16 +150,33 @@ func (r *skipRecorder) add(path, reason string) {
 	}
 	if reason == SkipCapReached {
 		if r.capReached >= maxCapReachedSkips {
-			r.truncated, r.hitCap = true, maxCapReachedSkips
+			r.noteCap(maxCapReachedSkips)
 			return
 		}
 		r.capReached++
 	}
 	if len(r.items) >= maxRecordedSkips {
-		r.truncated, r.hitCap = true, maxRecordedSkips
+		r.noteCap(maxRecordedSkips)
 		return
 	}
 	r.items = append(r.items, SkippedFile{Path: path, Reason: reason})
+}
+
+// noteCap records that a cap truncated the list, keeping the LARGEST one seen.
+//
+// Two caps can fire in a single walk, and the message they feed names a number
+// the operator uses to scope the blind spot. Last-write-wins let a cap_reached
+// add arriving after the main cap filled reset the figure from 1000 back to 100
+// -- printing "hit its cap (100)" beside a 1000-entry list, which is the same
+// mis-scoping the sub-cap was introduced to fix, inverted. The largest cap is
+// the honest headline: it is the one bounding the list the reader is looking at.
+// TruncateSkips takes the MINIMUM for the same reason, since there the smaller
+// per-surface budget is what bounds what the reader got.
+func (r *skipRecorder) noteCap(cap int) {
+	r.truncated = true
+	if cap > r.hitCap {
+		r.hitCap = cap
+	}
 }
 
 // result returns the recorded skips in a deterministic order. filepath.Walk is

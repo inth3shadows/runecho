@@ -806,3 +806,31 @@ func TestUnstattableNonCodeStaysOutOfTheFailClosedArray(t *testing.T) {
 		t.Error("nothing recorded for an unreadable directory containing source")
 	}
 }
+
+// TestHitCapReportsTheLargestCapThatFired.
+//
+// Both caps can fire in one walk. The recorder used last-write-wins, so a
+// cap_reached add arriving after the main cap had filled reset the reported
+// figure from 1000 back to 100 — printing "hit its cap (100)" beside a
+// 1000-entry list. That is the same mis-scoping the sub-cap was introduced to
+// fix, in the opposite direction.
+func TestHitCapReportsTheLargestCapThatFired(t *testing.T) {
+	r := &skipRecorder{}
+	for i := range maxRecordedSkips + 200 {
+		r.add(fmt.Sprintf("f%05d.java", i), SkipUnsupportedLanguage)
+	}
+	for i := range 200 {
+		r.add(fmt.Sprintf("g%05d.go", i), SkipCapReached)
+	}
+	items, truncated, cap := r.result()
+	if !truncated {
+		t.Fatal("both caps fired; truncation must be flagged")
+	}
+	if len(items) != maxRecordedSkips {
+		t.Fatalf("len = %d, want %d", len(items), maxRecordedSkips)
+	}
+	if cap != maxRecordedSkips {
+		t.Errorf("hitCap = %d, want %d — naming the sub-cap beside a %d-entry list "+
+			"mis-scopes the blind spot", cap, maxRecordedSkips, len(items))
+	}
+}

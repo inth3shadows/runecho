@@ -17,7 +17,7 @@ func TestTruthTrail_NoChanges(t *testing.T) {
 	}
 	meta, _ := db.GetByID(snapID)
 
-	trail, err := TruthTrail(db, repoID, *meta, irData, 0, "")
+	trail, err := TruthTrail(db, repoID, *meta, irData, ir.Stats{}, 0, "")
 	if err != nil {
 		t.Fatalf("TruthTrail: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestTruthTrail_RemovedSymbolWithCallers(t *testing.T) {
 		},
 	}
 
-	trail, err := TruthTrail(db, repoID, *meta, liveIR, 0, "")
+	trail, err := TruthTrail(db, repoID, *meta, liveIR, ir.Stats{}, 0, "")
 	if err != nil {
 		t.Fatalf("TruthTrail: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestTruthTrail_StaleClaims(t *testing.T) {
 	meta, _ := db.GetByID(snapID)
 
 	text := "The `PhantomFunc` handles routing and `RealFunc` does the work."
-	trail, err := TruthTrail(db, repoID, *meta, irData, 0, text)
+	trail, err := TruthTrail(db, repoID, *meta, irData, ir.Stats{}, 0, text)
 	if err != nil {
 		t.Fatalf("TruthTrail: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestTruthTrail_BareMethodClaimNotStale(t *testing.T) {
 	meta, _ := db.GetByID(snapID)
 
 	text := "The `FetchData` method now retries, but `PhantomHelper` was removed."
-	trail, err := TruthTrail(db, repoID, *meta, irData, 0, text)
+	trail, err := TruthTrail(db, repoID, *meta, irData, ir.Stats{}, 0, text)
 	if err != nil {
 		t.Fatalf("TruthTrail: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestTruthTrail_NoCallers(t *testing.T) {
 	snapID, _ := db.SaveSnapshot(repoID, "", "session-start", "/tmp/r", makeIR("h1", "FuncA"))
 	meta, _ := db.GetByID(snapID)
 
-	trail, err := TruthTrail(db, repoID, *meta, makeIR("h2", "FuncB"), 0, "")
+	trail, err := TruthTrail(db, repoID, *meta, makeIR("h2", "FuncB"), ir.Stats{}, 0, "")
 	if err != nil {
 		t.Fatalf("TruthTrail: %v", err)
 	}

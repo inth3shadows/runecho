@@ -32,6 +32,13 @@ func (db *DB) Diff(a, b SnapshotMeta) (DiffResult, error) {
 
 // DiffLive diffs a stored snapshot against the current live IR (not yet saved).
 // b is synthesized as a sentinel SnapshotMeta with ID=-1.
+//
+// The result carries no skip information (SkippedKnown stays false). Callers
+// that HAVE the walk's ir.Stats -- every caller that just built the live IR --
+// should use DiffLiveWithStats instead, so the payload can say which files the
+// indexer declined. This signature is kept for callers that genuinely do not
+// have the stats, and because silently reporting "nothing skipped" for them
+// would be a fail-open.
 func (db *DB) DiffLive(a SnapshotMeta, liveIR *ir.IR) (DiffResult, error) {
 	aFiles, err := db.loadFilesBySnapshot(a.ID)
 	if err != nil {
@@ -53,6 +60,27 @@ func (db *DB) DiffLive(a SnapshotMeta, liveIR *ir.IR) (DiffResult, error) {
 		FileCount: len(liveIR.Files),
 	}
 	return computeDiff(a, b, aFiles, bFiles, aSymbols, bSymbols), nil
+}
+
+// DiffLiveWithStats is DiffLive plus the skip report from the walk that produced
+// liveIR.
+//
+// The two arguments must come from the SAME walk. A diff says what changed among
+// the files the indexer read; the stats say which files it never read. Pairing a
+// diff with a different walk's stats would answer "was my file examined?" about
+// the wrong tree -- which is worse than not answering, because the answer looks
+// authoritative.
+func (db *DB) DiffLiveWithStats(a SnapshotMeta, liveIR *ir.IR, stats ir.Stats) (DiffResult, error) {
+	res, err := db.DiffLive(a, liveIR)
+	if err != nil {
+		return res, err
+	}
+	res.Skipped = stats.Skipped
+	res.SkippedKnown = true
+	res.SkippedTruncated = stats.SkippedTruncated
+	res.SkippedCap = stats.SkippedCap
+	res.RootUnreadable = stats.RootUnreadable
+	return res, nil
 }
 
 // irToMaps converts an IR into the file and symbol maps used by computeDiff.
@@ -192,14 +220,50 @@ func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 	return m
 }
 
-// FormatCompact returns a single-line summary, or "" if there are no changes.
+// FormatCompact returns a single-line summary, or "" if there are no changes and
+// nothing went unexamined.
+//
+// The zero-drift early return used to be unconditional, so `diff --compact` on a
+// repo the indexer could not read printed NOTHING at exit 0 -- the most
+// confident possible statement, from the surface with the least room to qualify
+// it. A caller piping --compact into a log gets one line either way; it must not
+// be a silently empty one.
 func FormatCompact(d DiffResult) string {
+	// RootUnreadable is checked BEFORE the zero-drift test, not inside it.
+	//
+	// When the root cannot be read, a live diff against a snapshot that HAS files
+	// reports every one of them as removed -- so the branch below never runs and
+	// compact rendered a tooling failure as a mass symbol deletion
+	// ("-3 symbols, 1 file changed") while FormatFull said the root could not be
+	// read. That is the disagreement with the highest consequence of all, and it
+	// sat in the one shape the earlier fix did not cover.
+	aShort, bShort := shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash)
+	if d.RootUnreadable {
+		return fmt.Sprintf("IR DIFF [%s→%s]: NOTHING examined — the repo root could not be read",
+			aShort, bShort)
+	}
 	if len(d.Files) == 0 {
+		// Every reason FormatFull would qualify "no structural changes" has to
+		// qualify this line too, or the two surfaces disagree about the same
+		// DiffResult -- which is how --compact came to print nothing at exit 0
+		// for a repo the indexer could not read.
+		n := len(skipCount(d))
+		switch {
+		case d.SkippedTruncated && n == 0:
+			// "0+ paths NOT examined" is the rendering writeSkipBlock suppresses
+			// for reading as a bug and undercutting the warning it introduces.
+			// Say the thing the number cannot.
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but a skip cap was hit — coverage unknown",
+				aShort, bShort)
+		case d.SkippedTruncated:
+			// A floor, not a total: the list hit its cap, so n understates it.
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %d+ paths NOT examined", aShort, bShort, n)
+		case n > 0:
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %s NOT examined",
+				aShort, bShort, plural(n, "path"))
+		}
 		return ""
 	}
-	aShort := shortHash(d.SnapshotA.RootHash)
-	bShort := shortHash(d.SnapshotB.RootHash)
-
 	// Count every changed file — added, removed, and modified. The label is
 	// "changed", not "modified": an added or removed file is a change but not a
 	// modification, so labeling this total "modified" over-counted modifications
@@ -236,22 +300,248 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 	if files == nil {
 		files = []FileDiff{}
 	}
-	return map[string]interface{}{
+	payload := map[string]interface{}{
 		"summary":        FormatCompact(d),
 		"total_added":    d.TotalAdded,
 		"total_removed":  d.TotalRemoved,
 		"total_modified": d.TotalModified,
 		"files":          files,
 	}
+	// `skipped` answers a question `files` cannot: which paths the indexer never
+	// read, and therefore where a deleted symbol would be invisible at exit 0
+	// with empty stderr. It is present ONLY when a live walk actually measured
+	// it. A snapshot-to-snapshot diff never walks the filesystem, so emitting
+	// `"skipped": []` there would tell a consumer "nothing was skipped" on the
+	// strength of never having looked -- the key's absence is the honest answer,
+	// and consumers must treat absent as "unknown", not as "none".
+	if d.SkippedKnown {
+		// TWO arrays, not one, and the split is the contract.
+		//
+		// `skipped` is everything the indexer COULD NOT READ -- the blind spots,
+		// the thing to fail closed on. `ignored_paths` is what the operator
+		// CONFIGURED away, which is informational.
+		//
+		// The discriminator is "did you ask for this", NOT file-versus-directory.
+		// Both arrays can hold either, so a consumer matches a changed path with
+		//
+		//	changed == entry || strings.HasPrefix(changed, entry+"/")
+		//
+		// which is correct for both: a file entry can never be a directory prefix
+		// of another path. Matching `skipped` by equality alone MISSES every path
+		// under an unreadable directory -- the fail-open the classification was
+		// corrected to close.
+		//
+		// The first draft merged the arrays, and the merge was the defect: `.git`
+		// is in DefaultIgnoredPaths, so every repo produced a non-empty list, and
+		// a gate prefix-matching it blocked an edit to `testdata/README.md`. That
+		// is the documentation-only false block the language table exists to
+		// prevent, arriving through the other reason code.
+		capability, policy := SplitSkips(d.Skipped)
+		payload["skipped"] = capability
+		payload["ignored_paths"] = policy
+		payload["skipped_truncated"] = d.SkippedTruncated
+		payload["root_unreadable"] = d.RootUnreadable
+	}
+	return payload
+}
+
+// skipCount returns the capability skips, or nil when this diff could not
+// measure them.
+func skipCount(d DiffResult) []ir.SkippedFile {
+	if !d.SkippedKnown {
+		return nil
+	}
+	capability, _ := SplitSkips(d.Skipped)
+	return capability
+}
+
+// SplitSkips partitions a skip list into capability skips (files the indexer
+// could not read) and policy skips (directories it did not enter). Both are
+// non-nil so a machine consumer never has to null-guard.
+func SplitSkips(all []ir.SkippedFile) (capability, policy []ir.SkippedFile) {
+	capability, policy = []ir.SkippedFile{}, []ir.SkippedFile{}
+	for _, sk := range all {
+		if ir.IsPolicySkip(sk.Reason) {
+			policy = append(policy, sk)
+		} else {
+			capability = append(capability, sk)
+		}
+	}
+	return capability, policy
+}
+
+// TruncateSkips returns d with its skip list clipped so that neither bucket
+// exceeds n entries, flagging the truncation. For surfaces with a tighter budget
+// than the payload cap -- the MCP oracle, whose whole purpose is context
+// economy, would otherwise inject up to MaxRecordedSkips objects into an agent's
+// context on every call against a C or Java repo.
+//
+// Budgeted PER BUCKET, not over the merged list. Clipping the merged list let
+// policy entries evict capability ones: result() sorts lexically, so on a
+// 50-package workspace the `packages/pNN/node_modules` entries interleave with
+// the `packages/pNN/src/App.vue` ones and a 50-entry clip discarded 15 of 40
+// real blind spots to make room for 25 ignored directories. With enough ignored
+// directories, `skipped` came back empty for a repo that was entirely
+// unindexed. The converse was equally wrong: clipping only policy entries set
+// skipped_truncated, telling a gate the fail-closed array was incomplete when
+// it was not.
+//
+// This is the same crowding-out the maxCapReachedSkips sub-cap prevents one
+// layer down, and it wants the same answer: give each class its own budget.
+func TruncateSkips(d DiffResult, n int) DiffResult {
+	if !d.SkippedKnown {
+		return d
+	}
+	capability, policy := SplitSkips(d.Skipped)
+	clippedCap, cutCap := clipSkips(capability, n)
+	clippedPol, cutPol := clipSkips(policy, n)
+	if !cutCap && !cutPol {
+		return d
+	}
+	// SkippedTruncated describes `skipped` ALONE, so it is set only when the
+	// capability bucket lost entries. The previous version raised it for either
+	// bucket -- the very thing this function's doc comment above calls out as
+	// wrong -- which meant any repo with more than n ignored directories (a
+	// Python monorepo with a __pycache__ per package, a pnpm workspace with a
+	// node_modules per package) reported the fail-closed array as "unknown" on
+	// every single MCP diff, permanently and unfixably, while that array was in
+	// fact complete. USAGE.md tells consumers to treat the flag as "absence no
+	// longer implies indexed", so a false positive here is a false fail-closed.
+	//
+	// Policy truncation is not reported: `ignored_paths` is informational, and a
+	// consumer has nothing to do differently on learning the list of directories
+	// it was already told to ignore is abridged.
+	// Copy: d.Skipped aliases the recorder's backing array, and a re-slice that
+	// the caller then treats as complete is exactly the "absence means indexed"
+	// fail-open this whole feature exists to close.
+	merged := make([]ir.SkippedFile, 0, len(clippedCap)+len(clippedPol))
+	merged = append(merged, clippedCap...)
+	merged = append(merged, clippedPol...)
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Path != merged[j].Path {
+			return merged[i].Path < merged[j].Path
+		}
+		return merged[i].Reason < merged[j].Reason
+	})
+	d.Skipped = merged
+	if cutCap {
+		d.SkippedTruncated = true
+		if d.SkippedCap == 0 || n < d.SkippedCap {
+			d.SkippedCap = n
+		}
+	}
+	return d
+}
+
+// clipSkips returns at most n entries and whether anything was dropped.
+func clipSkips(entries []ir.SkippedFile, n int) ([]ir.SkippedFile, bool) {
+	if len(entries) <= n {
+		return entries, false
+	}
+	return entries[:n], true
+}
+
+// maxShownSkips bounds each list in human output. The machine payload carries
+// the whole list (up to its own cap); a terminal does not need it.
+const maxShownSkips = 20
+
+// writeSkipBlock renders one labelled group of skips, or nothing when empty.
+func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool, capHit int) {
+	if len(entries) == 0 {
+		// Nothing to list. The WARNING still has to be said -- a truncated run
+		// that prints nothing silently asserts completeness -- but a
+		// "NOT EXAMINED (0+ paths):" header above zero entries reads as a
+		// rendering bug and undercuts the warning it introduces.
+		if truncated {
+			writeTruncationWarning(sb, capHit)
+		}
+		return
+	}
+	count := plural(len(entries), "path")
+	if truncated {
+		// "1000 paths" on a capped list reads as a total and contradicts the
+		// warning two lines down. The list is a floor, so say so.
+		count = fmt.Sprintf("%d+ paths", len(entries))
+	}
+	fmt.Fprintf(sb, "\n%s (%s):\n", header, count)
+	for i, sk := range entries {
+		if i >= maxShownSkips {
+			fmt.Fprintf(sb, "  ... and %d more (use --json for the full list)\n", len(entries)-maxShownSkips)
+			break
+		}
+		fmt.Fprintf(sb, "  %s  [%s]\n", sk.Path, sk.Reason)
+	}
+	if truncated {
+		writeTruncationWarning(sb, capHit)
+	}
+}
+
+// writeTruncationWarning says that the list is a floor, not a total. capHit 0
+// means the cap is unknown (a hand-built DiffResult, or one from an older
+// version), in which case the package cap is the least-wrong number to print.
+func writeTruncationWarning(sb *strings.Builder, capHit int) {
+	if capHit == 0 {
+		capHit = ir.MaxRecordedSkips
+	}
+	fmt.Fprintf(sb, "\nWARNING: a skip cap was hit (%d); other paths may also have gone unexamined.\n",
+		capHit)
+}
+
+// formatSkipped renders the paths the indexer declined, or "" when there are
+// none or when this diff mode could not measure them.
+//
+// Deliberately loud, and deliberately attached to BOTH branches of FormatFull:
+// the zero-drift branch prints "No structural changes", which for a repo in an
+// unindexed language is true only in the sense that nothing was ever looked at.
+// That sentence unqualified is the entire failure this reporting exists to end.
+//
+// Only the capability group is rendered. `ignored_paths` is the operator's own
+// configuration echoed back, and `.git` is in DefaultIgnoredPaths, so printing
+// it would put a block on every diff of every repo -- a note that fires every
+// time stops being read. It stays in --json, where a consumer applies its own
+// policy.
+func formatSkipped(d DiffResult) string {
+	if !d.SkippedKnown {
+		return ""
+	}
+	capability, _ := SplitSkips(d.Skipped)
+	// The human surface shows capability skips only. The policy array holds
+	// exactly one reason -- the operator's OWN ignore list -- and `.git` is in
+	// DefaultIgnoredPaths, so rendering it would print a block on every diff of
+	// every repo. A note that fires every time stops being read. It stays in
+	// --json, where a consumer applies its own policy.
+	//
+	// Everything a reader would call a surprise (an unreadable directory, an
+	// unfollowable link) is now classified as capability, so it appears above
+	// rather than needing a second block to rescue it.
+	if len(capability) == 0 && !d.SkippedTruncated && !d.RootUnreadable {
+		return ""
+	}
+	var sb strings.Builder
+	if d.RootUnreadable {
+		sb.WriteString("\nNOT EXAMINED — the repo root itself could not be read, so NOTHING was indexed.\n")
+	}
+	writeSkipBlock(&sb, "NOT EXAMINED — a symbol removed here would be invisible to this diff",
+		capability, d.SkippedTruncated, d.SkippedCap)
+	return sb.String()
 }
 
 // FormatFull returns a human-readable per-file breakdown.
 func FormatFull(d DiffResult) string {
 	if len(d.Files) == 0 {
-		return fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.",
+		// Terminated with exactly one newline, with or without a skip block.
+		//
+		// Both readings of this have been wrong once. The original
+		// "...changes.\n%s" appended a blank line on the common clean-repo path;
+		// the over-correction dropped the terminator entirely, so `diff` and
+		// `verify` (both fmt.Print) ran the shell prompt onto the output's last
+		// line and handed line-oriented consumers a partial final line. The skip
+		// block already begins with its own "\n" and ends with one.
+		base := fmt.Sprintf("IR DIFF  %s... → %s...\n\nNo structural changes.\n",
 			shortHash(d.SnapshotA.RootHash),
 			shortHash(d.SnapshotB.RootHash),
 		)
+		return base + formatSkipped(d)
 	}
 
 	var sb strings.Builder
@@ -305,6 +595,7 @@ func FormatFull(d DiffResult) string {
 		plural(d.TotalModified, "symbol"),
 		plural(len(d.Files), "file"),
 	)
+	sb.WriteString(formatSkipped(d))
 	return sb.String()
 }
 

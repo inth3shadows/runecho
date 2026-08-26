@@ -80,6 +80,44 @@ type Stats struct {
 	ParseErrors   int // supported files that failed to parse (not in the IR)
 	SupportedSeen int // supported-extension files encountered, including beyond the cap
 	Indexed       int // files in the IR (== len(IR.Files))
+	// Skipped names the paths the walk declined and why. It is NOT the inverse of
+	// Indexed: an unindexed language never reaches SupportedSeen, so it is
+	// invisible to Coverage() by construction (the denominator counts supported
+	// extensions only). That is the gap this field closes -- see skipped.go.
+	Skipped []SkippedFile
+	// SkippedTruncated reports that Skipped hit a cap. A consumer that fails
+	// closed on "was this path examined?" must treat a truncated list as
+	// "unknown", never as "not skipped".
+	SkippedTruncated bool
+	// SkippedCap is the cap that was hit, 0 when nothing truncated. Two caps can
+	// fire (the overall list and the cap_reached sub-cap), and a message naming
+	// the wrong one mis-scopes the blind spot for whoever reads it.
+	SkippedCap int
+	// RootUnreadable means NOTHING under this root was examined, and the reason
+	// is the root itself rather than any path beneath it. It needs its own flag:
+	// the root's repo-relative path is ".", which matches nothing under the
+	// documented prefix rule, and with SupportedSeen at 0 the coverage percentage
+	// is a vacuous 100. Without this, every signal reads clean for a tree nothing
+	// opened.
+	//
+	// Three states reach it, and the first is the one the name is drawn from:
+	//
+	//  1. The root could not be read or entered (EACCES, EIO), or the walk was
+	//     handed an error for it.
+	//  2. The root is a symlink that could not be resolved. The root is resolved
+	//     BEFORE the walk, so it only arrives as a link when that failed.
+	//  3. The root is a regular FILE the indexer declined -- source in a language
+	//     no parser handles. Reachable only through the library API and the MCP
+	//     surface; the CLI rejects a non-directory root first
+	//     (cmd/runecho-ir/capture.go requireExistingDir).
+	//
+	// (3) reads oddly against the flag's NAME -- the file was perfectly readable
+	// -- but it is the same fact for a consumer: zero files indexed, and the one
+	// path that could be reported is "." which matches nothing they hold. The
+	// alternative is what shipped before: the entry was dropped as inert and the
+	// caller saw a clean payload for a file the oracle never parsed, which is the
+	// fail-open this type exists to close. Fail closed, and say why here.
+	RootUnreadable bool
 }
 
 // Coverage returns Indexed as a percentage of SupportedSeen.
@@ -141,43 +179,279 @@ func NewGenerator(config GeneratorConfig) *Generator {
 // Returning an error from walkerFunc is propagated and stops the walk.
 type walkerFunc func(absPath, normalizedPath string) error
 
+// resolvedOrSame returns path with symlinks resolved, or path unchanged when it
+// cannot be resolved (broken link, permission error, nonexistent path).
+//
+// Used on both sides of every root/file containment test. A repo reached through
+// a link must resolve to the same string whichever way a caller names it, or the
+// two disagree and the mismatch is silent.
+func resolvedOrSame(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// everyChildFailed reports whether the directory containing path is itself
+// unenterable, by testing it directly rather than inferring it from one child's
+// failure.
+//
+// This is what separates "the whole directory is unreadable" (blame the
+// directory, one honest entry covering the subtree) from "one file on a flaky
+// mount returned EIO" (blame that file, and leave its siblings alone).
+//
+// MEMOISED per directory, and that is not an optimisation. It is called once per
+// FAILING child, and an unreadable directory fails every child, so a naive
+// implementation did a full Readdirnames plus an Lstat per sibling N times --
+// O(N^2) syscalls. Measured before memoisation: 500 entries 0.94s, 2000 entries
+// 13.4s, and 4000 entries exceeded the generate deadline, turning a walk that
+// should have produced an IR with one skip into a hard error and no IR at all.
+// The recorder's dedup runs after this, so it never helped.
+func (g *Generator) everyChildFailed(childPath string, memo map[string]bool) bool {
+	parent := filepath.Dir(childPath)
+	if parent == childPath {
+		return false
+	}
+	if known, seen := memo[parent]; seen {
+		return known
+	}
+	answer := g.probeEveryChildFailed(parent)
+	memo[parent] = answer
+	return answer
+}
+
+func (g *Generator) probeEveryChildFailed(parent string) bool {
+	f, err := os.Open(parent)
+	if err != nil {
+		return true // cannot even open it: the directory is the problem
+	}
+	defer f.Close()
+	names, rerr := f.Readdirnames(-1)
+	if rerr != nil {
+		return true
+	}
+	for _, n := range names {
+		if _, serr := os.Lstat(filepath.Join(parent, n)); serr == nil {
+			return false // at least one sibling is fine, so the parent is not
+		}
+	}
+	return true
+}
+
+// resolvedOrSameLeaf resolves the DIRECTORY containing path and re-joins the
+// base name, so a path whose leaf no longer exists still resolves.
+//
+// EvalSymlinks fails outright when the final component is missing, which is
+// exactly the DELETE case: resolving the root but not the file left absFile
+// under the link while absRoot was resolved, filepath.Rel produced a "../.."
+// path, the containment guard fired, and UpdateFile returned changed=false. A
+// file deleted in a repo reached through a symlink kept its symbols in the IR
+// indefinitely -- the "removed symbol invisible" failure this package exists to
+// close, on the incremental path.
+func resolvedOrSameLeaf(path string) string {
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		return path
+	}
+	resolved := resolvedOrSame(filepath.Clean(dir))
+	return filepath.Join(resolved, base)
+}
+
 // walkSourceFiles walks absRoot, calling fn for each supported source file.
 // It skips ignored directories, symlinked directories, and unsupported extensions.
 // The walk is checked for cancellation before each entry, so a done ctx
 // (deadline or explicit cancel) aborts it between files and propagates ctx.Err()
 // to the caller. Per-file granularity is sufficient: a single oversized file is
 // already bounded by maxParseBytes.
-func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc) error {
+//
+// rec records the paths declined along the way; nil disables recording. Only the
+// skips decided HERE are recorded (ignored directories, unindexed languages) --
+// the ones decided inside fn (oversized, parse error, file cap) are recorded by
+// fn, because only fn knows it took them.
+func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walkerFunc, rec *skipRecorder) error {
+	// A symlinked ROOT is resolved before walking, not pruned.
+	//
+	// filepath.Walk lstats, so a root that is a symlink to a directory arrives at
+	// the symlink branch, is recorded as pruned, and the walk ends after one
+	// callback: zero files indexed, and the only trace is {"Path": "."} in the
+	// INFORMATIONAL array -- a prefix matching no path a consumer could hold. A
+	// repo reached through a link (`~/work -> /mnt/checkouts/x`, a pnpm workspace
+	// link) was therefore a total, silent fail-open. The symlink rule exists to
+	// prune links found INSIDE the tree; the directory the operator named is what
+	// they asked to index, so follow it. Reporting stays relative to the resolved
+	// root, which is what every path in the IR is already relative to.
+	absRoot = resolvedOrSame(absRoot)
+	// Skips are reported repo-relative, matching every other path in the IR and
+	// in a diff payload. A path that cannot be made relative is not reported at
+	// all rather than reported absolute: a consumer intersects these against its
+	// own repo-relative paths, and an absolute entry would silently never match.
+	relOf := func(path string) (string, error) {
+		r, rerr := filepath.Rel(absRoot, path)
+		if rerr != nil {
+			return "", rerr
+		}
+		return normalizePath(r), nil
+	}
+	// parentProbe memoises everyChildFailed per directory; see its doc comment.
+	// Memoisation is load-bearing, not an optimisation: unmemoised it was O(N^2)
+	// -- 2000 entries took 13.4s and 4000 exceeded the generate deadline, so the
+	// run produced NO IR at all. The cost is that a time-dependent observation is
+	// cached as a fact for the duration of the walk; a directory whose
+	// permissions change mid-walk is reported as it was first seen. That trade is
+	// deliberate.
+	parentProbe := map[string]bool{}
+
+	apply := func(path string, d walkDecision) {
+		applyWalkDecision(rec, path, d, relOf)
+	}
+
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
-			return nil
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
+		// Classify what was actually observed, then read the table. The callback
+		// decides nothing itself: every "if" below answers "what did I see", never
+		// "what should I do". That separation is the point -- five review rounds
+		// on the previous branch nest produced 12/18/11/11/10 findings, and every
+		// one had the same shape, one branch deciding an axis differently from
+		// another branch facing the same state.
+		e := walkEntry{
+			isRoot:      path == absRoot,
+			err:         classifyWalkErr(err),
+			infoPresent: info != nil,
+			parentUnreadable: func() bool {
+				return g.everyChildFailed(path, parentProbe)
+			},
+			target: func() linkKind { return classifyLinkTarget(path) },
+		}
+		name := filepath.Base(path)
+		base, targetBase := name, ""
+		if err == nil {
+			switch {
+			case info.Mode()&os.ModeSymlink != 0:
+				e.kind = kindSymlink
+				// Both names feed the classification; see classifySymlinkExt.
+				// os.Readlink does not follow, so it answers even for an
+				// unreadable target.
+				if tgt, lerr := os.Readlink(path); lerr == nil && tgt != "" {
+					targetBase = filepath.Base(filepath.ToSlash(tgt))
+				}
+			case info.IsDir():
+				e.kind = kindDir
+			default:
+				e.kind = kindFile
 			}
-			return nil
 		}
-		if info.IsDir() {
-			if g.ignoredPaths[filepath.Base(path)] {
-				return filepath.SkipDir
+		// The ignore list is consulted before the extension so an ignored name is
+		// never stat'ed or readlink'ed for a classification the table will not
+		// use. e.ext stays extNone there, which no ignored-name row reads.
+		e.ignoredName = g.ignoredPaths[name]
+		if !(e.ignoredName && e.kind != kindFile) {
+			if e.kind == kindSymlink {
+				e.ext = g.classifySymlinkExt(base, targetBase)
+			} else {
+				e.ext = g.classifyExt(base)
 			}
+		}
+
+		d := g.decideWalkEntry(e)
+		apply(path, d)
+		if d.prunes() {
+			return filepath.SkipDir
+		}
+		if !d.indexes() {
 			return nil
 		}
-		if !g.supportsExtension(filepath.Ext(path)) {
+		relPath, rerr := relOf(path)
+		if rerr != nil {
+			g.warn("Warning: failed to compute relative path for %s: %v\n", path, rerr)
 			return nil
 		}
-		relPath, err := filepath.Rel(absRoot, path)
-		if err != nil {
-			g.warn("Warning: failed to compute relative path for %s: %v\n", path, err)
-			return nil
-		}
-		return fn(path, normalizePath(relPath))
+		return fn(path, relPath)
 	})
+}
+
+// applyWalkDecision turns one walkDecision into recorder writes. Both tables are
+// pure and live in walkdecision.go; everything impure -- the syscalls, the
+// relative path, the recorder -- happens here and only here.
+//
+// It is a named function rather than a closure so the two FAIL-CLOSED backstops
+// below can be tested directly. Neither is reachable from today's tables, which
+// is exactly why they were documented and not implemented: walkdecision.go
+// claimed "the caller treats actionUnset as rootUnreadable" while the caller
+// returned early and recorded nothing -- byte-equivalent to "index nothing,
+// record nothing, keep walking", which is the fail-open actionUnset was
+// introduced to remove, moved from the struct into the caller.
+func applyWalkDecision(rec *skipRecorder, path string, d walkDecision,
+	relOf func(string) (string, error)) {
+	// BACKSTOP 1. TestWalkDecisionCrossProduct proves totality TODAY. This is
+	// what happens the day someone adds an axis and misses a row: the walk
+	// cannot say what it saw, so it does not vouch for the tree.
+	if d.action == actionUnset {
+		rec.noteRootUnreadable()
+		return
+	}
+	if !d.records() {
+		return
+	}
+	blamePath := path
+	if d.blame == blameParent {
+		if parent := filepath.Dir(path); parent != path {
+			blamePath = parent
+		}
+	}
+	rel, rerr := relOf(blamePath)
+	// Written as "record only on blameRecord" rather than "root_unreadable only
+	// on blameRootUnreadable". The two are identical while decideBlame has two
+	// outcomes and diverge the moment it has three: the default branch decides
+	// what an UNKNOWN outcome does, and the safe answer is never "emit a path we
+	// could not classify into the array a gate fails closed on".
+	//
+	// BACKSTOP 2 is therefore the same branch as the ordinary root case: nothing
+	// was indexed, `skipped` is empty, and Coverage() returns a VACUOUS 100
+	// because SupportedSeen is 0 too, so every signal reads clean for a tree
+	// nothing opened. It needs its own flag because no path string can express
+	// "all of it".
+	if decideBlame(rel, rerr != nil) == blameRecord {
+		rec.add(rel, d.reason)
+		return
+	}
+	rec.noteRootUnreadable()
+}
+
+// classifyWalkErr maps filepath.Walk's error to the table's axis. See errKind.
+func classifyWalkErr(err error) errKind {
+	switch {
+	case err == nil:
+		return errNone
+	case os.IsNotExist(err):
+		return errGone
+	default:
+		return errOpaque
+	}
+}
+
+// classifyLinkTarget resolves a symlink with os.Stat (which FOLLOWS, unlike the
+// Lstat filepath.Walk did) and maps the result to the table's axis.
+//
+// It carries the same TOCTOU and unbounded-I/O properties as Walk's own lstat --
+// a link into a hanging NFS mount can stall here exactly as the walk itself can
+// -- so it adds nothing new in kind, and the generate deadline is the bound.
+func classifyLinkTarget(path string) linkKind {
+	target, serr := os.Stat(path)
+	switch {
+	case serr != nil && os.IsNotExist(serr):
+		return linkGone
+	case serr != nil:
+		return linkOpaque
+	case target.IsDir():
+		return linkDir
+	default:
+		return linkFile
+	}
 }
 
 // Generate creates IR for all supported files in the given root directory.
@@ -206,26 +480,31 @@ func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stat
 
 	result := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
+	rec := &skipRecorder{}
 
 	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(result.Files)) {
+			rec.add(normPath, SkipCapReached)
 			return nil // count only; cap bounds parse work, not the denominator
 		}
 		fileIR, err := g.parseFile(absPath)
 		if err != nil {
 			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
+			rec.add(normPath, g.parseFailureReason(absPath))
 			return nil
 		}
 		result.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}, rec); err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	result.RootHash = ComputeRootHash(result.Files)
 	stats.Indexed = len(result.Files)
+	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
+	stats.RootUnreadable = rec.rootUnreadable
 	return result, stats, nil
 }
 
@@ -261,10 +540,12 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 
 	updated := &IR{Version: IRVersion, Files: make(map[string]FileIR)}
 	var stats Stats
+	rec := &skipRecorder{}
 
 	if err := g.walkSourceFiles(ctx, absRoot, func(absPath, normPath string) error {
 		stats.SupportedSeen++
 		if g.capReached(len(updated.Files)) {
+			rec.add(normPath, SkipCapReached)
 			return nil // count only; cap bounds parse work, not the denominator
 		}
 		// Guard size before hashing: HashFile streams the whole file through
@@ -275,11 +556,17 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 		if info, serr := os.Stat(absPath); serr == nil && info.Size() > g.maxParseBytes {
 			g.warn("Warning: failed to parse %s: skipping oversized file (%d bytes)\n", absPath, info.Size())
 			stats.ParseErrors++
+			rec.add(normPath, SkipOversized)
 			return nil
 		}
 		currentHash, err := HashFile(absPath)
 		if err != nil {
 			g.warn("Warning: failed to hash %s: %v\n", absPath, err)
+			// Unhashable means unreadable means not in the updated IR. It is not
+			// counted in ParseErrors (it never reached the parser) but it is
+			// still a file the walk declined, and a consumer asking "did you
+			// look at this?" is owed the same "no" as any other skip.
+			rec.add(normPath, SkipParseError)
 			return nil
 		}
 		if existing, ok := existingIR.Files[normPath]; ok && existing.Hash == currentHash {
@@ -290,17 +577,36 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 		if err != nil {
 			g.warn("Warning: failed to parse %s: %v\n", absPath, err)
 			stats.ParseErrors++
+			rec.add(normPath, g.parseFailureReason(absPath))
 			return nil
 		}
 		updated.Files[normPath] = fileIR
 		return nil
-	}); err != nil {
+	}, rec); err != nil {
 		return nil, Stats{}, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	updated.RootHash = ComputeRootHash(updated.Files)
 	stats.Indexed = len(updated.Files)
+	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
+	stats.RootUnreadable = rec.rootUnreadable
 	return updated, stats, nil
+}
+
+// parseFailureReason classifies a parseFile failure for the skip list.
+//
+// Generate has no separate size guard -- parseFile itself rejects an oversized
+// file -- so on that path an oversized file and a syntactically broken one
+// arrive at the same error branch. Re-stat rather than string-match the error:
+// the message is a human diagnostic that is free to change, while the size is
+// the fact the reason is asserting. A stat failure here means the file went
+// away or became unreadable mid-walk; SkipParseError is the honest answer then,
+// since all the caller is entitled to conclude is "not indexed".
+func (g *Generator) parseFailureReason(absPath string) string {
+	if info, err := os.Stat(absPath); err == nil && info.Size() > g.maxParseBytes {
+		return SkipOversized
+	}
+	return SkipParseError
 }
 
 // UpdateFile refreshes a single file's entry in an existing IR and returns the
@@ -326,9 +632,53 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	if err != nil {
 		return existing, false, nil
 	}
-	rel, err := filepath.Rel(absRoot, absFile)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return existing, false, nil // edited file is outside this repo
+	// Both sides resolved through symlinks before the containment test, the same
+	// way walkSourceFiles resolves its root.
+	//
+	// Without this, a repo reached through a link indexes fine on a full walk and
+	// then never refreshes incrementally: filepath.Rel("/home/u/work",
+	// "/mnt/checkouts/x/main.go") starts with "..", so the edit is judged
+	// "outside this repo" and the IR silently goes stale. It fails in both
+	// directions -- root given as the link and file as the real path, or the
+	// reverse -- because only one of the two is ever resolved by the caller.
+	// Resolution failure falls through to the unresolved paths, which is the
+	// previous behaviour.
+	absRoot = resolvedOrSame(absRoot)
+	// Containment is tested with the path AS NAMED first, and only reconciled
+	// through symlinks if that fails.
+	//
+	// Resolving absFile unconditionally was too eager. It made the IR key the
+	// TARGET's path rather than the named one, so an in-repo symlink
+	// (`schema.go -> generated/schema.go`) wrote to a key the walk never
+	// produces -- the walk skips symlinks -- and it rejected an out-of-repo
+	// symlink before the #143 stale-entry cleanup below could drop the entry the
+	// file used to have. Resolution exists here for exactly one purpose:
+	// reconciling a root and a file the caller named through different symlink
+	// forms.
+	inRepo := func(root, file string) (string, bool) {
+		r, rerr := filepath.Rel(root, file)
+		if rerr != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		return r, true
+	}
+	rel, ok := inRepo(absRoot, absFile)
+	if !ok {
+		// Carry the RESOLVED path forward, not just the rel it produced.
+		//
+		// Deriving rel from the resolved form while leaving absFile in link form
+		// left the two disagreeing for every later use: pathCrossesSymlink walked
+		// up from the link-form path, never reached absRoot, hit the symlinked
+		// root component and returned true -- so the entry was treated as
+		// "replaced by a symlink" and DROPPED. In a repo the caller names through
+		// a link (the ordinary case: link root, link file), every incremental
+		// refresh erased that file's symbols, and the next diff reported all of
+		// them as removed.
+		resolved := resolvedOrSameLeaf(absFile)
+		if rel, ok = inRepo(absRoot, resolved); !ok {
+			return existing, false, nil // edited file is outside this repo
+		}
+		absFile = resolved
 	}
 	norm := normalizePath(rel)
 
@@ -433,7 +783,16 @@ func normalizePath(relPath string) string {
 }
 
 // supportsExtension returns true if any registered parser handles this extension.
+//
+// The extension is lowercased first. Every parser's SupportsExtension is an
+// exact match (`ext == ".go"`), while IsKnownSourceExtension lowercases — so
+// before this, `A.GO` fell through BOTH: not indexed (wrong case for the
+// parser) and not reported (`.go` is deliberately absent from the source table,
+// being a language we do parse). A file in a language RunEcho fully supports,
+// invisible and unnamed. Lowercasing here closes the crack at the one
+// chokepoint both the walk and parserFor already funnel through.
 func (g *Generator) supportsExtension(ext string) bool {
+	ext = strings.ToLower(ext)
 	for _, p := range g.parsers {
 		if p.SupportsExtension(ext) {
 			return true
@@ -443,7 +802,10 @@ func (g *Generator) supportsExtension(ext string) bool {
 }
 
 // parserFor returns the first parser that supports the given extension, or nil.
+// Lowercased for the same reason as supportsExtension: the two must agree, or a
+// file the walk accepted reaches parseFile with no parser to handle it.
 func (g *Generator) parserFor(ext string) parser.Parser {
+	ext = strings.ToLower(ext)
 	for _, p := range g.parsers {
 		if p.SupportsExtension(ext) {
 			return p
@@ -478,8 +840,17 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	// waste a syscall and race file modification between read and hash.
 	hash := HashBytes(content)
 
-	// Dispatch to the right parser by extension
-	ext := filepath.Ext(path)
+	// Dispatch to the right parser by extension.
+	//
+	// Lowercased HERE, not just in parserFor. The extension is used twice: to
+	// pick the parser, and (below) to pick the GRAMMAR inside an ExtAwareParser.
+	// Lowercasing only the first made `A.TS` newly indexable while
+	// jsLanguageFor's exact-match switch still fell through to the JavaScript
+	// grammar -- so the file was parsed with the wrong grammar and silently lost
+	// symbols (a TypeScript class method vanished). That is strictly worse than
+	// the old behaviour of not indexing it at all: unindexed is reported as a
+	// blind spot, mis-parsed is reported as a clean diff.
+	ext := strings.ToLower(filepath.Ext(path))
 	p := g.parserFor(ext)
 	if p == nil {
 		return FileIR{}, fmt.Errorf("no parser for extension %s", ext)

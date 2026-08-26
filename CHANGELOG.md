@@ -16,6 +16,88 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- `diff --since` and `verify` now report which paths the indexer declined and
+  why. `--json` carries two arrays — `skipped` (files it could not read; match
+  exactly, fail closed) and `ignored_paths` (directories it did not enter; match
+  by prefix, informational) — plus `skipped_truncated`. The text output gains a
+  `NOT EXAMINED` block. Closes the fail-open where a symbol deleted from an
+  unindexed language (`.java`, `.c`, `.php`, …) produced a clean diff at exit 0
+  with empty stderr. Non-code files are never in `skipped`, so a consumer can
+  fail closed on it without blocking documentation changes. The two-snapshot form
+  (`diff <id-a> <id-b>`) omits both keys — it never walks the filesystem, so it
+  cannot answer the question. The MCP `diff` tool clips its list harder, being a
+  context-economy surface.
+  ([harness#21](https://github.com/inth3shadows/harness/issues/21))
+  The skip list is bounded per class rather than by one shared ceiling, so
+  truncation always drops the compressible kind: `unsupported_language` and
+  `cap_reached` (re-derivable from the path) share one budget, permission errors
+  and unfollowable links share another and are never displaced, and the
+  informational `ignored_paths` array spends neither. Measured on a 1200-file
+  Java repo containing one unreadable subtree, the shared budget discarded the
+  permission error in favour of 999 rows the consumer could have derived from a
+  file extension, and reported `root_unreadable: false` at exit 0. An abridged
+  `ignored_paths` no longer raises `skipped_truncated`.
+
+### Changed
+- The walk's decision about each entry is now a pure decision table
+  (`internal/ir/walkdecision.go`) that the walk callback reads, instead of a
+  nest of branches that decided as it went. Five review rounds on the branch
+  nest produced 12/18/11/11/10 findings, a flat rate where every round's fixes
+  caused the next round's regression, and every one had the same shape: one
+  branch decided an axis differently from another branch facing the same state.
+  A generated cross-product over all 1152 states proves no state falls through
+  the table and no branch returns a decision the table does not name.
+- An unresolvable symlink is dropped from `skipped` only on POSITIVE evidence
+  that its target is a file: a curated `documentExtensions` table (docs, config,
+  images, fonts, media, archives). "Has an extension and is not source" is not
+  that evidence — `deps -> <unreadable>/deps.v2` was read as a file we do not
+  care about and silently dropped, discarding an entire unexamined Go subtree
+  with `skipped: []`, `root_unreadable: false` and exit 0. Dotted directory
+  names (`deps.v2`, `python3.11`, `node-18.20.4`, `src.bak`, `pkg.d`) are
+  ordinary. Anything the table does not vouch for now fails closed.
+- An unresolvable symlink is classified by its TARGET's base name (`os.Readlink`,
+  which does not follow, so it answers even when the target is unreadable), not
+  by the link's own. `README -> <unreadable>/README.md` and
+  `LICENSE -> <unreadable>/LICENSE` were indistinguishable by the link name, so
+  both were recorded as `unreadable_dir` and both blocked every documentation
+  change; the first now correctly drops out and the second stays honestly
+  ambiguous, where failing closed is right. The path reported is still the
+  link's own.
+- An unresolvable symlink to source records `unreadable_file`, not
+  `unreadable_dir`. Reason strings are read by humans and calling a file a
+  directory is false; behaviour under the prefix rule is unchanged.
+- An unresolvable symlinked ROOT sets `root_unreadable`. The root is resolved
+  before the walk, so it only arrives as a link when resolution failed — and
+  that walked one entry, indexed zero files, recorded nothing, and reported a
+  vacuous 100% coverage.
+- A dot-name that is always a FILE — `.gitignore`, `.npmrc`, `.env`,
+  `.editorconfig`, `.dockerignore` and the rest of a curated `documentDotNames`
+  table — classifies as a document rather than as "no extension, so it may be a
+  directory". Left as the latter it started failing CLOSED: a commit touching
+  `.npmrc` was blocked by an entry reading `unreadable_dir`, on a file.
+  Directory dot-names (`.github`, `.venv`, `.vscode`, `.tox`) are deliberately
+  absent and still fail closed.
+- A file whose name is entirely a leading dot is classified as a dotfile only
+  when the dot-name is not itself a known language: `.github` has no extension,
+  `.go` is Go source. `filepath.Ext(".github")` returns `".github"`, which had
+  classified every dot-named directory as a file with an unknown non-code
+  extension.
+
+### Fixed
+- The ignore list is no longer applied to the walk root itself. A repo whose
+  directory is named `testdata`, `vendor`, `dist`, `venv`, or `node_modules` had
+  its entire walk pruned: zero files indexed, and a vacuous 100% coverage,
+  because `SupportedSeen` was also 0.
+- File extensions are matched case-insensitively when selecting a parser.
+  `A.GO` and `B.PY` were previously neither indexed (parsers match exactly) nor
+  reported (the source-extension table deliberately omits languages we parse).
+- `.mts`, `.cts`, `.pyi`, `.pyx`, `.pxd`, `.rake`, `.gemspec`, `.zsh`,
+  `.fish` and `.ksh` are now recognised as source. Several belong to
+  language families RunEcho advertises support for, where a silent hole is least
+  expected; a new test requires every advertised family to be either parsed or
+  named.
+
 ## [0.46.0] — 2026-08-20
 
 ### Changed

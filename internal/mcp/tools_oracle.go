@@ -228,6 +228,14 @@ func (o *Oracle) resolveRepo(name string) (*snapshot.Repo, error) {
 // so the live IR is generated under the same cap as the repo's stored snapshots.
 // A mismatch here would make every diff/hash report phantom drift for capped repos.
 func liveIR(path string, fileCap int) (*ir.IR, error) {
+	irData, _, err := liveIRWithStats(path, fileCap)
+	return irData, err
+}
+
+// liveIRWithStats is liveIR plus the walk's coverage/skip counters, for the
+// callers that report which files the indexer declined. Kept as the single
+// implementation so the two cannot walk under different settings.
+func liveIRWithStats(path string, fileCap int) (*ir.IR, ir.Stats, error) {
 	gen := ir.NewGenerator(ir.GeneratorConfig{IgnoredPaths: ir.DefaultIgnoredPaths, FileCap: fileCap})
 	// A fresh IR is built on every MCP call, so an unbounded walk (huge repo,
 	// stalled FS) would hang the agent's request with no recourse. Set the
@@ -235,9 +243,18 @@ func liveIR(path string, fileCap int) (*ir.IR, error) {
 	// default — so the MCP budget is visible at the hot path.
 	ctx, cancel := context.WithTimeout(context.Background(), ir.DefaultGenerateTimeout)
 	defer cancel()
-	irData, _, err := gen.GenerateCtx(ctx, path)
-	return irData, err
+	return gen.GenerateCtx(ctx, path)
 }
+
+// maxMCPSkips clips the skip list on the MCP surface. See the call site in the
+// diff tool for why it is tighter than snapshot's own cap.
+//
+// PER BUCKET, not per payload: TruncateSkips budgets `skipped` and
+// `ignored_paths` separately so policy noise cannot evict blind spots, which
+// means the worst case is 2n objects. Halved from 50 to 25 when that changed, so
+// the ceiling this constant is supposed to express -- roughly fifty path objects
+// in an agent's context -- still holds.
+const maxMCPSkips = 25
 
 func jsonText(v any) (string, error) {
 	// Minified (no indentation): MCP responses are consumed by an LLM, which
@@ -445,11 +462,11 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 			}
 			return "", fmt.Errorf("no snapshot labeled %q for repo %q", a.Since, repo.Name)
 		}
-		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
+		live, stats, err := liveIRWithStats(repo.EffectiveSourceRoot(), repo.FileCap)
 		if err != nil {
 			return "", err
 		}
-		result, err = o.db.DiffLive(*meta, live)
+		result, err = o.db.DiffLiveWithStats(*meta, live, stats)
 		if err != nil {
 			return "", err
 		}
@@ -461,11 +478,11 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 		if len(latest) == 0 {
 			return "", fmt.Errorf("repo %q has no snapshots; run `runecho-ir repo reindex %s`", repo.Name, repo.Name)
 		}
-		live, err := liveIR(repo.EffectiveSourceRoot(), repo.FileCap)
+		live, stats, err := liveIRWithStats(repo.EffectiveSourceRoot(), repo.FileCap)
 		if err != nil {
 			return "", err
 		}
-		result, err = o.db.DiffLive(latest[0], live)
+		result, err = o.db.DiffLiveWithStats(latest[0], live, stats)
 		if err != nil {
 			return "", err
 		}
@@ -473,7 +490,14 @@ func (o *Oracle) diff(args json.RawMessage) (string, error) {
 
 	// Single source of truth for the diff JSON shape, shared with the
 	// `runecho-ir diff --json` CLI so the two surfaces cannot drift.
-	payload := snapshot.DiffPayload(result)
+	//
+	// The skip list is clipped harder here than on the CLI. This tool exists for
+	// context economy -- jsonText minifies for exactly that reason -- and an
+	// unclipped list would inject up to MaxRecordedSkips path objects into the
+	// agent's context on every diff of a C, Java, or PHP repo. The clip sets
+	// skipped_truncated, so the consumer still knows absence no longer implies
+	// "indexed"; it is a smaller honest answer, not a quieter one.
+	payload := snapshot.DiffPayload(snapshot.TruncateSkips(result, maxMCPSkips))
 	payload["repo"] = repo.Name
 	return jsonText(payload)
 }

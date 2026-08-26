@@ -163,6 +163,103 @@ any label you created with `snapshot --label=<name>`, such as `session-start`.
 Empty diff output means nothing structural changed. Otherwise you get a per-file
 list of added, removed, and modified (`~`) functions, classes, exports, and imports.
 
+#### What the diff did NOT look at
+
+"Nothing structural changed" is only as strong as what was indexed. RunEcho does
+not parse every language, so a function deleted from a `.java`, `.c`, or `.php`
+file used to produce a clean diff at exit 0 with empty stderr — indistinguishable
+from a genuinely unchanged repo.
+
+`diff --since` and `verify` now name what they declined:
+
+```
+IR DIFF  8f2a1c04... → b31d9e77...
+
+No structural changes.
+
+NOT EXAMINED — a symbol removed here would be invisible to this diff (1 path):
+  Widget.java  [unsupported_language]
+```
+
+`--json` carries two arrays, and **the split is the contract**:
+
+| Key | Contains | How to match | What to do |
+|---|---|---|---|
+| `skipped` | Everything it **could not read** | `p == e \|\| strings.HasPrefix(p, e+"/")` | Fail closed |
+| `ignored_paths` | What **you configured away** | Same | Informational |
+
+Reasons in `skipped`:
+
+| Reason | Meaning |
+|---|---|
+| `unsupported_language` | Source code in a language no parser handles |
+| `parse_error` | Supported extension, but the file could not be read or parsed |
+| `oversized` | Larger than the per-file parse limit |
+| `cap_reached` | The repo's file cap stopped indexing before this file |
+| `symlink` | A symlinked source file; the walk does not follow symlinks |
+| `unreadable_file` | A single file the walk could not stat, while its siblings were fine |
+| `symlink_dir` | A symlinked directory; its subtree is unexamined under this path |
+| `unreadable_dir` | A directory the walk could not read; its whole subtree went unvisited |
+
+`ignored_paths` carries exactly one reason: `ignored_dir`. Directory entries in
+either array name the directory, never its contents — the walk never descends,
+and enumerating it would defeat the pruning.
+
+Why two arrays and not one: `.git` is in the default ignore list, so a merged
+list is non-empty in *every* repo. A consumer prefix-matching it would block an
+edit to `testdata/README.md` — a documentation-only false block, which is exactly
+what the language table exists to prevent, arriving through the other reason
+code.
+
+A symlink is classified by the base name of its **target** as well as its own,
+and reported under its own path. It is kept out of `skipped` only on positive
+evidence that the target is a file — a documentation, config, or asset extension
+the indexer vouches for. `README -> /mnt/x/README.md` stays out;
+`LICENSE -> /mnt/x/LICENSE` and `deps -> /mnt/x/deps.v2` both fail closed,
+because neither an extensionless name nor an arbitrary dotted one tells you a
+directory from a file.
+
+The split is **"did you ask for this?"**, not "file or directory". An ignore rule
+is a decision you made. A permission error or an unfollowable link is a limit of
+the tool — and a directory it could not read took its whole subtree with it,
+recording none of the files inside, because it never saw them. That is a blind
+spot, so it is in `skipped`.
+
+Four rules for machine consumers:
+
+* **Non-code is never in `skipped`.** A `README.md` or a `.png` is not a blind
+  spot in a symbol index, so a gate can fail closed on a non-empty `skipped`
+  without blocking documentation changes.
+* **An absent `skipped` key means "not measured", not "nothing skipped".** Only
+  `diff --since` and `verify` walk the filesystem; the two-snapshot form
+  (`diff <id-a> <id-b>`) omits both keys entirely rather than claim a clean bill
+  of health it never checked.
+* **`skipped_truncated: true` means the list hit its cap**, so absence from it no
+  longer implies "indexed". Treat it as "unknown" — but a *bounded* unknown: the
+  cap is spent per class, so what truncation drops is always the compressible
+  kind. `unsupported_language` and `cap_reached` are re-derivable from the path
+  (the first is an extension test, the second means "everything past `FileCap`"),
+  and they get their own budget. A permission error, an unfollowable link, a
+  parse failure or an oversized file is a fact nothing else in the payload
+  implies, so those get a separate budget and are never displaced. A repo of
+  10,000 unparsed `.java` files still reports the one directory it could not
+  read. `ignored_paths` is budgeted separately again and never spends either — it
+  is your own configuration, and truncating it says nothing about `skipped`,
+  which is why an abridged ignore list does not raise this flag.
+* **`root_unreadable: true` means NOTHING under this root was examined**, and the
+  reason is the root itself rather than any path beneath it — it is raised when
+  the root could not be read, when it is an unresolvable symlink, and when it is
+  a single file in a language no parser handles (zero files indexed either way,
+  and the only reportable path is `.`, which matches nothing you hold). In every
+  case `skipped` is empty, `skipped_truncated` is false, and no file was indexed
+  — so every other signal reads clean. It is the one condition a gate cannot
+  detect from the other two, so check it first.
+
+The text output shows `skipped` only. `ignored_paths` is your own configuration
+echoed back, and with `.git` always in it, printing it would put a block on every
+diff of every repo — a note that fires every time stops being read. It is always
+in `--json`.
+
 ### Locate symbols (repo map)
 
 A deterministic "where is X" map of every indexed symbol — no LLM, no guessing.

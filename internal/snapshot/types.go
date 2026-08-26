@@ -3,6 +3,8 @@ package snapshot
 import (
 	"math"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // CoveragePercent returns indexed/supported as a percentage rounded to one
@@ -88,4 +90,25 @@ type DiffResult struct {
 	TotalAdded    int
 	TotalRemoved  int
 	TotalModified int
+
+	// Skipped names the paths the LIVE walk declined and why -- the files a
+	// symbol could have been deleted from without this diff noticing. It is
+	// meaningful only in DiffLive mode; see SkippedKnown.
+	Skipped []ir.SkippedFile
+	// SkippedKnown separates "the walk reported no skips" from "there was no
+	// walk". A snapshot-to-snapshot Diff compares two stored indexes and never
+	// touches the filesystem, so it cannot answer the question at all -- and an
+	// empty Skipped there would assert "nothing was skipped", which is precisely
+	// the fail-open this field exists to prevent. False means "unknown";
+	// DiffPayload omits the key entirely rather than emitting an empty list.
+	SkippedKnown bool
+	// SkippedTruncated forwards ir.Stats.SkippedTruncated: the skip list hit a
+	// cap, so absence from Skipped no longer implies "indexed".
+	SkippedTruncated bool
+	// SkippedCap is the cap that was hit, for a message that names the right
+	// number. 0 means "unknown"; renderers fall back to ir.MaxRecordedSkips.
+	SkippedCap int
+	// RootUnreadable forwards ir.Stats.RootUnreadable: the walk could not enter
+	// the repo root, so nothing at all was examined.
+	RootUnreadable bool
 }

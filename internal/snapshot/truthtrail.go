@@ -33,11 +33,16 @@ type TrailResult struct {
 // TruthTrail builds a fused change receipt for repoID using baseline meta and
 // live IR. churnN controls the lookback window (0 → 20). text is prose to
 // check for stale symbol refs; empty string skips that section.
-func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, churnN int, text string) (TrailResult, error) {
+//
+// stats must come from the same walk that produced liveIR, so the receipt can
+// name what the indexer never read. A receipt that lists removed symbols and
+// their callers, while silently omitting the files it could not parse, is
+// exactly the over-confident artifact this reporting exists to prevent.
+func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, stats ir.Stats, churnN int, text string) (TrailResult, error) {
 	result := TrailResult{SnapshotRef: meta}
 
 	// 1. Structural diff.
-	diff, err := db.DiffLive(meta, liveIR)
+	diff, err := db.DiffLiveWithStats(meta, liveIR, stats)
 	if err != nil {
 		return result, fmt.Errorf("diff: %w", err)
 	}
@@ -121,6 +126,13 @@ func FormatTrail(r TrailResult) string {
 
 	if len(r.Diff.Files) == 0 && len(r.StaleClaims) == 0 {
 		fmt.Fprintf(&sb, "\nNo structural changes since %s.\n", label)
+		// The skip block belongs on THIS branch above all others. A receipt is
+		// read as a settled account of what changed, and "No structural changes"
+		// on a repo whose only code the indexer could not read is true solely in
+		// the sense that nothing was ever examined. TruthTrail takes the walk's
+		// stats precisely so this line can be qualified; without the render, the
+		// signature and its call sites bought nothing.
+		sb.WriteString(formatSkipped(r.Diff))
 		return sb.String()
 	}
 
@@ -165,6 +177,7 @@ func FormatTrail(r TrailResult) string {
 		}
 	}
 
+	sb.WriteString(formatSkipped(r.Diff))
 	return sb.String()
 }
 

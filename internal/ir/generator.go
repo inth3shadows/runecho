@@ -344,9 +344,24 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 				// 100 because SupportedSeen is 0 too, so every signal reads clean
 				// for a tree nothing opened. It needs its own flag, because there
 				// is no path string that can express "all of it".
-				if rel, rerr := relOf(blame); rerr == nil && rel == "." {
+				// Blame that lands ON or ABOVE the root is the root's problem.
+				//
+				// The parent of a child directly under the root IS the root, and
+				// filepath.Rel happily returns ".." for anything above it -- so a
+				// repo whose PARENT directory is unreadable emitted
+				// {"Path": "..", "Reason": "unreadable_dir"} with rootUnreadable
+				// false. ".." matches nothing under the documented prefix rule,
+				// Coverage() reported a vacuous 100, and the tree read clean:
+				// exactly the fail-open the flag was added to close, one level
+				// out. It also breaks the invariant that every reported path is
+				// repo-relative.
+				rel, rerr := relOf(blame)
+				switch {
+				case rerr != nil:
 					rec.rootUnreadable = true
-				} else {
+				case rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)):
+					rec.rootUnreadable = true
+				default:
 					record(blame, SkipUnreadableDir)
 				}
 			}

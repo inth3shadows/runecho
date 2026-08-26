@@ -1263,3 +1263,41 @@ func TestUnreadableDirectoryDoesNotBlowTheDeadline(t *testing.T) {
 		t.Error("the unreadable directory should still be reported")
 	}
 }
+
+// TestBlameAboveTheRootBecomesRootUnreadable. The parent of a child directly
+// under the root IS the root, and filepath.Rel returns ".." for anything above
+// it — so a repo whose PARENT directory is unreadable emitted
+// {"Path": "..", "unreadable_dir"} with RootUnreadable false. ".." matches
+// nothing under the documented prefix rule and Coverage() reports a vacuous 100,
+// so the tree read clean: the fail-open the flag closes, one level out.
+func TestBlameAboveTheRootBecomesRootUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	outer := t.TempDir()
+	repo := filepath.Join(outer, "repo")
+	writeFile(t, repo, "main.go", "package p\nfunc M() {}\n")
+	if err := os.Chmod(outer, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outer, 0o755) })
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	irData, stats, err := g.Generate(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(irData.Files) != 0 {
+		t.Skip("this filesystem still walks through a 0000 parent")
+	}
+	for _, sk := range stats.Skipped {
+		if sk.Path == ".." || strings.HasPrefix(sk.Path, "../") {
+			t.Errorf("skip path %q escapes the repo and matches nothing a consumer holds", sk.Path)
+		}
+	}
+	if !stats.RootUnreadable {
+		t.Error("nothing was indexed and nothing matchable was reported — Coverage() " +
+			"also returns a vacuous 100, so every signal reads clean")
+	}
+}

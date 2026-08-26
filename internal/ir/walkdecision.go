@@ -212,6 +212,14 @@ func recordSelfPrune(reason string) walkDecision {
 func (g *Generator) classifyExt(base string) extClass {
 	ext := filepath.Ext(base)
 	if ext == base && strings.HasPrefix(base, ".") && !g.isCodeExt(ext) {
+		// The discard is right for `.github`, `.git`, `.venv` -- directories --
+		// and wrong for `.npmrc` and `.gitignore`, which are files and are not
+		// code. Left as extNone they read as "may be a directory" and started
+		// failing CLOSED, blocking a commit that touched `.npmrc` with an entry
+		// saying `unreadable_dir` on a file.
+		if IsDocumentDotName(base) {
+			return extDocument
+		}
 		return extNone
 	}
 	switch {

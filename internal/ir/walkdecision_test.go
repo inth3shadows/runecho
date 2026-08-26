@@ -311,7 +311,6 @@ func TestClassifyExt(t *testing.T) {
 		{"Makefile", extNone},
 		{".github", extNone},
 		{".git", extNone},
-		{".gitignore", extNone},
 		// A file named literally `.go` IS Go source. Stripping the leading dot
 		// unconditionally -- the first fix for the `.github` defect -- turned it
 		// into extNone: never indexed and never reported, a fail-open one level
@@ -321,9 +320,18 @@ func TestClassifyExt(t *testing.T) {
 		{".py", extSupported},
 		// Not a language, so the dot-name is discarded and it has no extension.
 		{".md", extNone},
+		// Files, not directories, and not code: they must not read as "may be a
+		// directory" and fail closed.
+		{".gitignore", extDocument},
+		{".npmrc", extDocument},
+		{".env", extDocument},
+		{".editorconfig", extDocument},
+		{".DOCKERIGNORE", extDocument},
+		// Directories. These must stay extNone.
+		{".venv", extNone},
+		{".vscode", extNone},
+		{".tox", extNone},
 		{".terraform.lock.hcl", extNonCode},
-		{".env", extNone},
-		{".dockerignore", extNone},
 		{".eslintrc.js", extSupported},
 	}
 	for _, tc := range cases {

@@ -1545,3 +1545,87 @@ func TestFileRootInASupportedLanguageIsIndexed(t *testing.T) {
 		t.Errorf("Indexed = %d, want 1", stats.Indexed)
 	}
 }
+
+// TestDocumentDotNamesAreNeverDirectories guards the table against the one
+// entry that would turn it from a false-block fix into a fail-open.
+//
+// A dot-name in this table is asserted to be a FILE, so it is dropped from the
+// fail-closed array. If someone adds a name that is a directory anywhere
+// (`.github`, `.venv`, `.vscode`, `.tox`, `.idea`, `.gradle`, `.next`), an
+// unreadable subtree under it is silently discarded — which is the defect
+// documentExtensions was just introduced to close, arriving through the name
+// table instead.
+func TestDocumentDotNamesAreNeverDirectories(t *testing.T) {
+	for _, dir := range []string{
+		".github", ".git", ".venv", ".tox", ".vscode", ".cursor", ".idea",
+		".gradle", ".next", ".nuxt", ".cache", ".pytest_cache", ".mypy_cache",
+		".terraform", ".yarn", ".pnpm-store", ".husky", ".circleci", ".vs",
+	} {
+		if IsDocumentDotName(dir) {
+			t.Errorf("%q is a DIRECTORY in common use but is listed as a document "+
+				"dot-name, so an unreadable subtree under it would be dropped from "+
+				"the fail-closed array", dir)
+		}
+	}
+}
+
+// TestDocumentExtensionsAreNotSource: the two curated tables answer opposite
+// questions and must not overlap. An extension in both would be reported as an
+// unindexed blind spot AND dropped as a harmless document, depending on which
+// branch reached it first.
+func TestDocumentExtensionsAreNotSource(t *testing.T) {
+	g := NewGenerator(GeneratorConfig{})
+	for ext := range documentExtensions {
+		if IsKnownSourceExtension(ext) {
+			t.Errorf("%q is in BOTH documentExtensions and knownSourceExtensions", ext)
+		}
+		if g.supportsExtension(ext) {
+			t.Errorf("%q is in documentExtensions but a registered parser handles it — "+
+				"an indexed file would be classified as a droppable document", ext)
+		}
+	}
+}
+
+// TestDotNamedNonCodeFileIsNotABlindSpot is the end-to-end regression for the
+// false block: `.npmrc -> <unreadable>/.npmrc` was recorded as `unreadable_dir`
+// — a directory reason, on a file — so a commit touching `.npmrc` failed closed.
+func TestDotNamedNonCodeFileIsNotABlindSpot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, vault, ".npmrc", "registry=x\n")
+	writeFile(t, vault, "Deep.java", "class D {}\n")
+	for _, l := range []struct{ link, target string }{
+		{".npmrc", "vault/.npmrc"},
+		{"Gadget", "vault/Deep.java"},
+	} {
+		if err := os.Symlink(filepath.Join(dir, l.target), filepath.Join(dir, l.link)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	writeFile(t, dir, "main.go", "package main\n")
+	if err := os.Chmod(vault, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(vault, 0o755) })
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	if r, ok := got[".npmrc"]; ok {
+		t.Errorf(".npmrc recorded as %q; it is a file and it is not code, so a commit "+
+			"touching it must not be blocked by the fail-closed array", r)
+	}
+	// The control: the same shape, but source. Without it, "drop every dot-name"
+	// would pass the assertion above.
+	if r := got["Gadget"]; r != SkipUnreadableFile {
+		t.Errorf("Gadget -> vault/Deep.java recorded as %q, want %q", r, SkipUnreadableFile)
+	}
+}

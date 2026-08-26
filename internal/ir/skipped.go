@@ -493,3 +493,46 @@ var documentExtensions = map[string]bool{
 func IsDocumentExtension(ext string) bool {
 	return documentExtensions[strings.ToLower(ext)]
 }
+
+// documentDotNames lists dot-names that are always a FILE and never source.
+//
+// classifyExt discards a name that is entirely a leading dot with no interior
+// dot, because filepath.Ext(".github") returns ".github" and that classified
+// every dot-named DIRECTORY as a file with an unknown extension. The discard is
+// right for `.github`, `.git`, `.venv`, `.tox`, `.vscode` — all directories —
+// and wrong for `.npmrc` and `.gitignore`, which are files and are not code.
+//
+// Before the discard existed they took the "has an extension, not source" path
+// and were dropped. After it, they became extNone — "no extension, so it may be
+// a directory" — and started FAILING CLOSED: a commit touching `.npmrc` was
+// blocked by an entry reading `unreadable_dir`, on a file. That is the
+// documentation-only false block the whole contract is built to avoid, arriving
+// through a third reason code.
+//
+// A name table rather than an extension table because there is no extension to
+// test: the whole name is the evidence.
+//
+// BIAS is under-inclusion, and it is the same bias as documentExtensions for the
+// same reason: a missing entry fails closed (loud and fixable), a wrong entry
+// drops a real blind spot silently. Every entry below must be a name that is a
+// FILE in every convention that uses it — which is why no `.d`-style name, and
+// nothing that is a directory anywhere (`.github`, `.venv`, `.idea`, `.vscode`,
+// `.cursor`, `.tox`, `.gradle`, `.next`) appears.
+var documentDotNames = map[string]bool{
+	".gitignore": true, ".gitattributes": true, ".gitmodules": true,
+	".gitkeep": true, ".mailmap": true,
+	".npmrc": true, ".npmignore": true, ".nvmrc": true, ".yarnrc": true,
+	".editorconfig": true, ".prettierrc": true, ".prettierignore": true,
+	".eslintignore": true, ".stylelintignore": true,
+	".dockerignore": true, ".env": true, ".envrc": true,
+	".flake8": true, ".pylintrc": true, ".coveragerc": true,
+	".rspec": true, ".rubocop": true, ".ruby-version": true, ".node-version": true,
+	".python-version": true, ".tool-versions": true, ".nojekyll": true,
+	".htaccess": true, ".babelrc": true, ".browserslistrc": true,
+}
+
+// IsDocumentDotName reports whether an entire base name is a dot-name that is
+// always a file and never source. See documentDotNames.
+func IsDocumentDotName(base string) bool {
+	return documentDotNames[strings.ToLower(base)]
+}

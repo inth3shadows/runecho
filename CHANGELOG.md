@@ -71,6 +71,13 @@ install time from `git describe --tags` (see `install.sh`).
   before the walk, so it only arrives as a link when resolution failed — and
   that walked one entry, indexed zero files, recorded nothing, and reported a
   vacuous 100% coverage.
+- A dot-name that is always a FILE — `.gitignore`, `.npmrc`, `.env`,
+  `.editorconfig`, `.dockerignore` and the rest of a curated `documentDotNames`
+  table — classifies as a document rather than as "no extension, so it may be a
+  directory". Left as the latter it started failing CLOSED: a commit touching
+  `.npmrc` was blocked by an entry reading `unreadable_dir`, on a file.
+  Directory dot-names (`.github`, `.venv`, `.vscode`, `.tox`) are deliberately
+  absent and still fail closed.
 - A file whose name is entirely a leading dot is classified as a dotfile only
   when the dot-name is not itself a known language: `.github` has no extension,
   `.go` is Go source. `filepath.Ext(".github")` returns `".github"`, which had

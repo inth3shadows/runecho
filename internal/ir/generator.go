@@ -173,6 +173,35 @@ func resolvedOrSame(path string) string {
 	return path
 }
 
+// everyChildFailed reports whether the directory containing path is itself
+// unenterable, by testing it directly rather than inferring it from one child's
+// failure.
+//
+// This is what separates "the whole directory is unreadable" (blame the
+// directory, one honest entry covering the subtree) from "one file on a flaky
+// mount returned EIO" (blame that file, and leave its siblings alone).
+func (g *Generator) everyChildFailed(childPath string) bool {
+	parent := filepath.Dir(childPath)
+	if parent == childPath {
+		return false
+	}
+	f, err := os.Open(parent)
+	if err != nil {
+		return true // cannot even open it: the directory is the problem
+	}
+	defer f.Close()
+	names, rerr := f.Readdirnames(-1)
+	if rerr != nil {
+		return true
+	}
+	for _, n := range names {
+		if _, serr := os.Lstat(filepath.Join(parent, n)); serr == nil {
+			return false // at least one sibling is fine, so the parent is not
+		}
+	}
+	return true
+}
+
 // resolvedOrSameLeaf resolves the DIRECTORY containing path and re-joins the
 // base name, so a path whose leaf no longer exists still resolves.
 //
@@ -267,8 +296,24 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			// no evidence of anything -- the containing directory is what could
 			// not be entered.
 			if !os.IsNotExist(err) {
+				// Blame the narrowest path that is actually implicated.
+				//
+				// info != nil means the entry was statted and READDIR failed: the
+				// directory is the blind spot, and everything under it is
+				// genuinely unexamined.
+				//
+				// info == nil means one child's LSTAT failed. Blaming the parent
+				// there was too broad -- a single EIO or ESTALE on a flaky NFS or
+				// FUSE mount marked the whole of src/ unexamined, which under the
+				// prefix rule makes every file in it unexamined to a fail-closed
+				// gate, while the walk indexed all the siblings fine. Blame the
+				// child instead, and let the prefix rule cover its subtree if it
+				// turned out to be a directory. The 0444 case that motivated
+				// parent-blaming still collapses to one entry, because EVERY child
+				// fails there and the recorder dedups -- but by then the parent is
+				// implicated on its own evidence, not inferred from one child.
 				blame := path
-				if info == nil {
+				if info == nil && g.everyChildFailed(path) {
 					if parent := filepath.Dir(path); parent != path {
 						blame = parent
 					}

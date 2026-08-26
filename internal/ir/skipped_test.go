@@ -549,7 +549,7 @@ func TestPolicyAndCapabilitySkipsAreDistinguishable(t *testing.T) {
 	// `skipped: []` and exit 0 for a tree it never opened.
 	policy := []string{SkipIgnoredDir}
 	capability := []string{SkipUnsupportedLanguage, SkipParseError, SkipOversized,
-		SkipCapReached, SkipSymlink, SkipUnreadable, SkipSymlinkDir, SkipUnreadableDir}
+		SkipCapReached, SkipSymlink, SkipSymlinkDir, SkipUnreadableDir}
 	for _, r := range policy {
 		if !IsPolicySkip(r) {
 			t.Errorf("%q names a pruned directory and must classify as policy", r)
@@ -1110,5 +1110,50 @@ func TestSubCapAloneDoesNotClaimToBoundTheList(t *testing.T) {
 	if len(items) <= capHit {
 		t.Errorf("precondition: the list (%d) should exceed the sub-cap (%d), which is "+
 			"what made the old wording contradictory", len(items), capHit)
+	}
+}
+
+// TestSymlinkedIgnoredDirIsTreatedAsAnIgnore, restored. It was deleted when the
+// ignore check gained its `IsDir() || symlink` gate, leaving the symlink half of
+// that gate unpinned — an easy target for a future "simplify to IsDir()".
+//
+// pnpm and yarn workspaces routinely make node_modules a link. Classified as a
+// symlink it becomes a CAPABILITY skip: a permanent, unfixable entry in the
+// fail-closed array for a directory the operator explicitly excluded.
+func TestSymlinkedIgnoredDirIsTreatedAsAnIgnore(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, outside, "dep.js", "export function D() {}\n")
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	if err := os.Symlink(outside, filepath.Join(dir, "node_modules")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	if got["node_modules"] != SkipIgnoredDir {
+		t.Errorf("node_modules: got %q, want %q — a configured ignore stored as a "+
+			"link is still a configured ignore", got["node_modules"], SkipIgnoredDir)
+	}
+	if IsPolicySkip(got["node_modules"]) == false {
+		t.Error("it must land in the informational array, not the fail-closed one")
+	}
+}
+
+// TestTableEntriesDoNotMatchCommonNonCode, restored. skipped_test.go's
+// advertisedFamilies comment still cites it by name as the authority resolving
+// the `.ru` rule conflict, so deleting it left that reasoning unsupported.
+func TestTableEntriesDoNotMatchCommonNonCode(t *testing.T) {
+	for _, name := range []string{
+		".terraform.lock.hcl", "README.ru", "README.md", "config.yaml",
+		"package-lock.json", "go.sum",
+	} {
+		if IsKnownSourceExtension(filepath.Ext(name)) {
+			t.Errorf("%s is matched via %q — it would enter the fail-closed array",
+				name, filepath.Ext(name))
+		}
 	}
 }

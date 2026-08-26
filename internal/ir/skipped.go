@@ -45,8 +45,6 @@ const (
 	// so the file is not indexed under this path. Recorded only for code: a
 	// symlinked README is not a blind spot in a symbol index.
 	SkipSymlink = "symlink"
-	// SkipUnreadable — a FILE the walk could not stat or open.
-	SkipUnreadable = "unreadable"
 
 	// SkipIgnoredDir — a directory matched IgnoredPaths and was pruned. The
 	// DIRECTORY is recorded, never its contents: filepath.SkipDir means the walk

@@ -230,7 +230,20 @@ func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 // be a silently empty one.
 func FormatCompact(d DiffResult) string {
 	if len(d.Files) == 0 {
-		if n := len(skipCount(d)); n > 0 {
+		// Every reason FormatFull would qualify "no structural changes" has to
+		// qualify this line too, or the two surfaces disagree about the same
+		// DiffResult -- which is how --compact came to print nothing at exit 0
+		// for a repo the indexer could not read.
+		n := len(skipCount(d))
+		switch {
+		case d.RootUnreadable:
+			return fmt.Sprintf("IR DIFF [%s→%s]: NOTHING examined — the repo root could not be read",
+				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash))
+		case d.SkippedTruncated:
+			// A floor, not a total: the list hit its cap, so n understates it.
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %d+ paths NOT examined",
+				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash), n)
+		case n > 0:
 			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %s NOT examined",
 				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash),
 				plural(n, "path"))

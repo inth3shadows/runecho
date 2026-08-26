@@ -485,3 +485,38 @@ func TestFormatCompact_SaysWhenNothingWasExamined(t *testing.T) {
 		t.Errorf("a configured ignore is not a blind spot, got %q", out)
 	}
 }
+
+// TestFormatCompact_QualifiesEveryReasonFormatFullDoes. The two surfaces must
+// not disagree about the same DiffResult. --compact gated on the capability
+// count alone, so a run whose list was truncated to nothing by policy entries,
+// or whose root could not be read at all, printed NOTHING at exit 0 — while
+// FormatFull warned.
+func TestFormatCompact_QualifiesEveryReasonFormatFullDoes(t *testing.T) {
+	base := DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown: true,
+	}
+	for _, c := range []struct {
+		name string
+		mut  func(*DiffResult)
+		want string
+	}{
+		{"truncated with an empty capability list", func(d *DiffResult) {
+			d.Skipped = []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}}
+			d.SkippedTruncated = true
+		}, "NOT examined"},
+		{"unreadable root", func(d *DiffResult) { d.RootUnreadable = true }, "NOTHING examined"},
+	} {
+		d := base
+		c.mut(&d)
+		out := FormatCompact(d)
+		if !strings.Contains(out, c.want) {
+			t.Errorf("%s: compact printed %q, want it to mention %q — FormatFull warns here",
+				c.name, out, c.want)
+		}
+		if FormatFull(d) == "" {
+			t.Errorf("%s: precondition — FormatFull should say something", c.name)
+		}
+	}
+}

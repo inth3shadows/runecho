@@ -315,7 +315,7 @@ func TestClassifyExt(t *testing.T) {
 // walking" -- a silent fail-open, and the branch-nest failure mode relocated
 // into the type rather than removed from the program.
 //
-// Two properties over all 1152 states:
+// Three properties over all 2304 states:
 //
 //  1. TOTALITY -- no state returns actionUnset. This is why actionUnset exists.
 //  2. CLOSURE -- every decision returned appears in walkDecisionRows(). A branch
@@ -324,6 +324,14 @@ func TestClassifyExt(t *testing.T) {
 // Both probes are supplied on every state, deliberately. Probe DISCIPLINE (a row
 // must not reach for a syscall it does not need) is the named table's job, where
 // an unsupplied probe calls t.Fatal. Mixing the two would make each weaker.
+//
+// parentUnreadable is a real axis and is enumerated. The first version wired it
+// as `func() bool { return infoPresent }`, and decideWalkError only consults the
+// probe when !infoPresent -- so across every iteration it returned false the one
+// time it was asked. recordParent was never produced, neither property was
+// proven for parentUnreadable==true, and the `total` assertion pinned half the
+// space as if it were whole. A gate that enumerates an axis it has pinned to a
+// constant is worse than no gate: it reads as proof.
 func TestWalkDecisionCrossProduct(t *testing.T) {
 	g := NewGenerator(GeneratorConfig{})
 
@@ -339,6 +347,7 @@ func TestWalkDecisionCrossProduct(t *testing.T) {
 	bools := []bool{false, true}
 
 	total, unset := 0, 0
+	seenParentBlame := false
 	for _, isRoot := range bools {
 		for _, ek := range errs {
 			for _, infoPresent := range bools {
@@ -346,42 +355,45 @@ func TestWalkDecisionCrossProduct(t *testing.T) {
 					for _, ignored := range bools {
 						for _, ext := range exts {
 							for _, lk := range links {
-								total++
-								e := walkEntry{
-									isRoot:      isRoot,
-									err:         ek,
-									infoPresent: infoPresent,
-									kind:        kind,
-									ignoredName: ignored,
-									ext:         ext,
-									parentUnreadable: func() bool {
-										return infoPresent
-									},
-									target: func() linkKind { return lk },
-								}
-								got := g.decideWalkEntry(e)
-								if got.action == actionUnset {
-									unset++
-									if unset <= 5 {
-										t.Errorf("no row matched %+v — an unmatched state "+
-											"is a silent fail-open", summarize(e, lk))
+								for _, parentBad := range bools {
+									total++
+									e := walkEntry{
+										isRoot:           isRoot,
+										err:              ek,
+										infoPresent:      infoPresent,
+										kind:             kind,
+										ignoredName:      ignored,
+										ext:              ext,
+										parentUnreadable: func() bool { return parentBad },
+										target:           func() linkKind { return lk },
 									}
-									continue
-								}
-								if _, ok := named[got]; !ok {
-									t.Errorf("state %s decided %+v, which no named row "+
-										"claims — a branch is deciding something the table "+
-										"does not say", summarize(e, lk), got)
-								}
-								if got.records() != (got.reason != "") {
-									t.Errorf("state %s: action %v with reason %q — a reason "+
-										"without a record, or a record without a reason",
-										summarize(e, lk), got.action, got.reason)
-								}
-								if got.prunes() && !(ek == errNone && kind == kindDir) {
-									t.Errorf("state %s pruned from a non-directory; Walk "+
-										"documents that SkipDir there skips the remaining "+
-										"SIBLINGS", summarize(e, lk))
+									got := g.decideWalkEntry(e)
+									if got.action == actionUnset {
+										unset++
+										if unset <= 5 {
+											t.Errorf("no row matched %+v — an unmatched state "+
+												"is a silent fail-open", summarize(e, lk, parentBad))
+										}
+										continue
+									}
+									if _, ok := named[got]; !ok {
+										t.Errorf("state %s decided %+v, which no named row "+
+											"claims — a branch is deciding something the table "+
+											"does not say", summarize(e, lk, parentBad), got)
+									}
+									if got.records() != (got.reason != "") {
+										t.Errorf("state %s: action %v with reason %q — a reason "+
+											"without a record, or a record without a reason",
+											summarize(e, lk, parentBad), got.action, got.reason)
+									}
+									if got.prunes() && !(ek == errNone && kind == kindDir) {
+										t.Errorf("state %s pruned from a non-directory; Walk "+
+											"documents that SkipDir there skips the remaining "+
+											"SIBLINGS", summarize(e, lk, parentBad))
+									}
+									if got.blame == blameParent {
+										seenParentBlame = true
+									}
 								}
 							}
 						}
@@ -390,18 +402,25 @@ func TestWalkDecisionCrossProduct(t *testing.T) {
 			}
 		}
 	}
+	// The axis exists to make this decision reachable. If no state produces it,
+	// the axis is pinned to a constant again and the gate is back to reading as
+	// proof of a space it never entered.
+	if !seenParentBlame {
+		t.Error("no state blamed the PARENT; the parentUnreadable axis is not " +
+			"actually being varied")
+	}
 	if unset > 0 {
 		t.Errorf("%d of %d states fell through the table", unset, total)
 	}
-	if total != 1152 {
-		t.Errorf("cross-product size = %d, want 1152 — an axis was added or "+
+	if total != 2304 {
+		t.Errorf("cross-product size = %d, want 2304 — an axis was added or "+
 			"removed without updating this gate", total)
 	}
 }
 
-func summarize(e walkEntry, lk linkKind) string {
-	return fmt.Sprintf("{root:%v err:%v info:%v kind:%v ignored:%v ext:%v target:%v}",
-		e.isRoot, e.err, e.infoPresent, e.kind, e.ignoredName, e.ext, lk)
+func summarize(e walkEntry, lk linkKind, parentBad bool) string {
+	return fmt.Sprintf("{root:%v err:%v info:%v kind:%v ignored:%v ext:%v target:%v parentBad:%v}",
+		e.isRoot, e.err, e.infoPresent, e.kind, e.ignoredName, e.ext, lk, parentBad)
 }
 
 // TestDecideBlameTable pins the second pure table. Every row is a shape that

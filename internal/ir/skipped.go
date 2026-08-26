@@ -153,6 +153,15 @@ func (r *skipRecorder) add(path, reason string) {
 	if r == nil {
 		return
 	}
+	// "." is the walk root, and it is inert as a report: under the documented
+	// match rule (equality, or a "<entry>/" prefix) it matches no repo-relative
+	// path a consumer could hold, so recording it looks like a finding while
+	// telling the consumer nothing. An unreadable or unstattable ROOT is a real
+	// condition, but the honest signal for it is that the walk indexed nothing,
+	// which SupportedSeen and Coverage already carry.
+	if path == "." {
+		return
+	}
 	if reason == SkipCapReached {
 		if r.capReached >= maxCapReachedSkips {
 			r.noteCap(maxCapReachedSkips)

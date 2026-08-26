@@ -219,9 +219,21 @@ func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 	return m
 }
 
-// FormatCompact returns a single-line summary, or "" if there are no changes.
+// FormatCompact returns a single-line summary, or "" if there are no changes and
+// nothing went unexamined.
+//
+// The zero-drift early return used to be unconditional, so `diff --compact` on a
+// repo the indexer could not read printed NOTHING at exit 0 -- the most
+// confident possible statement, from the surface with the least room to qualify
+// it. A caller piping --compact into a log gets one line either way; it must not
+// be a silently empty one.
 func FormatCompact(d DiffResult) string {
 	if len(d.Files) == 0 {
+		if n := len(skipCount(d)); n > 0 {
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %s NOT examined",
+				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash),
+				plural(n, "path"))
+		}
 		return ""
 	}
 	aShort := shortHash(d.SnapshotA.RootHash)
@@ -305,6 +317,16 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 		payload["skipped_truncated"] = d.SkippedTruncated
 	}
 	return payload
+}
+
+// skipCount returns the capability skips, or nil when this diff could not
+// measure them.
+func skipCount(d DiffResult) []ir.SkippedFile {
+	if !d.SkippedKnown {
+		return nil
+	}
+	capability, _ := SplitSkips(d.Skipped)
+	return capability
 }
 
 // SplitSkips partitions a skip list into capability skips (files the indexer

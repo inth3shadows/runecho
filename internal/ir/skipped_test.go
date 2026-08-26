@@ -908,3 +908,23 @@ func TestIgnoreListAppliesToDirectoriesAndLinksOnly(t *testing.T) {
 		t.Errorf("a real ignored directory must still be recorded, got %q", got["vendor"])
 	}
 }
+
+// TestWalkRootIsNeverRecordedAsDot. "." is inert as a report: under the
+// documented match rule (equality, or a "<entry>/" prefix) it matches no
+// repo-relative path a consumer could hold, so recording it looks like a finding
+// while saying nothing. An unreadable root is a real condition, but the honest
+// signal is that the walk indexed nothing, which SupportedSeen already carries.
+func TestWalkRootIsNeverRecordedAsDot(t *testing.T) {
+	r := &skipRecorder{}
+	r.add(".", SkipUnreadableDir)
+	r.add("real.java", SkipUnsupportedLanguage)
+	items, _, _ := r.result()
+	for _, sk := range items {
+		if sk.Path == "." {
+			t.Errorf(`"." was recorded (reason %q); it matches no path a consumer holds`, sk.Reason)
+		}
+	}
+	if len(items) != 1 {
+		t.Errorf("real entries must still be recorded, got %v", items)
+	}
+}

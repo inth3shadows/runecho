@@ -455,3 +455,33 @@ func TestTruncateSkips_BudgetIsPerBucket(t *testing.T) {
 			"context budget must know the real bound", len(d.Skipped))
 	}
 }
+
+// TestFormatCompact_SaysWhenNothingWasExamined.
+//
+// The zero-drift early return was unconditional, so `diff --compact` on a repo
+// the indexer could not read printed NOTHING at exit 0 — the most confident
+// possible statement, from the surface with the least room to qualify it. A
+// caller piping --compact into a log gets one line either way; it must not be a
+// silently empty one.
+func TestFormatCompact_SaysWhenNothingWasExamined(t *testing.T) {
+	base := DiffResult{
+		SnapshotA:    SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:    SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown: true,
+	}
+	// Clean and fully examined: still silent, as before.
+	if out := FormatCompact(base); out != "" {
+		t.Errorf("a clean, fully-examined repo must stay silent, got %q", out)
+	}
+	// Clean only because nothing was read.
+	base.Skipped = []ir.SkippedFile{{Path: "Widget.java", Reason: ir.SkipUnsupportedLanguage}}
+	out := FormatCompact(base)
+	if !strings.Contains(out, "NOT examined") {
+		t.Errorf("zero drift over an unexamined tree must not print an empty line, got %q", out)
+	}
+	// Configured ignores are not a blind spot and must not trip it.
+	base.Skipped = []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}}
+	if out := FormatCompact(base); out != "" {
+		t.Errorf("a configured ignore is not a blind spot, got %q", out)
+	}
+}

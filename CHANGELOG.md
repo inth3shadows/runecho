@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.46.1] — 2026-08-26
+
 ### Added
 - `diff --since` and `verify` now report which paths the indexer declined and
   why. `--json` carries two arrays — `skipped` (files it could not read; match

@@ -42,16 +42,34 @@ const (
 	kindSymlink
 )
 
-// extClass classifies an entry's extension. It is decisive in exactly ONE
-// direction -- a path that HAS a code extension is a file we care about -- and
-// only rows where the entry is already known to be file-shaped consult it.
+// extClass classifies an entry's extension.
+//
+// The rule this used to run on -- "a path that HAS an extension is a file" --
+// is FALSE, and believing it cost a silent fail-open: `deps -> <unreadable>/deps.v2`
+// was read as "has an extension, not source, so a file we do not care about"
+// and dropped, discarding an entire unexamined subtree at exit 0. Dotted
+// directory names are ordinary.
+//
+// So file-ness is asserted only where a curated table vouches for it
+// (extDocument) or where the extension names source (extSupported,
+// extKnownSource). extNonCode and extNone are both "we do not know", and every
+// row that must choose between a file and an unreadable directory fails closed
+// on them.
 type extClass int
 
 const (
 	// extNone -- no extension. Could be a directory, a Makefile, or a dotfile.
 	extNone extClass = iota
-	// extNonCode -- has an extension, and it is not source code (README.md).
+	// extNonCode -- has an extension, and it is not source code, and the table
+	// does not positively vouch for it being a file. `deps.v2`, `src.bak`,
+	// `pkg.d`: every one of those is a directory as readily as a file, which is
+	// why this class is NOT evidence of file-ness. See extDocument.
 	extNonCode
+	// extDocument -- an extension that positively names a documentation,
+	// configuration or asset FILE, from the curated documentExtensions table.
+	// This is the only class that is evidence a path is a file rather than a
+	// directory, and the only one an unresolvable symlink may be dropped on.
+	extDocument
 	// extKnownSource -- source code in a language no registered parser handles.
 	// THE reason skip reporting exists: absent from the IR, therefore absent
 	// from a diff, therefore a deleted symbol is invisible at exit 0.
@@ -203,6 +221,8 @@ func (g *Generator) classifyExt(base string) extClass {
 		return extSupported
 	case IsKnownSourceExtension(ext):
 		return extKnownSource
+	case IsDocumentExtension(ext):
+		return extDocument
 	default:
 		return extNonCode
 	}
@@ -330,7 +350,7 @@ func decideWalkError(e walkEntry) walkDecision {
 	// non-code extension is a FILE, and a non-code file is not a symbol blind
 	// spot. It can never tell you a directory is non-code, so everything else
 	// falls through to a blind spot.
-	if e.ext == extNonCode {
+	if e.ext == extNonCode || e.ext == extDocument {
 		return doNothing()
 	}
 	return recordSelf(SkipUnreadableFile)
@@ -406,11 +426,16 @@ func decideSymlink(e walkEntry) walkDecision {
 			// Calling a file a directory is simply false, and the reason string
 			// is read by humans. Behaviourally identical under the prefix rule.
 			return recordSelf(SkipUnreadableFile)
-		case extNonCode:
+		case extDocument:
+			// The ONLY class that is positive evidence of file-ness. A curated
+			// table vouches for it, so dropping it cannot discard a subtree.
 			return doNothing()
 		default:
-			// extNone: the target's own name gives nothing away, so it may be a
-			// source DIRECTORY we cannot see. Fail closed on capability.
+			// extNone AND extNonCode. Neither is evidence: an extensionless name
+			// gives nothing away, and a dotted one is a directory as readily as a
+			// file -- `deps.v2`, `python3.11`, `src.bak`, `pkg.d`. Reading
+			// extNonCode as "a file we do not care about" dropped an entire
+			// unexamined Go subtree at exit 0. Fail closed on capability.
 			return recordSelf(SkipUnreadableDir)
 		}
 	}

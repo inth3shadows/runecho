@@ -70,6 +70,10 @@ func walkDecisionRows() []walkRow {
 			entry: walkEntry{err: errOpaque, parentUnreadable: no, ext: extNonCode},
 			want:  doNothing(),
 		}, {
+			name:  "lone unstattable document file records nothing",
+			entry: walkEntry{err: errOpaque, parentUnreadable: no, ext: extDocument},
+			want:  doNothing(),
+		}, {
 			name:  "lone unstattable source file in an unparsed language is a blind spot",
 			entry: walkEntry{err: errOpaque, parentUnreadable: no, ext: extKnownSource},
 			want:  recordSelf(SkipUnreadableFile),
@@ -120,7 +124,7 @@ func walkDecisionRows() []walkRow {
 			want:  recordSelf(SkipUnsupportedLanguage),
 		}, {
 			name:  "a root that is a non-code file records nothing",
-			entry: walkEntry{isRoot: true, ext: extNonCode},
+			entry: walkEntry{isRoot: true, ext: extDocument},
 			want:  doNothing(),
 		}, {
 			name:  "a root that is an extensionless file records nothing",
@@ -180,9 +184,20 @@ func walkDecisionRows() []walkRow {
 			entry: walkEntry{kind: kindSymlink, target: link(linkOpaque), ext: extNone},
 			want:  recordSelf(SkipUnreadableDir),
 		}, {
-			name:  "an unresolvable symlink to a non-code file records nothing",
-			entry: walkEntry{kind: kindSymlink, target: link(linkOpaque), ext: extNonCode},
+			// extDocument is the ONLY class that is positive evidence of
+			// file-ness -- a curated table vouches for it -- so dropping it
+			// cannot discard a subtree.
+			name:  "an unresolvable symlink to a document file records nothing",
+			entry: walkEntry{kind: kindSymlink, target: link(linkOpaque), ext: extDocument},
 			want:  doNothing(),
+		}, {
+			// `deps -> <unreadable>/deps.v2`. Read as "has an extension, not
+			// source, therefore a file we do not care about", this dropped an
+			// entire unexamined Go subtree with skipped:[] and exit 0. A dotted
+			// name is a DIRECTORY as readily as a file.
+			name:  "an unresolvable symlink to an unvouched dotted name is a directory until proven otherwise",
+			entry: walkEntry{kind: kindSymlink, target: link(linkOpaque), ext: extNonCode},
+			want:  recordSelf(SkipUnreadableDir),
 		}, {
 			name:  "an unresolvable symlink to source is an unreadable FILE",
 			entry: walkEntry{kind: kindSymlink, target: link(linkOpaque), ext: extSupported},
@@ -205,6 +220,10 @@ func walkDecisionRows() []walkRow {
 			want:  recordSelf(SkipSymlink),
 		}, {
 			name:  "a symlinked README records nothing",
+			entry: walkEntry{kind: kindSymlink, target: link(linkFile), ext: extDocument},
+			want:  doNothing(),
+		}, {
+			name:  "a symlinked file with an unvouched extension records nothing",
 			entry: walkEntry{kind: kindSymlink, target: link(linkFile), ext: extNonCode},
 			want:  doNothing(),
 		}, {
@@ -228,6 +247,10 @@ func walkDecisionRows() []walkRow {
 			want:  recordSelf(SkipUnsupportedLanguage),
 		}, {
 			name:  "a README is neither indexed nor recorded",
+			entry: walkEntry{ext: extDocument},
+			want:  doNothing(),
+		}, {
+			name:  "a file with an unvouched extension is neither indexed nor recorded",
 			entry: walkEntry{ext: extNonCode},
 			want:  doNothing(),
 		}, {
@@ -279,7 +302,12 @@ func TestClassifyExt(t *testing.T) {
 		{"A.GO", extSupported},
 		{"Widget.java", extKnownSource},
 		{"b.JAVA", extKnownSource},
-		{"README.md", extNonCode},
+		{"README.md", extDocument},
+		{"logo.png", extDocument},
+		{"pkg.d", extNonCode},
+		{"deps.v2", extNonCode},
+		{"src.bak", extNonCode},
+		{"python3.11", extNonCode},
 		{"Makefile", extNone},
 		{".github", extNone},
 		{".git", extNone},
@@ -293,10 +321,10 @@ func TestClassifyExt(t *testing.T) {
 		{".py", extSupported},
 		// Not a language, so the dot-name is discarded and it has no extension.
 		{".md", extNone},
+		{".terraform.lock.hcl", extNonCode},
 		{".env", extNone},
 		{".dockerignore", extNone},
 		{".eslintrc.js", extSupported},
-		{".terraform.lock.hcl", extNonCode},
 	}
 	for _, tc := range cases {
 		if got := g.classifyExt(tc.base); got != tc.want {
@@ -315,7 +343,7 @@ func TestClassifyExt(t *testing.T) {
 // walking" -- a silent fail-open, and the branch-nest failure mode relocated
 // into the type rather than removed from the program.
 //
-// Three properties over all 2304 states:
+// Three properties over all 2880 states:
 //
 //  1. TOTALITY -- no state returns actionUnset. This is why actionUnset exists.
 //  2. CLOSURE -- every decision returned appears in walkDecisionRows(). A branch
@@ -342,7 +370,7 @@ func TestWalkDecisionCrossProduct(t *testing.T) {
 
 	errs := []errKind{errNone, errGone, errOpaque}
 	kinds := []entryKind{kindFile, kindDir, kindSymlink}
-	exts := []extClass{extNone, extNonCode, extKnownSource, extSupported}
+	exts := []extClass{extNone, extNonCode, extDocument, extKnownSource, extSupported}
 	links := []linkKind{linkGone, linkOpaque, linkDir, linkFile}
 	bools := []bool{false, true}
 
@@ -412,8 +440,8 @@ func TestWalkDecisionCrossProduct(t *testing.T) {
 	if unset > 0 {
 		t.Errorf("%d of %d states fell through the table", unset, total)
 	}
-	if total != 2304 {
-		t.Errorf("cross-product size = %d, want 2304 — an axis was added or "+
+	if total != 2880 {
+		t.Errorf("cross-product size = %d, want 2880 — an axis was added or "+
 			"removed without updating this gate", total)
 	}
 }
@@ -520,11 +548,18 @@ func TestClassifySymlinkExt(t *testing.T) {
 		name: "a link named as unparsed source is still source",
 		link: "Widget.java", target: "widget.txt", want: extKnownSource,
 	}, {
+		name: "a link named as source beats a document target too",
+		link: "main.go", target: "notes.md", want: extSupported,
+	}, {
 		// Link-only classification loses this: `README` and `LICENSE` are both
 		// extensionless, so both failed closed, and non-code in the fail-closed
 		// array blocks every documentation change in the repo.
-		name: "an extensionless link to a doc is non-code",
-		link: "README", target: "README.md", want: extNonCode,
+		name: "an extensionless link to a doc is a document",
+		link: "README", target: "README.md", want: extDocument,
+	}, {
+		// The severe one: a dotted DIRECTORY name is not evidence of a file.
+		name: "an extensionless link to a dotted directory name stays unvouched",
+		link: "deps", target: "deps.v2", want: extNonCode,
 	}, {
 		name: "an extensionless link to source is source",
 		link: "Gadget", target: "Widget.java", want: extKnownSource,

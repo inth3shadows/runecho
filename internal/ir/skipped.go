@@ -429,3 +429,67 @@ var knownSourceExtensions = map[string]bool{
 func IsKnownSourceExtension(ext string) bool {
 	return knownSourceExtensions[strings.ToLower(ext)]
 }
+
+// documentExtensions lists extensions that positively identify a FILE holding
+// documentation, configuration, or an asset — never source, and never a
+// directory.
+//
+// It exists because the rule this package ran on is false. "An extension is
+// decisive in exactly one direction: a path that HAS one is a file" held only
+// because it was applied to a symlink's OWN name, and links to directories are
+// usually undotted. Reading the link's TARGET name walked straight into the
+// counterexample: `deps -> /mnt/x/deps.v2`, target unreadable, classified
+// "has an extension, not source, therefore a file we do not care about" and
+// SILENTLY DROPPED — an entire unexamined Go subtree with `skipped: []`,
+// `root_unreadable: false` and exit 0. Reproduced identically on `python3.11`,
+// `node-18.20.4`, `src.bak` and `pkg.d`. Dotted directory names are ordinary.
+//
+// So the question is inverted. Instead of "is this NOT source?", which cannot
+// tell a file from a directory, ask "is this POSITIVELY a document file?" —
+// which only a curated table can answer, exactly as knownSourceExtensions is
+// the curated answer to "is this source we cannot parse?".
+//
+// BIAS: under-inclusion is the safe error, and it is the opposite bias from
+// knownSourceExtensions for the same reason — a missing entry here means an
+// unreadable symlink FAILS CLOSED (loud, fixable, and correct if it really was
+// a directory); a wrong entry means a real blind spot is dropped silently.
+//
+// EXCLUDED ON PURPOSE, all of them plausible directory suffixes:
+//   - `.d`   — `/etc/nginx/conf.d/`, and D source besides
+//   - `.bak` `.old` `.new` `.tmp` `.orig` — `src.bak/` is a directory as often
+//     as it is a file
+//   - anything numeric (`.v2`, `.11`, `.2024`) — version-suffixed directories
+//     are the single most common shape of this defect
+var documentExtensions = map[string]bool{
+	// Prose and docs.
+	".md": true, ".markdown": true, ".rst": true, ".adoc": true, ".txt": true,
+	".text": true, ".pdf": true, ".epub": true, ".rtf": true, ".org": true,
+	// Data and config a symbol index does not read.
+	".json": true, ".yaml": true, ".yml": true, ".toml": true, ".ini": true,
+	".cfg": true, ".conf": true, ".properties": true, ".csv": true, ".tsv": true,
+	".xml": true, ".plist": true, ".lock": true, ".log": true, ".env": true,
+	// Markup and styling. No parser reads them, and neither is a directory
+	// suffix in any convention.
+	".html": true, ".htm": true, ".css": true, ".scss": true, ".sass": true,
+	".less": true,
+	// Images.
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true,
+	".ico": true, ".webp": true, ".bmp": true, ".tiff": true, ".tif": true,
+	// Fonts.
+	".woff": true, ".woff2": true, ".ttf": true, ".otf": true, ".eot": true,
+	// Audio and video.
+	".mp3": true, ".wav": true, ".flac": true, ".ogg": true, ".mp4": true,
+	".mov": true, ".webm": true, ".avi": true, ".mkv": true,
+	// Archives and binaries. A directory is not named `foo.zip`.
+	".zip": true, ".gz": true, ".tgz": true, ".bz2": true, ".xz": true,
+	".tar": true, ".7z": true, ".rar": true, ".jar": true, ".war": true,
+	".so": true, ".dylib": true, ".dll": true, ".exe": true, ".bin": true,
+	".wasm": true, ".o": true, ".a": true, ".class": true, ".pyc": true,
+}
+
+// IsDocumentExtension reports whether ext positively names a document,
+// configuration, or asset FILE. See documentExtensions for why the question is
+// asked in this direction.
+func IsDocumentExtension(ext string) bool {
+	return documentExtensions[strings.ToLower(ext)]
+}

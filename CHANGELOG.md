@@ -48,6 +48,14 @@ install time from `git describe --tags` (see `install.sh`).
   branch decided an axis differently from another branch facing the same state.
   A generated cross-product over all 1152 states proves no state falls through
   the table and no branch returns a decision the table does not name.
+- An unresolvable symlink is dropped from `skipped` only on POSITIVE evidence
+  that its target is a file: a curated `documentExtensions` table (docs, config,
+  images, fonts, media, archives). "Has an extension and is not source" is not
+  that evidence — `deps -> <unreadable>/deps.v2` was read as a file we do not
+  care about and silently dropped, discarding an entire unexamined Go subtree
+  with `skipped: []`, `root_unreadable: false` and exit 0. Dotted directory
+  names (`deps.v2`, `python3.11`, `node-18.20.4`, `src.bak`, `pkg.d`) are
+  ordinary. Anything the table does not vouch for now fails closed.
 - An unresolvable symlink is classified by its TARGET's base name (`os.Readlink`,
   which does not follow, so it answers even when the target is unreadable), not
   by the link's own. `README -> <unreadable>/README.md` and

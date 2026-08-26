@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -530,3 +531,69 @@ func TestClassifySymlinkExt(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyWalkDecisionFailsClosedOnAnUnknownDecision exercises the two
+// backstops that no reachable state can reach today.
+//
+// That is the point of them. walkdecision.go documented "the caller treats
+// actionUnset as rootUnreadable" while the caller returned early and recorded
+// nothing — byte-equivalent to "index nothing, record nothing, keep walking",
+// the fail-open actionUnset was introduced to remove, relocated from the struct
+// into the caller. A documented backstop nobody executes is not a backstop.
+func TestApplyWalkDecisionFailsClosedOnAnUnknownDecision(t *testing.T) {
+	relOf := func(p string) (string, error) { return normalizePath(p), nil }
+
+	t.Run("the zero decision does not vouch for the tree", func(t *testing.T) {
+		rec := &skipRecorder{}
+		applyWalkDecision(rec, "src/main.go", walkDecision{}, relOf)
+		if !rec.rootUnreadable {
+			t.Error("actionUnset recorded nothing and left rootUnreadable false; " +
+				"a state nobody thought about must not read as a clean tree")
+		}
+		if items, _, _ := rec.result(); len(items) != 0 {
+			t.Errorf("actionUnset emitted %v; it has no reason to emit", items)
+		}
+	})
+
+	t.Run("an unclassifiable blame is never emitted as an entry", func(t *testing.T) {
+		// relOf fails, so decideBlame cannot produce a matchable path. The entry
+		// must not reach the array a gate fails closed on.
+		rec := &skipRecorder{}
+		failing := func(string) (string, error) { return "", errRelFailed }
+		applyWalkDecision(rec, "src", recordSelf(SkipUnreadableDir), failing)
+		if !rec.rootUnreadable {
+			t.Error("an unresolvable blame left rootUnreadable false")
+		}
+		if items, _, _ := rec.result(); len(items) != 0 {
+			t.Errorf("emitted %v for a blame that resolves to nothing a consumer holds", items)
+		}
+	})
+
+	t.Run("an ordinary blame is still recorded", func(t *testing.T) {
+		rec := &skipRecorder{}
+		applyWalkDecision(rec, "src/legacy", recordSelf(SkipUnreadableDir), relOf)
+		if rec.rootUnreadable {
+			t.Error("an ordinary repo-relative blame raised rootUnreadable")
+		}
+		items, _, _ := rec.result()
+		if len(items) != 1 || items[0].Path != "src/legacy" {
+			t.Errorf("items = %v, want one entry for src/legacy", items)
+		}
+	})
+
+	t.Run("a nil recorder is a no-op, as the API documents", func(t *testing.T) {
+		// walkSourceFiles' doc says "nil disables recording", and skipRecorder
+		// says a nil receiver is a no-op. add() honoured that; the direct
+		// `rec.rootUnreadable = true` field write did not, and the rewrite
+		// widened the states that reach it.
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("nil recorder panicked: %v", p)
+			}
+		}()
+		applyWalkDecision(nil, "src", walkDecision{}, relOf)
+		applyWalkDecision(nil, "src", recordSelf(SkipUnreadableDir), relOf)
+	})
+}
+
+var errRelFailed = errors.New("cannot make relative")

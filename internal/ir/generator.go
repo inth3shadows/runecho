@@ -301,30 +301,8 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 	// deliberate.
 	parentProbe := map[string]bool{}
 
-	// apply turns one walkDecision into recorder writes. Both tables are pure and
-	// live in walkdecision.go; everything impure -- the syscalls, the relative
-	// path, the recorder -- happens here and only here.
 	apply := func(path string, d walkDecision) {
-		if !d.records() {
-			return
-		}
-		blamePath := path
-		if d.blame == blameParent {
-			if parent := filepath.Dir(path); parent != path {
-				blamePath = parent
-			}
-		}
-		rel, rerr := relOf(blamePath)
-		switch decideBlame(rel, rerr != nil) {
-		case blameRootUnreadable:
-			// Nothing was indexed, `skipped` is empty, and Coverage() returns a
-			// VACUOUS 100 because SupportedSeen is 0 too -- every signal reads
-			// clean for a tree nothing opened. It needs its own flag because no
-			// path string can express "all of it".
-			rec.rootUnreadable = true
-		default:
-			rec.add(rel, d.reason)
-		}
+		applyWalkDecision(rec, path, d, relOf)
 	}
 
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
@@ -394,6 +372,54 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		return fn(path, relPath)
 	})
+}
+
+// applyWalkDecision turns one walkDecision into recorder writes. Both tables are
+// pure and live in walkdecision.go; everything impure -- the syscalls, the
+// relative path, the recorder -- happens here and only here.
+//
+// It is a named function rather than a closure so the two FAIL-CLOSED backstops
+// below can be tested directly. Neither is reachable from today's tables, which
+// is exactly why they were documented and not implemented: walkdecision.go
+// claimed "the caller treats actionUnset as rootUnreadable" while the caller
+// returned early and recorded nothing -- byte-equivalent to "index nothing,
+// record nothing, keep walking", which is the fail-open actionUnset was
+// introduced to remove, moved from the struct into the caller.
+func applyWalkDecision(rec *skipRecorder, path string, d walkDecision,
+	relOf func(string) (string, error)) {
+	// BACKSTOP 1. TestWalkDecisionCrossProduct proves totality TODAY. This is
+	// what happens the day someone adds an axis and misses a row: the walk
+	// cannot say what it saw, so it does not vouch for the tree.
+	if d.action == actionUnset {
+		rec.noteRootUnreadable()
+		return
+	}
+	if !d.records() {
+		return
+	}
+	blamePath := path
+	if d.blame == blameParent {
+		if parent := filepath.Dir(path); parent != path {
+			blamePath = parent
+		}
+	}
+	rel, rerr := relOf(blamePath)
+	// Written as "record only on blameRecord" rather than "root_unreadable only
+	// on blameRootUnreadable". The two are identical while decideBlame has two
+	// outcomes and diverge the moment it has three: the default branch decides
+	// what an UNKNOWN outcome does, and the safe answer is never "emit a path we
+	// could not classify into the array a gate fails closed on".
+	//
+	// BACKSTOP 2 is therefore the same branch as the ordinary root case: nothing
+	// was indexed, `skipped` is empty, and Coverage() returns a VACUOUS 100
+	// because SupportedSeen is 0 too, so every signal reads clean for a tree
+	// nothing opened. It needs its own flag because no path string can express
+	// "all of it".
+	if decideBlame(rel, rerr != nil) == blameRecord {
+		rec.add(rel, d.reason)
+		return
+	}
+	rec.noteRootUnreadable()
 }
 
 // classifyWalkErr maps filepath.Walk's error to the table's axis. See errKind.

@@ -236,6 +236,17 @@ type skipRecorder struct {
 	hitCap int
 }
 
+// noteRootUnreadable raises the flag that says nothing under this root was
+// examined. A method rather than a direct field write so the nil receiver the
+// API documents ("nil disables recording") is honoured here as it is by add --
+// a bare `rec.rootUnreadable = true` panics on it.
+func (r *skipRecorder) noteRootUnreadable() {
+	if r == nil {
+		return
+	}
+	r.rootUnreadable = true
+}
+
 func (r *skipRecorder) add(path, reason string) {
 	if r == nil {
 		return

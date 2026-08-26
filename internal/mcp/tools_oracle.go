@@ -248,7 +248,13 @@ func liveIRWithStats(path string, fileCap int) (*ir.IR, ir.Stats, error) {
 
 // maxMCPSkips clips the skip list on the MCP surface. See the call site in the
 // diff tool for why it is tighter than snapshot's own cap.
-const maxMCPSkips = 50
+//
+// PER BUCKET, not per payload: TruncateSkips budgets `skipped` and
+// `ignored_paths` separately so policy noise cannot evict blind spots, which
+// means the worst case is 2n objects. Halved from 50 to 25 when that changed, so
+// the ceiling this constant is supposed to express -- roughly fifty path objects
+// in an agent's context -- still holds.
+const maxMCPSkips = 25
 
 func jsonText(v any) (string, error) {
 	// Minified (no indentation): MCP responses are consumed by an LLM, which

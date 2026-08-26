@@ -435,3 +435,23 @@ func TestFormatFull_WarningNamesTheCapThatFired(t *testing.T) {
 		t.Errorf("expected the fallback cap:\n%s", out)
 	}
 }
+
+// TestTruncateSkips_BudgetIsPerBucket documents the bound a caller must size its
+// constant against: per-bucket budgeting means the payload can carry up to 2n
+// entries, not n.
+func TestTruncateSkips_BudgetIsPerBucket(t *testing.T) {
+	var all []ir.SkippedFile
+	for i := range 40 {
+		all = append(all, ir.SkippedFile{
+			Path: fmt.Sprintf("a%02d.java", i), Reason: ir.SkipUnsupportedLanguage,
+		})
+		all = append(all, ir.SkippedFile{
+			Path: fmt.Sprintf("b%02d", i), Reason: ir.SkipIgnoredDir,
+		})
+	}
+	d := TruncateSkips(DiffResult{SkippedKnown: true, Skipped: all}, 10)
+	if len(d.Skipped) != 20 {
+		t.Errorf("len = %d, want 20 (n per bucket, so 2n total) — a caller sizing a "+
+			"context budget must know the real bound", len(d.Skipped))
+	}
+}

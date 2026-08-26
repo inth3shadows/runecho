@@ -139,10 +139,12 @@ const maxCapReachedSkips = 100
 // The zero value is ready to use, and a nil receiver is a no-op so a caller that
 // does not care about skips can pass nil.
 type skipRecorder struct {
-	items      []SkippedFile
-	seen       map[string]bool
-	capReached int
-	truncated  bool
+	items []SkippedFile
+	seen  map[string]bool
+	// rootUnreadable: the walk could not enter the root itself. See Stats.
+	rootUnreadable bool
+	capReached     int
+	truncated      bool
 	// cap the recorder actually hit, for a message that names the right number.
 	// Two different caps can truncate; reporting MaxRecordedSkips when the
 	// cap_reached sub-cap fired told an operator a 1000-entry list had been

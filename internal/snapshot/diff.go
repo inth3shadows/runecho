@@ -79,6 +79,7 @@ func (db *DB) DiffLiveWithStats(a SnapshotMeta, liveIR *ir.IR, stats ir.Stats) (
 	res.SkippedKnown = true
 	res.SkippedTruncated = stats.SkippedTruncated
 	res.SkippedCap = stats.SkippedCap
+	res.RootUnreadable = stats.RootUnreadable
 	return res, nil
 }
 
@@ -315,6 +316,7 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 		payload["skipped"] = capability
 		payload["ignored_paths"] = policy
 		payload["skipped_truncated"] = d.SkippedTruncated
+		payload["root_unreadable"] = d.RootUnreadable
 	}
 	return payload
 }
@@ -488,10 +490,13 @@ func formatSkipped(d DiffResult) string {
 	// Everything a reader would call a surprise (an unreadable directory, an
 	// unfollowable link) is now classified as capability, so it appears above
 	// rather than needing a second block to rescue it.
-	if len(capability) == 0 && !d.SkippedTruncated {
+	if len(capability) == 0 && !d.SkippedTruncated && !d.RootUnreadable {
 		return ""
 	}
 	var sb strings.Builder
+	if d.RootUnreadable {
+		sb.WriteString("\nNOT EXAMINED — the repo root itself could not be read, so NOTHING was indexed.\n")
+	}
 	writeSkipBlock(&sb, "NOT EXAMINED — a symbol removed here would be invisible to this diff",
 		capability, d.SkippedTruncated, d.SkippedCap)
 	return sb.String()

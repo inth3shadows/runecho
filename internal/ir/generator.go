@@ -93,6 +93,12 @@ type Stats struct {
 	// fire (the overall list and the cap_reached sub-cap), and a message naming
 	// the wrong one mis-scopes the blind spot for whoever reads it.
 	SkippedCap int
+	// RootUnreadable means the walk could not enter the repo root itself, so
+	// NOTHING was examined. It needs its own flag: the root's repo-relative path
+	// is ".", which matches nothing under the documented prefix rule, and with
+	// SupportedSeen at 0 the coverage percentage is a vacuous 100. Without this,
+	// every signal reads clean for a tree nothing opened.
+	RootUnreadable bool
 }
 
 // Coverage returns Indexed as a percentage of SupportedSeen.
@@ -248,7 +254,18 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 						blame = parent
 					}
 				}
-				record(blame, SkipUnreadableDir)
+				// An unreadable ROOT resolves to ".", which the recorder drops as
+				// inert -- it matches no repo-relative path a consumer holds. But
+				// dropping it silently is the worst outcome available: nothing was
+				// indexed, `skipped` is empty, and Coverage() returns a VACUOUS
+				// 100 because SupportedSeen is 0 too, so every signal reads clean
+				// for a tree nothing opened. It needs its own flag, because there
+				// is no path string that can express "all of it".
+				if rel, rerr := relOf(blame); rerr == nil && rel == "." {
+					rec.rootUnreadable = true
+				} else {
+					record(blame, SkipUnreadableDir)
+				}
 			}
 			return nil
 		}
@@ -399,6 +416,7 @@ func (g *Generator) GenerateCtx(ctx context.Context, rootPath string) (*IR, Stat
 	result.RootHash = ComputeRootHash(result.Files)
 	stats.Indexed = len(result.Files)
 	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
+	stats.RootUnreadable = rec.rootUnreadable
 	return result, stats, nil
 }
 
@@ -483,6 +501,7 @@ func (g *Generator) UpdateCtx(ctx context.Context, existingIR *IR, rootPath stri
 	updated.RootHash = ComputeRootHash(updated.Files)
 	stats.Indexed = len(updated.Files)
 	stats.Skipped, stats.SkippedTruncated, stats.SkippedCap = rec.result()
+	stats.RootUnreadable = rec.rootUnreadable
 	return updated, stats, nil
 }
 

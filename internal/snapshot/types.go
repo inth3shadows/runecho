@@ -108,4 +108,7 @@ type DiffResult struct {
 	// SkippedCap is the cap that was hit, for a message that names the right
 	// number. 0 means "unknown"; renderers fall back to ir.MaxRecordedSkips.
 	SkippedCap int
+	// RootUnreadable forwards ir.Stats.RootUnreadable: the walk could not enter
+	// the repo root, so nothing at all was examined.
+	RootUnreadable bool
 }

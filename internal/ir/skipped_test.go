@@ -955,3 +955,34 @@ func TestWalkRootIsNeverRecordedAsDot(t *testing.T) {
 		t.Errorf("real entries must still be recorded, got %v", items)
 	}
 }
+
+// TestUnreadableRootIsFlagged. The root's repo-relative path is ".", which the
+// recorder drops as inert — it matches nothing under the documented prefix rule.
+// Dropping it silently is the worst outcome available: nothing is indexed,
+// `skipped` is empty, and Coverage() returns a VACUOUS 100 because SupportedSeen
+// is 0 too, so every signal reads clean for a tree nothing opened.
+func TestUnreadableRootIsFlagged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	irData, stats, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(irData.Files) != 0 {
+		t.Skip("this filesystem still walks a 0000 directory")
+	}
+	if !stats.RootUnreadable {
+		t.Error("nothing was indexed and nothing was reported — Coverage() also " +
+			"returns a vacuous 100 here, so every signal reads clean")
+	}
+}

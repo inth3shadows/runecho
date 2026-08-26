@@ -208,17 +208,24 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
-			// Both classifications are capability skips now, so the choice only
-			// affects whether a consumer matches this entry exactly or as a
-			// directory prefix. When info is nil the stat failed and we cannot
-			// tell which it was, so take the prefix reading: it covers a subtree
-			// if there was one, and for a plain file it degrades to the exact
-			// path plus a prefix that matches nothing else. The reverse mistake
-			// -- calling an unreadable directory a file -- silently drops its
-			// whole subtree from the consumer's view, and nothing recorded those
-			// files because nothing ever saw them.
+			// Same unknown state as the unresolvable-symlink branch below, and
+			// the same answer. When info is nil the lstat failed and we cannot
+			// tell a file from a directory, so record it as a prefix -- that
+			// covers a subtree if there was one, and for a plain file it
+			// degrades to the exact path plus a prefix matching nothing else.
+			// The reverse mistake silently drops a whole subtree whose files
+			// nothing ever saw.
+			//
+			// looksLikeNonCodeFile is what keeps that from becoming a false
+			// block: an entry whose extension says it is plainly not source
+			// stays out of the fail-closed array. Without it, a directory at
+			// mode 0444 (readdir works, lstat of children does not) put
+			// assets/README.md and assets/logo.png in `skipped`, as did the
+			// ordinary race of a file vanishing mid-walk during a git checkout.
 			if info == nil || info.IsDir() {
-				record(path, SkipUnreadableDir)
+				if !g.looksLikeNonCodeFile(path) {
+					record(path, SkipUnreadableDir)
+				}
 			} else if g.isCode(path) {
 				record(path, SkipUnreadable)
 			}

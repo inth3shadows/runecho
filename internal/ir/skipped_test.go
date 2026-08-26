@@ -761,3 +761,48 @@ func TestUnreadableDirectoryIsAFailClosedBlindSpot(t *testing.T) {
 			"operator configured — it must not be filed as informational")
 	}
 }
+
+// TestUnstattableNonCodeStaysOutOfTheFailClosedArray.
+//
+// A directory at mode 0444 lets readdir succeed while lstat of its children
+// fails, so the walk reaches its error branch with info == nil for each child.
+// That branch recorded unconditionally, so assets/README.md and assets/logo.png
+// entered the array a gate fails closed on — blocking a docs-only edit. The same
+// path is hit by the ordinary race of a file vanishing mid-walk during a git
+// checkout or an editor's temp-file churn.
+func TestUnstattableNonCodeStaysOutOfTheFailClosedArray(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0444 is still traversable")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	assets := filepath.Join(dir, "assets")
+	writeFile(t, dir, "assets/README.md", "# assets\n")
+	writeFile(t, dir, "assets/logo.png", "notreallyapng\n")
+	writeFile(t, dir, "assets/Widget.java", "class Widget { }\n")
+	if err := os.Chmod(assets, 0o444); err != nil { // readable, not traversable
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(assets, 0o755) })
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	_, stats, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	if len(got) == 0 {
+		t.Skip("this filesystem still stats children of a 0444 directory")
+	}
+	for _, quiet := range []string{"assets/README.md", "assets/logo.png"} {
+		if reason, reported := got[quiet]; reported {
+			t.Errorf("%s is not source and must not reach the fail-closed array (got %q)",
+				quiet, reason)
+		}
+	}
+	// The code file in the same unreadable directory still counts.
+	if got["assets/Widget.java"] == "" && got["assets"] == "" {
+		t.Error("nothing recorded for an unreadable directory containing source")
+	}
+}

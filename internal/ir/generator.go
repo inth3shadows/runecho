@@ -247,7 +247,16 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		// fails closed on, for a directory the operator explicitly excluded. The
 		// ignore rule is the operator's decision either way; how the directory
 		// happens to be stored is not their problem.
-		if path != absRoot && g.ignoredPaths[filepath.Base(path)] {
+		// Directories and symlinks only. Moving this check above the symlink
+		// branch (so an ignored directory stored AS a link is still an ignore)
+		// also put it ahead of the IsDir test, which made it fire for regular
+		// FILES: a plain file named `dist` or `vendor` was recorded as
+		// `ignored_dir`, a reason that is simply untrue for a file, and it
+		// consumed recorder budget. None of the twelve default ignore names
+		// carries an extension, so no source file could be caught -- but a `.git`
+		// FILE (git worktrees and submodules use one) hit it on every walk.
+		if path != absRoot && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) &&
+			g.ignoredPaths[filepath.Base(path)] {
 			record(path, SkipIgnoredDir)
 			if info.IsDir() {
 				return filepath.SkipDir

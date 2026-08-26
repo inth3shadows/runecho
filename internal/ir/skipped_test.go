@@ -877,3 +877,34 @@ func TestUpdateFileFollowsASymlinkedRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestIgnoreListAppliesToDirectoriesAndLinksOnly.
+//
+// Moving the ignore check above the symlink branch — so an ignored directory
+// stored as a link is still an ignore — also moved it above the IsDir test, so
+// it fired for regular files. A plain file named `dist` or `vendor` was recorded
+// as `ignored_dir`, which is untrue for a file, and consumed recorder budget.
+// The real-world hit is a `.git` FILE: git worktrees and submodules use one, so
+// it triggered on every walk of every worktree.
+func TestIgnoreListAppliesToDirectoriesAndLinksOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	writeFile(t, dir, "dist", "not a directory\n")
+	writeFile(t, dir, ".git", "gitdir: /elsewhere/.bare/worktrees/x\n")
+	writeFile(t, dir, "vendor/dep.go", "package dep\n") // a real ignored dir
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+
+	for _, file := range []string{"dist", ".git"} {
+		if reason, reported := got[file]; reported {
+			t.Errorf("%s is a regular FILE; %q is not a truthful reason for it", file, reason)
+		}
+	}
+	if got["vendor"] != SkipIgnoredDir {
+		t.Errorf("a real ignored directory must still be recorded, got %q", got["vendor"])
+	}
+}

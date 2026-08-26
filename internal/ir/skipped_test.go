@@ -1172,3 +1172,53 @@ func TestTableEntriesDoNotMatchCommonNonCode(t *testing.T) {
 		}
 	}
 }
+
+// TestUnreadableSymlinkKeepsNonCodeOut. A link whose target cannot be stat'd for
+// a non-ENOENT reason is recorded — something is there we cannot see. But
+// `skipped` is fail-closed on, and non-code in it blocks a docs-only change
+// permanently, until someone fixes the link or the target's permissions.
+//
+// The extension is weak evidence and decisive in exactly one direction: a path
+// that HAS one is a file. A path without one could be a directory, so it is
+// recorded.
+func TestUnreadableSymlinkKeepsNonCodeOut(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	blocked := t.TempDir()
+	for _, n := range []string{"README.md", "logo.png", "lib.go", "inner/x.go"} {
+		writeFile(t, blocked, n, "x\n")
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	for name, target := range map[string]string{
+		"README.md": "README.md", "logo.png": "logo.png",
+		"lib.go": "lib.go", "shared": "inner",
+	} {
+		if err := os.Symlink(filepath.Join(blocked, target), filepath.Join(dir, name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	_, stats, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	for _, quiet := range []string{"README.md", "logo.png"} {
+		if reason, reported := got[quiet]; reported {
+			t.Errorf("%s is non-code and must not reach the fail-closed array (got %q)", quiet, reason)
+		}
+	}
+	for _, loud := range []string{"lib.go", "shared"} {
+		if got[loud] == "" {
+			t.Errorf("%s may be hiding source and must be recorded", loud)
+		}
+	}
+}

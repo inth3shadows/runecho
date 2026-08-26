@@ -380,9 +380,20 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 				// `skipped`, which USAGE.md says never happens.
 			case serr != nil:
 				// Could not resolve for some OTHER reason -- EACCES, EPERM, EIO,
-				// ELOOP. Something IS there and the walk cannot see it, and a
-				// directory link has no extension to judge by, so record it.
-				record(path, SkipUnreadableDir)
+				// ELOOP. Something IS there and the walk cannot see it.
+				//
+				// A link with NO extension could be a directory, and a directory
+				// link has no extension to judge by, so it is recorded. A link
+				// with a plainly non-code extension is a FILE we do not care
+				// about: recording `README.md -> <unreadable>/README.md` put
+				// non-code in the fail-closed array and blocked every docs change
+				// until someone fixed the link or the target's permissions. The
+				// extension is weak evidence, but it is decisive in exactly one
+				// direction -- a path that HAS one is a file -- and that is the
+				// only direction used here.
+				if ext := filepath.Ext(path); ext == "" || g.isCode(path) {
+					record(path, SkipUnreadableDir)
+				}
 			case target.IsDir():
 				record(path, SkipSymlinkDir)
 			default:

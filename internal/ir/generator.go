@@ -782,20 +782,6 @@ func normalizePath(relPath string) string {
 	return normalized
 }
 
-// isCode reports whether path looks like source, by either measure: a language
-// we parse, or one we know of but do not. It is the guard on every capability
-// skip that names a FILE.
-//
-// The rule it enforces is the one the whole contract rests on -- non-code is
-// never in `skipped` -- because a consumer fails closed on that array, and a
-// README or a PNG in it blocks a documentation-only change. Every branch that
-// records a file skip must go through here; the dangling-symlink branch did not,
-// and that was enough to reintroduce the false block.
-func (g *Generator) isCode(path string) bool {
-	ext := filepath.Ext(path)
-	return g.supportsExtension(ext) || IsKnownSourceExtension(ext)
-}
-
 // supportsExtension returns true if any registered parser handles this extension.
 //
 // The extension is lowercased first. Every parser's SupportsExtension is an

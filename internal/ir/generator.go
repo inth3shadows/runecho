@@ -154,6 +154,19 @@ func NewGenerator(config GeneratorConfig) *Generator {
 // Returning an error from walkerFunc is propagated and stops the walk.
 type walkerFunc func(absPath, normalizedPath string) error
 
+// resolvedOrSame returns path with symlinks resolved, or path unchanged when it
+// cannot be resolved (broken link, permission error, nonexistent path).
+//
+// Used on both sides of every root/file containment test. A repo reached through
+// a link must resolve to the same string whichever way a caller names it, or the
+// two disagree and the mismatch is silent.
+func resolvedOrSame(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
 // walkSourceFiles walks absRoot, calling fn for each supported source file.
 // It skips ignored directories, symlinked directories, and unsupported extensions.
 // The walk is checked for cancellation before each entry, so a done ctx
@@ -177,11 +190,7 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 	// prune links found INSIDE the tree; the directory the operator named is what
 	// they asked to index, so follow it. Reporting stays relative to the resolved
 	// root, which is what every path in the IR is already relative to.
-	if info, serr := os.Stat(absRoot); serr == nil && info.IsDir() {
-		if resolved, rerr := filepath.EvalSymlinks(absRoot); rerr == nil {
-			absRoot = resolved
-		}
-	}
+	absRoot = resolvedOrSame(absRoot)
 	// Skips are reported repo-relative, matching every other path in the IR and
 	// in a diff payload. A path that cannot be made relative is not reported at
 	// all rather than reported absolute: a consumer intersects these against its
@@ -495,6 +504,19 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	if err != nil {
 		return existing, false, nil
 	}
+	// Both sides resolved through symlinks before the containment test, the same
+	// way walkSourceFiles resolves its root.
+	//
+	// Without this, a repo reached through a link indexes fine on a full walk and
+	// then never refreshes incrementally: filepath.Rel("/home/u/work",
+	// "/mnt/checkouts/x/main.go") starts with "..", so the edit is judged
+	// "outside this repo" and the IR silently goes stale. It fails in both
+	// directions -- root given as the link and file as the real path, or the
+	// reverse -- because only one of the two is ever resolved by the caller.
+	// Resolution failure falls through to the unresolved paths, which is the
+	// previous behaviour.
+	absRoot = resolvedOrSame(absRoot)
+	absFile = resolvedOrSame(absFile)
 	rel, err := filepath.Rel(absRoot, absFile)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return existing, false, nil // edited file is outside this repo

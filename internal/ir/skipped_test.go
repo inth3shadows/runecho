@@ -834,3 +834,46 @@ func TestHitCapReportsTheLargestCapThatFired(t *testing.T) {
 			"mis-scopes the blind spot", cap, maxRecordedSkips, len(items))
 	}
 }
+
+// TestUpdateFileFollowsASymlinkedRoot.
+//
+// Resolving the walk root made symlinked repos indexable, and left the
+// incremental path broken: UpdateFile computed filepath.Rel against the
+// UNresolved root, so the edited file's real path started with ".." and was
+// judged "outside this repo". The full walk worked, the per-edit refresh
+// silently did nothing, and the IR went stale — worse than before the fix, when
+// the repo was simply never indexed at all and the staleness was visible.
+func TestUpdateFileFollowsASymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	writeFile(t, real, "main.go", "package p\nfunc A() {}\n")
+	link := filepath.Join(t.TempDir(), "work")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	g := NewGenerator(GeneratorConfig{})
+	base, _, err := g.Generate(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := base.Files["main.go"]; !ok {
+		t.Fatal("precondition: the symlinked root should index")
+	}
+	writeFile(t, real, "main.go", "package p\nfunc A() {}\nfunc B() {}\n")
+
+	// Both namings must work: the caller may hold either the link or the real
+	// path, and only one of the two is ever resolved for it.
+	for _, c := range []struct{ name, root, file string }{
+		{"link root, real file", link, filepath.Join(real, "main.go")},
+		{"real root, link file", real, filepath.Join(link, "main.go")},
+		{"link root, link file", link, filepath.Join(link, "main.go")},
+	} {
+		_, changed, err := g.UpdateFile(base, c.root, c.file)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !changed {
+			t.Errorf("%s: the edit was judged outside the repo, so the IR silently went stale", c.name)
+		}
+	}
+}

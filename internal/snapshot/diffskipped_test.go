@@ -505,7 +505,7 @@ func TestFormatCompact_QualifiesEveryReasonFormatFullDoes(t *testing.T) {
 		{"truncated with an empty capability list", func(d *DiffResult) {
 			d.Skipped = []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}}
 			d.SkippedTruncated = true
-		}, "NOT examined"},
+		}, "coverage unknown"},
 		{"unreadable root", func(d *DiffResult) { d.RootUnreadable = true }, "NOTHING examined"},
 	} {
 		d := base
@@ -518,5 +518,44 @@ func TestFormatCompact_QualifiesEveryReasonFormatFullDoes(t *testing.T) {
 		if FormatFull(d) == "" {
 			t.Errorf("%s: precondition — FormatFull should say something", c.name)
 		}
+	}
+}
+
+// TestFormatCompact_RootUnreadableWinsOverDrift. When the root cannot be read, a
+// live diff against a snapshot that HAS files reports every one as removed. The
+// zero-drift branch therefore never ran, and compact rendered a tooling failure
+// as a mass symbol deletion while FormatFull said the root could not be read —
+// the two surfaces disagreeing in the shape with the highest consequence.
+func TestFormatCompact_RootUnreadableWinsOverDrift(t *testing.T) {
+	d := DiffResult{
+		SnapshotA:      SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:      SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown:   true,
+		RootUnreadable: true,
+		TotalRemoved:   3,
+		Files: []FileDiff{{Path: "main.go", Status: "removed",
+			Removed: []SymbolDelta{{Name: "A"}, {Name: "B"}, {Name: "C"}}}},
+	}
+	out := FormatCompact(d)
+	if !strings.Contains(out, "NOTHING examined") {
+		t.Errorf("a tooling failure must not render as a mass deletion, got %q", out)
+	}
+}
+
+// TestFormatCompact_TruncatedWithNoEntriesAvoidsZeroPlus. "0+ paths NOT
+// examined" is the rendering writeSkipBlock suppresses for reading as a bug.
+func TestFormatCompact_TruncatedWithNoEntriesAvoidsZeroPlus(t *testing.T) {
+	out := FormatCompact(DiffResult{
+		SnapshotA:        SnapshotMeta{RootHash: "aaaaaaaaaaaa"},
+		SnapshotB:        SnapshotMeta{RootHash: "bbbbbbbbbbbb"},
+		SkippedKnown:     true,
+		Skipped:          []ir.SkippedFile{{Path: ".git", Reason: ir.SkipIgnoredDir}},
+		SkippedTruncated: true,
+	})
+	if strings.Contains(out, "0+") {
+		t.Errorf("got %q", out)
+	}
+	if !strings.Contains(out, "coverage unknown") {
+		t.Errorf("must still say the coverage is unknown, got %q", out)
 	}
 }

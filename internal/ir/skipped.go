@@ -145,11 +145,8 @@ type skipRecorder struct {
 	seen  map[string]bool
 	// rootUnreadable: the walk could not enter the root itself. See Stats.
 	rootUnreadable bool
-	// subCapOnly: the only cap that fired was the per-reason cap_reached one, so
-	// the number bounds that reason rather than the whole list.
-	subCapOnly bool
-	capReached int
-	truncated  bool
+	capReached     int
+	truncated      bool
 	// cap the recorder actually hit, for a message that names the right number.
 	// Two different caps can truncate; reporting MaxRecordedSkips when the
 	// cap_reached sub-cap fired told an operator a 1000-entry list had been
@@ -179,18 +176,23 @@ func (r *skipRecorder) add(path, reason string) {
 	if r.seen[path] {
 		return
 	}
-	r.seen[path] = true
-	if reason == SkipCapReached {
-		if r.capReached >= maxCapReachedSkips {
-			r.noteCap(maxCapReachedSkips)
-			return
-		}
-		r.capReached++
+	// Inserted only once the entry can actually be stored. The caps exist so a
+	// monorepo cannot dominate memory as well as the payload; inserting before
+	// the cap checks left `seen` unbounded, so a repo whose file cap produced
+	// millions of cap_reached adds accumulated millions of path strings while
+	// `items` stopped at 1000.
+	if reason == SkipCapReached && r.capReached >= maxCapReachedSkips {
+		r.noteCap(maxCapReachedSkips)
+		return
 	}
 	if len(r.items) >= maxRecordedSkips {
 		r.noteCap(maxRecordedSkips)
 		return
 	}
+	if reason == SkipCapReached {
+		r.capReached++
+	}
+	r.seen[path] = true
 	r.items = append(r.items, SkippedFile{Path: path, Reason: reason})
 }
 
@@ -204,17 +206,13 @@ func (r *skipRecorder) add(path, reason string) {
 // naming a cap of 100, which reads as a contradiction.
 //
 // The honest number is the one that bounds the list as rendered. The sub-cap
-// bounds one reason, not the list, so it is reported only when nothing else
-// truncated -- and the renderer says which reason it applies to.
+// bounds one reason, not the list. The message is worded "a skip cap was hit
+// (N)", which is true of either cap, rather than "the skip list hit its cap",
+// which was only ever true of one.
 func (r *skipRecorder) noteCap(capHit int) {
 	r.truncated = true
 	if capHit > r.hitCap {
 		r.hitCap = capHit
-	}
-	if capHit == maxCapReachedSkips {
-		r.subCapOnly = r.hitCap == maxCapReachedSkips
-	} else {
-		r.subCapOnly = false
 	}
 }
 

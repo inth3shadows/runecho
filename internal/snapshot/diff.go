@@ -229,6 +229,19 @@ func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 // it. A caller piping --compact into a log gets one line either way; it must not
 // be a silently empty one.
 func FormatCompact(d DiffResult) string {
+	// RootUnreadable is checked BEFORE the zero-drift test, not inside it.
+	//
+	// When the root cannot be read, a live diff against a snapshot that HAS files
+	// reports every one of them as removed -- so the branch below never runs and
+	// compact rendered a tooling failure as a mass symbol deletion
+	// ("-3 symbols, 1 file changed") while FormatFull said the root could not be
+	// read. That is the disagreement with the highest consequence of all, and it
+	// sat in the one shape the earlier fix did not cover.
+	aShort, bShort := shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash)
+	if d.RootUnreadable {
+		return fmt.Sprintf("IR DIFF [%s→%s]: NOTHING examined — the repo root could not be read",
+			aShort, bShort)
+	}
 	if len(d.Files) == 0 {
 		// Every reason FormatFull would qualify "no structural changes" has to
 		// qualify this line too, or the two surfaces disagree about the same
@@ -236,23 +249,21 @@ func FormatCompact(d DiffResult) string {
 		// for a repo the indexer could not read.
 		n := len(skipCount(d))
 		switch {
-		case d.RootUnreadable:
-			return fmt.Sprintf("IR DIFF [%s→%s]: NOTHING examined — the repo root could not be read",
-				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash))
+		case d.SkippedTruncated && n == 0:
+			// "0+ paths NOT examined" is the rendering writeSkipBlock suppresses
+			// for reading as a bug and undercutting the warning it introduces.
+			// Say the thing the number cannot.
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but a skip cap was hit — coverage unknown",
+				aShort, bShort)
 		case d.SkippedTruncated:
 			// A floor, not a total: the list hit its cap, so n understates it.
-			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %d+ paths NOT examined",
-				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash), n)
+			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %d+ paths NOT examined", aShort, bShort, n)
 		case n > 0:
 			return fmt.Sprintf("IR DIFF [%s→%s]: no drift, but %s NOT examined",
-				shortHash(d.SnapshotA.RootHash), shortHash(d.SnapshotB.RootHash),
-				plural(n, "path"))
+				aShort, bShort, plural(n, "path"))
 		}
 		return ""
 	}
-	aShort := shortHash(d.SnapshotA.RootHash)
-	bShort := shortHash(d.SnapshotB.RootHash)
-
 	// Count every changed file — added, removed, and modified. The label is
 	// "changed", not "modified": an added or removed file is a change but not a
 	// modification, so labeling this total "modified" over-counted modifications

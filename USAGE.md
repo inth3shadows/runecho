@@ -217,7 +217,7 @@ the tool — and a directory it could not read took its whole subtree with it,
 recording none of the files inside, because it never saw them. That is a blind
 spot, so it is in `skipped`.
 
-Three rules for machine consumers:
+Four rules for machine consumers:
 
 * **Non-code is never in `skipped`.** A `README.md` or a `.png` is not a blind
   spot in a symbol index, so a gate can fail closed on a non-empty `skipped`
@@ -228,6 +228,10 @@ Three rules for machine consumers:
   of health it never checked.
 * **`skipped_truncated: true` means the list hit its cap**, so absence from it no
   longer implies "indexed". Treat it as "unknown".
+* **`root_unreadable: true` means NOTHING was examined.** The repo root itself
+  could not be read, so `skipped` is empty, `skipped_truncated` is false, and no
+  file was indexed — every other signal reads clean. It is the one condition a
+  gate cannot detect from the other two, so check it first.
 
 The text output shows `skipped` only. `ignored_paths` is your own configuration
 echoed back, and with `.git` always in it, printing it would put a block on every

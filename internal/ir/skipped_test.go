@@ -1120,9 +1120,9 @@ func TestSubCapAloneDoesNotClaimToBoundTheList(t *testing.T) {
 	if !truncated || capHit != maxCapReachedSkips {
 		t.Fatalf("want the sub-cap reported, got truncated=%v cap=%d", truncated, capHit)
 	}
-	if !r.subCapOnly {
-		t.Error("only the per-reason cap fired; the number does not bound the whole list")
-	}
+	// The wording carries this now, not a field: "a skip cap was hit (N)" is true
+	// of either cap, where "the skip list hit its cap (N)" was only ever true of
+	// one. A subCapOnly field was added for a renderer that never read it.
 	if len(items) <= capHit {
 		t.Errorf("precondition: the list (%d) should exceed the sub-cap (%d), which is "+
 			"what made the old wording contradictory", len(items), capHit)

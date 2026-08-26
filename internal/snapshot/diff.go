@@ -390,8 +390,15 @@ func clipSkips(entries []ir.SkippedFile, n int) ([]ir.SkippedFile, bool) {
 const maxShownSkips = 20
 
 // writeSkipBlock renders one labelled group of skips, or nothing when empty.
-func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool, cap int) {
-	if len(entries) == 0 && !truncated {
+func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile, truncated bool, capHit int) {
+	if len(entries) == 0 {
+		// Nothing to list. The WARNING still has to be said -- a truncated run
+		// that prints nothing silently asserts completeness -- but a
+		// "NOT EXAMINED (0+ paths):" header above zero entries reads as a
+		// rendering bug and undercuts the warning it introduces.
+		if truncated {
+			writeTruncationWarning(sb, capHit)
+		}
 		return
 	}
 	count := plural(len(entries), "path")
@@ -409,12 +416,19 @@ func writeSkipBlock(sb *strings.Builder, header string, entries []ir.SkippedFile
 		fmt.Fprintf(sb, "  %s  [%s]\n", sk.Path, sk.Reason)
 	}
 	if truncated {
-		if cap == 0 {
-			cap = ir.MaxRecordedSkips
-		}
-		fmt.Fprintf(sb, "  WARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
-			cap)
+		writeTruncationWarning(sb, capHit)
 	}
+}
+
+// writeTruncationWarning says that the list is a floor, not a total. capHit 0
+// means the cap is unknown (a hand-built DiffResult, or one from an older
+// version), in which case the package cap is the least-wrong number to print.
+func writeTruncationWarning(sb *strings.Builder, capHit int) {
+	if capHit == 0 {
+		capHit = ir.MaxRecordedSkips
+	}
+	fmt.Fprintf(sb, "\nWARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
+		capHit)
 }
 
 // formatSkipped renders the paths the indexer declined, or "" when there are

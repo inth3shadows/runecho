@@ -405,6 +405,11 @@ func TestFormatFull_TruncationWarningSurvivesAnEmptyList(t *testing.T) {
 	if !strings.Contains(out, "WARNING") {
 		t.Errorf("a truncated run must warn even with an empty capability list:\n%s", out)
 	}
+	// ...but without a header claiming to introduce a list that is not there.
+	if strings.Contains(out, "NOT EXAMINED") {
+		t.Errorf("a header above zero entries reads as a rendering bug and undercuts "+
+			"the warning it introduces:\n%s", out)
+	}
 }
 
 // TestFormatFull_WarningNamesTheCapThatFired. Two caps can truncate: the overall

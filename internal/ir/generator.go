@@ -173,6 +173,25 @@ func resolvedOrSame(path string) string {
 	return path
 }
 
+// resolvedOrSameLeaf resolves the DIRECTORY containing path and re-joins the
+// base name, so a path whose leaf no longer exists still resolves.
+//
+// EvalSymlinks fails outright when the final component is missing, which is
+// exactly the DELETE case: resolving the root but not the file left absFile
+// under the link while absRoot was resolved, filepath.Rel produced a "../.."
+// path, the containment guard fired, and UpdateFile returned changed=false. A
+// file deleted in a repo reached through a symlink kept its symbols in the IR
+// indefinitely -- the "removed symbol invisible" failure this package exists to
+// close, on the incremental path.
+func resolvedOrSameLeaf(path string) string {
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		return path
+	}
+	resolved := resolvedOrSame(filepath.Clean(dir))
+	return filepath.Join(resolved, base)
+}
+
 // walkSourceFiles walks absRoot, calling fn for each supported source file.
 // It skips ignored directories, symlinked directories, and unsupported extensions.
 // The walk is checked for cancellation before each entry, so a done ctx
@@ -556,7 +575,7 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	// Resolution failure falls through to the unresolved paths, which is the
 	// previous behaviour.
 	absRoot = resolvedOrSame(absRoot)
-	absFile = resolvedOrSame(absFile)
+	absFile = resolvedOrSameLeaf(absFile)
 	rel, err := filepath.Rel(absRoot, absFile)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return existing, false, nil // edited file is outside this repo

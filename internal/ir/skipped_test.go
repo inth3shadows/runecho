@@ -903,6 +903,25 @@ func TestUpdateFileFollowsASymlinkedRoot(t *testing.T) {
 			t.Errorf("%s: the edit was judged outside the repo, so the IR silently went stale", c.name)
 		}
 	}
+
+	// DELETION is the case that matters most and the one EvalSymlinks cannot
+	// handle directly: it fails outright when the final component is missing, so
+	// the file path stayed under the link while the root was resolved, Rel
+	// produced "../..", and the removal never reached the IR. A deleted symbol
+	// that stays indexed is the exact failure this package exists to close.
+	if err := os.Remove(filepath.Join(real, "main.go")); err != nil {
+		t.Fatal(err)
+	}
+	after, changed, err := g.UpdateFile(base, link, filepath.Join(link, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("a deletion under a symlinked root was judged outside the repo")
+	}
+	if _, still := after.Files["main.go"]; still {
+		t.Error("the deleted file is still in the IR, so its symbols read as present")
+	}
 }
 
 // TestIgnoreListAppliesToDirectoriesAndLinksOnly.

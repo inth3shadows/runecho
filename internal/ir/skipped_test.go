@@ -1038,3 +1038,51 @@ func TestUnreadableRootIsFlagged(t *testing.T) {
 			"returns a vacuous 100 here, so every signal reads clean")
 	}
 }
+
+// TestUpdateFileKeepsTheNamedKeyAndTheStaleEntryCleanup.
+//
+// Resolving the edited path unconditionally had two side effects beyond the
+// symlinked-root case it was for: the IR key became the TARGET's path rather
+// than the named one (the walk skips symlinks, so it never produces that key),
+// and an out-of-repo symlink was rejected before the #143 stale-entry cleanup
+// could drop the entry the file used to have.
+func TestUpdateFileKeepsTheNamedKeyAndTheStaleEntryCleanup(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, outside, "ext.go", "package p\nfunc E() {}\n")
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	writeFile(t, dir, "link.go", "package p\nfunc L() {}\n")
+
+	g := NewGenerator(GeneratorConfig{})
+	base, _, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := base.Files["link.go"]; !ok {
+		t.Fatal("precondition: link.go should start out as a real indexed file")
+	}
+
+	// Replace the real file with a symlink pointing OUTSIDE the repo. The walk
+	// would no longer index it, so its stale entry must be dropped.
+	if err := os.Remove(filepath.Join(dir, "link.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "ext.go"), filepath.Join(dir, "link.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	after, changed, err := g.UpdateFile(base, dir, filepath.Join(dir, "link.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("replacing an indexed file with an out-of-repo symlink must drop its entry (#143)")
+	}
+	if _, still := after.Files["link.go"]; still {
+		t.Error("the stale entry survived, so its symbols still read as present")
+	}
+	if _, wrong := after.Files["ext.go"]; wrong {
+		t.Error("the target's path was used as the IR key; the walk never produces that key")
+	}
+}

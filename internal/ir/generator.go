@@ -615,10 +615,29 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	// Resolution failure falls through to the unresolved paths, which is the
 	// previous behaviour.
 	absRoot = resolvedOrSame(absRoot)
-	absFile = resolvedOrSameLeaf(absFile)
-	rel, err := filepath.Rel(absRoot, absFile)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return existing, false, nil // edited file is outside this repo
+	// Containment is tested with the path AS NAMED first, and only reconciled
+	// through symlinks if that fails.
+	//
+	// Resolving absFile unconditionally was too eager. It made the IR key the
+	// TARGET's path rather than the named one, so an in-repo symlink
+	// (`schema.go -> generated/schema.go`) wrote to a key the walk never
+	// produces -- the walk skips symlinks -- and it rejected an out-of-repo
+	// symlink before the #143 stale-entry cleanup below could drop the entry the
+	// file used to have. Resolution exists here for exactly one purpose:
+	// reconciling a root and a file the caller named through different symlink
+	// forms.
+	inRepo := func(root, file string) (string, bool) {
+		r, rerr := filepath.Rel(root, file)
+		if rerr != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		return r, true
+	}
+	rel, ok := inRepo(absRoot, absFile)
+	if !ok {
+		if rel, ok = inRepo(absRoot, resolvedOrSameLeaf(absFile)); !ok {
+			return existing, false, nil // edited file is outside this repo
+		}
 	}
 	norm := normalizePath(rel)
 

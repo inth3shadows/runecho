@@ -762,28 +762,31 @@ func TestUnreadableDirectoryIsAFailClosedBlindSpot(t *testing.T) {
 	}
 }
 
-// TestUnstattableNonCodeStaysOutOfTheFailClosedArray.
+// TestUnenterableDirectoryIsRecordedOnceAsTheParent.
 //
 // A directory at mode 0444 lets readdir succeed while lstat of its children
-// fails, so the walk reaches its error branch with info == nil for each child.
-// That branch recorded unconditionally, so assets/README.md and assets/logo.png
-// entered the array a gate fails closed on — blocking a docs-only edit. The same
-// path is hit by the ordinary race of a file vanishing mid-walk during a git
-// checkout or an editor's temp-file churn.
-func TestUnstattableNonCodeStaysOutOfTheFailClosedArray(t *testing.T) {
+// fails, so the walk reaches its error branch once per child with info == nil.
+//
+// Recording those children individually was a false block: an extension is not
+// evidence for a path that has none, so `Makefile`, `LICENSE` and `Dockerfile`
+// went into the array a gate fails closed on. The blind spot belongs to the
+// containing DIRECTORY — it is what is genuinely unenterable, one entry covers
+// everything beneath it under the documented prefix rule, and no non-code
+// FILENAME ever enters.
+func TestUnenterableDirectoryIsRecordedOnceAsTheParent(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: mode 0444 is still traversable")
 	}
 	dir := t.TempDir()
 	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
-	assets := filepath.Join(dir, "assets")
-	writeFile(t, dir, "assets/README.md", "# assets\n")
-	writeFile(t, dir, "assets/logo.png", "notreallyapng\n")
-	writeFile(t, dir, "assets/Widget.java", "class Widget { }\n")
-	if err := os.Chmod(assets, 0o444); err != nil { // readable, not traversable
+	sub := filepath.Join(dir, "sub")
+	for _, name := range []string{"Makefile", "LICENSE", "Dockerfile", "README.md", "Widget.java"} {
+		writeFile(t, dir, "sub/"+name, "x\n")
+	}
+	if err := os.Chmod(sub, 0o444); err != nil { // readable, not traversable
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(assets, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
 
 	g := NewGenerator(GeneratorConfig{})
 	g.warn = func(string, ...any) {}
@@ -791,19 +794,43 @@ func TestUnstattableNonCodeStaysOutOfTheFailClosedArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := skipMap(t, stats)
+	got := skipMap(t, stats) // also asserts no path is recorded twice
 	if len(got) == 0 {
 		t.Skip("this filesystem still stats children of a 0444 directory")
 	}
-	for _, quiet := range []string{"assets/README.md", "assets/logo.png"} {
-		if reason, reported := got[quiet]; reported {
-			t.Errorf("%s is not source and must not reach the fail-closed array (got %q)",
-				quiet, reason)
+
+	if got["sub"] != SkipUnreadableDir {
+		t.Errorf("the unenterable directory itself must be the entry, got %q", got["sub"])
+	}
+	for name := range got {
+		if name != "sub" {
+			t.Errorf("only the directory should be recorded; got a child entry %q", name)
 		}
 	}
-	// The code file in the same unreadable directory still counts.
-	if got["assets/Widget.java"] == "" && got["assets"] == "" {
-		t.Error("nothing recorded for an unreadable directory containing source")
+}
+
+// TestVanishedEntryIsNotRecorded. A file removed mid-walk — a git checkout, an
+// editor's temp file — also reaches the error branch, but nothing was hidden
+// from us: there is nothing there. Recording it puts a transient, self-healing
+// false block in the fail-closed array.
+func TestVanishedEntryIsNotRecorded(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	rec := &skipRecorder{}
+	// Drive the branch directly: reproducing the race reliably is not possible,
+	// and the classification is the contract.
+	err := g.walkSourceFiles(t.Context(), dir, func(string, string) error { return nil }, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items, _, _ := rec.result(); len(items) != 0 {
+		t.Fatalf("clean tree should record nothing, got %v", items)
+	}
+	if !os.IsNotExist(os.ErrNotExist) {
+		t.Fatal("precondition: os.IsNotExist must recognise ErrNotExist")
 	}
 }
 

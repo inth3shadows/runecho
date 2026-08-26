@@ -140,6 +140,7 @@ const maxCapReachedSkips = 100
 // does not care about skips can pass nil.
 type skipRecorder struct {
 	items      []SkippedFile
+	seen       map[string]bool
 	capReached int
 	truncated  bool
 	// cap the recorder actually hit, for a message that names the right number.
@@ -162,6 +163,16 @@ func (r *skipRecorder) add(path, reason string) {
 	if path == "." {
 		return
 	}
+	// One entry per path. An unenterable directory yields a stat failure for
+	// every child, and each of those records the same parent; without this the
+	// payload carries N copies of it and burns N slots of the recorder budget.
+	if r.seen == nil {
+		r.seen = make(map[string]bool)
+	}
+	if r.seen[path] {
+		return
+	}
+	r.seen[path] = true
 	if reason == SkipCapReached {
 		if r.capReached >= maxCapReachedSkips {
 			r.noteCap(maxCapReachedSkips)

@@ -217,26 +217,38 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
-			// Same unknown state as the unresolvable-symlink branch below, and
-			// the same answer. When info is nil the lstat failed and we cannot
-			// tell a file from a directory, so record it as a prefix -- that
-			// covers a subtree if there was one, and for a plain file it
-			// degrades to the exact path plus a prefix matching nothing else.
-			// The reverse mistake silently drops a whole subtree whose files
-			// nothing ever saw.
+			// Two different failures reach here, and they want opposite answers.
 			//
-			// looksLikeNonCodeFile is what keeps that from becoming a false
-			// block: an entry whose extension says it is plainly not source
-			// stays out of the fail-closed array. Without it, a directory at
-			// mode 0444 (readdir works, lstat of children does not) put
-			// assets/README.md and assets/logo.png in `skipped`, as did the
-			// ordinary race of a file vanishing mid-walk during a git checkout.
-			if info == nil || info.IsDir() {
-				if !g.looksLikeNonCodeFile(path) {
-					record(path, SkipUnreadableDir)
+			// ENOENT means the entry is GONE -- the ordinary race of a file
+			// vanishing mid-walk during a git checkout or an editor's temp-file
+			// churn. Nothing was hidden from us; there is nothing there, and
+			// recording it puts a transient, self-healing false block in the
+			// fail-closed array.
+			//
+			// Anything else (EACCES on a directory readdir could list but lstat
+			// cannot enter, EIO, ELOOP) means something IS there and we could not
+			// look at it. That is a real blind spot -- but it belongs to the
+			// containing DIRECTORY, not to each child by name. Recording children
+			// individually put `Makefile`, `LICENSE` and `Dockerfile` into the
+			// fail-closed array, because an extension is not evidence for a path
+			// that has none. The parent is the honest unit: it is what is
+			// genuinely unenterable, one entry covers everything beneath it under
+			// the documented prefix rule, and no non-code FILENAME ever enters.
+			//
+			// Which path to blame depends on which failure it was, and Walk tells
+			// us via info. A non-nil info means the entry itself was statted and
+			// the READDIR failed: the directory is the blind spot, record it. A
+			// nil info means the LSTAT of a child failed, and the child's name is
+			// no evidence of anything -- the containing directory is what could
+			// not be entered.
+			if !os.IsNotExist(err) {
+				blame := path
+				if info == nil {
+					if parent := filepath.Dir(path); parent != path {
+						blame = parent
+					}
 				}
-			} else if g.isCode(path) {
-				record(path, SkipUnreadable)
+				record(blame, SkipUnreadableDir)
 			}
 			return nil
 		}

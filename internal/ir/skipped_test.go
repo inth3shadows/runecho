@@ -676,14 +676,47 @@ func TestUnresolvableSymlinkRespectsTheCodeFilter(t *testing.T) {
 				"fail-closed array (got %q)", quiet, reason)
 		}
 	}
-	if got["broken.go"] == "" {
-		t.Error("broken.go: an unresolvable CODE link is a real blind spot and must be reported")
+	// A plainly dangling link — target absent — is reported for NOTHING, code or
+	// not. Same policy as a file that vanished mid-walk: nothing was hidden from
+	// us. And unlike that race this one is permanent, so recording it would block
+	// every change in the repo until someone deleted the link.
+	for _, quiet := range []string{"broken.go", "latest"} {
+		if reason, reported := got[quiet]; reported {
+			t.Errorf("%s points at nothing; recording it blocks the repo permanently "+
+				"(got %q)", quiet, reason)
+		}
 	}
-	// No extension: it could be a directory we cannot enter, so it is recorded
-	// rather than assumed harmless. Erring toward a spurious entry here is the
-	// cheap mistake; erring the other way hides a subtree.
-	if got["latest"] == "" {
-		t.Error("an extension-less unresolvable link could be a directory; it must be recorded")
+}
+
+// TestSymlinkUnresolvableForAnotherReasonIsRecorded is the other side of the
+// ENOENT rule: EACCES/EIO/ELOOP mean something IS there and the walk cannot see
+// it. A directory link has no extension to judge by, so it must be recorded
+// regardless of name.
+func TestSymlinkUnresolvableForAnotherReasonIsRecorded(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	blocked := t.TempDir()
+	writeFile(t, blocked, "inner/lib.go", "package p\nfunc L() {}\n")
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	if err := os.Symlink(filepath.Join(blocked, "inner"), filepath.Join(dir, "inner")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	_, stats, err := g.Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skipMap(t, stats); got["inner"] == "" {
+		t.Error("a link the walk cannot resolve for a reason other than ENOENT may " +
+			"be hiding a subtree; it must be recorded")
 	}
 }
 

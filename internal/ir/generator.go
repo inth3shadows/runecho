@@ -325,24 +325,19 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			// nil -- Walk does not descend through a symlink regardless.
 			target, serr := os.Stat(path)
 			switch {
+			case serr != nil && os.IsNotExist(serr):
+				// A plainly dangling link: the target is not there. Same policy
+				// as the walk-error branch above -- nothing was hidden from us,
+				// so nothing is reported. Unlike a mid-walk race this one is
+				// PERMANENT, so recording it would block every change in the repo
+				// until someone deleted the link (`latest -> build-123`,
+				// `current -> releases/v1`), and it would put a non-code path in
+				// `skipped`, which USAGE.md says never happens.
 			case serr != nil:
-				// The link did not resolve. "Did not resolve" is NOT "resolves to
-				// nothing": os.Stat fails with EACCES, EPERM, EIO and ELOOP as
-				// well as ENOENT, and in those cases the target is a real
-				// directory full of real source that the walk simply cannot
-				// enter. An earlier version reasoned "it is not a directory" and
-				// applied the code filter -- which drops every such link, because
-				// a directory link has no extension -- so a `legacy ->
-				// $unreadable/legacy` produced `skipped: []` and a passing gate
-				// for a subtree nothing had opened. That is the exact failure
-				// policySkips was narrowed to close, reopened for symlinks.
-				//
-				// Since we cannot tell, take the same reading as the nil-info
-				// branch above: record it, as a prefix, unless the extension
-				// says it is plainly a non-code file.
-				if !g.looksLikeNonCodeFile(path) {
-					record(path, SkipUnreadableDir)
-				}
+				// Could not resolve for some OTHER reason -- EACCES, EPERM, EIO,
+				// ELOOP. Something IS there and the walk cannot see it, and a
+				// directory link has no extension to judge by, so record it.
+				record(path, SkipUnreadableDir)
 			case target.IsDir():
 				record(path, SkipSymlinkDir)
 			default:

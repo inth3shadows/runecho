@@ -180,11 +180,28 @@ func resolvedOrSame(path string) string {
 // This is what separates "the whole directory is unreadable" (blame the
 // directory, one honest entry covering the subtree) from "one file on a flaky
 // mount returned EIO" (blame that file, and leave its siblings alone).
-func (g *Generator) everyChildFailed(childPath string) bool {
+//
+// MEMOISED per directory, and that is not an optimisation. It is called once per
+// FAILING child, and an unreadable directory fails every child, so a naive
+// implementation did a full Readdirnames plus an Lstat per sibling N times --
+// O(N^2) syscalls. Measured before memoisation: 500 entries 0.94s, 2000 entries
+// 13.4s, and 4000 entries exceeded the generate deadline, turning a walk that
+// should have produced an IR with one skip into a hard error and no IR at all.
+// The recorder's dedup runs after this, so it never helped.
+func (g *Generator) everyChildFailed(childPath string, memo map[string]bool) bool {
 	parent := filepath.Dir(childPath)
 	if parent == childPath {
 		return false
 	}
+	if known, seen := memo[parent]; seen {
+		return known
+	}
+	answer := g.probeEveryChildFailed(parent)
+	memo[parent] = answer
+	return answer
+}
+
+func (g *Generator) probeEveryChildFailed(parent string) bool {
 	f, err := os.Open(parent)
 	if err != nil {
 		return true // cannot even open it: the directory is the problem
@@ -256,6 +273,8 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		return normalizePath(r), nil
 	}
+	// parentProbe memoises everyChildFailed per directory; see its doc comment.
+	parentProbe := map[string]bool{}
 	// record adds an entry, resolving the repo-relative path. A path that cannot
 	// be made relative is not reported rather than reported absolute: a consumer
 	// intersects these against its own repo-relative paths, and an absolute entry
@@ -313,7 +332,7 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 				// fails there and the recorder dedups -- but by then the parent is
 				// implicated on its own evidence, not inferred from one child.
 				blame := path
-				if info == nil && g.everyChildFailed(path) {
+				if info == nil && g.everyChildFailed(path, parentProbe) {
 					if parent := filepath.Dir(path); parent != path {
 						blame = parent
 					}

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/parser"
 )
@@ -1220,5 +1221,45 @@ func TestUnreadableSymlinkKeepsNonCodeOut(t *testing.T) {
 		if got[loud] == "" {
 			t.Errorf("%s may be hiding source and must be recorded", loud)
 		}
+	}
+}
+
+// TestUnreadableDirectoryDoesNotBlowTheDeadline. everyChildFailed is called once
+// per FAILING child, and an unreadable directory fails every child — so without
+// memoisation it did a full readdir plus an lstat per sibling N times. Measured:
+// 500 entries 0.94s, 2000 entries 13.4s, 4000 entries exceeded the generate
+// deadline and produced a hard error with no IR at all. A tooling timeout is a
+// worse outcome than the blind spot it was trying to report.
+func TestUnreadableDirectoryDoesNotBlowTheDeadline(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
+	sub := filepath.Join(dir, "big")
+	for i := range 3000 {
+		writeFile(t, dir, fmt.Sprintf("big/f%04d.go", i), "package p\n")
+	}
+	if err := os.Chmod(sub, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	start := time.Now()
+	irData, stats, err := g.Generate(dir)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("a single unreadable directory must not fail the whole walk: %v", err)
+	}
+	if _, ok := irData.Files["main.go"]; !ok {
+		t.Error("the readable part of the tree must still be indexed")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("took %s for one unreadable directory — quadratic in its entry count", elapsed)
+	}
+	if got := skipMap(t, stats); got["big"] == "" && len(got) == 0 {
+		t.Error("the unreadable directory should still be reported")
 	}
 }

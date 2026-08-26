@@ -39,6 +39,36 @@ install time from `git describe --tags` (see `install.sh`).
   file extension, and reported `root_unreadable: false` at exit 0. An abridged
   `ignored_paths` no longer raises `skipped_truncated`.
 
+### Changed
+- The walk's decision about each entry is now a pure decision table
+  (`internal/ir/walkdecision.go`) that the walk callback reads, instead of a
+  nest of branches that decided as it went. Five review rounds on the branch
+  nest produced 12/18/11/11/10 findings, a flat rate where every round's fixes
+  caused the next round's regression, and every one had the same shape: one
+  branch decided an axis differently from another branch facing the same state.
+  A generated cross-product over all 1152 states proves no state falls through
+  the table and no branch returns a decision the table does not name.
+- An unresolvable symlink is classified by its TARGET's base name (`os.Readlink`,
+  which does not follow, so it answers even when the target is unreadable), not
+  by the link's own. `README -> <unreadable>/README.md` and
+  `LICENSE -> <unreadable>/LICENSE` were indistinguishable by the link name, so
+  both were recorded as `unreadable_dir` and both blocked every documentation
+  change; the first now correctly drops out and the second stays honestly
+  ambiguous, where failing closed is right. The path reported is still the
+  link's own.
+- An unresolvable symlink to source records `unreadable_file`, not
+  `unreadable_dir`. Reason strings are read by humans and calling a file a
+  directory is false; behaviour under the prefix rule is unchanged.
+- An unresolvable symlinked ROOT sets `root_unreadable`. The root is resolved
+  before the walk, so it only arrives as a link when resolution failed — and
+  that walked one entry, indexed zero files, recorded nothing, and reported a
+  vacuous 100% coverage.
+- A file whose name is entirely a leading dot is classified as a dotfile only
+  when the dot-name is not itself a known language: `.github` has no extension,
+  `.go` is Go source. `filepath.Ext(".github")` returns `".github"`, which had
+  classified every dot-named directory as a file with an unknown non-code
+  extension.
+
 ### Fixed
 - The ignore list is no longer applied to the walk root itself. A repo whose
   directory is named `testdata`, `vendor`, `dist`, `venv`, or `node_modules` had

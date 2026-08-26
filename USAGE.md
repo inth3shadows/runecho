@@ -211,6 +211,11 @@ edit to `testdata/README.md` — a documentation-only false block, which is exac
 what the language table exists to prevent, arriving through the other reason
 code.
 
+A symlink is classified by the base name of its **target**, not its own name,
+and reported under its own path. `README -> /mnt/x/README.md` is non-code and
+stays out of `skipped`; `LICENSE -> /mnt/x/LICENSE` gives nothing away either way
+and fails closed, because an extensionless target may be a source directory.
+
 The split is **"did you ask for this?"**, not "file or directory". An ignore rule
 is a decision you made. A permission error or an unfollowable link is a limit of
 the tool — and a directory it could not read took its whole subtree with it,

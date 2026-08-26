@@ -1405,3 +1405,60 @@ func TestEveryReasonHasABudgetClass(t *testing.T) {
 		}
 	}
 }
+
+// TestUnresolvableSymlinkClassifiesByItsTargetsName.
+//
+// A symlink's own name is the wrong thing to classify it by. `README -> <target
+// EACCES>` and `LICENSE -> <target EACCES>` are indistinguishable by it: both
+// have no extension, so both were recorded as unreadable_dir and BOTH blocked
+// every documentation change in the repo. os.Readlink does not follow, so it
+// answers even when the target cannot be stat'ed, and it separates them for one
+// cheap syscall — README resolves to a .md and correctly drops out, LICENSE
+// stays honestly ambiguous where failing closed is right.
+//
+// The path REPORTED is always the link's own; that is the path a consumer holds.
+func TestUnresolvableSymlinkClassifiesByItsTargetsName(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
+	}
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"README.md", "LICENSE", "Widget.java"} {
+		writeFile(t, vault, name, "x\n")
+	}
+	for _, l := range []struct{ link, target string }{
+		{"README", "vault/README.md"},   // non-code target, extensionless link
+		{"LICENSE", "vault/LICENSE"},    // ambiguous both ways
+		{"Gadget", "vault/Widget.java"}, // source target, extensionless link
+	} {
+		if err := os.Symlink(filepath.Join(dir, l.target), filepath.Join(dir, l.link)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	writeFile(t, dir, "main.go", "package main\n")
+	if err := os.Chmod(vault, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(vault, 0o755) })
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := skipMap(t, stats)
+	if r, ok := got["README"]; ok {
+		t.Errorf("README -> vault/README.md was recorded as %q; the target's name says "+
+			"non-code, and non-code in the fail-closed array blocks every docs change", r)
+	}
+	if r := got["Gadget"]; r != SkipUnreadableFile {
+		t.Errorf("Gadget -> vault/Widget.java recorded as %q, want %q — the target's name "+
+			"says source, and a source blind spot is what this array is for", r, SkipUnreadableFile)
+	}
+	if r := got["LICENSE"]; r != SkipUnreadableDir {
+		t.Errorf("LICENSE -> vault/LICENSE recorded as %q, want %q — neither name gives "+
+			"anything away, so it may be a source DIRECTORY and must fail closed", r, SkipUnreadableDir)
+	}
+}

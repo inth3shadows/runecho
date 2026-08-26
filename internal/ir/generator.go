@@ -274,205 +274,93 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		return normalizePath(r), nil
 	}
 	// parentProbe memoises everyChildFailed per directory; see its doc comment.
+	// Memoisation is load-bearing, not an optimisation: unmemoised it was O(N^2)
+	// -- 2000 entries took 13.4s and 4000 exceeded the generate deadline, so the
+	// run produced NO IR at all. The cost is that a time-dependent observation is
+	// cached as a fact for the duration of the walk; a directory whose
+	// permissions change mid-walk is reported as it was first seen. That trade is
+	// deliberate.
 	parentProbe := map[string]bool{}
-	// record adds an entry, resolving the repo-relative path. A path that cannot
-	// be made relative is not reported rather than reported absolute: a consumer
-	// intersects these against its own repo-relative paths, and an absolute entry
-	// would silently never match.
-	record := func(path, reason string) {
-		if rel, rerr := relOf(path); rerr == nil {
-			rec.add(rel, reason)
+
+	// apply turns one walkDecision into recorder writes. Both tables are pure and
+	// live in walkdecision.go; everything impure -- the syscalls, the relative
+	// path, the recorder -- happens here and only here.
+	apply := func(path string, d walkDecision) {
+		if !d.records() {
+			return
+		}
+		blamePath := path
+		if d.blame == blameParent {
+			if parent := filepath.Dir(path); parent != path {
+				blamePath = parent
+			}
+		}
+		rel, rerr := relOf(blamePath)
+		switch decideBlame(rel, rerr != nil) {
+		case blameRootUnreadable:
+			// Nothing was indexed, `skipped` is empty, and Coverage() returns a
+			// VACUOUS 100 because SupportedSeen is 0 too -- every signal reads
+			// clean for a tree nothing opened. It needs its own flag because no
+			// path string can express "all of it".
+			rec.rootUnreadable = true
+		default:
+			rec.add(rel, d.reason)
 		}
 	}
+
 	return filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		if err != nil {
 			g.warn("Warning: failed to access %s: %v\n", path, err)
-			// Two different failures reach here, and they want opposite answers.
-			//
-			// ENOENT means the entry is GONE -- the ordinary race of a file
-			// vanishing mid-walk during a git checkout or an editor's temp-file
-			// churn. Nothing was hidden from us; there is nothing there, and
-			// recording it puts a transient, self-healing false block in the
-			// fail-closed array.
-			//
-			// Anything else (EACCES on a directory readdir could list but lstat
-			// cannot enter, EIO, ELOOP) means something IS there and we could not
-			// look at it. That is a real blind spot -- but it belongs to the
-			// containing DIRECTORY, not to each child by name. Recording children
-			// individually put `Makefile`, `LICENSE` and `Dockerfile` into the
-			// fail-closed array, because an extension is not evidence for a path
-			// that has none. The parent is the honest unit: it is what is
-			// genuinely unenterable, one entry covers everything beneath it under
-			// the documented prefix rule, and no non-code FILENAME ever enters.
-			//
-			// Which path to blame depends on which failure it was, and Walk tells
-			// us via info. A non-nil info means the entry itself was statted and
-			// the READDIR failed: the directory is the blind spot, record it. A
-			// nil info means the LSTAT of a child failed, and the child's name is
-			// no evidence of anything -- the containing directory is what could
-			// not be entered.
-			if !os.IsNotExist(err) {
-				// Blame the narrowest path that is actually implicated.
-				//
-				// info != nil means the entry was statted and READDIR failed: the
-				// directory is the blind spot, and everything under it is
-				// genuinely unexamined.
-				//
-				// info == nil means one child's LSTAT failed. Blaming the parent
-				// there was too broad -- a single EIO or ESTALE on a flaky NFS or
-				// FUSE mount marked the whole of src/ unexamined, which under the
-				// prefix rule makes every file in it unexamined to a fail-closed
-				// gate, while the walk indexed all the siblings fine. Blame the
-				// child instead, and let the prefix rule cover its subtree if it
-				// turned out to be a directory. The 0444 case that motivated
-				// parent-blaming still collapses to one entry, because EVERY child
-				// fails there and the recorder dedups -- but by then the parent is
-				// implicated on its own evidence, not inferred from one child.
-				blame, reason := path, SkipUnreadableDir
-				if info == nil {
-					if g.everyChildFailed(path, parentProbe) {
-						if parent := filepath.Dir(path); parent != path {
-							blame = parent
-						}
-					} else {
-						// Siblings are fine, so the parent is not the problem --
-						// this one entry is (EIO/ESTALE on a network mount). It
-						// is therefore a FILE as far as anything here can tell,
-						// so it takes the file reason, and the non-code rule
-						// applies: a path with an extension that is not code is
-						// not a symbol blind spot, and putting it in the
-						// fail-closed array blocks a change that touches it.
-						if ext := filepath.Ext(path); ext != "" && !g.isCode(path) {
-							return nil
-						}
-						reason = SkipUnreadableFile
-					}
-				}
-				// An unreadable ROOT resolves to ".", which the recorder drops as
-				// inert -- it matches no repo-relative path a consumer holds. But
-				// dropping it silently is the worst outcome available: nothing was
-				// indexed, `skipped` is empty, and Coverage() returns a VACUOUS
-				// 100 because SupportedSeen is 0 too, so every signal reads clean
-				// for a tree nothing opened. It needs its own flag, because there
-				// is no path string that can express "all of it".
-				// Blame that lands ON or ABOVE the root is the root's problem.
-				//
-				// The parent of a child directly under the root IS the root, and
-				// filepath.Rel happily returns ".." for anything above it -- so a
-				// repo whose PARENT directory is unreadable emitted
-				// {"Path": "..", "Reason": "unreadable_dir"} with rootUnreadable
-				// false. ".." matches nothing under the documented prefix rule,
-				// Coverage() reported a vacuous 100, and the tree read clean:
-				// exactly the fail-open the flag was added to close, one level
-				// out. It also breaks the invariant that every reported path is
-				// repo-relative.
-				rel, rerr := relOf(blame)
-				switch {
-				case rerr != nil:
-					rec.rootUnreadable = true
-				case rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)):
-					rec.rootUnreadable = true
-				default:
-					record(blame, reason)
-				}
-			}
-			return nil
 		}
-		// A symlink whose NAME is in the ignore list is a configured ignore first
-		// and a symlink second. pnpm and yarn workspaces routinely make
-		// node_modules a link, and classifying that as a symlink put it in the
-		// capability array -- a permanent, unfixable entry in the array a gate
-		// fails closed on, for a directory the operator explicitly excluded. The
-		// ignore rule is the operator's decision either way; how the directory
-		// happens to be stored is not their problem.
-		// Directories and symlinks only. Moving this check above the symlink
-		// branch (so an ignored directory stored AS a link is still an ignore)
-		// also put it ahead of the IsDir test, which made it fire for regular
-		// FILES: a plain file named `dist` or `vendor` was recorded as
-		// `ignored_dir`, a reason that is simply untrue for a file, and it
-		// consumed recorder budget. None of the twelve default ignore names
-		// carries an extension, so no source file could be caught -- but a `.git`
-		// FILE (git worktrees and submodules use one) hit it on every walk.
-		if path != absRoot && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) &&
-			g.ignoredPaths[filepath.Base(path)] {
-			record(path, SkipIgnoredDir)
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			// A symlink is not a directory to Walk, so SkipDir here would skip
-			// the remaining siblings in the containing directory. Walk does not
-			// descend through a link anyway.
-			return nil
+		// Classify what was actually observed, then read the table. The callback
+		// decides nothing itself: every "if" below answers "what did I see", never
+		// "what should I do". That separation is the point -- five review rounds
+		// on the previous branch nest produced 12/18/11/11/10 findings, and every
+		// one had the same shape, one branch deciding an axis differently from
+		// another branch facing the same state.
+		e := walkEntry{
+			isRoot:      path == absRoot,
+			err:         classifyWalkErr(err),
+			infoPresent: info != nil,
+			parentUnreadable: func() bool {
+				return g.everyChildFailed(path, parentProbe)
+			},
+			target: func() linkKind { return classifyLinkTarget(path) },
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			// filepath.Walk lstats, so info.IsDir() is ALWAYS false here even when
-			// the link points at a directory -- the mode bits describe the link,
-			// not its target. The pre-existing `if info.IsDir() { return
-			// filepath.SkipDir }` in this branch was therefore unreachable, and
-			// reachable would have been a bug: Walk documents that SkipDir from a
-			// non-directory entry skips the remaining files in the CONTAINING
-			// directory. Resolve the target explicitly instead, and always return
-			// nil -- Walk does not descend through a symlink regardless.
-			target, serr := os.Stat(path)
+		base := filepath.Base(path)
+		if err == nil {
 			switch {
-			case serr != nil && os.IsNotExist(serr):
-				// A plainly dangling link: the target is not there. Same policy
-				// as the walk-error branch above -- nothing was hidden from us,
-				// so nothing is reported. Unlike a mid-walk race this one is
-				// PERMANENT, so recording it would block every change in the repo
-				// until someone deleted the link (`latest -> build-123`,
-				// `current -> releases/v1`), and it would put a non-code path in
-				// `skipped`, which USAGE.md says never happens.
-			case serr != nil:
-				// Could not resolve for some OTHER reason -- EACCES, EPERM, EIO,
-				// ELOOP. Something IS there and the walk cannot see it.
-				//
-				// A link with NO extension could be a directory, and a directory
-				// link has no extension to judge by, so it is recorded. A link
-				// with a plainly non-code extension is a FILE we do not care
-				// about: recording `README.md -> <unreadable>/README.md` put
-				// non-code in the fail-closed array and blocked every docs change
-				// until someone fixed the link or the target's permissions. The
-				// extension is weak evidence, but it is decisive in exactly one
-				// direction -- a path that HAS one is a file -- and that is the
-				// only direction used here.
-				if ext := filepath.Ext(path); ext == "" || g.isCode(path) {
-					record(path, SkipUnreadableDir)
+			case info.Mode()&os.ModeSymlink != 0:
+				e.kind = kindSymlink
+				// Classified from the link's TARGET base name, not the link's
+				// own; see walkEntry.ext. os.Readlink does not follow, so it
+				// answers even for an unreadable target.
+				if tgt, lerr := os.Readlink(path); lerr == nil && tgt != "" {
+					base = filepath.Base(filepath.ToSlash(tgt))
 				}
-			case target.IsDir():
-				record(path, SkipSymlinkDir)
+			case info.IsDir():
+				e.kind = kindDir
 			default:
-				// Only code: a symlinked README is not a blind spot in a symbol
-				// index, and this list is fail-closed on.
-				if g.isCode(path) {
-					record(path, SkipSymlink)
-				}
+				e.kind = kindFile
 			}
-			return nil
 		}
-		if info.IsDir() {
-			// The ignore check happened above, before the symlink branch, so that
-			// an ignored directory stored AS a link is still treated as an
-			// ignore. The walk root is exempt from it: the rule exists to prune
-			// subdirectories, and applying it to the directory the operator
-			// explicitly pointed at pruned the entire walk, indexed zero files,
-			// and -- because SupportedSeen was then 0 -- reported a vacuous 100%
-			// coverage.
-			return nil
+		// The ignore list is consulted before the extension so an ignored name is
+		// never stat'ed or readlink'ed for a classification the table will not
+		// use. e.ext stays extNone there, which no ignored-name row reads.
+		e.ignoredName = g.ignoredPaths[filepath.Base(path)]
+		if !(e.ignoredName && e.kind != kindFile) {
+			e.ext = g.classifyExt(base)
 		}
-		ext := filepath.Ext(path)
-		if !g.supportsExtension(ext) {
-			// Only source code is reported. A README or a PNG is not a blind spot
-			// in the symbol index, and reporting it would make a consumer that
-			// fails closed on this list block every documentation change -- the
-			// exact false-block that kept this reporting out of the payload
-			// until the language table existed.
-			if IsKnownSourceExtension(ext) {
-				record(path, SkipUnsupportedLanguage)
-			}
+
+		d := g.decideWalkEntry(e)
+		apply(path, d)
+		if d.prunes() {
+			return filepath.SkipDir
+		}
+		if !d.indexes() {
 			return nil
 		}
 		relPath, rerr := relOf(path)
@@ -482,6 +370,38 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		}
 		return fn(path, relPath)
 	})
+}
+
+// classifyWalkErr maps filepath.Walk's error to the table's axis. See errKind.
+func classifyWalkErr(err error) errKind {
+	switch {
+	case err == nil:
+		return errNone
+	case os.IsNotExist(err):
+		return errGone
+	default:
+		return errOpaque
+	}
+}
+
+// classifyLinkTarget resolves a symlink with os.Stat (which FOLLOWS, unlike the
+// Lstat filepath.Walk did) and maps the result to the table's axis.
+//
+// It carries the same TOCTOU and unbounded-I/O properties as Walk's own lstat --
+// a link into a hanging NFS mount can stall here exactly as the walk itself can
+// -- so it adds nothing new in kind, and the generate deadline is the bound.
+func classifyLinkTarget(path string) linkKind {
+	target, serr := os.Stat(path)
+	switch {
+	case serr != nil && os.IsNotExist(serr):
+		return linkGone
+	case serr != nil:
+		return linkOpaque
+	case target.IsDir():
+		return linkDir
+	default:
+		return linkFile
+	}
 }
 
 // Generate creates IR for all supported files in the given root directory.

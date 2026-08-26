@@ -253,14 +253,22 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			target, serr := os.Stat(path)
 			switch {
 			case serr != nil:
-				// A dangling or looping link. It resolves to nothing, so it is
-				// not a directory and the code filter applies exactly as it does
-				// to a live symlink below -- without it, one stale `latest ->
-				// build-123` or a `README-link.md` pointing nowhere put a non-code
-				// path into the fail-closed array and blocked every build in the
-				// repo. That is the `.git` defect again, through a third door.
-				if g.isCode(path) {
-					record(path, SkipUnreadable)
+				// The link did not resolve. "Did not resolve" is NOT "resolves to
+				// nothing": os.Stat fails with EACCES, EPERM, EIO and ELOOP as
+				// well as ENOENT, and in those cases the target is a real
+				// directory full of real source that the walk simply cannot
+				// enter. An earlier version reasoned "it is not a directory" and
+				// applied the code filter -- which drops every such link, because
+				// a directory link has no extension -- so a `legacy ->
+				// $unreadable/legacy` produced `skipped: []` and a passing gate
+				// for a subtree nothing had opened. That is the exact failure
+				// policySkips was narrowed to close, reopened for symlinks.
+				//
+				// Since we cannot tell, take the same reading as the nil-info
+				// branch above: record it, as a prefix, unless the extension
+				// says it is plainly a non-code file.
+				if !g.looksLikeNonCodeFile(path) {
+					record(path, SkipUnreadableDir)
 				}
 			case target.IsDir():
 				record(path, SkipSymlinkDir)

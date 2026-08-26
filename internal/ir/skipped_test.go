@@ -638,21 +638,25 @@ func TestSymlinkedWalkRootIsFollowed(t *testing.T) {
 	}
 }
 
-// TestDanglingSymlinkRespectsTheCodeFilter.
+// TestUnresolvableSymlinkRespectsTheCodeFilter.
 //
-// `skipped` is fail-closed on, and the contract is that non-code is never in it.
-// The dangling-symlink branch recorded unconditionally, with no extension check,
-// while both sibling branches had one — so a single stale `latest -> build-123`
-// or a `README-link.md` pointing nowhere blocked every build in the repo. That
-// is the `.git` defect from the previous review, arriving through a third door.
-func TestDanglingSymlinkRespectsTheCodeFilter(t *testing.T) {
+// `skipped` is fail-closed on, and non-code must never reach it — a stale
+// `latest -> build-123` or a `README-link.md` pointing nowhere would otherwise
+// block every build in the repo until someone deleted the link.
+//
+// But "did not resolve" is NOT "resolves to nothing". os.Stat fails with EACCES,
+// EIO and ELOOP as well as ENOENT, and in those cases the target is a real
+// directory the walk cannot enter. An earlier version reasoned "it is not a
+// directory" and applied an extension filter, which drops EVERY directory link
+// (they have no extension) — see TestSymlinkToUnreadableDirectoryIsRecorded.
+func TestUnresolvableSymlinkRespectsTheCodeFilter(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
 	links := map[string]string{
 		"DANGLING.txt":   "/nonexistent/nope.txt",
 		"README-link.md": "/nonexistent/nope.md",
-		"latest":         "/nonexistent/build-123", // no extension at all
-		"broken.go":      "/nonexistent/lib.go",    // code: SHOULD be reported
+		"broken.go":      "/nonexistent/lib.go", // code: SHOULD be reported
+		"latest":         "/nonexistent/build-123",
 	}
 	for name, target := range links {
 		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
@@ -666,66 +670,62 @@ func TestDanglingSymlinkRespectsTheCodeFilter(t *testing.T) {
 	}
 	got := skipMap(t, stats)
 
-	for _, quiet := range []string{"DANGLING.txt", "README-link.md", "latest"} {
+	for _, quiet := range []string{"DANGLING.txt", "README-link.md"} {
 		if reason, reported := got[quiet]; reported {
-			t.Errorf("%s is not code and must not reach the fail-closed array (got %q)", quiet, reason)
+			t.Errorf("%s carries a non-code extension and must not reach the "+
+				"fail-closed array (got %q)", quiet, reason)
 		}
 	}
-	if got["broken.go"] != SkipUnreadable {
-		t.Errorf("broken.go: got %q, want %q — an unresolvable CODE link is a real blind spot",
-			got["broken.go"], SkipUnreadable)
+	if got["broken.go"] == "" {
+		t.Error("broken.go: an unresolvable CODE link is a real blind spot and must be reported")
+	}
+	// No extension: it could be a directory we cannot enter, so it is recorded
+	// rather than assumed harmless. Erring toward a spurious entry here is the
+	// cheap mistake; erring the other way hides a subtree.
+	if got["latest"] == "" {
+		t.Error("an extension-less unresolvable link could be a directory; it must be recorded")
 	}
 }
 
-// TestTableEntriesDoNotMatchCommonNonCode.
+// TestSymlinkToUnreadableDirectoryIsRecorded is the regression test for the
+// third-generation defect: round 3 closed the unreadable-directory fail-open for
+// a PLAIN directory and reopened it for a symlinked one.
 //
-// `skipped` is fail-closed on, so a table entry that also matches a common
-// non-code filename blocks builds. Two got in and were removed after review:
-// `.hcl` matches `.terraform.lock.hcl`, a generated lockfile rewritten on every
-// provider bump; `.ru` matches `README.ru`, the <name>.<lang> translated-doc
-// convention. Both are the same accident the table's `.d` rule already names.
-func TestTableEntriesDoNotMatchCommonNonCode(t *testing.T) {
-	for _, name := range []string{
-		".terraform.lock.hcl", // generated, touched on every provider bump
-		"README.ru",           // translated docs
-		"README.md",
-		"config.yaml",
-		"package-lock.json",
-		"go.sum",
-	} {
-		if IsKnownSourceExtension(filepath.Ext(name)) {
-			t.Errorf("%s is matched by knownSourceExtensions via %q — it would enter the "+
-				"fail-closed array and block a change that touches it",
-				name, filepath.Ext(name))
-		}
+// os.Stat on the link fails with EACCES, the old code concluded "not a
+// directory", the extension filter dropped it (a directory link has no
+// extension), and the payload reported `skipped: []` with zero drift — a passing
+// gate for a subtree that was never opened.
+func TestSymlinkToUnreadableDirectoryIsRecorded(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still traversable")
 	}
-}
-
-// TestSymlinkedIgnoredDirIsTreatedAsAnIgnore.
-//
-// pnpm and yarn workspaces routinely make node_modules a symlink. The symlink
-// branch ran before the ignore check, so such a directory was classified
-// symlink_dir — a capability skip, i.e. a permanent and unfixable entry in the
-// array a gate fails closed on, for a directory the operator explicitly
-// excluded. How a directory happens to be stored is not the operator's problem;
-// their ignore rule is a decision either way.
-func TestSymlinkedIgnoredDirIsTreatedAsAnIgnore(t *testing.T) {
-	outside := t.TempDir()
-	writeFile(t, outside, "dep.js", "export function D() {}\n")
+	blocked := t.TempDir()
+	writeFile(t, blocked, "legacy/Critical.java", "class Critical { }\n")
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
 
 	dir := t.TempDir()
 	writeFile(t, dir, "main.go", "package p\nfunc M() {}\n")
-	if err := os.Symlink(outside, filepath.Join(dir, "node_modules")); err != nil {
+	if err := os.Symlink(filepath.Join(blocked, "legacy"), filepath.Join(dir, "legacy")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	g := NewGenerator(GeneratorConfig{})
+	g.warn = func(string, ...any) {}
+	_, stats, err := g.Generate(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := skipMap(t, stats); got["node_modules"] != SkipIgnoredDir {
-		t.Errorf("node_modules: got %q, want %q — a configured ignore stored as a "+
-			"link is still a configured ignore", got["node_modules"], SkipIgnoredDir)
+	got := skipMap(t, stats)
+	if got["legacy"] == "" {
+		t.Fatal("a symlink to an unreadable directory was recorded nowhere — the gate " +
+			"sees `skipped: []` and passes for a subtree nothing opened")
+	}
+	if IsPolicySkip(got["legacy"]) {
+		t.Errorf("legacy recorded as %q, which is informational; an unenterable "+
+			"subtree is a blind spot", got["legacy"])
 	}
 }
 

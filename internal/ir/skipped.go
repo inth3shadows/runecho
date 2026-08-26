@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -258,6 +259,24 @@ var knownSourceExtensions = map[string]bool{
 	".sql": true, ".proto": true, ".tf": true, ".sol": true,
 	// Assembly
 	".asm": true, ".s": true,
+}
+
+// looksLikeNonCodeFile reports whether path is recognisably a file that is not
+// source: it carries an extension, and that extension is not code.
+//
+// It exists for the branches where the walk could not stat an entry and so does
+// not know whether it was a file or a directory. Both mistakes there are real:
+// dropping an unreadable DIRECTORY hides its whole subtree (nothing recorded the
+// files inside, because nothing ever saw them), while recording an unreadable
+// README puts non-code in the fail-closed array and blocks a docs-only change.
+//
+// The extension is the only evidence available. A path with a non-code extension
+// is a file we do not care about; anything else -- no extension, or a code
+// extension -- is recorded. Known failure mode: a DIRECTORY whose name happens
+// to carry a non-code extension (`my.config/`) is dropped. That is rare, and it
+// errs the same way the rest of the table does.
+func (g *Generator) looksLikeNonCodeFile(path string) bool {
+	return filepath.Ext(path) != "" && !g.isCode(path)
 }
 
 // IsKnownSourceExtension reports whether ext names a source language, matched

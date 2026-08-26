@@ -934,6 +934,21 @@ func TestUpdateFileFollowsASymlinkedRoot(t *testing.T) {
 		}
 		if !changed {
 			t.Errorf("%s: the edit was judged outside the repo, so the IR silently went stale", c.name)
+			continue
+		}
+		// changed==true is not enough: DELETING the entry also changes RootHash.
+		// The fallback used to derive rel from the resolved path while leaving
+		// absFile in link form, so pathCrossesSymlink saw a symlinked component,
+		// concluded "replaced by a link", and dropped the file -- every
+		// incremental refresh erasing its symbols.
+		out, _, _ := g.UpdateFile(base, c.root, c.file)
+		fileIR, present := out.Files["main.go"]
+		if !present {
+			t.Errorf("%s: the entry was DROPPED, so the next diff reports its symbols as removed", c.name)
+			continue
+		}
+		if len(fileIR.Symbols) == 0 {
+			t.Errorf("%s: the entry survived but lost its symbols", c.name)
 		}
 	}
 

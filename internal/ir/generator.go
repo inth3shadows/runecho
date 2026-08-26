@@ -635,9 +635,21 @@ func (g *Generator) UpdateFile(existing *IR, rootPath, filePath string) (*IR, bo
 	}
 	rel, ok := inRepo(absRoot, absFile)
 	if !ok {
-		if rel, ok = inRepo(absRoot, resolvedOrSameLeaf(absFile)); !ok {
+		// Carry the RESOLVED path forward, not just the rel it produced.
+		//
+		// Deriving rel from the resolved form while leaving absFile in link form
+		// left the two disagreeing for every later use: pathCrossesSymlink walked
+		// up from the link-form path, never reached absRoot, hit the symlinked
+		// root component and returned true -- so the entry was treated as
+		// "replaced by a symlink" and DROPPED. In a repo the caller names through
+		// a link (the ordinary case: link root, link file), every incremental
+		// refresh erased that file's symbols, and the next diff reported all of
+		// them as removed.
+		resolved := resolvedOrSameLeaf(absFile)
+		if rel, ok = inRepo(absRoot, resolved); !ok {
 			return existing, false, nil // edited file is outside this repo
 		}
+		absFile = resolved
 	}
 	norm := normalizePath(rel)
 

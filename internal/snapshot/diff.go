@@ -280,16 +280,24 @@ func DiffPayload(d DiffResult) map[string]interface{} {
 	if d.SkippedKnown {
 		// TWO arrays, not one, and the split is the contract.
 		//
-		// `skipped` is exact paths of FILES the indexer could not read: the blind
-		// spots, the thing to fail closed on. `ignored_paths` is DIRECTORIES it
-		// was told (or chose, for safety) not to enter: prefix-matched, and
-		// informational because the operator configured the ignore list on
-		// purpose.
+		// `skipped` is everything the indexer COULD NOT READ -- the blind spots,
+		// the thing to fail closed on. `ignored_paths` is what the operator
+		// CONFIGURED away, which is informational.
 		//
-		// The first draft merged them, and the merge was the defect: `.git` is in
-		// DefaultIgnoredPaths, so every repo produced a non-empty list, and a
-		// gate prefix-matching it blocked an edit to `testdata/README.md`. That is
-		// the documentation-only false block the language table exists to
+		// The discriminator is "did you ask for this", NOT file-versus-directory.
+		// Both arrays can hold either, so a consumer matches a changed path with
+		//
+		//	changed == entry || strings.HasPrefix(changed, entry+"/")
+		//
+		// which is correct for both: a file entry can never be a directory prefix
+		// of another path. Matching `skipped` by equality alone MISSES every path
+		// under an unreadable directory -- the fail-open the classification was
+		// corrected to close.
+		//
+		// The first draft merged the arrays, and the merge was the defect: `.git`
+		// is in DefaultIgnoredPaths, so every repo produced a non-empty list, and
+		// a gate prefix-matching it blocked an edit to `testdata/README.md`. That
+		// is the documentation-only false block the language table exists to
 		// prevent, arriving through the other reason code.
 		capability, policy := SplitSkips(d.Skipped)
 		payload["skipped"] = capability
@@ -439,10 +447,11 @@ func writeTruncationWarning(sb *strings.Builder, capHit int) {
 // unindexed language is true only in the sense that nothing was ever looked at.
 // That sentence unqualified is the entire failure this reporting exists to end.
 //
-// The two groups are rendered separately for the same reason the payload
-// carries two arrays: a pruned `vendor/` is not the same claim as an unreadable
-// `Widget.java`, and running them together is what made the merged list
-// unusable.
+// Only the capability group is rendered. `ignored_paths` is the operator's own
+// configuration echoed back, and `.git` is in DefaultIgnoredPaths, so printing
+// it would put a block on every diff of every repo -- a note that fires every
+// time stops being read. It stays in --json, where a consumer applies its own
+// policy.
 func formatSkipped(d DiffResult) string {
 	if !d.SkippedKnown {
 		return ""

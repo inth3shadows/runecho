@@ -12,11 +12,16 @@ import (
 //
 // The set splits in two, and the split is the contract (see IsPolicySkip):
 //
-//   - CAPABILITY reasons name a FILE the indexer wanted to read and could not.
-//     They are the blind spots. A consumer fails closed on these.
-//   - POLICY reasons name a DIRECTORY the indexer was told, or chose for safety,
-//     not to descend into. They are informational, and a consumer must
-//     prefix-match them.
+//   - CAPABILITY reasons name something the indexer wanted to read and could
+//     not. They are the blind spots. A consumer fails closed on these.
+//   - POLICY reasons name something the operator CONFIGURED away. They are
+//     informational.
+//
+// The discriminator is "did the operator ask for this", NOT file-versus-
+// directory: an unreadable or unfollowable DIRECTORY is a capability failure,
+// because its whole subtree went unvisited and nothing recorded the files inside
+// -- nothing ever saw them. Either array can therefore hold a file or a
+// directory, and both are matched the same way; see IsPolicySkip.
 //
 // Conflating the two was the defect that shipped in the first draft: `.git` is
 // in DefaultIgnoredPaths, so every repo produced a non-empty list, and a gate

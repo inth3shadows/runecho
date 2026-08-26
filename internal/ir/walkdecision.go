@@ -215,6 +215,40 @@ func (g *Generator) isCodeExt(ext string) bool {
 	return g.supportsExtension(ext) || IsKnownSourceExtension(ext)
 }
 
+// isCodeClass reports whether an extClass names source, parsed or not.
+func isCodeClass(c extClass) bool {
+	return c == extSupported || c == extKnownSource
+}
+
+// classifySymlinkExt combines a symlink's OWN base name with its target's.
+//
+// Neither name alone is enough, and the two failures are opposite:
+//
+//   - The link's own name alone cannot separate `README -> /mnt/x/README.md`
+//     from `LICENSE -> /mnt/x/LICENSE`. Both are extensionless, so both failed
+//     closed, and a non-code path in the fail-closed array blocks every
+//     documentation change in the repo.
+//   - The TARGET's name alone loses `handler.go -> handler.go.tmpl`, a readable
+//     regular file. Walk never follows the link, so those symbols are absent
+//     from the IR -- and with the target's name calling it non-code, nothing is
+//     recorded either. A deleted symbol then goes unnoticed at exit 0, which is
+//     the failure this whole package exists to close. It also inverted the
+//     safety gradient: an UNREADABLE extensionless target failed closed while a
+//     READABLE one failed open, treating the thing we can see as more suspicious
+//     than the thing we cannot.
+//
+// The rule that resolves both is the one the rest of the table already runs on:
+// an extension is decisive in exactly ONE direction -- a name that HAS a code
+// extension is code. Applied to BOTH names, code on either side wins, and the
+// target's name breaks the tie only when neither says code.
+func (g *Generator) classifySymlinkExt(linkBase, targetBase string) extClass {
+	own := g.classifyExt(linkBase)
+	if targetBase == "" || isCodeClass(own) {
+		return own
+	}
+	return g.classifyExt(targetBase)
+}
+
 // decideWalkEntry maps one observed entry to the single thing to do with it.
 //
 // Read it top to bottom: each helper owns one region of the state space and

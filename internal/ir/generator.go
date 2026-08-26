@@ -330,16 +330,17 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 			},
 			target: func() linkKind { return classifyLinkTarget(path) },
 		}
-		base := filepath.Base(path)
+		name := filepath.Base(path)
+		base, targetBase := name, ""
 		if err == nil {
 			switch {
 			case info.Mode()&os.ModeSymlink != 0:
 				e.kind = kindSymlink
-				// Classified from the link's TARGET base name, not the link's
-				// own; see walkEntry.ext. os.Readlink does not follow, so it
-				// answers even for an unreadable target.
+				// Both names feed the classification; see classifySymlinkExt.
+				// os.Readlink does not follow, so it answers even for an
+				// unreadable target.
 				if tgt, lerr := os.Readlink(path); lerr == nil && tgt != "" {
-					base = filepath.Base(filepath.ToSlash(tgt))
+					targetBase = filepath.Base(filepath.ToSlash(tgt))
 				}
 			case info.IsDir():
 				e.kind = kindDir
@@ -350,9 +351,13 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 		// The ignore list is consulted before the extension so an ignored name is
 		// never stat'ed or readlink'ed for a classification the table will not
 		// use. e.ext stays extNone there, which no ignored-name row reads.
-		e.ignoredName = g.ignoredPaths[filepath.Base(path)]
+		e.ignoredName = g.ignoredPaths[name]
 		if !(e.ignoredName && e.kind != kindFile) {
-			e.ext = g.classifyExt(base)
+			if e.kind == kindSymlink {
+				e.ext = g.classifySymlinkExt(base, targetBase)
+			} else {
+				e.ext = g.classifyExt(base)
+			}
 		}
 
 		d := g.decideWalkEntry(e)

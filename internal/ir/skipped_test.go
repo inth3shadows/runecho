@@ -1462,3 +1462,31 @@ func TestUnresolvableSymlinkClassifiesByItsTargetsName(t *testing.T) {
 			"anything away, so it may be a source DIRECTORY and must fail closed", r, SkipUnreadableDir)
 	}
 }
+
+// TestSymlinkNamedAsSourceIsRecordedWhateverItsTargetIsCalled.
+//
+// `handler.go -> handler.go.tmpl` is a readable regular file, so it never
+// reaches the unreadable rows — and once the classification came from the
+// TARGET's name alone, `.tmpl` said non-code and nothing was recorded. Walk does
+// not follow the link, so the symbols are absent from the IR too: a symbol
+// deleted from handler.go was invisible at exit 0 with empty stderr, which is
+// the exact fail-open this package exists to close.
+//
+// It also inverted the safety gradient — an UNREADABLE extensionless target
+// failed closed while a READABLE one failed open.
+func TestSymlinkNamedAsSourceIsRecordedWhateverItsTargetIsCalled(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "handler.go.tmpl", "package p\nfunc F(){}\n")
+	writeFile(t, dir, "main.go", "package main\n")
+	if err := os.Symlink(filepath.Join(dir, "handler.go.tmpl"), filepath.Join(dir, "handler.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := skipMap(t, stats)["handler.go"]; r != SkipSymlink {
+		t.Errorf("handler.go -> handler.go.tmpl recorded as %q, want %q — the link's own "+
+			"name says source, and Walk never followed it, so those symbols are in no IR", r, SkipSymlink)
+	}
+}

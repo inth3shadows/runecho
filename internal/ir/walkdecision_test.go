@@ -476,3 +476,51 @@ func FuzzDecideBlame(f *testing.F) {
 		}
 	})
 }
+
+// TestClassifySymlinkExt pins the two OPPOSITE failures neither name alone can
+// avoid. Rows are named for the one that would come back if the rule regressed.
+func TestClassifySymlinkExt(t *testing.T) {
+	g := NewGenerator(GeneratorConfig{})
+	cases := []struct {
+		name, link, target string
+		want               extClass
+	}{{
+		// Target-only classification loses this: Walk never follows the link, so
+		// the symbols are absent from the IR, and a non-code target name means
+		// nothing is recorded either. A deleted symbol goes unnoticed at exit 0.
+		name: "a link NAMED as source is source even when its target is not",
+		link: "handler.go", target: "handler.go.tmpl", want: extSupported,
+	}, {
+		name: "a link named as unparsed source is still source",
+		link: "Widget.java", target: "widget.txt", want: extKnownSource,
+	}, {
+		// Link-only classification loses this: `README` and `LICENSE` are both
+		// extensionless, so both failed closed, and non-code in the fail-closed
+		// array blocks every documentation change in the repo.
+		name: "an extensionless link to a doc is non-code",
+		link: "README", target: "README.md", want: extNonCode,
+	}, {
+		name: "an extensionless link to source is source",
+		link: "Gadget", target: "Widget.java", want: extKnownSource,
+	}, {
+		// Neither name gives anything away, so it may be a source DIRECTORY.
+		name: "extensionless both ends stays ambiguous and fails closed",
+		link: "LICENSE", target: "LICENSE", want: extNone,
+	}, {
+		// A link whose target cannot be read at all: os.Readlink failed, so the
+		// link's own name is the only evidence there is.
+		name: "an unreadable link falls back to its own name",
+		link: "main.go", target: "", want: extSupported,
+	}, {
+		name: "an unreadable link with no name evidence stays ambiguous",
+		link: "current", target: "", want: extNone,
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := g.classifySymlinkExt(tc.link, tc.target); got != tc.want {
+				t.Errorf("classifySymlinkExt(%q, %q) = %v, want %v",
+					tc.link, tc.target, got, tc.want)
+			}
+		})
+	}
+}

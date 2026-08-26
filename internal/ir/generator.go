@@ -331,10 +331,24 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 				// parent-blaming still collapses to one entry, because EVERY child
 				// fails there and the recorder dedups -- but by then the parent is
 				// implicated on its own evidence, not inferred from one child.
-				blame := path
-				if info == nil && g.everyChildFailed(path, parentProbe) {
-					if parent := filepath.Dir(path); parent != path {
-						blame = parent
+				blame, reason := path, SkipUnreadableDir
+				if info == nil {
+					if g.everyChildFailed(path, parentProbe) {
+						if parent := filepath.Dir(path); parent != path {
+							blame = parent
+						}
+					} else {
+						// Siblings are fine, so the parent is not the problem --
+						// this one entry is (EIO/ESTALE on a network mount). It
+						// is therefore a FILE as far as anything here can tell,
+						// so it takes the file reason, and the non-code rule
+						// applies: a path with an extension that is not code is
+						// not a symbol blind spot, and putting it in the
+						// fail-closed array blocks a change that touches it.
+						if ext := filepath.Ext(path); ext != "" && !g.isCode(path) {
+							return nil
+						}
+						reason = SkipUnreadableFile
 					}
 				}
 				// An unreadable ROOT resolves to ".", which the recorder drops as
@@ -362,7 +376,7 @@ func (g *Generator) walkSourceFiles(ctx context.Context, absRoot string, fn walk
 				case rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)):
 					rec.rootUnreadable = true
 				default:
-					record(blame, SkipUnreadableDir)
+					record(blame, reason)
 				}
 			}
 			return nil

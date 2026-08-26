@@ -550,7 +550,7 @@ func TestPolicyAndCapabilitySkipsAreDistinguishable(t *testing.T) {
 	// `skipped: []` and exit 0 for a tree it never opened.
 	policy := []string{SkipIgnoredDir}
 	capability := []string{SkipUnsupportedLanguage, SkipParseError, SkipOversized,
-		SkipCapReached, SkipSymlink, SkipSymlinkDir, SkipUnreadableDir}
+		SkipCapReached, SkipSymlink, SkipSymlinkDir, SkipUnreadableDir, SkipUnreadableFile}
 	for _, r := range policy {
 		if !IsPolicySkip(r) {
 			t.Errorf("%q names a pruned directory and must classify as policy", r)

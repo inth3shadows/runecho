@@ -36,6 +36,11 @@ const (
 	// SkipParseError — a supported extension whose parser failed. Already
 	// counted in Stats.ParseErrors; named here so the path is reportable.
 	SkipParseError = "parse_error"
+	// SkipUnreadableFile — a single FILE the walk could not stat, while its
+	// siblings were fine (EIO or ESTALE on a network mount). Distinct from
+	// SkipUnreadableDir because the reason string is read by humans and calling
+	// one file a directory is simply false.
+	SkipUnreadableFile = "unreadable_file"
 	// SkipOversized — over the generator's maxParseBytes ceiling.
 	SkipOversized = "oversized"
 	// SkipCapReached — FileCap was hit; the walk kept counting but stopped

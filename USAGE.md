@@ -197,6 +197,7 @@ Reasons in `skipped`:
 | `oversized` | Larger than the per-file parse limit |
 | `cap_reached` | The repo's file cap stopped indexing before this file |
 | `symlink` | A symlinked source file; the walk does not follow symlinks |
+| `unreadable_file` | A single file the walk could not stat, while its siblings were fine |
 | `symlink_dir` | A symlinked directory; its subtree is unexamined under this path |
 | `unreadable_dir` | A directory the walk could not read; its whole subtree went unvisited |
 

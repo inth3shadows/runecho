@@ -227,7 +227,17 @@ Four rules for machine consumers:
   (`diff <id-a> <id-b>`) omits both keys entirely rather than claim a clean bill
   of health it never checked.
 * **`skipped_truncated: true` means the list hit its cap**, so absence from it no
-  longer implies "indexed". Treat it as "unknown".
+  longer implies "indexed". Treat it as "unknown" — but a *bounded* unknown: the
+  cap is spent per class, so what truncation drops is always the compressible
+  kind. `unsupported_language` and `cap_reached` are re-derivable from the path
+  (the first is an extension test, the second means "everything past `FileCap`"),
+  and they get their own budget. A permission error, an unfollowable link, a
+  parse failure or an oversized file is a fact nothing else in the payload
+  implies, so those get a separate budget and are never displaced. A repo of
+  10,000 unparsed `.java` files still reports the one directory it could not
+  read. `ignored_paths` is budgeted separately again and never spends either — it
+  is your own configuration, and truncating it says nothing about `skipped`,
+  which is why an abridged ignore list does not raise this flag.
 * **`root_unreadable: true` means NOTHING was examined.** The repo root itself
   could not be read, so `skipped` is empty, `skipped_truncated` is false, and no
   file was indexed — every other signal reads clean. It is the one condition a

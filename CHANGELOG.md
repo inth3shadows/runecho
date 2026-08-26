@@ -29,6 +29,15 @@ install time from `git describe --tags` (see `install.sh`).
   cannot answer the question. The MCP `diff` tool clips its list harder, being a
   context-economy surface.
   ([harness#21](https://github.com/inth3shadows/harness/issues/21))
+  The skip list is bounded per class rather than by one shared ceiling, so
+  truncation always drops the compressible kind: `unsupported_language` and
+  `cap_reached` (re-derivable from the path) share one budget, permission errors
+  and unfollowable links share another and are never displaced, and the
+  informational `ignored_paths` array spends neither. Measured on a 1200-file
+  Java repo containing one unreadable subtree, the shared budget discarded the
+  permission error in favour of 999 rows the consumer could have derived from a
+  file extension, and reported `root_unreadable: false` at exit 0. An abridged
+  `ignored_paths` no longer raises `skipped_truncated`.
 
 ### Fixed
 - The ignore list is no longer applied to the walk root itself. A repo whose

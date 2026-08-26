@@ -299,15 +299,19 @@ func TestCapReachedIsRecorded(t *testing.T) {
 // "indexed". The flag is the only thing separating those two, so it is pinned.
 func TestSkipListTruncatesLoudly(t *testing.T) {
 	dir := t.TempDir()
-	for i := range MaxRecordedSkips + 25 {
+	for i := range maxDerivableSkips + 25 {
 		writeFile(t, dir, fmt.Sprintf("C%d.java", i), "class C { }\n")
 	}
 	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stats.Skipped) != MaxRecordedSkips {
-		t.Errorf("skip list length = %d, want the cap %d", len(stats.Skipped), MaxRecordedSkips)
+	// The bound is the DERIVABLE budget, not the whole capability budget:
+	// unsupported_language may not spend the irreplaceable class's share, or a
+	// Java monorepo evicts the one unreadable directory in the tree.
+	if len(stats.Skipped) != maxDerivableSkips {
+		t.Errorf("skip list length = %d, want the derivable budget %d",
+			len(stats.Skipped), maxDerivableSkips)
 	}
 	if !stats.SkippedTruncated {
 		t.Error("SkippedTruncated = false on a capped list — a consumer would read the missing " +
@@ -876,23 +880,28 @@ func TestVanishedEntryIsNotRecorded(t *testing.T) {
 // 1000-entry list. That is the same mis-scoping the sub-cap was introduced to
 // fix, in the opposite direction.
 func TestHitCapReportsTheLargestCapThatFired(t *testing.T) {
+	// cap_reached FIRST so its sub-cap actually fires (100), then enough
+	// unsupported_language to exhaust the derivable budget (500). Both caps have
+	// now truncated, which is the state this test exists to pin. Filling with
+	// unsupported_language first would spend the whole derivable budget before a
+	// single cap_reached add arrived, and the sub-cap would never fire.
 	r := &skipRecorder{}
-	for i := range maxRecordedSkips + 200 {
-		r.add(fmt.Sprintf("f%05d.java", i), SkipUnsupportedLanguage)
-	}
 	for i := range 200 {
 		r.add(fmt.Sprintf("g%05d.go", i), SkipCapReached)
+	}
+	for i := range maxDerivableSkips + 200 {
+		r.add(fmt.Sprintf("f%05d.java", i), SkipUnsupportedLanguage)
 	}
 	items, truncated, cap := r.result()
 	if !truncated {
 		t.Fatal("both caps fired; truncation must be flagged")
 	}
-	if len(items) != maxRecordedSkips {
-		t.Fatalf("len = %d, want %d", len(items), maxRecordedSkips)
+	if len(items) != maxDerivableSkips {
+		t.Fatalf("len = %d, want the derivable budget %d", len(items), maxDerivableSkips)
 	}
-	if cap != maxRecordedSkips {
+	if cap != maxDerivableSkips {
 		t.Errorf("hitCap = %d, want %d — naming the sub-cap beside a %d-entry list "+
-			"mis-scopes the blind spot", cap, maxRecordedSkips, len(items))
+			"mis-scopes the blind spot", cap, maxDerivableSkips, len(items))
 	}
 }
 
@@ -1299,5 +1308,100 @@ func TestBlameAboveTheRootBecomesRootUnreadable(t *testing.T) {
 	if !stats.RootUnreadable {
 		t.Error("nothing was indexed and nothing matchable was reported — Coverage() " +
 			"also returns a vacuous 100, so every signal reads clean")
+	}
+}
+
+// TestIrreplaceableSkipsSurviveAFloodOfDerivableOnes is the regression for the
+// defect the decision-table panel measured on a real binary.
+//
+// Fixture: 1200 .java files under src/ and one genuinely unreadable subtree,
+// zzz_secret/, sorting last. Against the single shared 1000-entry budget the
+// walk SAW the EACCES, printed it to stderr, and then dropped the entry because
+// 999 unsupported_language rows sorting earlier had already filled the list. The
+// payload read skipped_truncated=true, root_unreadable=false, exit 0 — the one
+// fact nothing else in the payload implies, discarded in favour of 999 copies of
+// a fact the consumer could work out from a file extension. Downstream, the
+// harness maps skipped_truncated to "degraded" and degraded to PASS, so the gate
+// silently disabled itself on exactly the repo class it was built for.
+//
+// The entry arrives LAST here on purpose: first-come plus a lexical walk is what
+// made the surviving signal "alphabetically earliest" rather than "irreplaceable".
+func TestIrreplaceableSkipsSurviveAFloodOfDerivableOnes(t *testing.T) {
+	r := &skipRecorder{}
+	for i := range maxDerivableSkips + 700 {
+		r.add(fmt.Sprintf("src/A%05d.java", i), SkipUnsupportedLanguage)
+	}
+	r.add("zzz_secret", SkipUnreadableDir)
+
+	items, truncated, _ := r.result()
+	if !truncated {
+		t.Error("the derivable budget was exhausted; truncation must be flagged")
+	}
+	found := false
+	for _, sk := range items {
+		if sk.Path == "zzz_secret" {
+			found = true
+			if sk.Reason != SkipUnreadableDir {
+				t.Errorf("zzz_secret reason = %q, want %q", sk.Reason, SkipUnreadableDir)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the unreadable directory was evicted by %d unsupported_language entries; "+
+			"a permission error is the one skip nothing else in the payload implies", len(items))
+	}
+}
+
+// TestPolicySkipsCannotDisplaceCapabilitySkips.
+//
+// `.git` is in DefaultIgnoredPaths, so every repo emits at least one policy
+// entry, and a pnpm workspace or a Python monorepo emits one per package. Under
+// the single shared budget those informational rows billed against the
+// fail-closed array — measurably: the reproduction above held 999 entries, not
+// 1000, because `.git` had taken a slot.
+func TestPolicySkipsCannotDisplaceCapabilitySkips(t *testing.T) {
+	r := &skipRecorder{}
+	for i := range maxPolicySkips + 300 {
+		r.add(fmt.Sprintf("pkg%04d/node_modules", i), SkipIgnoredDir)
+	}
+	r.add("legacy", SkipUnreadableDir)
+
+	items, truncated, _ := r.result()
+	if truncated {
+		t.Error("only the POLICY budget truncated, yet SkippedTruncated was raised. " +
+			"USAGE.md defines that flag as 'absence from `skipped` no longer implies " +
+			"indexed', and `skipped` holds no policy entries — a false positive here " +
+			"is a false fail-closed on every diff of a monorepo, permanently.")
+	}
+	found := false
+	for _, sk := range items {
+		if sk.Path == "legacy" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an unreadable directory was displaced by the operator's own ignore list")
+	}
+}
+
+// TestEveryReasonHasABudgetClass: the closed reason set and the budget table are
+// two lists that must not drift. A reason absent from classifySkip's switch is
+// budgeted as irreplaceable, which is the safe error — but a reason accidentally
+// landing in classPolicy would be filed as informational and would stop being
+// reported on truncation, which is the fail-open the split exists to close.
+func TestEveryReasonHasABudgetClass(t *testing.T) {
+	for _, reason := range []string{
+		SkipUnsupportedLanguage, SkipParseError, SkipUnreadableFile, SkipOversized,
+		SkipCapReached, SkipSymlink, SkipIgnoredDir, SkipSymlinkDir, SkipUnreadableDir,
+	} {
+		class := classifySkip(reason)
+		if (class == classPolicy) != IsPolicySkip(reason) {
+			t.Errorf("classifySkip(%q) = policy:%v, IsPolicySkip = %v — the payload's "+
+				"split and the budget's split disagree about the same reason",
+				reason, class == classPolicy, IsPolicySkip(reason))
+		}
+		if class < 0 || int(class) >= len(skipBudgets) || skipBudgets[class] <= 0 {
+			t.Errorf("classifySkip(%q) = %d, which has no positive budget", reason, class)
+		}
 	}
 }

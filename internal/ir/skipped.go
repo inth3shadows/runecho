@@ -114,35 +114,117 @@ type SkippedFile struct {
 	Reason string
 }
 
-// maxRecordedSkips bounds the skip list. A monorepo of a language RunEcho does
-// not parse would otherwise dominate a diff payload that exists to report symbol
-// drift. Truncation is reported (Stats.SkippedTruncated), never silent — a
-// consumer that fails closed on "did you look at my file?" must be able to tell
-// "no entry, so it was indexed" from "no entry, because the list ran out".
-const maxRecordedSkips = 1000
-
-// MaxRecordedSkips exposes the cap so a consumer rendering a truncated list can
-// name the number rather than hard-coding a copy that drifts.
-const MaxRecordedSkips = maxRecordedSkips
-
-// maxCapReachedSkips sub-bounds the cap_reached reason.
+// The skip list is bounded by THREE budgets, one per class, not by a single
+// shared ceiling. A monorepo of a language RunEcho does not parse would
+// otherwise dominate a diff payload that exists to report symbol drift.
 //
-// Without it, cap_reached crowds out the reason the feature exists for. The
-// walk is lexical and the recorder is first-come, so a 5000-file repo with
-// FileCap=2000 emits ~3000 cap_reached adds; the list fills at 1000 and every
-// .java file sorting after the fill point is dropped. The signal that survived
-// was "lexically earliest", not "most important". cap_reached is also the most
-// compressible reason -- it means "everything past the cap", and its count is
-// already implied by SupportedSeen minus Indexed -- so a sample plus the
-// truncation flag loses nothing a consumer can act on.
+// One shared budget was the defect. filepath.Walk is lexical and the recorder is
+// first-come, so a shared budget means the reason with the most files wins and
+// "most files" is decided by alphabet. Measured on a 1200-file Java repo
+// containing one genuinely unreadable subtree: the walk SAW the EACCES, printed
+// it to stderr, and then dropped the entry because 999 unsupported_language rows
+// sorting earlier had already filled the list. The payload read
+// skipped_truncated=true, root_unreadable=false, exit 0 -- the real blind spot
+// discarded in favour of 999 copies of a fact the consumer could have worked out
+// from the file extension. In the same repo, src/A00001.java blocked and
+// src/A01100.java passed clean: same commit shape, verdict by alphabet.
+//
+// The split is by what a consumer could RECONSTRUCT without the walk:
+//
+//   - IRREPLACEABLE -- only the walk could have observed it. A permission error,
+//     an unfollowable link, a parser failure, a file over the size ceiling. If
+//     the entry is dropped, the fact is gone: nothing else in the payload or in
+//     the binary's published tables implies it. Budgeted first and never
+//     displaced.
+//   - DERIVABLE -- the consumer can work it out from the path plus a table the
+//     binary already publishes. unsupported_language is the extension test;
+//     cap_reached means "everything past FileCap" and its count is already
+//     implied by SupportedSeen minus Indexed. These are the ones that flood, and
+//     they are the ones that cost least when they truncate.
+//   - POLICY -- the operator's own ignore list. Informational; see IsPolicySkip.
+//
+// This is the same crowding-out that maxCapReachedSkips prevents one reason
+// down, and that snapshot.TruncateSkips prevents one layer up. The rule was
+// already learned twice and simply never applied at the source.
+const (
+	maxIrreplaceableSkips = 400
+	maxDerivableSkips     = 500
+	maxPolicySkips        = 100
+)
+
+// maxRecordedSkips is the total the three budgets add up to. It bounds nothing
+// on its own -- no single class may spend it -- and exists so the payload's
+// overall size stays where it was.
+const maxRecordedSkips = maxIrreplaceableSkips + maxDerivableSkips + maxPolicySkips
+
+// MaxRecordedSkips exposes the cap that bounds the `skipped` array as rendered,
+// so a consumer naming the number in a truncation notice does not hard-code a
+// copy that drifts. It is the CAPABILITY budget: `skipped` never holds policy
+// entries, so the policy budget is not part of what the reader is holding.
+const MaxRecordedSkips = maxIrreplaceableSkips + maxDerivableSkips
+
+// maxCapReachedSkips sub-bounds the cap_reached reason WITHIN the derivable
+// budget.
+//
+// Without it, cap_reached crowds out unsupported_language, which is the reason
+// the feature exists for -- the same crowding-out one level down. A 5000-file
+// repo with FileCap=2000 emits ~3000 cap_reached adds and would spend the whole
+// derivable budget on them. cap_reached is the most compressible reason of all
+// -- it means "everything past the cap" -- so a sample plus the truncation flag
+// loses nothing a consumer can act on.
 const maxCapReachedSkips = 100
 
-// skipRecorder accumulates skips during one walk, bounded by maxRecordedSkips.
+// skipClass partitions the reason set by what a consumer could reconstruct
+// without the walk. See the budget block above for why that is the axis.
+type skipClass int
+
+const (
+	classIrreplaceable skipClass = iota
+	classDerivable
+	classPolicy
+)
+
+// skipBudgets is indexed by skipClass.
+var skipBudgets = [...]int{
+	classIrreplaceable: maxIrreplaceableSkips,
+	classDerivable:     maxDerivableSkips,
+	classPolicy:        maxPolicySkips,
+}
+
+// classifySkip maps a reason to its budget class.
+//
+// The default is classIrreplaceable ON PURPOSE. A reason added to the closed set
+// above and not listed here is budgeted as irreplaceable and reported on
+// truncation -- the safe error. Defaulting to derivable would let a new reason
+// silently occupy the compressible budget, and defaulting to policy would put it
+// in the informational array, which is the fail-open this whole feature exists
+// to close.
+func classifySkip(reason string) skipClass {
+	// Policy membership is asked of IsPolicySkip rather than re-listed here.
+	// Two places encoding the same partition is precisely the cross-branch
+	// disagreement this file keeps paying for: a reason added to policySkips and
+	// not to a duplicate list here would be budgeted as a blind spot and
+	// reported on truncation, while the payload filed it as informational.
+	if IsPolicySkip(reason) {
+		return classPolicy
+	}
+	switch reason {
+	case SkipUnsupportedLanguage, SkipCapReached:
+		return classDerivable
+	default:
+		return classIrreplaceable
+	}
+}
+
+// skipRecorder accumulates skips during one walk, bounded per class.
 // The zero value is ready to use, and a nil receiver is a no-op so a caller that
 // does not care about skips can pass nil.
 type skipRecorder struct {
 	items []SkippedFile
 	seen  map[string]bool
+	// counts spends a separate budget per skipClass, so a class that floods
+	// cannot displace one that cannot be reconstructed. Indexed by skipClass.
+	counts [len(skipBudgets)]int
 	// rootUnreadable: the walk could not enter the root itself. See Stats.
 	rootUnreadable bool
 	capReached     int
@@ -181,17 +263,19 @@ func (r *skipRecorder) add(path, reason string) {
 	// the cap checks left `seen` unbounded, so a repo whose file cap produced
 	// millions of cap_reached adds accumulated millions of path strings while
 	// `items` stopped at 1000.
+	class := classifySkip(reason)
 	if reason == SkipCapReached && r.capReached >= maxCapReachedSkips {
-		r.noteCap(maxCapReachedSkips)
+		r.noteCap(maxCapReachedSkips, class)
 		return
 	}
-	if len(r.items) >= maxRecordedSkips {
-		r.noteCap(maxRecordedSkips)
+	if r.counts[class] >= skipBudgets[class] {
+		r.noteCap(skipBudgets[class], class)
 		return
 	}
 	if reason == SkipCapReached {
 		r.capReached++
 	}
+	r.counts[class]++
 	r.seen[path] = true
 	r.items = append(r.items, SkippedFile{Path: path, Reason: reason})
 }
@@ -209,7 +293,19 @@ func (r *skipRecorder) add(path, reason string) {
 // bounds one reason, not the list. The message is worded "a skip cap was hit
 // (N)", which is true of either cap, rather than "the skip list hit its cap",
 // which was only ever true of one.
-func (r *skipRecorder) noteCap(capHit int) {
+func (r *skipRecorder) noteCap(capHit int, class skipClass) {
+	// Policy truncation is NOT reported, matching snapshot.TruncateSkips one
+	// layer up. `truncated` becomes Stats.SkippedTruncated, which USAGE.md
+	// defines as "absence from `skipped` no longer implies indexed" -- and
+	// `skipped` never holds policy entries, so an abridged ignore list says
+	// nothing about it. Raising the flag for policy meant a Python monorepo with
+	// a __pycache__ per package, or a pnpm workspace with a node_modules per
+	// package, reported the fail-closed array as unknown on every single diff,
+	// permanently and unfixably, while that array was in fact complete. A false
+	// positive on this flag is a false fail-closed.
+	if class == classPolicy {
+		return
+	}
 	r.truncated = true
 	if capHit > r.hitCap {
 		r.hitCap = capHit

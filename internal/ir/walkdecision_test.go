@@ -3,6 +3,7 @@ package ir
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -484,6 +485,13 @@ func TestDecideBlameTable(t *testing.T) {
 		// A backslash is a legal Linux filename character. Rejecting it would set
 		// rootUnreadable for the WHOLE repo over one oddly named file.
 		{`a backslash in a name is an ordinary path on linux`, `weird\name.go`, false, blameRecord},
+		// Passed all three explicit checks and was RECORDED: it starts with no
+		// "..", is not "." or "..", and is not absolute — yet it names the
+		// root's PARENT. An interior segment is a disguise, not a difference.
+		{"an escaping path with interior segments is total blindness", "a/../..", false, blameRootUnreadable},
+		{"a deeper escape is total blindness", "a/b/../../..", false, blameRootUnreadable},
+		{"an escape through a dot segment is total blindness", "x/./../..", false, blameRootUnreadable},
+		{"an interior traversal that stays inside is recorded", "a/../b.go", false, blameRecord},
 		{"a leading dot-slash is already stripped by normalizePath", ".hidden/x.go", false, blameRecord},
 	}
 	for _, tc := range cases {
@@ -508,6 +516,9 @@ func FuzzDecideBlame(f *testing.F) {
 		// been. Kept as a named seed rather than an opaque corpus file so the
 		// case is visible in review.
 		"./", ".//", "././",
+		// Found by review, not by the fuzz: all three explicit checks pass and
+		// it still names the root's parent.
+		"a/../..", "a/b/../../..", "x/./../..",
 	} {
 		f.Add(seed, false)
 		f.Add(seed, true)
@@ -524,17 +535,28 @@ func FuzzDecideBlame(f *testing.F) {
 		if relErr {
 			t.Errorf("recorded %q despite an unresolvable blame", rel)
 		}
-		if rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
-			t.Errorf("recorded %q, which is at or above the root and matches no "+
-				"repo-relative path a consumer holds", rel)
+		// ONE independent oracle, deliberately not a restatement of the
+		// implementation's predicates.
+		//
+		// The first version listed the same three checks decideBlame makes,
+		// against the same raw string, so it could only ever detect
+		// raw-versus-normalised divergence — never a shape the implementation
+		// and the oracle agreed on, which is every interesting bug. `a/../..` is
+		// exactly that shape: it satisfied all three checks and was recorded.
+		//
+		// What the entry must be TRUE of is what the consumer does with it:
+		// resolve it under the repo root and stay inside. Anything that escapes
+		// matches nothing in a changed-path set — a fail-open wearing a clean
+		// payload.
+		const root = "/repo"
+		resolved := filepath.Clean(filepath.Join(root, rel))
+		if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+			t.Errorf("recorded %q, which resolves to %q — outside the repo root, so "+
+				"it matches no changed path a consumer holds", rel, resolved)
 		}
-		if strings.HasPrefix(rel, "/") {
-			t.Errorf("recorded absolute path %q, which silently matches nothing", rel)
-		}
-		// The entry becomes an IR map key, and the caller may re-normalise it.
-		if n := normalizePath(rel); decideBlame(n, false) != blameRecord {
-			t.Errorf("recorded %q but its normalised form %q would not be recorded; "+
-				"the decision must survive normalisation", rel, n)
+		if resolved == root {
+			t.Errorf("recorded %q, which resolves to the root itself; that is the "+
+				"root_unreadable flag's job, and an entry for it matches nothing", rel)
 		}
 	})
 }

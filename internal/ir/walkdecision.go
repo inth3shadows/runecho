@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -494,7 +495,15 @@ func decideBlame(rel string, relErr bool) blameOutcome {
 	if relErr {
 		return blameRootUnreadable
 	}
-	rel = normalizePath(rel)
+	// Clean as well as normalise. normalizePath does ToSlash, strips leading
+	// "./" and applies NFC -- it does NOT resolve interior "..", because its
+	// output is the IR's map key and must stay a faithful spelling of the path.
+	// Without a Clean here, `a/../..` passed all three checks below and was
+	// RECORDED, even though it names the root's parent: the same unmatchable
+	// entry the function exists to reject, wearing an interior segment as a
+	// disguise. path.Clean, not filepath.Clean, because rel is already
+	// slash-separated by then and the decision must not vary by platform.
+	rel = path.Clean(normalizePath(rel))
 	// "." is the root itself. ".." and anything under it is ABOVE the root: the
 	// parent of a child directly under the root IS the root, and filepath.Rel
 	// happily returns ".." for anything further out, so a repo whose parent

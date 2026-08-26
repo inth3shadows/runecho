@@ -342,6 +342,19 @@ func TruncateSkips(d DiffResult, n int) DiffResult {
 	if !cutCap && !cutPol {
 		return d
 	}
+	// SkippedTruncated describes `skipped` ALONE, so it is set only when the
+	// capability bucket lost entries. The previous version raised it for either
+	// bucket -- the very thing this function's doc comment above calls out as
+	// wrong -- which meant any repo with more than n ignored directories (a
+	// Python monorepo with a __pycache__ per package, a pnpm workspace with a
+	// node_modules per package) reported the fail-closed array as "unknown" on
+	// every single MCP diff, permanently and unfixably, while that array was in
+	// fact complete. USAGE.md tells consumers to treat the flag as "absence no
+	// longer implies indexed", so a false positive here is a false fail-closed.
+	//
+	// Policy truncation is not reported: `ignored_paths` is informational, and a
+	// consumer has nothing to do differently on learning the list of directories
+	// it was already told to ignore is abridged.
 	// Copy: d.Skipped aliases the recorder's backing array, and a re-slice that
 	// the caller then treats as complete is exactly the "absence means indexed"
 	// fail-open this whole feature exists to close.
@@ -355,9 +368,11 @@ func TruncateSkips(d DiffResult, n int) DiffResult {
 		return merged[i].Reason < merged[j].Reason
 	})
 	d.Skipped = merged
-	d.SkippedTruncated = true
-	if d.SkippedCap == 0 || n < d.SkippedCap {
-		d.SkippedCap = n
+	if cutCap {
+		d.SkippedTruncated = true
+		if d.SkippedCap == 0 || n < d.SkippedCap {
+			d.SkippedCap = n
+		}
 	}
 	return d
 }

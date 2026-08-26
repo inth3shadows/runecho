@@ -228,8 +228,30 @@ func TestTruncateSkips_BudgetsEachBucketSeparately(t *testing.T) {
 	if len(policy) != 50 {
 		t.Errorf("policy entries = %d, want the 50-entry budget", len(policy))
 	}
+	// The flag describes `skipped` alone. Nothing was dropped from it here, so
+	// raising it would tell a gate the fail-closed array is incomplete when it is
+	// not — a false fail-closed on every diff of any repo with more than n
+	// ignored directories. An earlier version of this test asserted the
+	// opposite, pinning the behaviour TruncateSkips' own doc comment calls wrong.
+	if d.SkippedTruncated {
+		t.Error("only policy entries were dropped; `skipped` is complete and must not " +
+			"be flagged as truncated")
+	}
+}
+
+// TestTruncateSkips_FlagsOnlyCapabilityLoss is the other half: when the
+// fail-closed array really is clipped, the flag and the cap must both be set.
+func TestTruncateSkips_FlagsOnlyCapabilityLoss(t *testing.T) {
+	var all []ir.SkippedFile
+	for i := range 60 {
+		all = append(all, ir.SkippedFile{
+			Path:   fmt.Sprintf("src/F%02d.java", i),
+			Reason: ir.SkipUnsupportedLanguage,
+		})
+	}
+	d := TruncateSkips(DiffResult{SkippedKnown: true, Skipped: all}, 50)
 	if !d.SkippedTruncated {
-		t.Error("policy entries were dropped, so the flag must be set")
+		t.Error("capability entries were dropped, so the flag must be set")
 	}
 	if d.SkippedCap != 50 {
 		t.Errorf("SkippedCap = %d, want 50 so the warning names the cap that fired", d.SkippedCap)

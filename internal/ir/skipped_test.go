@@ -1490,3 +1490,58 @@ func TestSymlinkNamedAsSourceIsRecordedWhateverItsTargetIsCalled(t *testing.T) {
 			"name says source, and Walk never followed it, so those symbols are in no IR", r, SkipSymlink)
 	}
 }
+
+// TestFileRootInAnUnparsedLanguageFailsClosed pins the OBSERVABLE outcome across
+// the seam between the two tables, which the table row alone cannot.
+//
+// decideWalkEntry returns record(self, unsupported_language); the blame is the
+// root, so decideBlame maps it to root_unreadable rather than an entry, because
+// "." matches nothing a consumer holds. The row asserts the first half and the
+// caller does the second, so a test of the row alone passes while the two
+// disagree — exactly the gap the pair of tables exists to close.
+//
+// Reachable only through the library API and MCP; the CLI rejects a
+// non-directory root first (cmd/runecho-ir/capture.go requireExistingDir).
+//
+// Failing closed is the point. What shipped before dropped the "." entry as
+// inert and returned a clean payload for a file the oracle never parsed.
+func TestFileRootInAnUnparsedLanguageFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Widget.java", "class W { }\n")
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(filepath.Join(dir, "Widget.java"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Indexed != 0 {
+		t.Fatalf("precondition: Indexed = %d, want 0", stats.Indexed)
+	}
+	if !stats.RootUnreadable {
+		t.Error("RootUnreadable = false for a root the indexer declined. Nothing was " +
+			"indexed and the only reportable path is \".\", which matches nothing a " +
+			"consumer holds — so every signal reads clean for a file never parsed.")
+	}
+	if len(stats.Skipped) != 0 {
+		t.Errorf("Skipped = %v, want empty — a \".\" entry matches nothing under the "+
+			"prefix rule, which is why the flag exists", stats.Skipped)
+	}
+}
+
+// TestFileRootInASupportedLanguageIsIndexed is the control: the flag must not
+// fire for a root the indexer CAN read. Without this, "always set RootUnreadable
+// for a file root" would pass the test above.
+func TestFileRootInASupportedLanguageIsIndexed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+
+	_, stats, err := NewGenerator(GeneratorConfig{}).Generate(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RootUnreadable {
+		t.Error("RootUnreadable = true for a readable, parseable file root")
+	}
+	if stats.Indexed != 1 {
+		t.Errorf("Indexed = %d, want 1", stats.Indexed)
+	}
+}

@@ -243,10 +243,14 @@ Four rules for machine consumers:
   read. `ignored_paths` is budgeted separately again and never spends either — it
   is your own configuration, and truncating it says nothing about `skipped`,
   which is why an abridged ignore list does not raise this flag.
-* **`root_unreadable: true` means NOTHING was examined.** The repo root itself
-  could not be read, so `skipped` is empty, `skipped_truncated` is false, and no
-  file was indexed — every other signal reads clean. It is the one condition a
-  gate cannot detect from the other two, so check it first.
+* **`root_unreadable: true` means NOTHING under this root was examined**, and the
+  reason is the root itself rather than any path beneath it — it is raised when
+  the root could not be read, when it is an unresolvable symlink, and when it is
+  a single file in a language no parser handles (zero files indexed either way,
+  and the only reportable path is `.`, which matches nothing you hold). In every
+  case `skipped` is empty, `skipped_truncated` is false, and no file was indexed
+  — so every other signal reads clean. It is the one condition a gate cannot
+  detect from the other two, so check it first.
 
 The text output shows `skipped` only. `ignored_paths` is your own configuration
 echoed back, and with `.git` always in it, printing it would put a block on every

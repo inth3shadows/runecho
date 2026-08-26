@@ -93,11 +93,30 @@ type Stats struct {
 	// fire (the overall list and the cap_reached sub-cap), and a message naming
 	// the wrong one mis-scopes the blind spot for whoever reads it.
 	SkippedCap int
-	// RootUnreadable means the walk could not enter the repo root itself, so
-	// NOTHING was examined. It needs its own flag: the root's repo-relative path
-	// is ".", which matches nothing under the documented prefix rule, and with
-	// SupportedSeen at 0 the coverage percentage is a vacuous 100. Without this,
-	// every signal reads clean for a tree nothing opened.
+	// RootUnreadable means NOTHING under this root was examined, and the reason
+	// is the root itself rather than any path beneath it. It needs its own flag:
+	// the root's repo-relative path is ".", which matches nothing under the
+	// documented prefix rule, and with SupportedSeen at 0 the coverage percentage
+	// is a vacuous 100. Without this, every signal reads clean for a tree nothing
+	// opened.
+	//
+	// Three states reach it, and the first is the one the name is drawn from:
+	//
+	//  1. The root could not be read or entered (EACCES, EIO), or the walk was
+	//     handed an error for it.
+	//  2. The root is a symlink that could not be resolved. The root is resolved
+	//     BEFORE the walk, so it only arrives as a link when that failed.
+	//  3. The root is a regular FILE the indexer declined -- source in a language
+	//     no parser handles. Reachable only through the library API and the MCP
+	//     surface; the CLI rejects a non-directory root first
+	//     (cmd/runecho-ir/capture.go requireExistingDir).
+	//
+	// (3) reads oddly against the flag's NAME -- the file was perfectly readable
+	// -- but it is the same fact for a consumer: zero files indexed, and the one
+	// path that could be reported is "." which matches nothing they hold. The
+	// alternative is what shipped before: the entry was dropped as inert and the
+	// caller saw a clean payload for a file the oracle never parsed, which is the
+	// fail-open this type exists to close. Fail closed, and say why here.
 	RootUnreadable bool
 }
 

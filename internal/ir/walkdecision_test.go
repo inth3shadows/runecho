@@ -108,7 +108,13 @@ func walkDecisionRows() []walkRow {
 			entry: walkEntry{isRoot: true, kind: kindDir},
 			want:  descend(),
 		}, {
-			name:  "a root that is source in a language with no parser is reported, not dropped",
+			// The blame is the root, so the CALLER turns this into root_unreadable
+			// rather than an entry -- see TestFileRootInAnUnparsedLanguageFails-
+			// Closed, which pins the observable outcome. Naming this row
+			// "reported, not dropped" described the table's return value and not
+			// what a consumer sees, which is the caller/callee gap the two tables
+			// exist to close.
+			name:  "a root that is source in a language with no parser is blamed, not dropped",
 			entry: walkEntry{isRoot: true, ext: extKnownSource},
 			want:  recordSelf(SkipUnsupportedLanguage),
 		}, {

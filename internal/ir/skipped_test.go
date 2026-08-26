@@ -1086,3 +1086,29 @@ func TestUpdateFileKeepsTheNamedKeyAndTheStaleEntryCleanup(t *testing.T) {
 		t.Error("the target's path was used as the IR key; the walk never produces that key")
 	}
 }
+
+// TestSubCapAloneDoesNotClaimToBoundTheList. When only the per-reason
+// cap_reached cap fires, the list can hold far more entries than that cap — 160
+// items under "cap (100)" reads as a contradiction. hitCap still reports the
+// largest cap that fired; subCapOnly records that the number bounds one reason
+// rather than the whole list.
+func TestSubCapAloneDoesNotClaimToBoundTheList(t *testing.T) {
+	r := &skipRecorder{}
+	for i := range 200 {
+		r.add(fmt.Sprintf("c%03d.go", i), SkipCapReached)
+	}
+	for i := range 60 {
+		r.add(fmt.Sprintf("u%03d.java", i), SkipUnsupportedLanguage)
+	}
+	items, truncated, capHit := r.result()
+	if !truncated || capHit != maxCapReachedSkips {
+		t.Fatalf("want the sub-cap reported, got truncated=%v cap=%d", truncated, capHit)
+	}
+	if !r.subCapOnly {
+		t.Error("only the per-reason cap fired; the number does not bound the whole list")
+	}
+	if len(items) <= capHit {
+		t.Errorf("precondition: the list (%d) should exceed the sub-cap (%d), which is "+
+			"what made the old wording contradictory", len(items), capHit)
+	}
+}

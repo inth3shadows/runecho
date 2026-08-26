@@ -425,13 +425,13 @@ func TestFormatFull_WarningNamesTheCapThatFired(t *testing.T) {
 		SkippedTruncated: true,
 	}
 	base.SkippedCap = 100
-	if out := FormatFull(base); !strings.Contains(out, "hit its cap (100)") {
+	if out := FormatFull(base); !strings.Contains(out, "a skip cap was hit (100)") {
 		t.Errorf("expected the sub-cap named:\n%s", out)
 	}
 	// Unknown cap (an older DiffResult, or one built by hand) falls back rather
 	// than printing 0.
 	base.SkippedCap = 0
-	if out := FormatFull(base); !strings.Contains(out, fmt.Sprintf("hit its cap (%d)", ir.MaxRecordedSkips)) {
+	if out := FormatFull(base); !strings.Contains(out, fmt.Sprintf("a skip cap was hit (%d)", ir.MaxRecordedSkips)) {
 		t.Errorf("expected the fallback cap:\n%s", out)
 	}
 }

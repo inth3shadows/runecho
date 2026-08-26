@@ -142,8 +142,11 @@ type skipRecorder struct {
 	seen  map[string]bool
 	// rootUnreadable: the walk could not enter the root itself. See Stats.
 	rootUnreadable bool
-	capReached     int
-	truncated      bool
+	// subCapOnly: the only cap that fired was the per-reason cap_reached one, so
+	// the number bounds that reason rather than the whole list.
+	subCapOnly bool
+	capReached int
+	truncated  bool
 	// cap the recorder actually hit, for a message that names the right number.
 	// Two different caps can truncate; reporting MaxRecordedSkips when the
 	// cap_reached sub-cap fired told an operator a 1000-entry list had been
@@ -188,20 +191,27 @@ func (r *skipRecorder) add(path, reason string) {
 	r.items = append(r.items, SkippedFile{Path: path, Reason: reason})
 }
 
-// noteCap records that a cap truncated the list, keeping the LARGEST one seen.
+// noteCap records that a cap truncated the list, keeping the cap that bounds
+// what the reader is actually holding.
 //
-// Two caps can fire in a single walk, and the message they feed names a number
-// the operator uses to scope the blind spot. Last-write-wins let a cap_reached
-// add arriving after the main cap filled reset the figure from 1000 back to 100
-// -- printing "hit its cap (100)" beside a 1000-entry list, which is the same
-// mis-scoping the sub-cap was introduced to fix, inverted. The largest cap is
-// the honest headline: it is the one bounding the list the reader is looking at.
-// TruncateSkips takes the MINIMUM for the same reason, since there the smaller
-// per-surface budget is what bounds what the reader got.
-func (r *skipRecorder) noteCap(cap int) {
+// Two caps can fire in one walk, and the number feeds a message an operator uses
+// to scope the blind spot. Last-write-wins let a cap_reached add after the main
+// cap filled reset 1000 to 100. "Largest wins" fixed that and left the inverse:
+// when ONLY the sub-cap fires, the list can hold 160 entries under a warning
+// naming a cap of 100, which reads as a contradiction.
+//
+// The honest number is the one that bounds the list as rendered. The sub-cap
+// bounds one reason, not the list, so it is reported only when nothing else
+// truncated -- and the renderer says which reason it applies to.
+func (r *skipRecorder) noteCap(capHit int) {
 	r.truncated = true
-	if cap > r.hitCap {
-		r.hitCap = cap
+	if capHit > r.hitCap {
+		r.hitCap = capHit
+	}
+	if capHit == maxCapReachedSkips {
+		r.subCapOnly = r.hitCap == maxCapReachedSkips
+	} else {
+		r.subCapOnly = false
 	}
 }
 

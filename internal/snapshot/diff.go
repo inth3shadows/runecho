@@ -472,7 +472,7 @@ func writeTruncationWarning(sb *strings.Builder, capHit int) {
 	if capHit == 0 {
 		capHit = ir.MaxRecordedSkips
 	}
-	fmt.Fprintf(sb, "\nWARNING: the skip list hit its cap (%d); other paths may also have gone unexamined.\n",
+	fmt.Fprintf(sb, "\nWARNING: a skip cap was hit (%d); other paths may also have gone unexamined.\n",
 		capHit)
 }
 

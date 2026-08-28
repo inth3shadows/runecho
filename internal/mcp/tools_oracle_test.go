@@ -186,11 +186,42 @@ func TestOracleStructureProjection(t *testing.T) {
 	}
 
 	// paths glob scoping.
-	if hit := call(t, o.structure, `{"repo":"`+name+`","paths":["*.go"]}`); hit["file_count"].(float64) != 1 {
-		t.Errorf("paths=*.go file_count = %v, want 1", hit["file_count"])
+	if m := call(t, o.structure, `{"repo":"`+name+`","paths":["*.go"]}`); m["file_count"].(float64) != 1 {
+		t.Errorf("paths=*.go file_count = %v, want 1", m["file_count"])
 	}
 	if miss := call(t, o.structure, `{"repo":"`+name+`","paths":["nomatch/**"]}`); miss["file_count"].(float64) != 0 {
 		t.Errorf("paths=nomatch file_count = %v, want 0", miss["file_count"])
+	}
+}
+
+// TestParseDetail pins the boundary parse gate: valid wire strings distill to
+// their Detail constants, and anything else is rejected with an error (never a
+// silently-coerced zero value). This is the parse-don't-validate contract the
+// schema's enum advertises — one canonical vocabulary for the whole tool.
+func TestParseDetail(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want Detail
+		ok   bool
+	}{
+		{"tree", DetailTree, true},
+		{"symbols", DetailSymbols, true},
+		{"hashes", DetailHashes, true},
+		{"full", DetailFull, true},
+		// Case-sensitive: "TREE" is not a member of the enum.
+		{"TREE", "", false},
+		{"", "", false}, // zero Detail is not a valid member
+		{"nope", "", false},
+		{"tree ", "", false}, // trailing space is a different string
+	}
+	for _, c := range cases {
+		got, err := ParseDetail(c.raw)
+		if c.ok && (err != nil || got != c.want) {
+			t.Errorf("ParseDetail(%q) = %q, %v; want %q", c.raw, got, err, c.want)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("ParseDetail(%q) = %q, nil; want error", c.raw, got)
+		}
 	}
 }
 

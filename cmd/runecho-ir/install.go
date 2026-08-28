@@ -330,12 +330,44 @@ func cronEntry(irBin, logPath string) string {
 	return fmt.Sprintf("0 * * * * %s repo reindex --all --prune >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(logPath))
 }
 
+// noCrontabYet reports whether crontab -l's stderr means "this user has no
+// crontab yet" rather than "the read failed".
+//
+// The distinction is the difference between installing and destroying: both
+// cases exit non-zero, and installCron writes the whole crontab back, so
+// treating a failed read as an empty one deletes every entry the user has.
+//
+// Matched on the message, not the exit status, because implementations agree on
+// the wording and disagree on the code. Verified against Debian/Ubuntu cron
+// (vixie-cron), whose crontab binary carries exactly two such strings —
+// "no crontab for %s" and "no crontab for %s - using an empty one" — both of
+// which contain this substring. An implementation that words it differently
+// falls through to the error path and aborts the install: a loud failure the
+// user can retry, rather than a silent one they cannot undo.
+func noCrontabYet(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "no crontab for")
+}
+
 // installCron adds an hourly crontab entry on Linux/other.
 func installCron(irBin, logPath string) error {
 	entry := cronEntry(irBin, logPath)
 	// Read existing crontab, strip any prior runecho entry, append new one.
-	existing, _ := exec.Command("crontab", "-l").Output()
-	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	lsCmd := exec.Command("crontab", "-l")
+	var lsErr bytes.Buffer
+	lsCmd.Stderr = &lsErr
+	existing, err := lsCmd.Output()
+	if err != nil && !noCrontabYet(lsErr.String()) {
+		// Anything other than "you have no crontab" — cron not installed, a
+		// permission error, an unreadable spool — must not reach the write below.
+		return fmt.Errorf("read existing crontab (refusing to overwrite it): %w: %s",
+			err, strings.TrimSpace(lsErr.String()))
+	}
+	var lines []string
+	// TrimRight then Split on an empty crontab yields [""], which would prepend a
+	// blank line on every install; skip the split entirely in that case.
+	if trimmed := strings.TrimRight(string(existing), "\n"); trimmed != "" {
+		lines = strings.Split(trimmed, "\n")
+	}
 	filtered := lines[:0]
 	for _, l := range lines {
 		if !strings.Contains(l, "# runecho") {

@@ -139,6 +139,51 @@ func runArgs(args []string) int {
 		})
 	}
 
+	// The pre-commit path gets a panic barrier of its own. deferOnPanic above
+	// covers only the two stdio-hook entry points; a panic in extraction on
+	// adversarial staged content exited 2 and BLOCKED the commit, the exact
+	// inverse of the contract deferOnPanic was written to uphold.
+	return neverBlockOnPanic(func() int { return runPreCommitBody(*dryRun, *verbose) })
+}
+
+// runPreCommitBody indirects runPreCommit through a var so a test can substitute
+// a panicking body and prove the barrier in runArgs is WIRED, not merely
+// present. Same seam as vcRunInstall/vcReadStamp in versioncheck.go.
+var runPreCommitBody = runPreCommit
+
+// neverBlockOnPanic is deferOnPanic's counterpart for the pre-commit entry
+// point, and holds the same contract: a guard that cannot run must step aside,
+// never obstruct (SECURITY.md). Exit 0 here means "allow the commit".
+//
+// deferOnPanic could not be reused as-is. Its 4s guardTimeout exists for the
+// PreToolUse latency budget; imposing it on pre-commit would silently pass a
+// large staged diff that legitimately takes longer to scan, trading a loud
+// block for a quiet miss. This is a panic barrier only, with no deadline.
+func neverBlockOnPanic(fn func() int) (code int) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		code = 0
+		warnf("pre-commit panicked — commit allowed, NOT blocked: %v", r)
+		// logDecision runs INSIDE the recover, where the deferred func above can no
+		// longer catch anything, so it needs a recover of its own. deferOnPanic does
+		// not need this: its logDecision call sits in the select body, which its own
+		// outer recover still covers.
+		func() {
+			defer func() { _ = recover() }()
+			logDecision(decisionRecord{Mode: "precommit", Decision: "defer", Reason: "panic"})
+		}()
+	}()
+	return fn()
+}
+
+// runPreCommit is the pre-commit path: everything after the hook-mode and
+// outcome-mode branches. Extracted from runArgs so neverBlockOnPanic wraps it
+// alone — wrapping all of runArgs would put a second, redundant barrier around
+// the two hook modes deferOnPanic already covers.
+func runPreCommit(dryRun, verbose bool) int {
 	strict := strictMode()
 
 	// Resolve central store.
@@ -262,7 +307,7 @@ func runArgs(args []string) int {
 		guard.FoldInFileDefs(symbols, readFileLines(fd.AbsPath), lang)
 	}
 
-	if *verbose {
+	if verbose {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
 	}
 
@@ -358,7 +403,7 @@ func runArgs(args []string) int {
 	// of the gate a commit whose only findings are one of those three would
 	// read as clean and pass silently. See firedChecks.anyNonViolation.
 	if len(violations) == 0 && !fired.anyNonViolation() {
-		if *verbose {
+		if verbose {
 			infof("all references resolved")
 		}
 		return 0
@@ -396,7 +441,7 @@ func runArgs(args []string) int {
 		CheckReasons: checkReasonMap(results),
 	})
 
-	if *dryRun {
+	if dryRun {
 		return 0
 	}
 	return 1

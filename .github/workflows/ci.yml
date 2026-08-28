@@ -83,10 +83,10 @@ jobs:
       # fixture can pass forever while pinning nothing, which is what #227 was
       # filed about. `go test` above cannot see that; only this can.
       #
-      # Pull requests only. It applies mutations to the working tree (restored in
-      # a finally, and it refuses to start on a dirty one), so it is kept off any
-      # job that could ever push, and off the master-push run where the same
-      # commit has already been gated on its PR. Costs ~2-4 min.
+      # Pull requests only, for cost: ~9 min (71 test runs). The master-push run
+      # would re-score the same commit its PR already gated. Mutations are applied
+      # inside a disposable `git archive HEAD` sandbox, never to the checkout, so
+      # a killed step cannot strand a mutant in the tree (#367).
       - name: Hook-fixture mutation gate
         if: github.event_name == 'pull_request'
         run: python3 bench/hookmutate/mutate.py --strict

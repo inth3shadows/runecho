@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.46.3] — 2026-08-28
+
+### Changed
+- guard,ir: give pre-commit a panic barrier, and stop installCron destroying a crontab
+
 ## [0.46.2] — 2026-08-28
 
 ### Changed

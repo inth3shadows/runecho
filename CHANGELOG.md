@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.46.2] — 2026-08-28
+
+### Changed
+- bench(hookmutate): sandbox the run and prove the tests reach the mutated tree (#367)
+
 ## [0.46.1] — 2026-08-26
 
 ### Added

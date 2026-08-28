@@ -35,7 +35,6 @@ start, because the sandbox is HEAD: uncommitted edits would go unscored.
 
 import argparse
 import atexit
-import glob
 import io
 import json
 import os
@@ -49,7 +48,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 CORPUS_REL = os.path.join("cmd", "runecho-guard", "testdata", "hookcorpus")
-TEST_ARGS = ["go", "test", "./cmd/runecho-guard/", "-run", "TestHookCorpus", "-json"]
+TEST_PKG = "./cmd/runecho-guard/"
+TEST_ARGS = ["go", "test", TEST_PKG, "-run", "TestHookCorpus", "-json"]
 
 # Appended to a real source file to prove a break in the sandbox reaches the
 # tests. Deliberately not valid Go, and deliberately not valid anything else
@@ -58,16 +58,39 @@ CANARY = "\n@@@ hookmutate liveness canary -- not valid source in any language @
 
 SANDBOX = None
 
+# Set on the canary failure path only. That abort tells the operator to go and
+# look at the sandbox -- stale build cache, wrong working directory, editable
+# install -- so removing it would delete the evidence the message asks for.
+KEEP_SANDBOX = False
 
-def git(*args, cwd=REPO):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+def git(*args):
+    return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+
+
+def sandbox_path(rel):
+    """Resolve a repo-relative path inside the sandbox, or refuse to hand one back.
+
+    `os.path.join(SANDBOX, rel)` silently discards the sandbox prefix when `rel`
+    is absolute, and `../` walks out of it. Either one writes the mutant into the
+    live working tree for the length of a test run -- and the `finally` restores
+    it, so the end-of-run `git status` check sees a clean tree and never fires.
+    That is the exact failure the sandbox exists to prevent, reachable by pasting
+    an editor's "Copy path" into the catalog, so containment is structural here
+    rather than remembered at each write site.
+    """
+    root = os.path.realpath(SANDBOX)
+    p = os.path.realpath(os.path.join(root, rel))
+    if os.path.commonpath([root, p]) != root:
+        sys.exit(f"INTERNAL: {rel!r} resolves outside the sandbox — refusing to write")
+    return p
 
 
 def _cleanup():
     global SANDBOX
-    if SANDBOX:
+    if SANDBOX and not KEEP_SANDBOX:
         shutil.rmtree(SANDBOX, ignore_errors=True)
-        SANDBOX = None
+    SANDBOX = None
 
 
 def _on_signal(signum, _frame):
@@ -93,24 +116,42 @@ def sandbox():
     `git status` check cannot see that, because the tree is clean at every
     quiescent moment. This has now happened in two separate repos.
     """
-    d = tempfile.mkdtemp(prefix="hookmutate-")
+    global SANDBOX
+    # Publish the path before anything else can fail. Archive + extract measured
+    # ~186ms, and a signal in that window -- or a raise out of extractall -- would
+    # otherwise leave _cleanup() and _on_signal with nothing to remove, stranding
+    # several MB in /tmp. atexit is the single owner from here on, which is why
+    # the git-archive failure branch below no longer rmtree's by hand.
+    SANDBOX = tempfile.mkdtemp(prefix="hookmutate-")
     p = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=REPO, capture_output=True)
     if p.returncode != 0:
-        shutil.rmtree(d, ignore_errors=True)
         sys.exit("git archive HEAD failed:\n" + p.stderr.decode(errors="replace"))
     # `filter` landed in 3.12; these are our own tracked files either way.
     kwargs = {"filter": "data"} if sys.version_info >= (3, 12) else {}
     with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
-        tf.extractall(d, **kwargs)
-    return d
+        tf.extractall(SANDBOX, **kwargs)
 
 
 def fixture_names():
-    """Every fixture in the corpus, as the subtest names TestHookCorpus emits."""
+    """Every fixture in the corpus, as the subtest names TestHookCorpus emits.
+
+    os.listdir and not glob, deliberately: glob runs the WHOLE path through
+    fnmatch, so a `[`, `*` or `?` anywhere in the sandbox root -- which is
+    $TMPDIR-derived, and $TMPDIR is not ours to constrain -- returns [] from a
+    directory that plainly holds the fixtures. Measured: TMPDIR='br[a]nch' gives
+    listdir=['a.json'] glob=[]. That reads as "no fixtures", which empties `dead`
+    and switches off the dead-fixture half of --strict -- the half #227 was filed
+    about -- leaving a header saying `0 fixtures` as the only trace. The abort
+    below is what stops the next variant of this rather than this one.
+    """
+    d = os.path.join(SANDBOX, CORPUS_REL)
+    files = [f for f in os.listdir(d) if f.endswith(".json")] if os.path.isdir(d) else []
     names = []
-    for f in sorted(glob.glob(os.path.join(SANDBOX, CORPUS_REL, "*.json"))):
-        for case in json.load(open(f)):
+    for f in sorted(files):
+        for case in json.load(open(os.path.join(d, f))):
             names.append(case["name"])
+    if not names:
+        sys.exit(f"no fixtures found under {d} — the dead-fixture half of --strict would pass vacuously")
     return names
 
 
@@ -145,6 +186,14 @@ def load_catalog():
         # drift check below cannot see it, because it does occur once.
         if m["find"] == m["replace"]:
             bad.append(f"{m['id']}: find == replace -- applies cleanly, changes nothing, reads as SURVIVED")
+        # os.path.join(SANDBOX, file) drops the sandbox prefix for an absolute
+        # path, and `../` walks out of it -- either one puts the mutant in the
+        # live working tree for the length of a test run. sandbox_path() refuses
+        # too; this gate is the one that says so at authoring time, before the
+        # dirty check, which is when the catalog is actually being written.
+        if os.path.isabs(m["file"]) or os.path.normpath(m["file"]).startswith(".."):
+            bad.append(f"{m['id']}: file {m['file']!r} is not a repo-relative path — "
+                       "os.path.join would write the mutant outside the sandbox, into the working tree")
         if m["id"] in seen:
             bad.append(f"{m['id']}: duplicate id -- the later entry overwrites the earlier one in the report")
         seen.add(m["id"])
@@ -163,7 +212,8 @@ def canary(rel_path):
     is never seen when the source is not re-parsed) or an editable install
     resolving the package back to the original tree.
     """
-    path = os.path.join(SANDBOX, rel_path)
+    global KEEP_SANDBOX
+    path = sandbox_path(rel_path)
     src = open(path).read()
     try:
         open(path, "w").write(src + CANARY)
@@ -171,17 +221,66 @@ def canary(rel_path):
     finally:
         open(path, "w").write(src)
     if not registered:
+        # Every cause named below is diagnosed by looking at the sandbox, so the
+        # sandbox has to outlive this abort -- otherwise the message sends the
+        # operator to a directory atexit just deleted, and in CI there is nothing
+        # left to inspect at all.
+        KEEP_SANDBOX = True
         sys.exit(
             f"liveness canary did not fire: a deliberate syntax error in {rel_path}\n"
             "left the build green, so this run would score a tree it is not mutating.\n"
             "Causes: a stale build cache, the wrong working directory, or -- in a\n"
             "Python consumer -- stale .pyc or an editable install resolving the\n"
-            "package back to the original tree."
+            "package back to the original tree.\n"
+            f"Sandbox left in place for inspection: {SANDBOX}\n"
+            f"Delete it when done: rm -rf {SANDBOX}"
+        )
+
+
+def assert_build_graph(muts):
+    """Require every catalog file's DIRECTORY to sit in the graph the canary proved live.
+
+    Directory, not file: a file excluded from its own package by a `//go:build`
+    constraint sits in a live directory and still reports a false SURVIVED. This
+    check does not close that; nothing in the catalog carries a build tag today.
+
+    canary() breaks ONE file, so what it proves is narrower than it looks: the
+    compilation unit holding the first catalog entry is reached by the tests. It
+    says nothing about the rest of the catalog. Where a catalog spans packages
+    that resolve independently -- a second checkout on the path, a vendored copy,
+    an editable install covering part of the tree -- the canary can pass while a
+    second package still resolves to the original tree, and every mutation in
+    that package reports a false SURVIVED whatever it does.
+
+    `-test` is load-bearing: the canary proves the TEST binary's graph is live,
+    and that is a strict superset of the plain build's. Without it, a package
+    reached only from a _test.go file reads as outside the graph and the abort
+    below tells the author the tests never build it, which is false. Today that
+    is internal/guardstats and internal/hookwiring.
+
+    Asking the toolchain costs 0.3s warm, against ~0.9s for a second `go test`
+    canary (a canary is a build break, so it never links or runs) -- both
+    measured. The saving is small; naming the offending package is the point.
+    """
+    p = subprocess.run(["go", "list", "-test", "-deps", "-f", "{{.Dir}}", TEST_PKG],
+                       cwd=SANDBOX, capture_output=True, text=True)
+    if p.returncode != 0:
+        sys.exit(f"go list -test -deps {TEST_PKG} failed, so the catalog could not be checked\n"
+                 "against the build graph the canary proved live:\n" + p.stderr)
+    live = {os.path.realpath(line.strip()) for line in p.stdout.splitlines() if line.strip()}
+    outside = sorted({os.path.dirname(m["file"]) for m in muts
+                      if os.path.dirname(sandbox_path(m["file"])) not in live})
+    if outside:
+        sys.exit(
+            f"catalog files live outside the build graph of {TEST_PKG}:\n  "
+            + "\n  ".join(outside)
+            + f"\nThe liveness canary covered {os.path.dirname(muts[0]['file'])} only. A mutation in a\n"
+              "package the tests never build reports SURVIVED whatever it does.\n"
+              "Give each such package its own canary, or drop its entries."
         )
 
 
 def main():
-    global SANDBOX
     ap = argparse.ArgumentParser()
     ap.add_argument("--strict", action="store_true",
                     help="exit 1 if a fixture caught nothing or a survivor is unclaimed")
@@ -202,10 +301,12 @@ def main():
         sys.exit("refusing to run: working tree is dirty — the sandbox is HEAD, so your edits would go unscored")
 
     atexit.register(_cleanup)
-    for signame in ("SIGTERM", "SIGINT", "SIGHUP"):
+    # SIGABRT is raised at the C level and a Python-level handler does not
+    # reliably run for it, so it is deliberately not in this set.
+    for signame in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"):
         if hasattr(signal, signame):
             signal.signal(getattr(signal, signame), _on_signal)
-    SANDBOX = sandbox()
+    sandbox()
 
     baseline = run_corpus()
     if baseline is None:
@@ -213,10 +314,11 @@ def main():
     if baseline:
         sys.exit(f"baseline is already failing: {sorted(baseline)}")
     canary(muts[0]["file"])
+    assert_build_graph(muts)
 
     killed_by, broken = {}, []
     for m in muts:
-        path = os.path.join(SANDBOX, m["file"])
+        path = sandbox_path(m["file"])
         src = open(path).read()
         if src.count(m["find"]) != 1:
             broken.append((m["id"], f"pattern matches {src.count(m['find'])} times — catalog drifted from the code"))

@@ -61,14 +61,16 @@ Three consequences of the sandbox:
   uncommitted edits would be silently unscored — a wrong answer in the other
   direction. Commit first.
 - A run killed by a signal strands a mutant in a temp dir, not in your repo.
-  Handlers for `SIGTERM`/`SIGINT`/`SIGHUP` remove the sandbox and re-raise with
+  Handlers for `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGQUIT` remove the sandbox and re-raise with
   the default disposition, so the exit status still reports the signal. **They
   only help when the signal reaches this process**: `timeout … uv run python
   mutate.py` absorbs it in the wrapper and leaks the temp dir.
 - Before scoring, a **liveness canary** appends a deliberate syntax error to the
   first catalog file and requires the build to break. If a guaranteed break does
   *not* register, the run is scoring a tree it is not mutating, and it aborts
-  rather than reporting survivors. See "Lifting this" for what causes that.
+  rather than reporting survivors — leaving the sandbox in place, since every
+  cause is diagnosed by looking at it. See "Lifting this" for what causes that,
+  and for the precise (narrower than it looks) claim one canary supports.
 
 ## Adding a mutation
 
@@ -105,6 +107,32 @@ happens to be immune to, and which the canary is designed to catch:
   tests were passing against the unmutated original. `git archive` avoids this by
   construction (no venv is copied); `uv run python -c "import pkg;
   print(pkg.__file__)"` asserts it directly.
+
+### What one canary proves, and what it does not
+
+The canary breaks **one file**, so the claim it supports is exactly this: *the
+compilation unit holding the first catalog entry is reached by the tests*. It
+says nothing about the rest of the catalog. A repo whose catalog spans packages
+that resolve **independently** — a second checkout on the path, a vendored copy,
+an editable install covering only part of the tree — can pass the canary while a
+second package still resolves to the original tree, and every mutation in that
+package then reports a false `SURVIVED`.
+
+Here that gap is closed by a check rather than by care: after the canary,
+`assert_build_graph()` runs `go list -test -deps -f '{{.Dir}}' ./cmd/runecho-guard/`
+inside the sandbox and requires every catalog file's directory to appear in the
+result, aborting with the name of any package that does not. `-test` matters:
+that is the graph the canary actually proved, and it is a strict superset of the
+plain build's — without it, a package reached only from a `_test.go` file is
+wrongly reported as one the tests never build. Both measured: 0.3s warm, against
+~0.9s for a second `go test` canary, which is a build break and so never links or
+runs. The saving is small; naming the offending package is the point.
+
+The check is per **directory**, so a file excluded from its own package by a
+`//go:build` constraint still slips through — no catalog entry carries one today.
+**A consumer with no equivalent
+build-graph query needs one canary per independently-resolved package in its
+catalog** — per package, not per run.
 
 ## Scope
 

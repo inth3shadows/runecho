@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.46.4] — 2026-08-29
+
+### Changed
+- security: require the checked-out revision to be trusted before auto-reinstall (#373)
+
 ## [0.46.3] — 2026-08-28
 
 ### Changed

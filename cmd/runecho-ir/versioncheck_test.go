@@ -94,7 +94,9 @@ func runechoRepo(t *testing.T, tag string) string {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	git("init", "-q")
+	// Pinned so the trust tests do not depend on the machine's init.defaultBranch
+	// (RemoteDefaultRef's name fallback only knows main and master).
+	git("-c", "init.defaultBranch=master", "init", "-q")
 	git("add", ".")
 	git("commit", "-q", "-m", "init")
 	if tag != "" {

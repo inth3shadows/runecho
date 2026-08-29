@@ -36,8 +36,23 @@ picks up the just-rebuilt binary.
 The freshness half also requires the checked-out revision to be **contained in
 `origin`'s default branch** (#373). Reaching the rebuild runs `install.sh`, which
 compiles the whole worktree, so it runs that revision's code — and `git checkout`
-of a contributor's branch is not an act of trust. Note the gate is on HEAD, not
-on the tag: a fork branch based on master resolves a legitimate release tag by
-ancestry, so no amount of tag verification closes it. The cost is that your own
-unpushed feature branches no longer auto-refresh a stale binary; `runecho-ir
-version-check` (without `--quiet`) still reports it.
+of a contributor's branch is not an act of trust. The gate is on HEAD, not on the
+tag: a fork branch based on master resolves a legitimate release tag by ancestry,
+so no amount of tag verification closes it.
+
+**Know the cost before relying on this feature.** A branch stops being contained
+at its FIRST COMMIT — not merely when unpushed — and on a squash-merge repo the
+local default branch drifts from `origin/master` too (measured 2026-08-29: the
+`master` worktree here was 1 ahead / 6 behind, and the gate refused it). In the
+worktree-per-task workflow above, that means **auto-refresh is inert nearly
+always**. `runecho-ir version-check` without `--quiet` still reports it, and
+`bash install.sh` still works. Two other consequences: the remote name `origin`
+is hardcoded, so a differently-named remote loses the feature silently; and if
+`origin/HEAD` is unset while both `origin/main` and `origin/master` exist, the
+lookup refuses rather than guessing (`git remote set-head origin -a` fixes it).
+
+The successor — build from a **detached worktree** at
+`refs/remotes/origin/<default>` rather than gating the current one — would
+restore it on any branch. `git archive` does NOT work for that: `install.sh:164`
+stamps the build with `git describe`, and an archive has no `.git`, so every
+build would stamp `dev` and re-fire forever.

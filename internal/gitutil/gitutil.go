@@ -149,14 +149,23 @@ func WorktreePaths(dir string) []string {
 }
 
 // RemoteDefaultRef returns the remote-tracking ref for remote's default branch:
-// refs/remotes/<remote>/HEAD when git knows it, otherwise the first of main and
-// master that actually exists.
+// refs/remotes/<remote>/HEAD when git knows it, otherwise whichever ONE of
+// main/master exists.
 //
-// The fallback is not cosmetic. `refs/remotes/<remote>/HEAD` is written at clone
-// time and by `git remote set-head`; a repo fetched into an existing directory,
-// or one cloned with --single-branch, can have working remote-tracking branches
-// and no HEAD symref at all. Returning an error there would make a caller that
-// fails closed (#373) stop working for those users.
+// Why a fallback exists at all, stated accurately (an earlier version of this
+// comment named two reasons that are false on modern git, measured on 2.55:
+// `clone --single-branch`, `init` + `fetch`, and this repo's bare `repo-init`
+// form ALL create the symref, because git 2.41 added "fetch: set remote/HEAD if
+// it does not exist"). The two that hold: git < 2.41, and a symref that has been
+// removed with `symbolic-ref -d` — which this package's own test does.
+//
+// Why it refuses when BOTH main and master exist: picking by name is a coin flip
+// with no signal in it, and the caller (#373) uses the answer as a trust anchor.
+// Guessing wrong measures containment against the wrong branch and silently
+// refuses a legitimate HEAD — a stale binary with no error, which is worse than
+// the loud failure of refusing here. Note "prefer whichever contains HEAD" is NOT
+// an option: choosing the ref that contains HEAD makes the trust gate
+// self-satisfying.
 func RemoteDefaultRef(dir, remote string) (string, error) {
 	if out, err := runGit(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
 		// Verify the target resolves. A symref can outlive what it points at:
@@ -171,13 +180,22 @@ func RemoteDefaultRef(dir, remote string) (string, error) {
 			}
 		}
 	}
+	var found []string
 	for _, branch := range []string{"main", "master"} {
 		ref := "refs/remotes/" + remote + "/" + branch
 		if _, err := runGit(dir, "rev-parse", "--verify", "--quiet", ref); err == nil {
-			return ref, nil
+			found = append(found, ref)
 		}
 	}
-	return "", fmt.Errorf("no default branch for remote %q: neither %s/HEAD, %s/main, nor %s/master resolves", remote, remote, remote, remote)
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("no default branch for remote %q: neither %s/HEAD, %s/main, nor %s/master resolves", remote, remote, remote, remote)
+	default:
+		return "", fmt.Errorf("cannot tell which branch is the default for remote %q: %s/HEAD is unset and both %s exist — set it with `git remote set-head %s -a`",
+			remote, remote, strings.Join(found, " and "), remote)
+	}
 }
 
 // Contains reports whether rev is an ancestor of ref, or is ref itself.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/version"
@@ -136,5 +138,55 @@ func TestDefaultTrusted_AnswersContainment(t *testing.T) {
 	}
 	if ok {
 		t.Error("a commit that exists only locally reported as contained in origin's default branch")
+	}
+}
+
+// TestVersionCheck_TrustErrorHonoursQuiet — the hook always passes --quiet, and
+// this path fires on every checkout and merge for anyone whose remote is not
+// named `origin` (defaultTrusted hardcodes it). An unconditional write here is
+// permanent noise in the terminal, which is the failure the Windows branch
+// already exists to avoid.
+func TestVersionCheck_TrustErrorHonoursQuiet(t *testing.T) {
+	repo := runechoRepo(t, "v0.17.0") // no origin at all, so RemoteDefaultRef errors
+	withRealTrust(t, "v0.16.1")
+	vcRunInstall = func(string, string) error {
+		t.Fatal("reinstall ran although trust could not be established")
+		return nil
+	}
+
+	stdout, stderr := captureOutput(func() {
+		if code := runVersionCheck([]string{"--reinstall", "--quiet", repo}); code != ExitOK {
+			t.Errorf("exit = %d, want ExitOK", code)
+		}
+	})
+	if stdout != "" || stderr != "" {
+		t.Errorf("--quiet produced output:\nstdout: %q\nstderr: %q", stdout, stderr)
+	}
+
+	// Without --quiet it must still say why, or the user has a silently stale
+	// binary and nothing to explain it.
+	stdout, stderr = captureOutput(func() { runVersionCheck([]string{"--reinstall", repo}) })
+	if !strings.Contains(stdout+stderr, "cannot confirm") {
+		t.Errorf("non-quiet run said nothing about the skip:\nstdout: %q\nstderr: %q", stdout, stderr)
+	}
+}
+
+// TestVersionCheck_TrustedTrueWithErrorSkips pins that fail-closed is a property
+// of THIS gate, not of vcTrusted. Every implementation today returns false with
+// its error, so without the forced `trusted = false` the gate still passes every
+// other test — and a later (true, ref, err) would walk straight through.
+func TestVersionCheck_TrustedTrueWithErrorSkips(t *testing.T) {
+	repo := runechoRepo(t, "v0.17.0")
+	withSeams(t, "v0.16.1") // stubs vcTrusted; overridden immediately below
+	vcTrusted = func(string) (bool, string, error) {
+		return true, "refs/remotes/origin/master", errors.New("git exploded")
+	}
+	vcRunInstall = func(string, string) error {
+		t.Fatal("reinstall ran on (true, ref, err) — fail-closed is not enforced by the caller")
+		return nil
+	}
+
+	if code := runVersionCheck([]string{"--reinstall", "--quiet", repo}); code != ExitOK {
+		t.Fatalf("exit = %d, want ExitOK", code)
 	}
 }

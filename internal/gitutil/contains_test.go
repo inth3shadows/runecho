@@ -27,7 +27,10 @@ func repoWithCommit(t *testing.T) string {
 		t.Skip("git not available")
 	}
 	dir := t.TempDir()
-	git(t, "", "init", "-q", dir)
+	// Pinned, not inherited: a machine with init.defaultBranch=trunk would make
+	// TestRemoteDefaultRef_PrefersSymrefThenFallsBack fail for an environment
+	// reason, since the name fallback only knows main and master.
+	git(t, "", "-c", "init.defaultBranch=master", "init", "-q", dir)
 	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -178,5 +181,29 @@ func TestRemoteDefaultRef_ErrorsWithNoRemote(t *testing.T) {
 	dir := repoWithCommit(t)
 	if ref, err := RemoteDefaultRef(dir, "origin"); err == nil {
 		t.Errorf("RemoteDefaultRef = %q, nil on a repo with no origin; want an error so callers fail closed", ref)
+	}
+}
+
+// TestRemoteDefaultRef_RefusesToGuessBetweenMainAndMaster — picking by name when
+// both exist is a coin flip, and the caller (#373) uses the answer as a trust
+// anchor. Guessing wrong measures containment against the wrong branch and
+// silently refuses a legitimate HEAD: a stale binary with no error, which is
+// worse than the loud failure of refusing here.
+func TestRemoteDefaultRef_RefusesToGuessBetweenMainAndMaster(t *testing.T) {
+	up := repoWithCommit(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "-q", up, clone)
+
+	// Both candidates present, and no symref to say which is the default.
+	git(t, clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+	git(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	git(t, clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+
+	ref, err := RemoteDefaultRef(clone, "origin")
+	if err == nil {
+		t.Fatalf("RemoteDefaultRef = %q, nil with both main and master present and no symref; want an error rather than a guess", ref)
+	}
+	if !strings.Contains(err.Error(), "remote set-head") {
+		t.Errorf("error %q does not tell the user how to resolve it", err)
 	}
 }

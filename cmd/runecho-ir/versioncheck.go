@@ -202,19 +202,50 @@ func runVersionCheck(args []string) int {
 	//
 	// Fails closed. An error means "could not confirm", which is not permission.
 	//
-	// Cost, stated because it is real: a local branch of your own is not contained
-	// in origin/HEAD either, so working on a feature branch no longer
-	// auto-refreshes a stale binary. `runecho-ir version-check` (no --quiet) still
-	// says so, and `bash install.sh` still works. Restoring the automatic half
-	// safely means building from a trusted revision rather than the worktree.
+	// SCOPE, precisely (#374 review): containment of HEAD is NECESSARY, not
+	// sufficient. install.sh runs from the WORKING TREE, so uncommitted edits to
+	// tracked files and untracked .go files that `go build ./...` compiles are
+	// outside what this gate authorises. A reviewer tried and failed to construct
+	// an attacker-reachable route into that state — `gh pr checkout` puts changes
+	// in tracked files, which `git checkout` restores — so it is recorded as a
+	// known limit rather than implied away. Closing it properly means not
+	// executing the worktree at all; see the note below.
+	//
+	// COST, stated because it is real and larger than it first looks. A branch of
+	// your own stops being contained at its FIRST COMMIT, not merely when unpushed
+	// — and on a squash-merge repo the local default branch can diverge from
+	// origin's too (measured here: master 1 ahead / 6 behind, gate refuses). So in
+	// a worktree-per-task workflow this auto-refresh is inert nearly always.
+	// `runecho-ir version-check` without --quiet still reports it, and
+	// `bash install.sh` still works.
+	//
+	// The successor, deliberately NOT folded in here: build from a DETACHED
+	// WORKTREE at refs/remotes/origin/<default> instead of gating the current one.
+	// It restores the refresh on any branch and dissolves the scope limit above.
+	// Note `git archive` does NOT work for this — install.sh:164 stamps the build
+	// with `git describe`, and an archive has no .git, so every build would stamp
+	// "dev" and re-fire forever. It also needs its tag source moved off HEAD, since
+	// a fork fetch can pollute refs/tags.
 	trusted, trustRef, err := vcTrusted(top)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "runecho: cannot confirm the checked-out revision is trusted, skipping auto-reinstall: %v\n", err)
-		return ExitOK
+		// Forced, not merely expected. Every vcTrusted today returns false
+		// alongside its error, so the gate WOULD hold without this line — which is
+		// precisely the problem: fail-closed would be a property of the callee
+		// rather than of this gate, and a later (true, ref, err) would walk
+		// straight through. Pinned by TestVersionCheck_TrustedTrueWithErrorSkips.
+		trusted = false
+		// vcInfo, not os.Stderr: every other "nothing to do" exit in this function
+		// honours --quiet, and --quiet's own help text promises silence when "not
+		// applicable". This path fires on every checkout and merge for anyone whose
+		// remote is not named origin, so an unconditional write is permanent noise
+		// in the hook -- the spam mode the Windows branch already exists to avoid.
+		vcInfo(*quiet, "version-check: cannot confirm the checked-out revision is trusted, skipping auto-reinstall: %v", err)
 	}
 	if !trusted {
-		vcInfo(*quiet, "version-check: installed %s is BEHIND %s, but HEAD is not contained in %s — skipping auto-reinstall. Run 'bash %s/install.sh' if you trust this revision.",
-			disp(installed), newest, trustRef, top)
+		if err == nil {
+			vcInfo(*quiet, "version-check: installed %s is BEHIND %s, but HEAD is not contained in %s — skipping auto-reinstall. Run 'bash %s/install.sh' if you trust this revision.",
+				disp(installed), newest, trustRef, top)
+		}
 		return ExitOK
 	}
 

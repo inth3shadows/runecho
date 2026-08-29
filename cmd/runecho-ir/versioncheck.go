@@ -78,6 +78,24 @@ func isRunechoTree(top string) bool {
 	return false
 }
 
+// defaultTrusted answers "is HEAD contained in origin's default branch".
+//
+// Containment of HEAD, not of the tag (#373). A tag check does not close the
+// hole and it is worth being explicit about why, because it is the obvious fix
+// and it is wrong: install.sh, and every line of Go it compiles, comes from the
+// CHECKED-OUT WORKTREE. A fork's PR branch based on master resolves a legitimate
+// release tag by ancestry, passes any amount of tag verification, and still gets
+// its own worktree's install.sh executed. The tag says nothing about the bytes
+// that run. Only containment of HEAD does.
+func defaultTrusted(top string) (bool, string, error) {
+	ref, err := gitutil.RemoteDefaultRef(top, "origin")
+	if err != nil {
+		return false, "", err
+	}
+	ok, err := gitutil.Contains(top, "HEAD", ref)
+	return ok, ref, err
+}
+
 // Seams overridden in tests. Real implementations shell out to git / install.sh.
 var (
 	// vcNewestTag returns the nearest tag by ancestry (git describe --abbrev=0).
@@ -89,6 +107,10 @@ var (
 	// binDir (where the currently-running binary lives) so a custom-dir install
 	// refreshes in place rather than spraying a second copy into ~/.local/bin.
 	vcRunInstall = defaultRunInstall
+	// vcTrusted reports whether the CHECKED-OUT revision is one the user already
+	// trusts, and names the ref that defined "trusted" so the skip message can
+	// say what it measured against.
+	vcTrusted = defaultTrusted
 	// vcReadStamp returns the version the freshly-installed binary at path
 	// reports (`<path> --version`) — read AFTER a reinstall to confirm the stamp
 	// actually advanced, since a build can exit 0 without moving it.
@@ -167,6 +189,32 @@ func runVersionCheck(args []string) int {
 	if !*reinstall {
 		fmt.Printf("version-check: installed %s is BEHIND %s — run 'bash %s/install.sh' or 'runecho-ir version-check --reinstall'\n",
 			disp(installed), newest, top)
+		return ExitOK
+	}
+
+	// Everything below this line executes the checked-out tree. install.sh is run
+	// as bash, and it compiles the whole source tree, so reaching vcRunInstall is
+	// running THIS revision's code. `git checkout` is not an act of trust — on a
+	// public repo, checking out a contributor's branch to read the diff is routine
+	// — and this path is silent by design (--quiet in the hook, ExitOK always).
+	// So the revision has to be one the user already has: contained in origin's
+	// default branch. See defaultTrusted for why the tag cannot stand in for this.
+	//
+	// Fails closed. An error means "could not confirm", which is not permission.
+	//
+	// Cost, stated because it is real: a local branch of your own is not contained
+	// in origin/HEAD either, so working on a feature branch no longer
+	// auto-refreshes a stale binary. `runecho-ir version-check` (no --quiet) still
+	// says so, and `bash install.sh` still works. Restoring the automatic half
+	// safely means building from a trusted revision rather than the worktree.
+	trusted, trustRef, err := vcTrusted(top)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runecho: cannot confirm the checked-out revision is trusted, skipping auto-reinstall: %v\n", err)
+		return ExitOK
+	}
+	if !trusted {
+		vcInfo(*quiet, "version-check: installed %s is BEHIND %s, but HEAD is not contained in %s — skipping auto-reinstall. Run 'bash %s/install.sh' if you trust this revision.",
+			disp(installed), newest, trustRef, top)
 		return ExitOK
 	}
 

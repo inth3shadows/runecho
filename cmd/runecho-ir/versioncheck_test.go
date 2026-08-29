@@ -106,11 +106,15 @@ func runechoRepo(t *testing.T, tag string) string {
 func withSeams(t *testing.T, ver string) {
 	t.Helper()
 	origVer := version.Version
-	origRun, origStamp := vcRunInstall, vcReadStamp
+	origRun, origStamp, origTrusted := vcRunInstall, vcReadStamp, vcTrusted
 	version.Version = ver
+	// runechoRepo has no origin remote, so the real defaultTrusted would fail
+	// closed and every reinstall test would pass for the wrong reason. Tests that
+	// are ABOUT the trust gate override this again; see versioncheck_trust_test.go.
+	vcTrusted = func(string) (bool, string, error) { return true, "refs/remotes/origin/master", nil }
 	t.Cleanup(func() {
 		version.Version = origVer
-		vcRunInstall, vcReadStamp = origRun, origStamp
+		vcRunInstall, vcReadStamp, vcTrusted = origRun, origStamp, origTrusted
 	})
 }
 

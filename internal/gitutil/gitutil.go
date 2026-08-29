@@ -8,6 +8,7 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,4 +146,62 @@ func WorktreePaths(dir string) []string {
 		}
 	}
 	return paths
+}
+
+// RemoteDefaultRef returns the remote-tracking ref for remote's default branch:
+// refs/remotes/<remote>/HEAD when git knows it, otherwise the first of main and
+// master that actually exists.
+//
+// The fallback is not cosmetic. `refs/remotes/<remote>/HEAD` is written at clone
+// time and by `git remote set-head`; a repo fetched into an existing directory,
+// or one cloned with --single-branch, can have working remote-tracking branches
+// and no HEAD symref at all. Returning an error there would make a caller that
+// fails closed (#373) stop working for those users.
+func RemoteDefaultRef(dir, remote string) (string, error) {
+	if out, err := runGit(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		// Verify the target resolves. A symref can outlive what it points at:
+		// `git update-ref -d refs/remotes/origin/HEAD` deletes the TARGET and
+		// leaves the symref behind, after which symbolic-ref still happily prints
+		// a ref that no longer exists. Returning it would hand the caller a name
+		// that every later git command rejects — and a caller that fails closed
+		// would read that as "not trusted" rather than "ask a different way".
+		if ref := strings.TrimSpace(string(out)); ref != "" {
+			if _, err := runGit(dir, "rev-parse", "--verify", "--quiet", ref); err == nil {
+				return ref, nil
+			}
+		}
+	}
+	for _, branch := range []string{"main", "master"} {
+		ref := "refs/remotes/" + remote + "/" + branch
+		if _, err := runGit(dir, "rev-parse", "--verify", "--quiet", ref); err == nil {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no default branch for remote %q: neither %s/HEAD, %s/main, nor %s/master resolves", remote, remote, remote, remote)
+}
+
+// Contains reports whether rev is an ancestor of ref, or is ref itself.
+//
+// `git merge-base --is-ancestor` answers in the exit status: 0 yes, 1 no,
+// anything else a real failure. The third case must NOT be folded into "no".
+// Callers use this as a trust gate, and a git that failed to run is not evidence
+// about ancestry — collapsing the two would turn "git is broken" into a verdict.
+func Contains(dir, rev, ref string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	var stderr strings.Builder
+	cmd := Command(ctx, dir, "merge-base", "--is-ancestor", rev, ref)
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		return false, fmt.Errorf("%w: %s", err, msg)
+	}
+	return false, err
 }

@@ -32,3 +32,12 @@ installed binary is behind the newest reachable tag) is folded into these SAME
 two hooks — never a separate installer, which is what collided in #226 — so both
 features share one hook body: freshness runs first, then the background reindex
 picks up the just-rebuilt binary.
+
+The freshness half also requires the checked-out revision to be **contained in
+`origin`'s default branch** (#373). Reaching the rebuild runs `install.sh`, which
+compiles the whole worktree, so it runs that revision's code — and `git checkout`
+of a contributor's branch is not an act of trust. Note the gate is on HEAD, not
+on the tag: a fork branch based on master resolves a legitimate release tag by
+ancestry, so no amount of tag verification closes it. The cost is that your own
+unpushed feature branches no longer auto-refresh a stale binary; `runecho-ir
+version-check` (without `--quiet`) still reports it.

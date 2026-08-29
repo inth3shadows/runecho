@@ -8,6 +8,7 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,4 +146,80 @@ func WorktreePaths(dir string) []string {
 		}
 	}
 	return paths
+}
+
+// RemoteDefaultRef returns the remote-tracking ref for remote's default branch:
+// refs/remotes/<remote>/HEAD when git knows it, otherwise whichever ONE of
+// main/master exists.
+//
+// Why a fallback exists at all, stated accurately (an earlier version of this
+// comment named two reasons that are false on modern git, measured on 2.55:
+// `clone --single-branch`, `init` + `fetch`, and this repo's bare `repo-init`
+// form ALL create the symref, because git 2.41 added "fetch: set remote/HEAD if
+// it does not exist"). The two that hold: git < 2.41, and a symref that has been
+// removed with `symbolic-ref -d` — which this package's own test does.
+//
+// Why it refuses when BOTH main and master exist: picking by name is a coin flip
+// with no signal in it, and the caller (#373) uses the answer as a trust anchor.
+// Guessing wrong measures containment against the wrong branch and silently
+// refuses a legitimate HEAD — a stale binary with no error, which is worse than
+// the loud failure of refusing here. Note "prefer whichever contains HEAD" is NOT
+// an option: choosing the ref that contains HEAD makes the trust gate
+// self-satisfying.
+func RemoteDefaultRef(dir, remote string) (string, error) {
+	if out, err := runGit(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		// Verify the target resolves. A symref can outlive what it points at:
+		// `git update-ref -d refs/remotes/origin/HEAD` deletes the TARGET and
+		// leaves the symref behind, after which symbolic-ref still happily prints
+		// a ref that no longer exists. Returning it would hand the caller a name
+		// that every later git command rejects — and a caller that fails closed
+		// would read that as "not trusted" rather than "ask a different way".
+		if ref := strings.TrimSpace(string(out)); ref != "" {
+			if _, err := runGit(dir, "rev-parse", "--verify", "--quiet", ref); err == nil {
+				return ref, nil
+			}
+		}
+	}
+	var found []string
+	for _, branch := range []string{"main", "master"} {
+		ref := "refs/remotes/" + remote + "/" + branch
+		if _, err := runGit(dir, "rev-parse", "--verify", "--quiet", ref); err == nil {
+			found = append(found, ref)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("no default branch for remote %q: neither %s/HEAD, %s/main, nor %s/master resolves", remote, remote, remote, remote)
+	default:
+		return "", fmt.Errorf("cannot tell which branch is the default for remote %q: %s/HEAD is unset and both %s exist — set it with `git remote set-head %s -a`",
+			remote, remote, strings.Join(found, " and "), remote)
+	}
+}
+
+// Contains reports whether rev is an ancestor of ref, or is ref itself.
+//
+// `git merge-base --is-ancestor` answers in the exit status: 0 yes, 1 no,
+// anything else a real failure. The third case must NOT be folded into "no".
+// Callers use this as a trust gate, and a git that failed to run is not evidence
+// about ancestry — collapsing the two would turn "git is broken" into a verdict.
+func Contains(dir, rev, ref string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+	var stderr strings.Builder
+	cmd := Command(ctx, dir, "merge-base", "--is-ancestor", rev, ref)
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		return false, fmt.Errorf("%w: %s", err, msg)
+	}
+	return false, err
 }

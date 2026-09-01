@@ -3,7 +3,7 @@ module github.com/inth3shadows/runecho
 go 1.25.0
 
 require (
-	github.com/odvcencio/gotreesitter v0.47.1
+	github.com/odvcencio/gotreesitter v0.51.0
 	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.55.0
 )

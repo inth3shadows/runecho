@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.47.2] — 2026-09-01
+
+### Changed
+- guardstats: fpaudit stops scoring reserved words/masking-gap leaks as correct catches (#360) (#383)
+
 ## [0.47.1] — 2026-09-01
 
 ### Changed

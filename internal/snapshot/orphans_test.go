@@ -72,6 +72,42 @@ func TestPurgeRepo_LeavesNoOrphans(t *testing.T) {
 	}
 }
 
+// PurgeRepo must succeed on a repo that has an active contract, and must leave
+// no contracts row behind. Before #370's fix, ActivateContract's row (V9,
+// contracts.repo_id REFERENCES repos(id), no ON DELETE) blocked the
+// `DELETE FROM repos` inside PurgeRepo's own transaction: the whole purge
+// rolled back with a foreign-key error, and the enrollment became permanently
+// unpurgeable — reproducing issue #370's stuck row (id=787), which survived
+// `repo prune-missing --yes` and reappeared on every subsequent run.
+func TestPurgeRepo_WithActiveContract(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ActivateContract(victim, "sess-1", "my-contract", "/tmp/victim/CONTRACT.md", "hash123"); err != nil {
+		t.Fatalf("ActivateContract: %v", err)
+	}
+
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo with an active contract: %v", err)
+	}
+
+	var repoCount, contractCount int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM repos WHERE id = ?`, victim).Scan(&repoCount); err != nil {
+		t.Fatal(err)
+	}
+	if repoCount != 0 {
+		t.Errorf("repos row for purged repo %d still present", victim)
+	}
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, victim).Scan(&contractCount); err != nil {
+		t.Fatal(err)
+	}
+	if contractCount != 0 {
+		t.Errorf("contracts row for purged repo %d still present: %d", victim, contractCount)
+	}
+}
+
 // The auto-snapshot roll is the second delete path; it must be equally clean and
 // must never touch manual snapshots.
 func TestDeleteAutoSnapshots_LeavesNoOrphans(t *testing.T) {

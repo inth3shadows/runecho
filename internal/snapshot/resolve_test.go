@@ -342,3 +342,134 @@ func TestResolveRepo_DBErrorWarnsAndFailsOpen(t *testing.T) {
 		t.Errorf("expected a DB-error warning on stderr, got %q", stderr)
 	}
 }
+
+// TestResolveRepo_MultiMatchFallbackPrefersLiveRoot pins issue #370: when the
+// common-dir lookup returns several enrollments and none matches the resolving
+// worktree's own top-level (so resolution falls through to the multi-match
+// fallback), it must prefer a candidate whose source root still exists on disk
+// over the lowest-id row.
+//
+// This matters because #376 turned "enrolled root is gone" from a warn-and-pass
+// into a hard block, and the claudew/codexw workflow makes the OLDEST
+// enrollment in a shared common-dir the one most likely to have been deleted —
+// a per-session worktree enrolls on first use and is removed at session end,
+// while nothing un-enrolls it. Before this fix, resolving from an unenrolled
+// sibling worktree (or a fresh worktree not yet indexed) would deterministically
+// hand back the dead oldest enrollment and block every commit.
+func TestResolveRepo_MultiMatchFallbackPrefersLiveRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	mainDir := t.TempDir() // primary worktree: never enrolled, only the resolution site
+	wtDeadDir := filepath.Join(t.TempDir(), "wt-dead")
+	wtLiveDir := filepath.Join(t.TempDir(), "wt-live")
+
+	resolveGitInit(t, mainDir)
+	resolveGitCommit(t, mainDir)
+	for _, add := range [][]string{
+		{"-C", mainDir, "worktree", "add", wtDeadDir, "-b", "wt-dead-370"},
+		{"-C", mainDir, "worktree", "add", wtLiveDir, "-b", "wt-live-370"},
+	} {
+		if out, err := exec.Command("git", add...).CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add: %v: %s", err, out)
+		}
+	}
+
+	db, _ := openTemp(t)
+	cd, err := gitutil.CommonDir(mainDir)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	// Enroll the dead worktree FIRST so it gets the lower id — repos[0] in the
+	// old behavior, and the row the fallback must now skip past.
+	deadID, err := db.EnrollRepo("wt-dead", wtDeadDir, wtDeadDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-dead: %v", err)
+	}
+	liveID, err := db.EnrollRepo("wt-live", wtLiveDir, wtLiveDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-live: %v", err)
+	}
+	for _, id := range []int64{deadID, liveID} {
+		if err := db.SetRepoCommonDir(id, cd); err != nil {
+			t.Fatalf("SetRepoCommonDir %d: %v", id, err)
+		}
+	}
+
+	// Simulate the claudew/codexw session-end cleanup: the worktree directory is
+	// gone, but nothing un-enrolled it (issue #370's core defect).
+	if out, err := exec.Command("git", "-C", mainDir, "worktree", "remove", "--force", wtDeadDir).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove: %v: %s", err, out)
+	}
+	if _, err := os.Stat(wtDeadDir); !os.IsNotExist(err) {
+		t.Fatalf("wtDeadDir still exists after worktree remove: %v", err)
+	}
+
+	// Resolve from mainDir: common-dir matches both enrollments, mainDir's own
+	// top-level matches neither exactly, so this exercises the fallback branch.
+	repo, _, ok := db.ResolveRepo(mainDir)
+	if !ok {
+		t.Fatalf("ResolveRepo(mainDir) ok=false; want a resolved repo")
+	}
+	if repo.ID != liveID {
+		t.Errorf("fallback resolved id %d (dead=%d live=%d); want the live enrollment, not the lower-id dead one",
+			repo.ID, deadID, liveID)
+	}
+}
+
+// TestResolveRepo_MultiMatchFallbackAllDeadReturnsLowestID pins the other half:
+// when EVERY multi-match candidate's root is gone, the fallback must still
+// return the lowest-id row (today's behavior) so callers get the deterministic
+// "resolved, then blocked" path #376 relies on — never a silent ok=false that
+// would look identical to "not enrolled".
+func TestResolveRepo_MultiMatchFallbackAllDeadReturnsLowestID(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	mainDir := t.TempDir()
+	wtADir := filepath.Join(t.TempDir(), "wt-a-370")
+	wtBDir := filepath.Join(t.TempDir(), "wt-b-370")
+
+	resolveGitInit(t, mainDir)
+	resolveGitCommit(t, mainDir)
+	for _, add := range [][]string{
+		{"-C", mainDir, "worktree", "add", wtADir, "-b", "wt-a-370b"},
+		{"-C", mainDir, "worktree", "add", wtBDir, "-b", "wt-b-370b"},
+	} {
+		if out, err := exec.Command("git", add...).CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add: %v: %s", err, out)
+		}
+	}
+
+	db, _ := openTemp(t)
+	cd, err := gitutil.CommonDir(mainDir)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	idA, err := db.EnrollRepo("wt-a", wtADir, wtADir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-a: %v", err)
+	}
+	idB, err := db.EnrollRepo("wt-b", wtBDir, wtBDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-b: %v", err)
+	}
+	for _, id := range []int64{idA, idB} {
+		if err := db.SetRepoCommonDir(id, cd); err != nil {
+			t.Fatalf("SetRepoCommonDir %d: %v", id, err)
+		}
+	}
+	for _, dir := range []string{wtADir, wtBDir} {
+		if out, err := exec.Command("git", "-C", mainDir, "worktree", "remove", "--force", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git worktree remove %s: %v: %s", dir, err, out)
+		}
+	}
+
+	repo, _, ok := db.ResolveRepo(mainDir)
+	if !ok {
+		t.Fatalf("ResolveRepo(mainDir) ok=false; want resolved-but-dead, not unresolved")
+	}
+	if repo.ID != idA {
+		t.Errorf("all-dead fallback returned id %d, want lowest id %d (unchanged pre-#370 behavior)", repo.ID, idA)
+	}
+}

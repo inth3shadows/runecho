@@ -1,8 +1,12 @@
 package snapshot
 
 import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -214,70 +218,149 @@ func TestPurgeRepoDeletesContracts(t *testing.T) {
 	}
 }
 
-// The fence that stops #370 recurring for the NEXT table.
-//
-// Reads the live schema rather than a hand-maintained list: for every table
-// holding a foreign key to `repos`, plant a row and require PurgeRepo to remove
-// it. A new child table added without a matching delete fails here at the point
-// it is added, instead of years later as an unexplained "FOREIGN KEY constraint
-// failed" in the middle of a bulk prune.
-//
-// Tables are discovered through PRAGMA foreign_key_list, so this cannot drift
-// from the schema the way the comment on deleteSnapshotsTx did.
-func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
-	db, _ := openTemp(t)
+// repoChild is one foreign key pointing at `repos`: which table holds it and
+// which column, both read from the schema rather than assumed.
+type repoChild struct{ table, column string }
 
-	var tables []string
-	rows, err := db.conn.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+// scanRepoChildren reads a live schema and returns every direct child of
+// `repos`, plus a complaint for every foreign key ANYWHERE that declares an
+// ON DELETE action.
+//
+// Extracted from the test that uses it for one reason: both of its rules only
+// fire on a schema that does not exist yet (today nothing cascades and every
+// child column is named `repo_id`), so mutating the test could never redden.
+// Against a synthetic schema it can — see TestScanRepoChildrenDetectsWhatTheFenceIsFor,
+// which is what makes the fence a check rather than a comment.
+func scanRepoChildren(conn interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) (children []repoChild, cascades []string, err error) {
+	rows, err := conn.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
-	defer rows.Close()
+	var tables []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			t.Fatal(err)
+			rows.Close()
+			return nil, nil, err
 		}
 		tables = append(tables, name)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 
-	// Direct children of `repos` only. The snapshot subtree reaches `repos`
-	// transitively and is already covered by TestPurgeRepo_LeavesNoOrphans.
-	var children []string
 	for _, table := range tables {
-		fks, err := db.conn.Query(`SELECT "table" FROM pragma_foreign_key_list(?)`, table)
+		fks, err := conn.Query(`SELECT "table", "from", "on_delete" FROM pragma_foreign_key_list(?)`, table)
 		if err != nil {
-			t.Fatalf("foreign_key_list(%s): %v", table, err)
+			return nil, nil, fmt.Errorf("foreign_key_list(%s): %w", table, err)
 		}
 		for fks.Next() {
-			var parent string
-			if err := fks.Scan(&parent); err != nil {
+			var parent, from, onDelete string
+			if err := fks.Scan(&parent, &from, &onDelete); err != nil {
 				fks.Close()
-				t.Fatal(err)
+				return nil, nil, err
+			}
+			// Schema-wide, not only for repos' children: #13's argument is that
+			// the MIGRATION adding a cascade is what silently empties tables, so
+			// the property that matters is "no cascade anywhere".
+			if onDelete != "NO ACTION" {
+				cascades = append(cascades, fmt.Sprintf("%s.%s -> %s ON DELETE %s", table, from, parent, onDelete))
 			}
 			if parent == "repos" {
-				children = append(children, table)
+				children = append(children, repoChild{table, from})
 			}
 		}
 		fks.Close()
 	}
+	return children, cascades, nil
+}
 
+// Proves the fence's two schema rules actually fire, against a synthetic schema
+// that breaks both. Without this they are unfalsifiable on the real schema —
+// nothing cascades and every child column is `repo_id`, so a mutation removing
+// either rule survives and the fence is decoration.
+func TestScanRepoChildrenDetectsWhatTheFenceIsFor(t *testing.T) {
+	conn, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "synthetic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, ddl := range []string{
+		`CREATE TABLE repos (id INTEGER PRIMARY KEY)`,
+		// A column that is NOT `repo_id` — hardcoding the name would miss it.
+		`CREATE TABLE widgets (id INTEGER PRIMARY KEY, owner_repo_id INTEGER NOT NULL REFERENCES repos(id))`,
+		// The thing #13 forbids.
+		`CREATE TABLE gadgets (id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE)`,
+	} {
+		if _, err := conn.Exec(ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+
+	children, cascades, err := scanRepoChildren(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, c := range children {
+		got[c.table] = c.column
+	}
+	if got["widgets"] != "owner_repo_id" {
+		t.Errorf("child column not read from the schema: got %q for widgets, want owner_repo_id", got["widgets"])
+	}
+	if got["gadgets"] != "repo_id" {
+		t.Errorf("gadgets not discovered as a child of repos: %v", children)
+	}
+	if len(cascades) != 1 || !strings.Contains(cascades[0], "gadgets") {
+		t.Errorf("ON DELETE CASCADE not flagged: %v", cascades)
+	}
+}
+
+// The fence that stops #370 recurring for the NEXT table.
+//
+// Reads the live schema rather than a hand-maintained list: for every table
+// holding a foreign key to `repos`, require PurgeRepo to have deleted its rows.
+// A new child table added without a matching delete fails here at the point it
+// is added, instead of years later as an unexplained "FOREIGN KEY constraint
+// failed" in the middle of a bulk prune.
+//
+// Known limit, stated rather than papered over: the row-count half only proves
+// the tables this test plants a fixture in. Someone adding a child table, adding
+// it to `handled`, and adding the DELETE — but no fixture — gets a vacuous zero
+// for it. Exact equality is what forces them to touch this test at all; the
+// fixture is on them.
+func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
+	db, _ := openTemp(t)
+
+	children, cascades, err := scanRepoChildren(db.conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cascades {
+		t.Errorf("%s — this schema deliberately carries no ON DELETE action "+
+			"(see deleteSnapshotsTx and #13)", c)
+	}
+
+	var names []string
+	for _, c := range children {
+		names = append(names, c.table)
+	}
 	// EXACT match, not "every discovered table is in the list". A superset
 	// check passes when the list names a table that does not exist, which makes
 	// it possible to satisfy the fence by editing the list instead of the code —
 	// and a mutation that added a phantom entry survived until this was tightened.
 	handled := []string{"contracts", "snapshots"}
-	sort.Strings(children)
-	if !slices.Equal(children, handled) {
+	sort.Strings(names)
+	if !slices.Equal(names, handled) {
 		t.Errorf("tables referencing repos = %v, PurgeRepo handles %v.\n"+
 			"A table here that PurgeRepo does not delete is #370 happening again: "+
-			"add a DELETE for it in PurgeRepo, then add it to `handled`.", children, handled)
+			"add a DELETE for it in PurgeRepo, then add it to `handled`.", names, handled)
 	}
 
-	// And prove the handled ones really are handled, rather than only listed.
 	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -291,14 +374,14 @@ func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
 	if err := db.PurgeRepo(victim); err != nil {
 		t.Fatalf("PurgeRepo: %v", err)
 	}
-	for _, table := range children {
+	for _, c := range children {
 		var n int
-		q := `SELECT COUNT(*) FROM "` + table + `" WHERE repo_id = ?`
+		q := `SELECT COUNT(*) FROM "` + c.table + `" WHERE "` + c.column + `" = ?`
 		if err := db.conn.QueryRow(q, victim).Scan(&n); err != nil {
-			t.Fatalf("count %s: %v", table, err)
+			t.Fatalf("count %s.%s: %v", c.table, c.column, err)
 		}
 		if n != 0 {
-			t.Errorf("%s still holds %d row(s) for the purged repo", table, n)
+			t.Errorf("%s still holds %d row(s) for the purged repo", c.table, n)
 		}
 	}
 }

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.47.0] — 2026-09-01
+
+### Changed
+- guard: read the staged diff from the worktree being committed (#369)
+
 ## [0.46.4] — 2026-08-29
 
 ### Changed

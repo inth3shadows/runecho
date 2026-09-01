@@ -167,6 +167,15 @@ func (db *DB) RemoveRepo(id int64) error {
 	if n > 0 {
 		return fmt.Errorf("repo %d has %d snapshot(s); use PurgeRepo to delete them along with the repo", id, n)
 	}
+	// The same foreign-key gap PurgeRepo just closed. A repo with zero snapshots
+	// but an activated contract reaches the DELETE below and fails
+	// SQLITE_CONSTRAINT_FOREIGNKEY exactly as PurgeRepo did — the snapshot count
+	// above says nothing about contracts. Latent (only tests call this today),
+	// which is why it survived the fix to its sibling; the fence test now covers
+	// both entry points so it cannot come back through this one.
+	if _, err := tx.Exec(`DELETE FROM contracts WHERE repo_id = ?`, id); err != nil {
+		return fmt.Errorf("remove repo %d: %w", id, err)
+	}
 	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("remove repo %d: %w", id, err)
 	}
@@ -219,7 +228,20 @@ func deleteSnapshotsTx(tx *sql.Tx, snapshotWhere string, args ...any) error {
 }
 
 // PurgeRepo deletes a repo and its entire snapshot history (symbols, files,
-// snapshots, then the repo row) in one transaction — no orphaned rows.
+// snapshots, contracts, then the repo row) in one transaction — no orphaned
+// rows.
+//
+// contracts.repo_id REFERENCES repos(id) with no ON DELETE action (see
+// migrateV9's doc comment for why: no CASCADE, because a rebuild migration in
+// this codebase is a data-loss trap — #13/PR #196). Without an explicit delete
+// here, DELETE FROM repos fails its foreign-key check for any repo that ever
+// had a contract activated, the whole transaction rolls back, and the repo is
+// left permanently unpurgeable — this is what made issue #370's stuck row
+// survive `repo prune-missing --yes`. That row is enrollment id=430; the
+// `(787)` in the issue's pasted error is SQLITE_CONSTRAINT_FOREIGNKEY
+// (19 | 3<<8), the extended error code for the class of failure, not a row id.
+// The issue misreads it and orphans_test.go says so; stated here too because
+// this is where the next reader looks.
 func (db *DB) PurgeRepo(id int64) error {
 	tx, err := db.conn.Begin()
 	if err != nil {
@@ -227,6 +249,9 @@ func (db *DB) PurgeRepo(id int64) error {
 	}
 	defer tx.Rollback()
 	if err := deleteSnapshotsTx(tx, `s.repo_id = ?`, id); err != nil {
+		return fmt.Errorf("purge repo %d: %w", id, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM contracts WHERE repo_id = ?`, id); err != nil {
 		return fmt.Errorf("purge repo %d: %w", id, err)
 	}
 	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
@@ -583,8 +608,28 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 				}
 			}
 			// No worktree-specific enrollment matched (e.g. an unenrolled sibling
-			// worktree): fall back to the canonical lowest-id row so resolution
-			// still succeeds, preferring the oldest enrollment deterministically.
+			// worktree). Fall back to the lowest-id row whose source root still
+			// exists on disk, rather than unconditionally repos[0] — in the
+			// claudew/codexw workflow the oldest enrollment in a shared
+			// common-dir is the one most likely to have been deleted at session
+			// end, and since #376 a dead root is a hard block, not a warn-and-pass.
+			// Preferring a live sibling over the dead oldest one is a strict
+			// improvement: it costs nothing when every candidate is live (the
+			// loop below returns immediately), and when every candidate is dead
+			// it falls through to the same repos[0] behavior as before (issue
+			// #370 — see also PurgeRepo, which is how a dead row actually leaves
+			// this table).
+			// Tested on r.Path, NOT EffectiveSourceRoot(): r.Path is the value
+			// returned as repoRoot, and runecho-guard blocks on exactly that
+			// (cmd/runecho-guard/main.go). Judging liveness on a different path
+			// than the caller will act on means a `--source-root` enrollment
+			// whose worktree is deleted reads as live here and is then refused
+			// by the guard, while a fully live sibling was skipped to choose it.
+			for _, r := range repos {
+				if dirExists(r.Path) {
+					return r, r.Path, true
+				}
+			}
 			return repos[0], repos[0].Path, true
 		}
 	}
@@ -628,4 +673,29 @@ func (db *DB) backfillCommonDir(repoID int64, commonDir string, cdErr error) {
 	if cdErr == nil && commonDir != "" {
 		_ = db.SetRepoCommonDir(repoID, commonDir)
 	}
+}
+
+// dirExists reports whether p is an existing directory. Only a definitive
+// "not there" (os.ErrNotExist) counts as absent — a permission error or a
+// flaky mount is not evidence the directory is gone, so those are reported as
+// present.
+//
+// It does NOT match `rootIsMissing` (which prune-missing uses) or the guard's
+// own dirExists, and saying it did was wrong. The three disagree on two inputs:
+//
+//	input                  rootIsMissing   this        guard's dirExists
+//	ENOENT                 missing         absent      absent
+//	EACCES / EIO           not missing     PRESENT     absent
+//	exists, is a file      not missing     absent      absent
+//
+// That divergence is why the resolver above tests r.Path — the value its caller
+// acts on — rather than trusting these to agree. The guard's copy is separate
+// because this helper is unexported, not because cmd/ cannot import this
+// package: cmd/runecho-guard already does (it calls snapshot.Open).
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	if err == nil {
+		return fi.IsDir()
+	}
+	return !os.IsNotExist(err)
 }

@@ -108,6 +108,24 @@ func withRepoRefreshLock(repoID int64, fn func()) {
 	store.WithFileLock(store.RefreshLockPath(dir, repoID), fn)
 }
 
+// removeRefreshLock unlinks the E6 refresh lock file for a repo that has just
+// been purged. Best-effort and silent on any error, including "not there" —
+// the lock is advisory scratch state, not data, and repos that never took the
+// E6 path never created one.
+//
+// Stops the leak; does NOT clean up after it. Locks orphaned by a repo purged
+// before this shipped are never swept — 116 lock files against 102 enrolments
+// on the box that motivated #370's hygiene item, and this removes none of them.
+// Saying it "bounds the count to live repos" would be a claim that is true on
+// no existing store. A sweeper for the existing backlog is still owed.
+func removeRefreshLock(repoID int64) {
+	dir, err := runechoDir()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(store.RefreshLockPath(dir, repoID))
+}
+
 // enrolledRepoID returns the repo_id of an already-enrolled repo at root, or -1.
 // Unlike mustOpenDB it never creates the store dir, and unlike resolveRepoForWrite
 // it never enrolls — the bare `runecho-ir [root]` index stays ungated. It exists

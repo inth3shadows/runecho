@@ -1,6 +1,15 @@
 package snapshot
 
-import "testing"
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+)
 
 // countOrphans returns how many child rows survive with no live parent. The
 // schema deliberately carries no ON DELETE CASCADE (issue #13 — see
@@ -69,6 +78,44 @@ func TestPurgeRepo_LeavesNoOrphans(t *testing.T) {
 	}
 	if n == 0 {
 		t.Error("purging one repo deleted every symbol row in the store")
+	}
+}
+
+// PurgeRepo must succeed on a repo that has an active contract, and must leave
+// no contracts row behind. Before #370's fix, ActivateContract's row (V9,
+// contracts.repo_id REFERENCES repos(id), no ON DELETE) blocked the
+// `DELETE FROM repos` inside PurgeRepo's own transaction: the whole purge
+// rolled back with a foreign-key error, and the enrollment became permanently
+// unpurgeable — reproducing issue #370's stuck row (enrollment id=430; the
+// `(787)` in that issue's error output is SQLITE_CONSTRAINT_FOREIGNKEY, the
+// extended error code, not a row id), which survived
+// `repo prune-missing --yes` and reappeared on every subsequent run.
+func TestPurgeRepo_WithActiveContract(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ActivateContract(victim, "sess-1", "my-contract", "/tmp/victim/CONTRACT.md", "hash123"); err != nil {
+		t.Fatalf("ActivateContract: %v", err)
+	}
+
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo with an active contract: %v", err)
+	}
+
+	var repoCount, contractCount int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM repos WHERE id = ?`, victim).Scan(&repoCount); err != nil {
+		t.Fatal(err)
+	}
+	if repoCount != 0 {
+		t.Errorf("repos row for purged repo %d still present", victim)
+	}
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, victim).Scan(&contractCount); err != nil {
+		t.Fatal(err)
+	}
+	if contractCount != 0 {
+		t.Errorf("contracts row for purged repo %d still present: %d", victim, contractCount)
 	}
 }
 
@@ -166,5 +213,271 @@ func TestRepoDeleteIsRefusedWhileSnapshotsExist(t *testing.T) {
 	assertNoOrphans(t, db, "a rejected repo delete")
 	if got := countLabel(t, db, id, "reindex"); got != 1 {
 		t.Errorf("rejected repo delete damaged history: %d snapshots, want 1", got)
+	}
+}
+
+// A sibling repo's contract must survive the purge. TestPurgeRepo_WithActiveContract
+// proves the victim's row goes; only this proves the DELETE kept its WHERE clause.
+// A `DELETE FROM contracts` with no predicate passes every assertion there.
+func TestPurgeRepo_LeavesASiblingsContractAlone(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystander, err := db.EnrollRepo("bystander", "/tmp/bystander", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{victim, bystander} {
+		if err := db.ActivateContract(id, "sess", "c", "/tmp/c.md", "h"); err != nil {
+			t.Fatalf("ActivateContract(%d): %v", id, err)
+		}
+	}
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo: %v", err)
+	}
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, bystander).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("the bystander's contract was collateral damage: want 1 row, got %d", n)
+	}
+}
+
+// repoChild is one foreign key pointing at `repos`: which table holds it and
+// which column, both read from the schema rather than assumed.
+type repoChild struct{ table, column string }
+
+// scanRepoChildren reads a live schema and returns every direct child of
+// `repos`, plus a complaint for every foreign key ANYWHERE that declares an
+// ON DELETE action.
+//
+// Extracted from the test that uses it for one reason: both of its rules only
+// fire on a schema that does not exist yet (today nothing cascades and every
+// child column is named `repo_id`), so mutating them against the real schema
+// survives — the assertions cannot fire. Against a synthetic schema they can.
+// See TestScanRepoChildrenDetectsWhatTheFenceIsFor, which is what makes the
+// fence a check rather than a comment.
+func scanRepoChildren(conn interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) (children []repoChild, cascades []string, err error) {
+	rows, err := conn.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return nil, nil, err
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		tables = append(tables, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	for _, table := range tables {
+		fks, err := conn.Query(`SELECT "table", "from", "on_delete" FROM pragma_foreign_key_list(?)`, table)
+		if err != nil {
+			return nil, nil, fmt.Errorf("foreign_key_list(%s): %w", table, err)
+		}
+		for fks.Next() {
+			var parent, from, onDelete string
+			if err := fks.Scan(&parent, &from, &onDelete); err != nil {
+				fks.Close()
+				return nil, nil, err
+			}
+			// Schema-wide, not only for repos' children: #13's argument is that
+			// the MIGRATION adding a cascade is what silently empties tables, so
+			// the property that matters is "no cascade anywhere".
+			if onDelete != "NO ACTION" {
+				cascades = append(cascades, fmt.Sprintf("%s.%s -> %s ON DELETE %s", table, from, parent, onDelete))
+			}
+			if parent == "repos" {
+				children = append(children, repoChild{table, from})
+			}
+		}
+		fks.Close()
+	}
+	return children, cascades, nil
+}
+
+// Proves the fence's two schema rules actually fire, against a synthetic schema
+// that breaks both. Without this they are unfalsifiable on the real schema —
+// nothing cascades and every child column is `repo_id` — so a mutation removing
+// either rule survives and the fence is decoration.
+func TestScanRepoChildrenDetectsWhatTheFenceIsFor(t *testing.T) {
+	conn, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "synthetic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, ddl := range []string{
+		`CREATE TABLE repos (id INTEGER PRIMARY KEY)`,
+		// A column that is NOT `repo_id` — hardcoding the name would miss it.
+		`CREATE TABLE widgets (id INTEGER PRIMARY KEY, owner_repo_id INTEGER NOT NULL REFERENCES repos(id))`,
+		// The thing #13 forbids.
+		`CREATE TABLE gadgets (id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE)`,
+	} {
+		if _, err := conn.Exec(ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+
+	children, cascades, err := scanRepoChildren(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, c := range children {
+		got[c.table] = c.column
+	}
+	if got["widgets"] != "owner_repo_id" {
+		t.Errorf("child column not read from the schema: got %q for widgets, want owner_repo_id", got["widgets"])
+	}
+	if got["gadgets"] != "repo_id" {
+		t.Errorf("gadgets not discovered as a child of repos: %v", children)
+	}
+	if len(cascades) != 1 || !strings.Contains(cascades[0], "gadgets") {
+		t.Errorf("ON DELETE CASCADE not flagged: %v", cascades)
+	}
+}
+
+// The fence that stops #370 recurring for the NEXT child table.
+//
+// D1 was found years after the table that caused it was added. Nothing connected
+// "new table referencing repos" to "PurgeRepo must delete it", so this reads the
+// live schema and requires the discovered set of repos-children to equal, EXACTLY,
+// the set PurgeRepo handles. Exactly rather than as a superset: a superset check
+// can be satisfied by editing the list instead of the code, and a mutation adding
+// a phantom entry survived until this was tightened.
+//
+// Known limit, stated rather than papered over: the row-count half only proves
+// the tables this test plants a fixture in. Someone adding a child table, adding
+// it to `handled`, and adding the DELETE — but no fixture — gets a vacuous zero.
+// Exact equality is what forces them to touch this test at all; the fixture is
+// on them.
+func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
+	db, _ := openTemp(t)
+
+	children, cascades, err := scanRepoChildren(db.conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cascades {
+		t.Errorf("%s — this schema deliberately carries no ON DELETE action "+
+			"(see deleteSnapshotsTx and #13)", c)
+	}
+
+	var names []string
+	for _, c := range children {
+		names = append(names, c.table)
+	}
+	handled := []string{"contracts", "snapshots"}
+	sort.Strings(names)
+	if !slices.Equal(names, handled) {
+		t.Errorf("tables referencing repos = %v, PurgeRepo handles %v.\n"+
+			"A table here that PurgeRepo does not delete is #370 happening again: "+
+			"add a DELETE for it in PurgeRepo, then add it to `handled`.", names, handled)
+	}
+
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSnapshot(victim, "sess", "reindex", "/tmp/victim", makeIR("h", "Alpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ActivateContract(victim, "sess", "c", "/tmp/c.md", "h"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo: %v", err)
+	}
+	for _, c := range children {
+		var n int
+		// The column comes from the schema. Hardcoding `repo_id` would query a
+		// nonexistent column on a future `owner_repo_id` child and fail as a test
+		// bug rather than as the finding it is.
+		q := `SELECT COUNT(*) FROM "` + c.table + `" WHERE "` + c.column + `" = ?`
+		if err := db.conn.QueryRow(q, victim).Scan(&n); err != nil {
+			t.Fatalf("count %s.%s: %v", c.table, c.column, err)
+		}
+		if n != 0 {
+			t.Errorf("%s still holds %d row(s) for the purged repo", c.table, n)
+		}
+	}
+}
+
+// dirExists' tolerant branch — a non-ENOENT stat error reports PRESENT — is the
+// half that keeps an unmounted drive or a flaky share from reading as deleted.
+// Nothing pinned it: mutating `return !os.IsNotExist(err)` to `return false`
+// survived the whole package suite, so the doc comment asserted a behaviour no
+// test could falsify.
+func TestDirExistsTreatsAnUnreadableDirAsPresent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the permission bits this test needs")
+	}
+	parent := t.TempDir()
+	child := filepath.Join(parent, "repo")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	if _, err := os.Stat(child); err == nil || os.IsNotExist(err) {
+		t.Skipf("could not produce a non-ENOENT stat error here: %v", err)
+	}
+	if !dirExists(child) {
+		t.Error("an unreadable directory reported absent — a permission error is not " +
+			"evidence the repo is gone, and treating it as gone is how a live " +
+			"enrollment gets skipped and the commit blocked")
+	}
+}
+
+// The fence covers both delete paths, not only the one #370 exercised.
+// RemoveRepo carried the identical foreign-key gap: its snapshot-count guard
+// says nothing about contracts, so a repo with zero snapshots and an active
+// contract failed the same way. Latent (only tests reach it today), which is
+// exactly why fixing its sibling did not fix it.
+func TestRemoveRepoDeletesContracts(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystander, err := db.EnrollRepo("bystander", "/tmp/bystander", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{victim, bystander} {
+		if err := db.ActivateContract(id, "sess", "c", "/tmp/c.md", "h"); err != nil {
+			t.Fatalf("ActivateContract(%d): %v", id, err)
+		}
+	}
+
+	if err := db.RemoveRepo(victim); err != nil {
+		t.Fatalf("RemoveRepo with an active contract: %v", err)
+	}
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, victim).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("victim's contract survived RemoveRepo: %d row(s)", n)
+	}
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, bystander).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("the bystander's contract was collateral damage: want 1, got %d", n)
 	}
 }

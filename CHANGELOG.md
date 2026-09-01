@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.47.1] — 2026-09-01
+
+### Changed
+- guard,ir: fix enrollment lifecycle — unpurgeable rows and dead-root resolution (#370)
+
 ## [0.47.0] — 2026-09-01
 
 ### Changed

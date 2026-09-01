@@ -212,8 +212,11 @@ func runPreCommit(dryRun, verbose bool) int {
 
 	// Resolve the enrolled repo for the current working tree. ResolveRepo keys
 	// on git-common-dir (stable across all worktrees), so bare-repo claudew
-	// worktrees resolve in O(1). repoRoot is the enrolled repo's real working
-	// tree — where ParseStagedDiff and the ignorefile are read from.
+	// worktrees resolve in O(1). repoRoot is the ENROLLED row's path, which
+	// selects the symbol set — it is NOT where the working tree is read from.
+	// See worktreeRootFor: several worktrees share one common-dir, each with its
+	// own index, so anything derived from the tree being committed (the staged
+	// diff, the seed paths, the ignorefile) must come from cwd (issue #369).
 	cwd, err := os.Getwd()
 	if err != nil {
 		warnf("cannot determine working directory: %v", err)
@@ -226,6 +229,31 @@ func runPreCommit(dryRun, verbose bool) int {
 		infof("skipping: repo not enrolled (run: runecho-ir repo add .)")
 		return 0
 	}
+
+	// A resolved enrollment whose root no longer exists means the index is lying
+	// about its own state: the snapshot it points at describes a tree that is
+	// gone, so any verdict computed from it is unfounded. That is categorically
+	// different from the transient faults degradedExit covers (locked index,
+	// credential-helper stall), which is why this one blocks rather than stepping
+	// aside — it is permanent, it is not self-healing, and it has a one-command
+	// remedy. Left fail-open it is invisible: 516 of 617 enrolments on one machine
+	// had missing roots before anything reported it (issues #369, #370).
+	// RUNECHO_GUARD_SKIP=1 remains the escape hatch, as for every other block.
+	if !dirExists(repoRoot) {
+		warnf("enrolled path for %q no longer exists: %s", repo.Name, repoRoot)
+		warnf("the index cannot be trusted while it points at a deleted tree — run: runecho-ir repo prune-missing")
+		// Deliberately NOT logged to decisions.jsonl. The log's vocabulary is
+		// {ask, defer, refresh, outcome}, and guardstats.Aggregate counts only
+		// ask/defer (guardstats.go:200) while fpaudit reads only mode=hook asks.
+		// A new "block" value would be written and counted by nothing — a silent
+		// hole of exactly the kind this block exists to close. The block itself
+		// is the signal: it stops the commit, which cannot scroll past.
+		return 1
+	}
+
+	// Everything read from the working tree comes from the worktree being
+	// committed, never from repoRoot.
+	wtRoot := worktreeRootFor(cwd, repoRoot)
 
 	// Ensure at least one snapshot exists.
 	snaps, err := db.List(repo.ID, 1)
@@ -260,7 +288,7 @@ func runPreCommit(dryRun, verbose bool) int {
 	// Parse staged diff.
 	diffCtx, diffCancel := context.WithTimeout(context.Background(), gitutil.Timeout)
 	defer diffCancel()
-	diffs, partial, err := guard.ParseStagedDiff(diffCtx, repoRoot)
+	diffs, partial, err := guard.ParseStagedDiff(diffCtx, wtRoot)
 	if err != nil {
 		// Context deadline kills the git subprocess when it stalls (credential
 		// helper, locked index). Fail-open by default; fail-closed under strict.
@@ -283,10 +311,14 @@ func runPreCommit(dryRun, verbose bool) int {
 	// Seed each diff with its on-disk path so the hallucination check can mask a
 	// hunk that begins inside a pre-existing docstring — the opening delimiter sits
 	// in unchanged context above the hunk, invisible to the added lines alone
-	// (issue #145). Diff paths are repoRoot-relative; a file that can't be read
-	// disables seeding for that entry (fail-open, handled in openSeedFor).
+	// (issue #145). Diff paths are relative to the tree the diff came from, so
+	// they join against wtRoot — joining against an enrolled CONTAINER instead
+	// produced a path that does not exist, which disabled seeding and made a
+	// symbol defined in the staged file itself read as unresolved (issue #371).
+	// A file that still can't be read disables seeding for that entry alone
+	// (fail-open, handled in openSeedFor).
 	for i := range diffs {
-		diffs[i].AbsPath = filepath.Join(repoRoot, filepath.FromSlash(diffs[i].Path))
+		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}
 
 	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
@@ -1780,6 +1812,34 @@ func ignorePathFor(dir, repoRoot string) string {
 		}
 	}
 	return filepath.Join(repoRoot, ".runechoguardignore")
+}
+
+// worktreeRootFor returns the top of the git worktree containing `dir` — the
+// tree whose index `git diff --cached` reads and whose files the staged paths
+// are relative to. It is the same correction ignorePathFor makes, applied to
+// the rest of the working-tree reads.
+//
+// The enrolled repoRoot cannot serve here. Sibling worktrees of a bare repo
+// share one common-dir, so ResolveRepo can return a DIFFERENT worktree's path,
+// and each worktree has its own index: reading the diff there returned a
+// sibling's staged changes (usually none) and reported success without ever
+// looking at the commit — silently, with no warning at all (issue #369).
+//
+// Falls back to repoRoot when `dir` is not inside a worktree (TopLevel errors
+// on a bare root), matching ignorePathFor's shape. The caller has already
+// established that repoRoot exists.
+func worktreeRootFor(dir, repoRoot string) string {
+	if top, err := gitutil.TopLevel(dir); err == nil {
+		return top
+	}
+	return repoRoot
+}
+
+// dirExists reports whether p is an existing directory. Distinct from
+// fileExists, which requires a regular file.
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 func fileExists(p string) bool {

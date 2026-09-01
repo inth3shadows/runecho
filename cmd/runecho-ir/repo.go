@@ -140,7 +140,11 @@ func runRepoList(args []string) int {
 		fmt.Println("No repos enrolled. Add one: runecho-ir repo add <path>")
 		return 0
 	}
-	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %-7s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "COVER", "PATH")
+	// STATUS sits BEFORE path, and path stays the last field. Issue #370's own
+	// documented measurement is `repo list | tail -n +3 | awk '{print $NF}'`,
+	// so a marker appended to the path makes $NF the marker and destroys every
+	// path the command reports. Pinned by TestRepoList_PathStaysTheLastField.
+	fmt.Printf("%-24s  %-4s  %-20s  %-6s  %-5s  %-7s  %-7s  %s\n", "NAME", "ID", "LAST-INDEXED", "ERRORS", "CAP", "COVER", "STATUS", "PATH")
 	fmt.Println(strings.Repeat("-", 108))
 	missing := 0
 	for _, r := range repos {
@@ -156,20 +160,28 @@ func runRepoList(args []string) int {
 				cover = fmt.Sprintf("%.1f%%", snapshot.CoveragePercent(latest[0].FileCount, r.SupportedSeen))
 			}
 		}
-		path := r.Path
+		// Missingness is judged on the EFFECTIVE source root, which is what
+		// prune-missing acts on; PATH prints r.Path, which is the enrollment's
+		// identity. For a `--source-root` enrollment those differ, so a row can
+		// read `missing` against a path that exists. Deliberate: the status must
+		// agree with prune-missing or the two commands disagree about what rot
+		// is, and the path column must stay the enrollment key.
+		status := "ok"
 		if rootIsMissing(r.EffectiveSourceRoot()) {
 			missing++
-			path += " [missing]"
+			status = "missing"
 		}
-		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %-7s  %s\n",
-			r.Name, r.ID, last, r.ParseErrors, r.FileCap, cover, path)
+		fmt.Printf("%-24s  %-4d  %-20s  %-6d  %-5d  %-7s  %-7s  %s\n",
+			r.Name, r.ID, last, r.ParseErrors, r.FileCap, cover, status, r.Path)
 	}
 	// Quiet in the common case (issue #370): the rot is otherwise invisible
 	// until it surfaces as an unrelated warning or, since #376, a blocked
 	// commit — this is the first point in the workflow where it can be seen
 	// before it bites.
+	// stderr, not stdout: the table is the command's data, and a footer on
+	// stdout adds two lines a `tail -n +3 | awk` reader parses as rows.
 	if missing > 0 {
-		fmt.Printf("\n%d of %d enrolled repo(s) have a missing source root — runecho-ir repo prune-missing\n",
+		fmt.Fprintf(os.Stderr, "\n%d of %d enrolled repo(s) have a missing source root — runecho-ir repo prune-missing\n",
 			missing, len(repos))
 	}
 	return 0
@@ -439,6 +451,18 @@ func runRepoPrune(args []string) int {
 	return ExitOK
 }
 
+// rootIsMissing reports whether root is definitively gone: only a real
+// os.ErrNotExist counts. A permission error or an I/O error on a flaky mount
+// is NOT evidence the repo is gone, so those report false — treating them as
+// missing is how --yes would delete something real. Shared by
+// runRepoPruneMissing and runRepoList so "missing" cannot mean two different
+// things between the two commands (issue #370: the rot must be visible in
+// `repo list` in exactly the same terms prune-missing acts on).
+func rootIsMissing(root string) bool {
+	_, statErr := os.Stat(root)
+	return errors.Is(statErr, os.ErrNotExist)
+}
+
 // runRepoPruneMissing lists — or with --yes purges — enrolled repos whose
 // source root no longer exists on disk.
 //
@@ -457,18 +481,6 @@ func runRepoPrune(args []string) int {
 // refuses a vanished root via requireExistingDir before any snapshot is
 // written, so these repos are dead weight and hourly log noise, not a source
 // of junk rows.
-// rootIsMissing reports whether root is definitively gone: only a real
-// os.ErrNotExist counts. A permission error or an I/O error on a flaky mount
-// is NOT evidence the repo is gone, so those report false — treating them as
-// missing is how --yes would delete something real. Shared by
-// runRepoPruneMissing and runRepoList so "missing" cannot mean two different
-// things between the two commands (issue #370: the rot must be visible in
-// `repo list` in exactly the same terms prune-missing acts on).
-func rootIsMissing(root string) bool {
-	_, statErr := os.Stat(root)
-	return errors.Is(statErr, os.ErrNotExist)
-}
-
 func runRepoPruneMissing(args []string) int {
 	fs := flag.NewFlagSet("repo prune-missing", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "actually purge the listed repos and their history")

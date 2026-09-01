@@ -225,24 +225,74 @@ func TestRepoList_MarksMissingRootAndReportsCount(t *testing.T) {
 	enrollAt(t, home, "alive", liveRoot)
 	enrollAt(t, home, "ghost", filepath.Join(t.TempDir(), "absent-370"))
 
-	code, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "list"})
+	code, out, errOut := runWith(t, home, []string{"runecho-ir", "repo", "list"})
 	if code != 0 {
 		t.Fatalf("repo list: code %d", code)
 	}
-	if !strings.Contains(out, "ghost") || !strings.Contains(out, "[missing]") {
-		t.Errorf("repo list did not mark the missing enrollment: %s", out)
-	}
-	if strings.Contains(strings.Split(out, "\n")[0], "[missing]") {
-		// sanity: header line itself must never match
-		t.Errorf("header line unexpectedly matched [missing]")
-	}
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "alive") && strings.Contains(line, "[missing]") {
-			t.Errorf("repo list marked the LIVE enrollment as missing: %q", line)
+		switch {
+		case strings.Contains(line, "ghost"):
+			if !strings.Contains(line, "missing") {
+				t.Errorf("the dead enrollment is not marked: %q", line)
+			}
+		case strings.Contains(line, "alive"):
+			if !strings.Contains(line, "ok") || strings.Contains(line, "missing") {
+				t.Errorf("the live enrollment is mismarked: %q", line)
+			}
 		}
 	}
-	if !strings.Contains(out, "1 of 2 enrolled repo(s) have a missing source root") {
-		t.Errorf("repo list did not report the missing count: %s", out)
+	// The footer belongs on stderr. On stdout it adds two lines that a
+	// `tail -n +3` reader parses as table rows.
+	if !strings.Contains(errOut, "1 of 2 enrolled repo(s) have a missing source root") {
+		t.Errorf("the missing count was not reported on stderr: %s", errOut)
+	}
+	if strings.Contains(out, "missing source root") {
+		t.Errorf("the footer leaked onto stdout, which is the data stream: %s", out)
+	}
+}
+
+// TestRepoList_PathStaysTheLastField pins the column contract, which the
+// marker broke and no test caught.
+//
+// Issue #370's own documented measurement is
+// `repo list | tail -n +3 | awk '{print $NF}'`. An earlier form of this marker
+// appended " [missing]" to the path, so $NF became the literal "[missing]" —
+// every path that command reported was destroyed, and the dead count went
+// 3 -> 5 on the real store because the stdout footer added two more lines.
+// Asserting only that "[missing]" appears somewhere passes just as happily
+// with the marker in the last column, which is how that shipped.
+func TestRepoList_PathStaysTheLastField(t *testing.T) {
+	home := t.TempDir()
+	liveRoot := t.TempDir()
+	deadRoot := filepath.Join(t.TempDir(), "absent-370")
+	enrollAt(t, home, "alive", liveRoot)
+	enrollAt(t, home, "ghost", deadRoot)
+
+	_, out, _ := runWith(t, home, []string{"runecho-ir", "repo", "list"})
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected a header, a rule and two rows; got %d line(s): %s", len(lines), out)
+	}
+	// Exactly what issue #370's repro does: tail -n +3 | awk '{print $NF}'
+	var lastFields []string
+	for _, line := range lines[2:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		lastFields = append(lastFields, fields[len(fields)-1])
+	}
+
+	want := map[string]bool{liveRoot: true, deadRoot: true}
+	for _, got := range lastFields {
+		if !want[got] {
+			t.Errorf("$NF is %q, not an enrolled path — a marker or footer is in the last column, "+
+				"which breaks issue #370's own repro command", got)
+		}
+	}
+	if len(lastFields) != 2 {
+		t.Errorf("expected 2 data rows, got %d: %v", len(lastFields), lastFields)
 	}
 }
 
@@ -257,7 +307,7 @@ func TestRepoList_NoFooterWhenNoneMissing(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("repo list: code %d", code)
 	}
-	if strings.Contains(out, "[missing]") || strings.Contains(out, "missing source root") {
+	if strings.Contains(out, "missing source root") {
 		t.Errorf("repo list printed missing-root output with nothing missing: %s", out)
 	}
 }

@@ -473,3 +473,76 @@ func TestResolveRepo_MultiMatchFallbackAllDeadReturnsLowestID(t *testing.T) {
 		t.Errorf("all-dead fallback returned id %d, want lowest id %d (unchanged pre-#370 behavior)", repo.ID, idA)
 	}
 }
+
+// The fallback must judge liveness on the path it RETURNS, not on the source
+// root. These are the same value for an ordinary enrollment, which is why every
+// other test here passes under either predicate — and why swapping
+// `dirExists(r.Path)` back to `dirExists(r.EffectiveSourceRoot())` survived the
+// whole suite until this existed.
+//
+// `repo add --source-root` makes them diverge. Here the dead candidate's
+// worktree is deleted but its recorded source root is live, so the source-root
+// predicate calls it live and returns it — with the dead `r.Path` as repoRoot,
+// which is exactly what runecho-guard stats and blocks on (main.go's own
+// dirExists). A fully live sibling is skipped to make that choice, so the fix
+// that exists to prevent a spurious block causes one.
+func TestResolveRepo_MultiMatchFallbackJudgesThePathItReturns(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	mainDir := t.TempDir()
+	wtDeadDir := filepath.Join(t.TempDir(), "wt-dead-path")
+	wtLiveDir := filepath.Join(t.TempDir(), "wt-live-path")
+	liveSourceRoot := t.TempDir() // survives; stands in for a --source-root target
+
+	resolveGitInit(t, mainDir)
+	resolveGitCommit(t, mainDir)
+	for _, add := range [][]string{
+		{"-C", mainDir, "worktree", "add", wtDeadDir, "-b", "wt-dead-path"},
+		{"-C", mainDir, "worktree", "add", wtLiveDir, "-b", "wt-live-path"},
+	} {
+		if out, err := exec.Command("git", add...).CombinedOutput(); err != nil {
+			t.Fatalf("git worktree add: %v: %s", err, out)
+		}
+	}
+
+	db, _ := openTemp(t)
+	cd, err := gitutil.CommonDir(mainDir)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	// Lower id, so it is repos[0]: path will be deleted, source_root will not.
+	deadID, err := db.EnrollRepo("wt-dead", wtDeadDir, liveSourceRoot, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-dead: %v", err)
+	}
+	liveID, err := db.EnrollRepo("wt-live", wtLiveDir, wtLiveDir, 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo wt-live: %v", err)
+	}
+	for _, id := range []int64{deadID, liveID} {
+		if err := db.SetRepoCommonDir(id, cd); err != nil {
+			t.Fatalf("SetRepoCommonDir %d: %v", id, err)
+		}
+	}
+
+	if out, err := exec.Command("git", "-C", mainDir, "worktree", "remove", "--force", wtDeadDir).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove: %v: %s", err, out)
+	}
+
+	repo, repoRoot, ok := db.ResolveRepo(mainDir)
+	if !ok {
+		t.Fatalf("ResolveRepo(mainDir) ok=false; want a resolved repo")
+	}
+	// The returned root is what the guard stats. If it does not exist, the guard
+	// blocks — so the fallback must never hand back one that is gone while a
+	// live candidate was available.
+	if _, err := os.Stat(repoRoot); os.IsNotExist(err) {
+		t.Errorf("fallback returned repoRoot %q, which does not exist — the guard blocks "+
+			"on exactly this, and id=%d had a live path", repoRoot, liveID)
+	}
+	if repo.ID != liveID {
+		t.Errorf("fallback resolved id %d (dead=%d, source_root live but path gone; live=%d); "+
+			"liveness must be judged on the returned path", repo.ID, deadID, liveID)
+	}
+}

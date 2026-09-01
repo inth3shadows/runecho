@@ -3,6 +3,7 @@ package snapshot
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -410,5 +411,73 @@ func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
 		if n != 0 {
 			t.Errorf("%s still holds %d row(s) for the purged repo", c.table, n)
 		}
+	}
+}
+
+// dirExists' tolerant branch — a non-ENOENT stat error reports PRESENT — is the
+// half that keeps an unmounted drive or a flaky share from reading as deleted.
+// Nothing pinned it: mutating `return !os.IsNotExist(err)` to `return false`
+// survived the whole package suite, so the doc comment asserted a behaviour no
+// test could falsify.
+func TestDirExistsTreatsAnUnreadableDirAsPresent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the permission bits this test needs")
+	}
+	parent := t.TempDir()
+	child := filepath.Join(parent, "repo")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	if _, err := os.Stat(child); err == nil || os.IsNotExist(err) {
+		t.Skipf("could not produce a non-ENOENT stat error here: %v", err)
+	}
+	if !dirExists(child) {
+		t.Error("an unreadable directory reported absent — a permission error is not " +
+			"evidence the repo is gone, and treating it as gone is how a live " +
+			"enrollment gets skipped and the commit blocked")
+	}
+}
+
+// The fence covers both delete paths, not only the one #370 exercised.
+// RemoveRepo carried the identical foreign-key gap: its snapshot-count guard
+// says nothing about contracts, so a repo with zero snapshots and an active
+// contract failed the same way. Latent (only tests reach it today), which is
+// exactly why fixing its sibling did not fix it.
+func TestRemoveRepoDeletesContracts(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystander, err := db.EnrollRepo("bystander", "/tmp/bystander", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{victim, bystander} {
+		if err := db.ActivateContract(id, "sess", "c", "/tmp/c.md", "h"); err != nil {
+			t.Fatalf("ActivateContract(%d): %v", id, err)
+		}
+	}
+
+	if err := db.RemoveRepo(victim); err != nil {
+		t.Fatalf("RemoveRepo with an active contract: %v", err)
+	}
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, victim).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("victim's contract survived RemoveRepo: %d row(s)", n)
+	}
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, bystander).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("the bystander's contract was collateral damage: want 1, got %d", n)
 	}
 }

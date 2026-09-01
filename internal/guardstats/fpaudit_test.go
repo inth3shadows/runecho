@@ -458,6 +458,39 @@ func TestNotIdentIsPerLanguage(t *testing.T) {
 	}
 }
 
+// A word only reserved in STRICT-mode JS ("static", "implements",
+// "interface", "package", "private", "protected", "public", "let", "yield",
+// "await") must NOT gate the oracle: .gs (Apps Script) and CommonJS .js both
+// run sloppy-mode by default, where e.g. `function static(){}` is a legal
+// declaration. Regression for a real code-review finding: this list
+// originally included these words, and a fixture declaring `function
+// static(){}` reached VerdictNotIdent with Defined never called — silently
+// converting a genuine resolver miss (VerdictFP) into an unfalsifiable
+// non-finding, the opposite of this file's purpose.
+func TestNotIdentExcludesStrictModeOnlyWords(t *testing.T) {
+	for _, sym := range []string{
+		"static", "implements", "interface", "package",
+		"private", "protected", "public", "let", "yield", "await",
+	} {
+		if isNotIdentifier("js", sym) {
+			t.Errorf("isNotIdentifier(js, %q) = true, want false — only strict-mode reserved, legal in sloppy-mode .js/.gs", sym)
+		}
+	}
+	// A genuine sloppy-mode declaration of one of these names must still be
+	// judged by the oracle, not short-circuited away.
+	o := &fakeOracle{
+		head: "HEAD", revAt: map[string]string{"": "OLD"},
+		defined: map[[2]string]bool{{"OLD", "static"}: true, {"HEAD", "static"}: true},
+	}
+	s := Audit([]Decision{
+		auditAskLang("2026-07-10T10:00:00Z", "/wt/a.gs", "js", "violations",
+			[]string{"static"}, []string{"static"}),
+	}, auditTS("2026-07-01T00:00:00Z"), o)
+	if got := verdictOf(t, s, "static"); got != VerdictFP {
+		t.Errorf("static = %q, want %q (a real declaration must reach the oracle)", got, VerdictFP)
+	}
+}
+
 // VerdictNotIdent is a judged, wrong flag — it must stay inside Rated(), the
 // same way fp/premature/stands do. Excluding it (like VerdictUnknown/
 // VerdictNA) would move the symbol out of `stands` and leave the reported FP

@@ -20,7 +20,7 @@ import (
 // This audit replaces the human with git history, which does vary. For a
 // flagged symbol it asks two dated questions instead of one undated one:
 // did the symbol exist when we complained, and does it exist now. That splits
-// the single "approved anyway" bucket into three verdicts with different fixes:
+// the single "approved anyway" bucket into four verdicts with different fixes:
 //
 //   - VerdictFP        the symbol was already defined somewhere in the repo at
 //                      ask time. A complete resolver would have found it; the
@@ -395,34 +395,57 @@ func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision
 // notIdentSets is the per-language set of reserved words and literal globals
 // that can NEVER be a declaration, keyed on the same "go"/"js"/"py" tag the
 // guard stamps into Decision.Lang (js already covers ts/jsx/tsx/gs — see
-// gitoracle.go's langExts — so there is no separate ts/jsx/tsx entry to keep
-// in sync). "js" is deliberately a SHORTER list than jsBuiltins in
-// internal/guard/extract.go: that list also carries callable globals like
-// `fetch`/`Promise`, which ARE legal identifiers a user could shadow or
-// (in principle) a resolver could find defined — only true reserved
+// LangJS's doc comment in internal/guard/extract.go — so there is no separate
+// ts/jsx/tsx entry to keep in sync). "js" is deliberately a SHORTER list than
+// jsBuiltins in internal/guard/extract.go: that list also carries callable
+// globals like `fetch`/`Promise`, which ARE legal identifiers a user could
+// shadow or (in principle) a resolver could find defined — only true reserved
 // words/literals belong here, because this gate's whole justification is
 // that git can never answer "was it declared" any other way for these names.
+//
+// A word only reserved in STRICT-mode JS (`static`, `let`, `yield`, `await`,
+// `implements`, `interface`, `package`, `private`, `protected`, `public`) is
+// deliberately EXCLUDED, even though it looks tempting to add: `.gs` (Apps
+// Script) and CommonJS `.js` both run sloppy-mode by default, where
+// `function static(){}` is a legal declaration. Gating on one of these words
+// would short-circuit the oracle for a symbol that genuinely could be
+// declared, turning a real VerdictFP (resolver miss) into an unfalsifiable
+// VerdictNotIdent — reviewed 2026-09-01, verified live: a `.gs` fixture
+// declaring `function static(){}` reached VerdictNotIdent with the oracle's
+// Defined never called, before this list was narrowed to unconditional
+// keywords/literals only.
 //
 // nil is a Go builtin but a legal Python variable name, and vice versa for
 // None — this is why the map is per-language rather than one shared set.
 var notIdentSets = map[string]map[string]struct{}{
 	"js": setOfNames(
-		// literals — never bindable as a `let`/`const`/`function` name.
-		"NaN", "Infinity", "undefined", "null", "true", "false", "this", "super",
-		// reserved words — a syntax error as a binding name in every JS mode.
+		// Global properties, not syntactically reserved — `function NaN(){}`
+		// and `function undefined(){}` are both legal JS in every mode
+		// (verified on node: typeof both is "function" afterwards) — but
+		// treated as unshadowable in practice, the same tradeoff jsBuiltins
+		// already makes for callable globals like `console`/`Object`. NaN and
+		// Infinity are the pair issue #360's corpus actually measured (a JS
+		// file's SQL template referencing SUM/COALESCE alongside a literal
+		// NaN/Infinity reference); undefined joins them for the same reason,
+		// not because it is grammatically reserved like null/true/false below.
+		"NaN", "Infinity", "undefined",
+		// Unconditionally reserved in every JS mode (ECMA-262 ReservedWord —
+		// not the FutureReservedWord subset, which is strict-mode only and
+		// excluded above).
+		"null", "true", "false", "this", "super",
 		"break", "case", "catch", "class", "const", "continue", "debugger",
-		"default", "delete", "do", "else", "export", "extends", "finally",
-		"for", "function", "if", "import", "in", "instanceof", "let", "new",
-		"return", "static", "switch", "throw", "try", "typeof", "var", "void",
-		"while", "with", "yield", "enum", "await", "implements", "interface",
-		"package", "private", "protected", "public",
+		"default", "delete", "do", "else", "enum", "export", "extends",
+		"finally", "for", "function", "if", "import", "in", "instanceof",
+		"new", "return", "switch", "throw", "try", "typeof", "var", "void",
+		"while", "with",
 	),
 	"go": setOfNames(
-		// predeclared identifiers that are literals/constants, not ordinary
-		// names — nil/iota can never be what a "was this declared" question
-		// means, and true/false/iota are predeclared, not declarable.
+		// Predeclared identifiers, not keywords — `var nil = 5` compiles (it
+		// shadows the predeclared nil within that scope). Treated as
+		// unshadowable in practice for the same reason as JS's NaN/Infinity
+		// above: no real Go code names a function `nil`/`iota`.
 		"nil", "iota", "true", "false",
-		// keywords — a syntax error as an identifier.
+		// Keywords — a syntax error as an identifier in every Go version.
 		"break", "case", "chan", "const", "continue", "default", "defer",
 		"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
 		"interface", "map", "package", "range", "return", "select", "struct",
@@ -537,16 +560,20 @@ func FormatAudit(s AuditStats) string {
 		{VerdictStands, "still undefined — the guard caught a real unbacked reference"},
 		{VerdictNotIdent, "not a code identifier at all — reserved word or masking gap"},
 	}
+	// "not-an-identifier" is 17 chars, the longest verdict label; width 18
+	// gives it a 1-char margin. Widen this if a longer verdict is ever added,
+	// or the row it belongs to shifts the count/percent columns out of
+	// alignment with the rest.
 	for _, r := range rows {
-		fmt.Fprintf(&b, "  %-10s %5d  %5.1f%%   %s\n",
+		fmt.Fprintf(&b, "  %-18s %5d  %5.1f%%   %s\n",
 			r.v, s.Counts[r.v], 100*s.Share(r.v), r.what)
 	}
 	if u := s.Counts[VerdictUnknown]; u > 0 {
-		fmt.Fprintf(&b, "  %-10s %5d      -    oracle could not answer (see --json for reasons)\n",
+		fmt.Fprintf(&b, "  %-18s %5d      -    oracle could not answer (see --json for reasons)\n",
 			VerdictUnknown, u)
 	}
 	if n := s.Counts[VerdictNA]; n > 0 {
-		fmt.Fprintf(&b, "  %-10s %5d      -    outside learn_symbols — see the n/a note below\n",
+		fmt.Fprintf(&b, "  %-18s %5d      -    outside learn_symbols — see the n/a note below\n",
 			VerdictNA, n)
 	}
 

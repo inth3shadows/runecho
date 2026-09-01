@@ -374,3 +374,107 @@ func TestAuditUntilNeverZero(t *testing.T) {
 		t.Errorf("header renders the zero time:\n%s", FormatAudit(s))
 	}
 }
+
+// failIfDefinedOracle wraps a fakeOracle but fails the test the moment
+// Defined is called. Used to pin that the not-an-identifier gate SHORT-
+// CIRCUITS classify — not merely that it produces the right label after
+// consulting git, but that it never asks git at all (issue #360).
+type failIfDefinedOracle struct {
+	*fakeOracle
+	t *testing.T
+}
+
+func (f *failIfDefinedOracle) Defined(root, rev, lang, sym, rel string) (bool, error) {
+	f.t.Fatalf("Defined(%q) called — the not-an-identifier gate should have short-circuited before any oracle lookup", sym)
+	return false, nil
+}
+
+func auditAskLang(at, file, lang, reason string, syms []string, learn []string) Decision {
+	return Decision{
+		TS: auditTS(at), Mode: "hook", Decision: "ask", File: file, Lang: lang,
+		Reason: reason, Symbols: syms, LearnSymbols: learn,
+	}
+}
+
+// A JS literal that can never be a declaration (NaN) must classify as
+// not-an-identifier WITHOUT ever calling the oracle. This is the short-circuit
+// itself, not just the resulting label — a test that only checked the verdict
+// would still pass if the gate ran the git lookups and then relabeled the
+// result, which defeats the "needs no git lookup" point of the gate.
+func TestClassifyNotIdentShortCircuitsOracle(t *testing.T) {
+	base := &fakeOracle{head: "HEAD", revAt: map[string]string{"": "OLD"}}
+	o := &failIfDefinedOracle{fakeOracle: base, t: t}
+	in := []Decision{
+		auditAskLang("2026-07-10T10:00:00Z", "/wt/a.ts", "js", "violations",
+			[]string{"NaN"}, []string{"NaN"}),
+	}
+	s := Audit(in, auditTS("2026-07-01T00:00:00Z"), o)
+	if got, want := verdictOf(t, s, "NaN"), VerdictNotIdent; got != want {
+		t.Errorf("NaN = %q, want %q", got, want)
+	}
+}
+
+// Table names and SQL-keyword leaks (SUM, COALESCE, EXISTS) are NOT JS
+// keywords — calling them not-an-identifier IN JS would misclassify a real
+// JS function legitimately named `sum` or `exists`. Only exact matches
+// against the flagged language's own reserved-word/literal set qualify; a
+// same-spelled SQL keyword must fall through to the ordinary oracle path.
+func TestNotIdentIsNotASQLKeywordList(t *testing.T) {
+	for _, sym := range []string{"sum", "SUM", "exists", "EXISTS", "coalesce", "COALESCE"} {
+		if isNotIdentifier("js", sym) {
+			t.Errorf("isNotIdentifier(js, %q) = true, want false — not a JS reserved word", sym)
+		}
+	}
+	// Sanity: a real JS function named `exists` still resolves normally
+	// through the oracle (i.e. reaches VerdictStands/VerdictFP, not
+	// VerdictNotIdent) rather than being silently misjudged.
+	o := &fakeOracle{head: "HEAD", revAt: map[string]string{"": "OLD"}}
+	s := Audit([]Decision{
+		auditAskLang("2026-07-10T10:00:00Z", "/wt/a.ts", "js", "violations",
+			[]string{"exists"}, []string{"exists"}),
+	}, auditTS("2026-07-01T00:00:00Z"), o)
+	if got := verdictOf(t, s, "exists"); got != VerdictStands {
+		t.Errorf("exists = %q, want %q (must go through the oracle, not the not-ident gate)", got, VerdictStands)
+	}
+}
+
+// nil is a Go builtin but a legal Python identifier, and None is the reverse.
+// The membership test must be keyed on the flagged language's own tag, not a
+// language-agnostic union of every language's reserved words.
+func TestNotIdentIsPerLanguage(t *testing.T) {
+	cases := []struct {
+		lang, sym string
+		want      bool
+	}{
+		{"go", "nil", true},
+		{"py", "nil", false},
+		{"py", "None", true},
+		{"go", "None", false},
+	}
+	for _, c := range cases {
+		if got := isNotIdentifier(c.lang, c.sym); got != c.want {
+			t.Errorf("isNotIdentifier(%q, %q) = %v, want %v", c.lang, c.sym, got, c.want)
+		}
+	}
+}
+
+// VerdictNotIdent is a judged, wrong flag — it must stay inside Rated(), the
+// same way fp/premature/stands do. Excluding it (like VerdictUnknown/
+// VerdictNA) would move the symbol out of `stands` and leave the reported FP
+// rate exactly as understated as before this verdict existed.
+func TestRatedIncludesNotIdent(t *testing.T) {
+	o := &fakeOracle{head: "HEAD", revAt: map[string]string{"": "OLD"}}
+	s := Audit([]Decision{
+		auditAskLang("2026-07-10T10:00:00Z", "/wt/a.ts", "js", "violations",
+			[]string{"NaN", "realSym"}, []string{"NaN", "realSym"}),
+	}, auditTS("2026-07-01T00:00:00Z"), o)
+	if s.Symbols != 2 {
+		t.Fatalf("Symbols = %d, want 2", s.Symbols)
+	}
+	if s.Rated() != 2 {
+		t.Errorf("Rated() = %d, want 2 (not-an-identifier must not be excluded like unknown/n-a)", s.Rated())
+	}
+	if s.Counts[VerdictNotIdent] != 1 {
+		t.Errorf("Counts[VerdictNotIdent] = %d, want 1", s.Counts[VerdictNotIdent])
+	}
+}

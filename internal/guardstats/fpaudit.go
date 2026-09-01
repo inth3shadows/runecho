@@ -20,7 +20,7 @@ import (
 // This audit replaces the human with git history, which does vary. For a
 // flagged symbol it asks two dated questions instead of one undated one:
 // did the symbol exist when we complained, and does it exist now. That splits
-// the single "approved anyway" bucket into three verdicts with different fixes:
+// the single "approved anyway" bucket into four verdicts with different fixes:
 //
 //   - VerdictFP        the symbol was already defined somewhere in the repo at
 //                      ask time. A complete resolver would have found it; the
@@ -31,8 +31,18 @@ import (
 //                      callee, which is legitimate authoring order. Not a
 //                      resolver bug; a timing one. The fix is to move the check
 //                      later, not to widen the known set.
-//   - VerdictStands    the symbol never came to resolve. The guard caught a
-//                      reference that is still unbacked.
+//   - VerdictStands    the symbol never came to resolve, AND it is a name that
+//                      could legitimately have been declared in the flagged
+//                      language. The guard caught a real unbacked reference.
+//   - VerdictNotIdent  the symbol could never have resolved, in any repo, at
+//                      any commit — it is not a code identifier in the
+//                      flagged language at all (a reserved word like JS
+//                      `NaN`, or text from inside a string/comment the
+//                      masking pass missed). This is still a false positive,
+//                      but the fix is masking, not resolution — a different
+//                      bug from VerdictFP, so it gets its own bucket instead
+//                      of being folded into one that would send the fix to
+//                      the wrong file. See classify's not-an-identifier gate.
 //
 // The premature bucket is the one no prior metric could see, and the one that
 // motivated this file. Its founding case: `hashToSeed` in frostline's
@@ -50,6 +60,29 @@ const (
 	VerdictFP        AuditVerdict = "fp"
 	VerdictPremature AuditVerdict = "premature"
 	VerdictStands    AuditVerdict = "stands"
+	// VerdictNotIdent marks a flagged symbol that cannot be a declaration in
+	// the flagged language at all — a reserved word/literal (JS `NaN`,
+	// `Infinity`; Go `nil`, `iota`; Python `None`) that will NEVER resolve no
+	// matter what commit is inspected, or SQL/prose text a masking gap let
+	// through (`SUM`, `SQLite`). Without this, both fell to VerdictStands and
+	// were scored "the guard was right" — measured at ~31% of one language's
+	// stands bucket (issue #360) — which understates the guard's real FP rate
+	// on exactly the number used to gate default-on decisions.
+	//
+	// The membership test below is deliberately NOT a SQL-keyword list: `SUM`,
+	// `COALESCE`, `EXISTS` are not JS keywords, and calling them
+	// not-an-identifier IN JS would misclassify a real JS function legitimately
+	// named `SUM`. Only names that are reserved words/literals of the flagged
+	// language itself qualify — a fact about that language's grammar, not an
+	// inference about surrounding context. Table names and SQL-keyword leaks
+	// belong to the masking fix (see extract.go's string/comment stripping),
+	// not to this gate.
+	//
+	// Counted inside Rated() (see below) — this is a JUDGED, wrong flag, not a
+	// coverage gap like VerdictUnknown/VerdictNA. Excluding it would move the
+	// symbols out of `stands` and leave the reported FP rate exactly as
+	// understated as before, wearing a different label.
+	VerdictNotIdent AuditVerdict = "not-an-identifier"
 	// VerdictUnknown covers every case the oracle could not answer: a deleted
 	// worktree, an unenrolled or non-git tree, a symbol name too odd to build a
 	// safe pattern from. Counted and reported, never folded into another bucket
@@ -156,6 +189,10 @@ type AuditStats struct {
 }
 
 // Rated is the number of pairs that were both judgeable and answerable.
+// VerdictNotIdent deliberately stays IN this count: it is a judged, wrong
+// flag (a masking bug, not a resolution one), so subtracting it here like
+// VerdictUnknown/VerdictNA would move it out of `stands` and leave the
+// reported FP rate exactly as understated as before this verdict existed.
 func (s AuditStats) Rated() int {
 	return s.Symbols - s.Counts[VerdictUnknown] - s.Counts[VerdictNA]
 }
@@ -305,12 +342,22 @@ func dedupeStrings(in []string) []string {
 
 // classify runs the two dated questions for one symbol.
 //
-// Order matters and is not an optimisation. "Defined at ask time" is asked
-// first because it is the only verdict that indicts the guard's resolver; if it
-// is true, whether the symbol also exists now tells us nothing. Asking HEAD
-// first and treating "defined now" as the FP signal is the mistake that made
-// hashToSeed read as a false positive for weeks.
+// The not-an-identifier gate runs first and short-circuits both dated
+// questions: a name that can never be a declaration in the flagged language
+// needs no git lookup at all — asking "was NaN defined at ask time" cannot
+// come back true, in this or any repo, so skipping straight past the oracle
+// is not an optimisation shortcut, it is the only answer the two dated
+// questions could ever produce.
+//
+// Order matters for the rest and is not an optimisation. "Defined at ask time"
+// is asked first because it is the only verdict that indicts the guard's
+// resolver; if it is true, whether the symbol also exists now tells us
+// nothing. Asking HEAD first and treating "defined now" as the FP signal is
+// the mistake that made hashToSeed read as a false positive for weeks.
 func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision, sym string, defs map[defKey]bool) (AuditVerdict, string) {
+	if isNotIdentifier(d.Lang, sym) {
+		return VerdictNotIdent, ""
+	}
 	if revErr != nil {
 		return VerdictUnknown, "no commit at or before ask time: " + revErr.Error()
 	}
@@ -343,6 +390,101 @@ func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision
 		return VerdictPremature, ""
 	}
 	return VerdictStands, ""
+}
+
+// notIdentSets is the per-language set of reserved words and literal globals
+// that can NEVER be a declaration, keyed on the same "go"/"js"/"py" tag the
+// guard stamps into Decision.Lang (js already covers ts/jsx/tsx/gs — see
+// LangJS's doc comment in internal/guard/extract.go — so there is no separate
+// ts/jsx/tsx entry to keep in sync). "js" is deliberately a SHORTER list than
+// jsBuiltins in internal/guard/extract.go: that list also carries callable
+// globals like `fetch`/`Promise`, which ARE legal identifiers a user could
+// shadow or (in principle) a resolver could find defined — only true reserved
+// words/literals belong here, because this gate's whole justification is
+// that git can never answer "was it declared" any other way for these names.
+//
+// A word only reserved in STRICT-mode JS (`static`, `let`, `yield`, `await`,
+// `implements`, `interface`, `package`, `private`, `protected`, `public`) is
+// deliberately EXCLUDED, even though it looks tempting to add: `.gs` (Apps
+// Script) and CommonJS `.js` both run sloppy-mode by default, where
+// `function static(){}` is a legal declaration. Gating on one of these words
+// would short-circuit the oracle for a symbol that genuinely could be
+// declared, turning a real VerdictFP (resolver miss) into an unfalsifiable
+// VerdictNotIdent — reviewed 2026-09-01, verified live: a `.gs` fixture
+// declaring `function static(){}` reached VerdictNotIdent with the oracle's
+// Defined never called, before this list was narrowed to unconditional
+// keywords/literals only.
+//
+// nil is a Go builtin but a legal Python variable name, and vice versa for
+// None — this is why the map is per-language rather than one shared set.
+var notIdentSets = map[string]map[string]struct{}{
+	"js": setOfNames(
+		// Global properties, not syntactically reserved — `function NaN(){}`
+		// and `function undefined(){}` are both legal JS in every mode
+		// (verified on node: typeof both is "function" afterwards) — but
+		// treated as unshadowable in practice, the same tradeoff jsBuiltins
+		// already makes for callable globals like `console`/`Object`. NaN and
+		// Infinity are the pair issue #360's corpus actually measured (a JS
+		// file's SQL template referencing SUM/COALESCE alongside a literal
+		// NaN/Infinity reference); undefined joins them for the same reason,
+		// not because it is grammatically reserved like null/true/false below.
+		"NaN", "Infinity", "undefined",
+		// Unconditionally reserved in every JS mode (ECMA-262 ReservedWord —
+		// not the FutureReservedWord subset, which is strict-mode only and
+		// excluded above).
+		"null", "true", "false", "this", "super",
+		"break", "case", "catch", "class", "const", "continue", "debugger",
+		"default", "delete", "do", "else", "enum", "export", "extends",
+		"finally", "for", "function", "if", "import", "in", "instanceof",
+		"new", "return", "switch", "throw", "try", "typeof", "var", "void",
+		"while", "with",
+	),
+	"go": setOfNames(
+		// Predeclared identifiers, not keywords — `var nil = 5` compiles (it
+		// shadows the predeclared nil within that scope). Treated as
+		// unshadowable in practice for the same reason as JS's NaN/Infinity
+		// above: no real Go code names a function `nil`/`iota`.
+		"nil", "iota", "true", "false",
+		// Keywords — a syntax error as an identifier in every Go version.
+		"break", "case", "chan", "const", "continue", "default", "defer",
+		"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+		"interface", "map", "package", "range", "return", "select", "struct",
+		"switch", "type", "var",
+	),
+	"py": setOfNames(
+		// literals/keyword-constants — never bindable (SyntaxError to assign to).
+		"None", "True", "False",
+		// keywords — a syntax error as an identifier.
+		"and", "as", "assert", "async", "await", "break", "class", "continue",
+		"def", "del", "elif", "else", "except", "finally", "for", "from",
+		"global", "if", "import", "in", "is", "lambda", "nonlocal", "not",
+		"or", "pass", "raise", "return", "try", "while", "with", "yield",
+	),
+}
+
+func setOfNames(names ...string) map[string]struct{} {
+	m := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		m[n] = struct{}{}
+	}
+	return m
+}
+
+// isNotIdentifier reports whether sym is a reserved word or literal of lang —
+// a name that cannot be a declaration in that language at any commit, so the
+// two dated git questions cannot judge it. Zero inference: membership is a
+// fact about the flagged language's own grammar, not a guess about what kind
+// of code the name showed up in. An unrecognised lang tag reports false
+// (widens rather than narrows, matching Oracle.Defined's convention — a miss
+// here reads as VerdictStands, same failure direction as before this gate
+// existed, never a new one).
+func isNotIdentifier(lang, sym string) bool {
+	set, ok := notIdentSets[lang]
+	if !ok {
+		return false
+	}
+	_, isReserved := set[sym]
+	return isReserved
 }
 
 // duplicateFireWindow is how close two identical ask records must be to be read
@@ -416,17 +558,22 @@ func FormatAudit(s AuditStats) string {
 		{VerdictFP, "already defined at ask time — the guard's resolver missed it"},
 		{VerdictPremature, "defined only afterwards — correct, but fired too early"},
 		{VerdictStands, "still undefined — the guard caught a real unbacked reference"},
+		{VerdictNotIdent, "not a code identifier at all — reserved word or masking gap"},
 	}
+	// "not-an-identifier" is 17 chars, the longest verdict label; width 18
+	// gives it a 1-char margin. Widen this if a longer verdict is ever added,
+	// or the row it belongs to shifts the count/percent columns out of
+	// alignment with the rest.
 	for _, r := range rows {
-		fmt.Fprintf(&b, "  %-10s %5d  %5.1f%%   %s\n",
+		fmt.Fprintf(&b, "  %-18s %5d  %5.1f%%   %s\n",
 			r.v, s.Counts[r.v], 100*s.Share(r.v), r.what)
 	}
 	if u := s.Counts[VerdictUnknown]; u > 0 {
-		fmt.Fprintf(&b, "  %-10s %5d      -    oracle could not answer (see --json for reasons)\n",
+		fmt.Fprintf(&b, "  %-18s %5d      -    oracle could not answer (see --json for reasons)\n",
 			VerdictUnknown, u)
 	}
 	if n := s.Counts[VerdictNA]; n > 0 {
-		fmt.Fprintf(&b, "  %-10s %5d      -    outside learn_symbols — see the n/a note below\n",
+		fmt.Fprintf(&b, "  %-18s %5d      -    outside learn_symbols — see the n/a note below\n",
 			VerdictNA, n)
 	}
 
@@ -443,6 +590,9 @@ func FormatAudit(s AuditStats) string {
 	b.WriteString("\nA high 'premature' share is not a resolver bug. It means the check fires at\n")
 	b.WriteString("the wrong moment — an agent writing a caller before its callee — and the fix\n")
 	b.WriteString("is to move the check later, not to widen the known-symbol set.\n")
+	b.WriteString("\n'not-an-identifier' is also a false positive, but a masking bug, not a\n")
+	b.WriteString("resolver bug — fp + not-an-identifier is the true 'guard was wrong' total,\n")
+	b.WriteString("with two different fixes in two different files (see VerdictNotIdent).\n")
 	return b.String()
 }
 
@@ -465,11 +615,11 @@ func writeVerdictTable(b *strings.Builder, m map[string]map[AuditVerdict]int) {
 			width = len(k)
 		}
 	}
-	fmt.Fprintf(b, "  %-*s  %6s %10s %7s %8s %5s\n", width, "", "fp", "premature", "stands", "unknown", "n/a")
+	fmt.Fprintf(b, "  %-*s  %6s %10s %7s %10s %8s %5s\n", width, "", "fp", "premature", "stands", "not-ident", "unknown", "n/a")
 	for _, k := range keys {
 		c := m[k]
-		fmt.Fprintf(b, "  %-*s  %6d %10d %7d %8d %5d\n", width, k,
-			c[VerdictFP], c[VerdictPremature], c[VerdictStands], c[VerdictUnknown], c[VerdictNA])
+		fmt.Fprintf(b, "  %-*s  %6d %10d %7d %10d %8d %5d\n", width, k,
+			c[VerdictFP], c[VerdictPremature], c[VerdictStands], c[VerdictNotIdent], c[VerdictUnknown], c[VerdictNA])
 	}
 }
 

@@ -1,6 +1,10 @@
 package snapshot
 
-import "testing"
+import (
+	"slices"
+	"sort"
+	"testing"
+)
 
 // countOrphans returns how many child rows survive with no live parent. The
 // schema deliberately carries no ON DELETE CASCADE (issue #13 — see
@@ -166,5 +170,135 @@ func TestRepoDeleteIsRefusedWhileSnapshotsExist(t *testing.T) {
 	assertNoOrphans(t, db, "a rejected repo delete")
 	if got := countLabel(t, db, id, "reindex"); got != 1 {
 		t.Errorf("rejected repo delete damaged history: %d snapshots, want 1", got)
+	}
+}
+
+// A repo with an active contract must purge. This is #370's stuck row: on the
+// store that motivated the issue exactly one enrolment had a contracts row, so
+// `prune-missing --yes` reported "Purged 515 of 516" and that enrolment was
+// unprunable by the documented command, forever.
+func TestPurgeRepoDeletesContracts(t *testing.T) {
+	db, _ := openTemp(t)
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystander, err := db.EnrollRepo("bystander", "/tmp/bystander", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{victim, bystander} {
+		if err := db.ActivateContract(id, "sess", "c", "/tmp/c.md", "h"); err != nil {
+			t.Fatalf("ActivateContract(%d): %v", id, err)
+		}
+	}
+
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo with a contract: %v", err)
+	}
+
+	var n int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, victim).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("victim's contracts survived the purge: %d row(s)", n)
+	}
+	// The bystander's contract must survive: a delete that dropped its WHERE
+	// clause would pass every assertion above and show up only here.
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM contracts WHERE repo_id = ?`, bystander).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("bystander's contract was collateral damage: want 1 row, got %d", n)
+	}
+}
+
+// The fence that stops #370 recurring for the NEXT table.
+//
+// Reads the live schema rather than a hand-maintained list: for every table
+// holding a foreign key to `repos`, plant a row and require PurgeRepo to remove
+// it. A new child table added without a matching delete fails here at the point
+// it is added, instead of years later as an unexplained "FOREIGN KEY constraint
+// failed" in the middle of a bulk prune.
+//
+// Tables are discovered through PRAGMA foreign_key_list, so this cannot drift
+// from the schema the way the comment on deleteSnapshotsTx did.
+func TestPurgeRepoDeletesEveryTableThatReferencesRepos(t *testing.T) {
+	db, _ := openTemp(t)
+
+	var tables []string
+	rows, err := db.conn.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Direct children of `repos` only. The snapshot subtree reaches `repos`
+	// transitively and is already covered by TestPurgeRepo_LeavesNoOrphans.
+	var children []string
+	for _, table := range tables {
+		fks, err := db.conn.Query(`SELECT "table" FROM pragma_foreign_key_list(?)`, table)
+		if err != nil {
+			t.Fatalf("foreign_key_list(%s): %v", table, err)
+		}
+		for fks.Next() {
+			var parent string
+			if err := fks.Scan(&parent); err != nil {
+				fks.Close()
+				t.Fatal(err)
+			}
+			if parent == "repos" {
+				children = append(children, table)
+			}
+		}
+		fks.Close()
+	}
+
+	// EXACT match, not "every discovered table is in the list". A superset
+	// check passes when the list names a table that does not exist, which makes
+	// it possible to satisfy the fence by editing the list instead of the code —
+	// and a mutation that added a phantom entry survived until this was tightened.
+	handled := []string{"contracts", "snapshots"}
+	sort.Strings(children)
+	if !slices.Equal(children, handled) {
+		t.Errorf("tables referencing repos = %v, PurgeRepo handles %v.\n"+
+			"A table here that PurgeRepo does not delete is #370 happening again: "+
+			"add a DELETE for it in PurgeRepo, then add it to `handled`.", children, handled)
+	}
+
+	// And prove the handled ones really are handled, rather than only listed.
+	victim, err := db.EnrollRepo("victim", "/tmp/victim", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveSnapshot(victim, "sess", "reindex", "/tmp/victim", makeIR("h", "Alpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ActivateContract(victim, "sess", "c", "/tmp/c.md", "h"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PurgeRepo(victim); err != nil {
+		t.Fatalf("PurgeRepo: %v", err)
+	}
+	for _, table := range children {
+		var n int
+		q := `SELECT COUNT(*) FROM "` + table + `" WHERE repo_id = ?`
+		if err := db.conn.QueryRow(q, victim).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("%s still holds %d row(s) for the purged repo", table, n)
+		}
 	}
 }

@@ -197,6 +197,12 @@ func (db *DB) RemoveRepo(id int64) error {
 // caller to get wrong. Re-open #13 if a delete path ever appears outside this
 // helper, or if the store stops being rebuildable by reindexing.
 //
+// Scope, stated because it was once read wider than it is: this helper owns the
+// SNAPSHOT subtree only (refs → symbols → files → snapshots). A table that
+// references `repos` directly — `contracts` does — is outside it, and PurgeRepo
+// deletes those itself. #370 was that gap: the ordering guarantee was real and
+// simply did not extend to a child this helper never knew about.
+//
 // snapshotWhere is a code-controlled SQL fragment over `snapshots` aliased `s`,
 // never user input; its placeholders are filled from args on every statement.
 func deleteSnapshotsTx(tx *sql.Tx, snapshotWhere string, args ...any) error {
@@ -218,8 +224,23 @@ func deleteSnapshotsTx(tx *sql.Tx, snapshotWhere string, args ...any) error {
 	return nil
 }
 
-// PurgeRepo deletes a repo and its entire snapshot history (symbols, files,
-// snapshots, then the repo row) in one transaction — no orphaned rows.
+// PurgeRepo deletes a repo and everything that references it — the snapshot
+// subtree (refs, symbols, files, snapshots) and the repo's direct children —
+// then the repo row, in one transaction. No orphaned rows.
+//
+// `contracts` is a direct child of `repos`, NOT part of the snapshot subtree,
+// so deleteSnapshotsTx never saw it and this function used to delete the repo
+// row with a contracts row still pointing at it. The FK then refused the
+// delete and the whole purge rolled back — exactly the "fails loudly rather
+// than orphaning" behaviour deleteSnapshotsTx's comment promises, arriving as
+// an unexplained `FOREIGN KEY constraint failed` at the top of a bulk prune.
+// On the store that motivated #370 that was one unprunable enrolment reported
+// as "Purged 515 of 516", and it would have recurred on every future run.
+//
+// Any new table with a foreign key to `repos` must be deleted here.
+// TestPurgeRepoDeletesEveryTableThatReferencesRepos reads the live schema and
+// fails if one is added without being handled, so this is a fence rather than
+// a comment asking to be remembered.
 func (db *DB) PurgeRepo(id int64) error {
 	tx, err := db.conn.Begin()
 	if err != nil {
@@ -227,6 +248,9 @@ func (db *DB) PurgeRepo(id int64) error {
 	}
 	defer tx.Rollback()
 	if err := deleteSnapshotsTx(tx, `s.repo_id = ?`, id); err != nil {
+		return fmt.Errorf("purge repo %d: %w", id, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM contracts WHERE repo_id = ?`, id); err != nil {
 		return fmt.Errorf("purge repo %d: %w", id, err)
 	}
 	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {

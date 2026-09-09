@@ -316,6 +316,80 @@ reported zero false positives while two default-on paths were broken. It now
 measures whole-file Write, Write-creating-a-file (no fold), and Edit-hunk (one
 function as the hunk, the rest as the fold).
 
+### Python: the ruff differential (#313)
+
+Go's adjudicator is the compiler. Python has no compiler, but `ruff check
+--select F821` reports undefined names, so it serves the same role
+(`internal/guard/pyresolve_differential_test.go`). The corpus defaults to the
+CPython stdlib's top-level modules — foreign-authored, always present, zero
+setup — with `RUNECHO_ORACLE_PY_CORPUS` pointing it anywhere else.
+
+```
+RUNECHO_ORACLE_MUTATIONS=400 go test ./internal/guard -run TestPyResolve -v
+```
+
+**ruff is a weaker oracle than a compiler, and the harness is built around
+that.** A file gets one of four verdicts, not two:
+
+| verdict | meaning | used for |
+|---|---|---|
+| `clean` | no findings — every name resolves | the only population false positives are counted against |
+| `silent` | `F403` star import; ruff stops resolving | tabulated as UNADJUDICATED, never as a false positive |
+| `noisy` | `F821` on *unmutated* code — ruff is wrong (`calendar.py`'s `globals()` injection reports `JANUARY` undefined) | excluded from false-positive counting, still eligible for mutation |
+| `unadjudicable` | invalid syntax, unreadable | dropped, counted |
+
+Silence is not proof, and neither is a positive: ruff false-alarms on valid
+code, so a mutation counts only when ruff reports the *fresh* name at the
+*exact* line and the pre-mutation run did not. Anything else is `discarded` and
+reported as such.
+
+Latest, over 155 stdlib files / 130,869 lines:
+
+```
+oracle: clean=123 silent(F403)=22 noisy=10 unadjudicable=0
+PROVEN FALSE POSITIVES: 40 occurrences (0.31 per KLOC)
+
+SHAPE         OWNER  PROVEN  write-whole  write-new  edit-hunk  inner-hunk  precommit
+bare-call     Run         5        5/5        5/5        5/5         4/4        5/5
+bare-const    Run         5        5/5        5/5        5/5         2/2        5/5
+bare-name     -           5        0/5        0/5        0/5         0/4        0/5
+attr-base     -           5        0/5        0/5        0/5         0/5        0/5
+decorator/class-base/annotation/except-class — 0 in every posture
+```
+
+Both shapes `Run` claims to own are closed in every posture. The zero rows are
+`Run`'s documented scope (it is call-only) — now measured rather than assumed.
+The remaining false positives are filed, not tolerated silently: #387
+(`pyBuiltins` missing `__import__`/`SystemError`, and disagreeing with
+`filescope.go`'s own list), #388, #389 and #390. The first is subtracted from
+the fail set by `pyKnownGaps`, which fails in **both** directions — an entry
+that stops firing is fiction and goes red, the same discipline
+`.github/expected-skips.txt` applies to skips.
+
+**Five postures, and the fifth exists because four were not enough.** The Go
+harness learned that a single posture can report zero while default-on paths
+are broken; the Python one learned the sharper version of it. With four
+postures — whole-file Write, Write-creating-a-file, Edit-hunk, pre-commit — the
+`PyParamNames` fold in `foldinfile.go` could be **deleted outright** and every
+one stayed green. Cause: an Edit-hunk was always a whole top-level block, so a
+parameter's binding (`def f(cb):`) and its use (`cb()`) were always in the same
+hunk, and `Run`'s own Pass 1 supplied the binding. `FoldInFileDefs` was never
+load-bearing.
+
+`inner-hunk` is the missing shape: the added text is a slice from strictly
+inside a function body, the fold is the whole file minus that slice, so the
+signature exists only in the fold. Deleting that same fold call now fails with
+10 flags, every one a parameter used as a callable (`cls`, `dict_factory`,
+`mycmp`, `onerror`, `func`, `predicate`, …), and every other posture silent.
+
+It carries a cost the other postures do not: an inner slice starts indented, so
+it can begin inside a docstring or a bracket continuation, where the nil-seed
+assumption the other postures rely on is void. Those slices are skipped and
+counted rather than measured — 88 for bracket depth, 10 with no interior, on
+the current corpus. The header line reports every one, because a posture that
+quietly measures less than it claims is the failure this whole harness exists
+to prevent.
+
 ### Posture: why `GoQualified` is default-on and `GoDepQualified` stays off (#314)
 
 Measured 2026-08-06, `TestGoResolveNoFalsePositivesAgainstCompiler` extended to

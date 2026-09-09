@@ -271,8 +271,13 @@ func posturesFor(text string, lang guard.Lang) []posture {
 		// A Write of the whole file, where the pre-edit file is the same text.
 		{name: "write-whole", fold: text, added: text},
 		// A Write CREATING the file: readFileLines returns nil, so nothing is
-		// folded. This is also the pre-commit path's posture, which calls
-		// guard.Run with the store's symbols and no fold at all.
+		// folded. NOT the pre-commit path: main.go:334-340 folds the whole
+		// on-disk POST-EDIT file for every staged file (via FoldInFileDefs)
+		// before calling guard.Run, so pre-commit is closer to write-whole
+		// than to this posture. The Python differential
+		// (pyresolve_differential_test.go, #313) measures the real
+		// pre-commit posture directly through guard.ParseStagedDiff instead
+		// of approximating it here.
 		{name: "write-new", fold: "", added: text},
 	}
 	if lang != guard.LangGo {

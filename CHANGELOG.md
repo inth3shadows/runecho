@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.47.3] — 2026-09-09
+
+### Changed
+- test(guard): ruff-adjudicated Python resolve differential (#313) (#391)
+
 ## [0.47.2] — 2026-09-01
 
 ### Changed

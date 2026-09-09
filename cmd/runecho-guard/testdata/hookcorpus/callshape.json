@@ -248,15 +248,15 @@
     "expect_log_reason": "call-shape"
   },
   {
-    "name": "python-callshape-for-target-rebinds-the-callee-clean",
-    "desc": "`for handler in fns: handler(item, verbose=True)` beside a module-level `def handler(x, dry=False)`. PyDeclaredNames sees only plain `=` assignments, so this reported `verbose` against a signature the call never reaches — one of five rebinding false positives an adversarial review reproduced on valid Python",
+    "name": "python-callshape-for-tuple-target-rebinds-the-callee-clean",
+    "desc": "`for (handler, meta) in pairs: handler(item, verbose=True)` beside a module-level `def handler(x, dry=False)`. Pins PyDeclaredNames' #313 for-target fold specifically, not callshape's own idx.rebindings(): rebindings()'s rePyAnyForTarget requires the target to start with a bare `[A-Za-z_]\\w*` right after `for`, so a parenthesized tuple target never matches it and it contributes nothing here — PyDeclaredNames' unanchored rePyForTargetAnyPos + pyBindTargets (which recurses into a parenthesized/bracketed target) is the only thing shadowing `handler`. The original bare-identifier form of this fixture (`for handler in fns:`) is redundant with idx.rebindings() and caught nothing under mutate.py's one-mutation-at-a-time model — see the known_gap on callshape/rebinding-forms in mutations.json for the proof",
     "check": "callshape",
     "flags": [
       "RUNECHO_GUARD_CALLSHAPE=1"
     ],
     "file": "pkg/rebind.py",
     "old": "def handler(x, dry=False):\n    return x\n",
-    "new": "def handler(x, dry=False):\n    return x\n\ndef run(fns, item):\n    for handler in fns:\n        handler(item, verbose=True)\n",
+    "new": "def handler(x, dry=False):\n    return x\n\ndef run(pairs, item):\n    for (handler, meta) in pairs:\n        handler(item, verbose=True)\n",
     "expect_ask": false
   },
   {

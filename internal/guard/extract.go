@@ -717,9 +717,54 @@ func PyDeclaredNames(lines []AddedLine, bracketDepthSeed func(lineNo int) int) [
 		// Only a line that starts OUTSIDE any bracket is a statement-level
 		// assignment; otherwise a `=` here is a kwarg/default inside a call.
 		if depth == 0 {
-			if lhs := pyAssignLHS(s); lhs != "" {
+			// #313 residual (`gnv`): a chained assignment
+			// (`body[k] = gnv = etype._gnv_`) binds EVERY target, not just the
+			// first — pyAssignLHSChain returns all of them (last segment is
+			// the value expression, dropped). A plain, non-chained assignment
+			// is just the one-target case of the same rule.
+			for _, lhs := range pyAssignLHSChain(s) {
 				out = append(out, pyBindTargets(lhs)...)
 			}
+		}
+		// #313: for-loop/comprehension targets, `with`/`except` `as` targets,
+		// and walrus targets are real, callable-eligible local bindings — a
+		// `for fn in fns: fn()`, `tuple(g(x) for g in getters)`,
+		// `with open() as fh: ...` or `except E as e: raise e()`, or
+		// `if x := probe(): x()` must not read as a hallucination.
+		// reAsBind/reWalrus are dropped_import.go's own tested patterns for
+		// LocallyBoundNames (used by FileScopeViolations, NOT by Run/
+		// FoldInFileDefs — that gap is the actual #313 defect) — reused
+		// as-is here rather than redeclared. rePyForTargetAnyPos is NOT
+		// reused: dropped_import.go's rePyForTarget is deliberately anchored
+		// to line-start ("Definition-position only ... none match
+		// call-argument parens" — a DIFFERENT precision requirement for
+		// DroppedImportRefs), so it never matches a comprehension/generator
+		// `for` clause sitting mid-line inside a call's arguments — exactly
+		// the #313 compiler-oracle differential's `operator.py` miss,
+		// `tuple(getter(obj) for getter in getters)`. Widening that shared
+		// anchored regex would be an undocumented behavior change to a
+		// different check; a second, unanchored regex local to this
+		// function is the narrower, safer fix.
+		//
+		// Unlike the `=` branch above, none of the three below are gated on
+		// depth==0: a comprehension's `for` clause is typically nested
+		// inside the enclosing call/list/dict/set (depth >= 1), and gating
+		// it out would defeat the fix for exactly that shape. Matched on `s`
+		// (string/comment-masked) so a literal containing these words is
+		// never mistaken for real syntax, matching pyAssignLHS's own masking
+		// discipline above. Known limitation, accepted rather than chased: a
+		// target list that itself SPANS multiple lines (rare — most real
+		// code keeps it single-line) is not threaded across lines the way
+		// PyParamNames' signature scanner is; a miss there is a pre-existing,
+		// safe-direction gap, not a regression this fix introduces.
+		for _, m := range rePyForTargetAnyPos.FindAllStringSubmatch(s, -1) {
+			out = append(out, pyBindTargets(m[1])...)
+		}
+		for _, m := range reAsBind.FindAllStringSubmatch(s, -1) {
+			out = append(out, m[1])
+		}
+		for _, m := range reWalrus.FindAllStringSubmatch(s, -1) {
+			out = append(out, m[1])
 		}
 		// Depth advances on the f-string-neutralized braceScan, not the plain
 		// code scan: an f-string interpolation's own brackets
@@ -735,10 +780,53 @@ func PyDeclaredNames(lines []AddedLine, bracketDepthSeed func(lineNo int) int) [
 	return out
 }
 
+// rePyForTargetAnyPos matches a `for <target-list> in` clause anywhere on
+// masked text — the SAME grammar whether it introduces a statement-level
+// `for` loop or a comprehension/generator-expression `for` clause (list/set/
+// dict comprehensions and generator expressions share one target grammar),
+// so one regex covers both without needing to know which context it's in.
+// `async for` matches too, since `for` is word-bounded and "async " merely
+// precedes it. Non-greedy up to the first ` in` keeps a target list
+// containing no literal "in" substring (the common case) from over-matching
+// into the iterable expression.
+//
+// Deliberately UNANCHORED, unlike dropped_import.go's own rePyForTarget
+// (`^\s*for...`) — that one is anchored on purpose for a different check's
+// precision needs (see PyDeclaredNames' call site for the full argument).
+// This is the only regex added by #313; `as`/walrus reuse dropped_import.go's
+// existing reAsBind/reWalrus directly.
+var rePyForTargetAnyPos = regexp.MustCompile(`\bfor\s+(.+?)\s+in\b`)
+
 // pyAssignLHS returns the target-list text before the first TOP-LEVEL plain `=`
 // in s, or "" if s carries no such operator (not an assignment, or the `=` is
-// part of ==/!=/<=/>=/:= or an augmented op like += //=).
+// part of ==/!=/<=/>=/:= or an augmented op like += //=). Retained as the
+// single-target convenience wrapper around pyAssignLHSChain, which every real
+// caller (PyDeclaredNames) now uses directly to also catch chained targets.
 func pyAssignLHS(s string) string {
+	if segs := pyAssignLHSChain(s); len(segs) > 0 {
+		return segs[0]
+	}
+	return ""
+}
+
+// pyAssignLHSChain returns every target-list segment of a (possibly chained)
+// assignment on s: `a = b = c = expr` binds a, b, AND c — Python evaluates
+// the one RHS value into every target in the chain, left to right. Each
+// TOP-LEVEL plain `=` (same exclusions as pyAssignLHS: not ==/!=/<=/>=/:=,
+// not an augmented op, not inside a bracket) splits s into one more segment;
+// the LAST segment is always the value expression, never a target, so this
+// returns all segments except the last. A plain non-chained assignment is
+// just the one-target case of the same rule (one `=`, one target segment).
+// Returns nil if s carries no top-level plain `=` at all.
+//
+// Precision note: pyBindTargets (the only consumer of each returned segment)
+// requires a segment to reduce to a bare identifier/tuple-of-identifiers to
+// bind anything, so an unparenthesized lambda default inside a chain segment
+// (`f = lambda x=1: x` splits into "f ", " lambda x", "1: x") is silently
+// ignored rather than mis-bound — "lambda x" fails pyBindTargets' identifier
+// check the same way it always would have.
+func pyAssignLHSChain(s string) []string {
+	var eqPos []int
 	depth := 0
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
@@ -760,10 +848,19 @@ func pyAssignLHS(s string) string {
 					continue // tail of ==/!=/<=/>=/:= or an augmented assignment
 				}
 			}
-			return s[:i]
+			eqPos = append(eqPos, i)
 		}
 	}
-	return ""
+	if len(eqPos) == 0 {
+		return nil
+	}
+	segs := make([]string, 0, len(eqPos))
+	start := 0
+	for _, p := range eqPos {
+		segs = append(segs, s[start:p])
+		start = p + 1
+	}
+	return segs
 }
 
 // pyBindTargets extracts the plain identifiers a target list binds, skipping

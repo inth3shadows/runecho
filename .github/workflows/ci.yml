@@ -57,7 +57,33 @@ jobs:
       - name: Test (race + coverage, includes guard corpus gate)
         run: |
           set -o pipefail
-          go test ./... -race -cover -v 2>&1 | tee test.log
+          go test ./... -race -cover -v -skip 'TestPyResolve' 2>&1 | tee test.log
+      # The #313 Python differential runs here instead of above, WITHOUT -race.
+      #
+      # Measured on the full CPython stdlib corpus (155 files / ~131k lines):
+      # 78s plain, 1195s under `-race -cover` — past `go test`'s DEFAULT 10-minute
+      # per-package timeout, which is what `go test ./...` above uses. It failed
+      # that way once already (`panic: test timed out after 10m0s`,
+      # internal/guard 600.037s, every other package green). Both phases PASS
+      # under -race given 45 minutes; there is no data race, only cost.
+      #
+      # Excluding it rather than raising the timeout is deliberate. The harness
+      # is single-goroutine test code driving deterministic scanners, so -race
+      # has almost nothing to find in it, and it was buying that at ~15x. Raising
+      # the global timeout instead would mean a genuine hang anywhere in the repo
+      # takes 30 minutes to surface rather than 10.
+      #
+      # Scale-down under -race still exists in the harness itself (pyRaceBuild,
+      # internal/guard/pyresolve_race_test.go) for anyone who does run it that
+      # way locally; it is not what makes THIS step fit.
+      #
+      # tee -a, not tee: the skip gate below reads one log, and a differential
+      # that silently skipped (no ruff, no python3, no stdlib) is exactly the
+      # environment degradation that gate exists to catch.
+      - name: Test the Python resolve differential (#313, no -race)
+        run: |
+          set -o pipefail
+          go test ./internal/guard -run 'TestPyResolve' -v 2>&1 | tee -a test.log
       # The verbose log is ~3,800 lines to carry ~3 lines of payload, so the
       # payload is lifted into the run summary where it is read without scrolling
       # — and gated, so a silent coverage hole fails the build rather than

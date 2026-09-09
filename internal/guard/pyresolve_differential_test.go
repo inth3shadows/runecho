@@ -120,6 +120,26 @@ const defaultPyMutations = 40
 // cap uses a stride (see its doc comment).
 const pyHunkCap = 8
 
+// pyEffectiveHunkCap and pyEffectiveMutations scale the two sample sizes down
+// under `-race`, and are identity otherwise. See pyresolve_race_test.go for the
+// measurement that forced this and for why the corpus itself is NOT reduced.
+//
+// Both are reported by the harness next to the population they sample, so a
+// race run is legible as a reduced run.
+func pyEffectiveHunkCap() int {
+	if pyRaceBuild {
+		return 2
+	}
+	return pyHunkCap
+}
+
+func pyEffectiveMutations(budget int) int {
+	if pyRaceBuild && budget > 8 {
+		return 8
+	}
+	return budget
+}
+
 // pyConstSuffix is the fresh-name suffix for the bare-const shape only. Every
 // other shape uses the shared mutationSuffix ("Zq7Runecho"); bare-const uses
 // this instead so the mutant NAME stays in reUpperSnakeRef's SCREAMING_SNAKE
@@ -305,16 +325,16 @@ func pyPosturesForFile(text string) (postures []pyPostureSpec, blocksTotal, bloc
 	blocks := pyTopLevelBlocks(text)
 	blocksTotal = len(blocks)
 	kept := blocks
-	if len(blocks) > pyHunkCap {
+	if len(blocks) > pyEffectiveHunkCap() {
 		// Float stride spanning the whole population, mirroring pyCorpusFiles'
 		// own cap (pyoracle_test.go) — an integer stride truncates to a prefix
 		// whenever len(blocks)/pyHunkCap floors to 1 (any file with 9-15
 		// blocks at cap 8), and even where it doesn't, the last picked index
 		// stays fixed at 7*floor(n/8), leaving the final ~1/8 of every large
 		// file permanently unsampled (Fix 6a of the #313 review).
-		stride := float64(len(blocks)) / float64(pyHunkCap)
-		kept = make([]pyBlock, 0, pyHunkCap)
-		for i := 0; i < pyHunkCap; i++ {
+		stride := float64(len(blocks)) / float64(pyEffectiveHunkCap())
+		kept = make([]pyBlock, 0, pyEffectiveHunkCap())
+		for i := 0; i < pyEffectiveHunkCap(); i++ {
 			idx := int(float64(i) * stride)
 			if idx >= len(blocks) {
 				idx = len(blocks) - 1
@@ -456,10 +476,10 @@ func pyInnerHunkPosturesForFile(text string, blocks []pyBlock) ([]pyPostureSpec,
 	stats.eligible = len(eligible)
 
 	kept := eligible
-	if len(eligible) > pyHunkCap {
-		stride := float64(len(eligible)) / float64(pyHunkCap)
-		kept = make([]pyPostureSpec, 0, pyHunkCap)
-		for i := 0; i < pyHunkCap; i++ {
+	if cap := pyEffectiveHunkCap(); len(eligible) > cap {
+		stride := float64(len(eligible)) / float64(cap)
+		kept = make([]pyPostureSpec, 0, cap)
+		for i := 0; i < cap; i++ {
 			idx := int(float64(i) * stride)
 			if idx >= len(eligible) {
 				idx = len(eligible) - 1
@@ -1408,7 +1428,7 @@ func TestPyResolveFalseNegativesAgainstRuff(t *testing.T) {
 		t.Logf("phase2: %d site(s) skipped — past capLine's %d-byte truncation, invisible to the guard by design", skippedPastCap, pyCapLineBytes)
 	}
 
-	budget := defaultPyMutations
+	budget := pyEffectiveMutations(defaultPyMutations)
 	if v := os.Getenv("RUNECHO_ORACLE_MUTATIONS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {

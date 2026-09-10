@@ -1085,8 +1085,16 @@ type pyKnownGap struct {
 // report-only above. If FileScope is ever promoted to a fail condition, #388's
 // symbols must be added here or that promotion goes red on a filed defect.
 var pyKnownGaps = map[string]pyKnownGap{
-	"__import__":  {"#387", "pyBuiltins omits __import__; filescope.go:60 has it, extract.go:111-143 does not"},
-	"SystemError": {"#387", "pyBuiltins omits the SystemError builtin exception"},
+	// EMPTY, and that is the point: #387 (pyBuiltins missing __import__ and
+	// SystemError) was the only entry, and generating pyBuiltins from the
+	// interpreter closed it. The entries were deleted rather than left behind
+	// because the stale check below fails on an entry that stops firing.
+	//
+	// #388, #389 and #390 need no entry: #388 and #390 surface only through
+	// FileScope, which is report-only, and #389's LC_ALL is masked at full
+	// corpus size by locale.py's own definition. Any of them becoming a Run
+	// false positive at full corpus is a REGRESSION and should go red here,
+	// not be allowlisted away.
 }
 
 // ---------------------------------------------------------------------------

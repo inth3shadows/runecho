@@ -108,38 +108,67 @@ var jsTestGlobals = setOf(
 	"xit", "xdescribe", "fit", "fdescribe",
 )
 
+// pyBuiltins is every name Python resolves without a definition in the file:
+// the keyword list plus the builtins namespace. A reference to one of these is
+// never a hallucination, so the guard must stay silent on it.
+//
+// GENERATED, not curated. Regenerate with:
+//
+//	python3 -c 'import keyword,builtins; print("\n".join(sorted(set(keyword.kwlist)|set(dir(builtins)))))'
+//
+// Generated from CPython 3.14.7. TestPyBuiltinsCoversInterpreter pins it.
+//
+// It was hand-maintained until #387, and was 38 names short — `__import__`
+// alone accounted for 19 of the 41 false positives the #313 ruff differential
+// measured over the CPython stdlib. Whether a given omission ever surfaced
+// depended on corpus vocabulary rather than on the guard, which is why
+// enumerating by hand kept missing names.
+//
+// A SUPERSET is the safe direction, so this is generated from the newest
+// interpreter to hand rather than the oldest supported one. A name here that an
+// older Python lacks can only make the guard silent on code targeting that
+// version (a false negative, vanishingly rare); a name MISSING here is a false
+// positive on ordinary correct code, which is the defect #387 filed.
+//
+// Soft keywords (keyword.softkwlist: match, case, type, _) are deliberately
+// EXCLUDED — they are valid identifiers, so folding them in would mask a real
+// hallucination named `match` and buy a false negative for nothing.
 var pyBuiltins = setOf(
-	// keywords that can appear immediately before '(' (`return (x)`, `for i in (…)`,
-	// `raise X`, `a or (b)`). Without these, ~half of all Python edits false-positive.
-	"return", "raise", "yield", "assert", "del", "pass", "break", "continue",
-	"global", "nonlocal", "lambda", "with", "as", "from", "import", "in", "is",
-	"and", "or", "not", "if", "elif", "else", "for", "while", "try", "except",
-	"finally", "def", "class", "async", "await", "None", "True", "False",
-	// builtin functions
-	"print", "len", "range", "str", "int", "float", "bool",
-	"list", "dict", "set", "tuple", "type", "isinstance", "issubclass",
-	"super", "enumerate", "zip", "map", "filter", "open",
-	"repr", "getattr", "setattr", "hasattr", "delattr", "format",
-	"sorted", "reversed", "sum", "min", "max", "abs",
-	"any", "all", "next", "iter", "id", "hash", "dir",
-	"vars", "callable", "input", "exit", "quit",
-	"round", "divmod", "pow", "bytes", "bytearray", "frozenset", "complex",
-	"slice", "object", "property", "staticmethod", "classmethod", "memoryview",
-	"ord", "chr", "hex", "oct", "bin", "ascii", "globals", "locals",
-	"eval", "exec", "compile", "breakpoint",
-	// exception hierarchy (constantly raised: `raise ValueError(...)`)
-	"Exception", "BaseException", "ValueError", "TypeError", "KeyError",
-	"IndexError", "AttributeError", "RuntimeError", "OSError", "IOError",
-	"FileNotFoundError", "FileExistsError", "PermissionError", "IsADirectoryError",
-	"NotADirectoryError", "NotImplementedError", "StopIteration",
-	"StopAsyncIteration", "GeneratorExit", "KeyboardInterrupt", "SystemExit",
-	"ArithmeticError", "ZeroDivisionError", "OverflowError", "FloatingPointError",
-	"LookupError", "NameError", "UnboundLocalError", "ImportError",
-	"ModuleNotFoundError", "AssertionError", "TimeoutError", "ConnectionError",
-	"ConnectionResetError", "BrokenPipeError", "RecursionError", "MemoryError",
-	"BufferError", "EOFError", "TabError", "IndentationError", "SyntaxError",
-	"UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError", "Warning",
-	"DeprecationWarning", "UserWarning", "RuntimeWarning",
+	"ArithmeticError", "AssertionError", "AttributeError", "BaseException",
+	"BaseExceptionGroup", "BlockingIOError", "BrokenPipeError", "BufferError",
+	"BytesWarning", "ChildProcessError", "ConnectionAbortedError",
+	"ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
+	"DeprecationWarning", "EOFError", "Ellipsis", "EncodingWarning",
+	"EnvironmentError", "Exception", "ExceptionGroup", "False",
+	"FileExistsError", "FileNotFoundError", "FloatingPointError",
+	"FutureWarning", "GeneratorExit", "IOError", "ImportError", "ImportWarning",
+	"IndentationError", "IndexError", "InterruptedError", "IsADirectoryError",
+	"KeyError", "KeyboardInterrupt", "LookupError", "MemoryError",
+	"ModuleNotFoundError", "NameError", "None", "NotADirectoryError",
+	"NotImplemented", "NotImplementedError", "OSError", "OverflowError",
+	"PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
+	"PythonFinalizationError", "RecursionError", "ReferenceError",
+	"ResourceWarning", "RuntimeError", "RuntimeWarning", "StopAsyncIteration",
+	"StopIteration", "SyntaxError", "SyntaxWarning", "SystemError",
+	"SystemExit", "TabError", "TimeoutError", "True", "TypeError",
+	"UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError",
+	"UnicodeError", "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
+	"ValueError", "Warning", "ZeroDivisionError", "_IncompleteInputError",
+	"__build_class__", "__debug__", "__doc__", "__import__", "__loader__",
+	"__name__", "__package__", "__spec__", "abs", "aiter", "all", "and",
+	"anext", "any", "as", "ascii", "assert", "async", "await", "bin", "bool",
+	"break", "breakpoint", "bytearray", "bytes", "callable", "chr", "class",
+	"classmethod", "compile", "complex", "continue", "copyright", "credits",
+	"def", "del", "delattr", "dict", "dir", "divmod", "elif", "else",
+	"enumerate", "eval", "except", "exec", "exit", "filter", "finally", "float",
+	"for", "format", "from", "frozenset", "getattr", "global", "globals",
+	"hasattr", "hash", "help", "hex", "id", "if", "import", "in", "input",
+	"int", "is", "isinstance", "issubclass", "iter", "lambda", "len", "license",
+	"list", "locals", "map", "max", "memoryview", "min", "next", "nonlocal",
+	"not", "object", "oct", "open", "or", "ord", "pass", "pow", "print",
+	"property", "quit", "raise", "range", "repr", "return", "reversed", "round",
+	"set", "setattr", "slice", "sorted", "staticmethod", "str", "sum", "super",
+	"try", "tuple", "type", "vars", "while", "with", "yield", "zip",
 )
 
 func setOf(ss ...string) map[string]struct{} {

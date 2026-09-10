@@ -1342,6 +1342,47 @@ func TestAppendConstRefs_AnnotationTargetStillSkipped(t *testing.T) {
 	}
 }
 
+// TestAppendConstRefs_KeywordArgumentIsNotAReference pins #389: a
+// SCREAMING_SNAKE keyword-ARGUMENT name inside a call is a binding, not a
+// reference to a constant. `dict(os.environ, LC_ALL='C')` is CPython
+// platform.py:752, adjudicated clean by ruff --select F821 while the guard
+// flagged LC_ALL in all four postures.
+//
+// The old rule gated the `=` exclusion on defPos.at(s), which is false inside
+// parentheses, so only statement-level `NAME = value` was excluded.
+func TestAppendConstRefs_KeywordArgumentIsNotAReference(t *testing.T) {
+	for _, line := range []string{
+		`env = dict(os.environ, LC_ALL='C')`,
+		`run(cmd, TIMEOUT_S=5)`,
+		`def f(MAX_RETRIES=3):`,
+		`    LC_ALL='C',`, // the multi-line call form: no paren on this line at all
+	} {
+		refs := appendConstRefs(nil, map[string]struct{}{}, line, 1, nil, nil, pyCtxFor(line, 0))
+		for _, r := range refs {
+			if r.Name == "LC_ALL" || r.Name == "TIMEOUT_S" || r.Name == "MAX_RETRIES" {
+				t.Errorf("%q: flagged %q — a keyword-argument name is not a reference", line, r.Name)
+			}
+		}
+	}
+}
+
+// TestAppendConstRefs_ComparisonIsStillAReference guards the false-negative
+// direction #389's fix could have opened: only a SINGLE `=` is a binding.
+// `==`, `!=`, `>=`, `<=` and `+=` are uses, and must stay flagged.
+func TestAppendConstRefs_ComparisonIsStillAReference(t *testing.T) {
+	for _, line := range []string{
+		`if mode == MAX_VALUE:`,
+		`if MAX_VALUE == mode:`,
+		`if MAX_VALUE != mode:`,
+		`if MAX_VALUE >= mode:`,
+	} {
+		refs := appendConstRefs(nil, map[string]struct{}{}, line, 1, nil, nil, pyCtxFor(line, 0))
+		if len(refs) != 1 || refs[0].Name != "MAX_VALUE" {
+			t.Errorf("%q: got %+v, want a single MAX_VALUE reference", line, refs)
+		}
+	}
+}
+
 // TestAppendConstRefs_MultiLineDictKeyIsAReference pins #289: a dict key on
 // its own line inside a multi-line literal (`result = {\n    MAX_VALUE: 5,\n}`)
 // is preceded by only whitespace on ITS line — indistinguishable, at a single-

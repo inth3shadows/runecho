@@ -1358,10 +1358,27 @@ func appendConstRefs(refs []Ref, seen map[string]struct{}, scan string, lineNo i
 			continue // part of a tuple-assignment LHS target list — a definition
 		}
 		rest := strings.TrimLeft(scan[e:], " \t")
-		if defPos.at(s) {
-			if strings.HasPrefix(rest, ":") || (strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==")) {
-				continue // `NAME: type = value` / `NAME = value` — a definition, not a use
-			}
+		// A single `=` immediately after the name is never a reference to it, at
+		// ANY position (#389). Two constructs produce it and both are bindings:
+		// `NAME = value` at statement level, and `f(NAME=value)` — a keyword
+		// ARGUMENT name — anywhere inside a call. The old rule gated this on
+		// defPos.at(s), which is false inside parentheses, so every SCREAMING_SNAKE
+		// kwarg read as an unresolved constant. `dict(os.environ, LC_ALL='C')`
+		// (CPython platform.py:752) was the ruff-adjudicated case; 323 first-party
+		// .py files on the measuring machine carry the construct.
+		//
+		// Dropping the position gate costs nothing in the other direction: an
+		// assignment target is a definition, so there is no hallucinated reference
+		// at that position to miss. Augmented forms (`+=`) and comparisons (`==`,
+		// `!=`, `>=`, `<=`) do not reach here — their `rest` does not begin `=`.
+		if strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==") {
+			continue
+		}
+		// `:` stays gated on definition position, and must: at statement level
+		// `NAME: T = v` is an annotated definition, but inside a `{}` literal
+		// `{NAME: v}` is a dict key, which IS a reference to NAME (#289).
+		if defPos.at(s) && strings.HasPrefix(rest, ":") {
+			continue // `NAME: type = value` — a definition, not a use
 		}
 		if _, ok := builtins[name]; ok {
 			continue

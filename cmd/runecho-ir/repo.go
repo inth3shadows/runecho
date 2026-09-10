@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/dirstate"
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
@@ -459,9 +459,11 @@ func runRepoPrune(args []string) int {
 // things between the two commands (issue #370: the rot must be visible in
 // `repo list` in exactly the same terms prune-missing acts on).
 func rootIsMissing(root string) bool {
-	_, statErr := os.Stat(root)
-	return errors.Is(statErr, os.ErrNotExist)
+	return dirstate.IsGone(root)
 }
+
+// Thin over dirstate.IsGone (#386): the destructive posture, ENOENT only. Kept
+// as a named local so the two call sites read in prune-missing's own vocabulary.
 
 // runRepoPruneMissing lists — or with --yes purges — enrolled repos whose
 // source root no longer exists on disk.

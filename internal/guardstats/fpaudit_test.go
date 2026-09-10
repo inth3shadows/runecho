@@ -13,10 +13,13 @@ type fakeOracle struct {
 	head    string
 	revAt   map[string]string // ts.Format(RFC3339) -> rev; "" entry is the default
 	defined map[[2]string]bool
-	wtErr   error
-	revErr  error
-	defErr  error
-	calls   int
+	// scopedDefined keys on (rev, symbol, scope) and, when non-nil, replaces
+	// `defined` entirely — see Defined below.
+	scopedDefined map[[3]string]bool
+	wtErr         error
+	revErr        error
+	defErr        error
+	calls         int
 }
 
 func (f *fakeOracle) Worktree(file string) (string, string, error) {
@@ -35,10 +38,18 @@ func (f *fakeOracle) RevAt(_ string, ts time.Time) (string, error) {
 	}
 	return f.revAt[""], nil
 }
-func (f *fakeOracle) Defined(_, rev, _, sym, _ string) (bool, error) {
+
+// scopedDefined, when set, answers per (rev, sym, scope) — for the file-scope
+// tests, where the whole point is that the same symbol at the same commit
+// answers differently to the two questions. When nil the fake ignores scope, so
+// every pre-#393 test keeps its original meaning.
+func (f *fakeOracle) Defined(_, rev, _, sym, _ string, scope ClaimScope) (bool, error) {
 	f.calls++
 	if f.defErr != nil {
 		return false, f.defErr
+	}
+	if f.scopedDefined != nil {
+		return f.scopedDefined[[3]string{rev, sym, string(scope)}], nil
 	}
 	return f.defined[[2]string{rev, sym}], nil
 }
@@ -384,7 +395,7 @@ type failIfDefinedOracle struct {
 	t *testing.T
 }
 
-func (f *failIfDefinedOracle) Defined(root, rev, lang, sym, rel string) (bool, error) {
+func (f *failIfDefinedOracle) Defined(root, rev, lang, sym, rel string, scope ClaimScope) (bool, error) {
 	f.t.Fatalf("Defined(%q) called — the not-an-identifier gate should have short-circuited before any oracle lookup", sym)
 	return false, nil
 }

@@ -118,7 +118,7 @@ func TestSpikePrematureLatency(t *testing.T) {
 			unresolved++
 			continue
 		}
-		sha, definedAt, status := findDefiningCommit(oracle, root, rel, f.Lang, f.Symbol, f.TS)
+		sha, definedAt, status := findDefiningCommit(oracle, root, rel, f.Lang, f.Symbol, f.TS, f.Scope)
 		switch status {
 		case scanCapped:
 			capped++
@@ -219,7 +219,10 @@ const (
 // This is a linear scan, not a bisection: with commits drawn from multiple
 // branches, "defined" is not guaranteed monotonic across the scan order the
 // way it is within one branch's own history.
-func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Time) (sha string, definedAt time.Time, status scanStatus) {
+// scope is the finding's own dated question (#393): a file-scope finding must be
+// scanned with the file-scoped query, or "when did this become defined" answers
+// about the whole repo and reports a latency for a different event.
+func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Time, scope ClaimScope) (sha string, definedAt time.Time, status scanStatus) {
 	// No --since here, deliberately: git's --since prunes the graph walk based
 	// on an assumption of chronological order down each branch, and can stop
 	// early (silently dropping a later-dated commit) when a descendant has an
@@ -262,7 +265,7 @@ func findDefiningCommit(o GitOracle, root, rel, lang, sym string, askTS time.Tim
 		wasCapped = true
 	}
 	for i := 0; i < limit; i++ {
-		defined, err := o.Defined(root, commits[i].sha, lang, sym, rel)
+		defined, err := o.Defined(root, commits[i].sha, lang, sym, rel, scope)
 		if err != nil {
 			continue // this commit's answer is unavailable; keep scanning forward
 		}

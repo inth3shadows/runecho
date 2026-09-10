@@ -41,6 +41,17 @@ type Decision struct {
 	// whether the guard was right. Records written before the field existed
 	// carry nil, which consumers must treat as unknown rather than empty.
 	LearnSymbols []string
+	// ClaimSymbols is decisionRecord.ClaimSymbols (#393): check name -> the
+	// flagged symbols on this record whose claim the dated oracle may judge.
+	// Distinct from LearnSymbols, which is gated on what an APPROVAL licenses;
+	// this is gated on what the CHECK ASSERTED, so a contract-merged ask (whose
+	// learn_symbols is deliberately empty) still populates it.
+	//
+	// nil means the record predates the field, NOT "nothing is claimable" — see
+	// claimedSymbols in fpaudit.go, which falls back to the pre-#393 reason-string
+	// heuristic for those. An empty non-nil map is the guard saying this ask made
+	// no rateable claim at all.
+	ClaimSymbols map[string][]string
 	// Edit is the ask-side edit fingerprint (see cmd/runecho-guard/declog.go's
 	// editFingerprint), present on both ask and outcome records once #300
 	// landed. Empty on records from older guards, on pre-commit asks, and on
@@ -76,20 +87,21 @@ type Decision struct {
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
 // import — see package doc). Keep in sync with declog.go's decisionRecord.
 type rawDecision struct {
-	V            int               `json:"v"`
-	GV           string            `json:"gv,omitempty"`
-	TS           string            `json:"ts"`
-	Mode         string            `json:"mode"`
-	Repo         string            `json:"repo,omitempty"`
-	File         string            `json:"file,omitempty"`
-	Lang         string            `json:"lang,omitempty"`
-	Decision     string            `json:"decision"`
-	Reason       string            `json:"reason"`
-	Symbols      []string          `json:"symbols,omitempty"`
-	LearnSymbols []string          `json:"learn_symbols,omitempty"`
-	Edit         string            `json:"edit,omitempty"`
-	Checks       map[string]string `json:"checks,omitempty"`
-	CheckReasons map[string]string `json:"check_reasons,omitempty"`
+	V            int                 `json:"v"`
+	GV           string              `json:"gv,omitempty"`
+	TS           string              `json:"ts"`
+	Mode         string              `json:"mode"`
+	Repo         string              `json:"repo,omitempty"`
+	File         string              `json:"file,omitempty"`
+	Lang         string              `json:"lang,omitempty"`
+	Decision     string              `json:"decision"`
+	Reason       string              `json:"reason"`
+	Symbols      []string            `json:"symbols,omitempty"`
+	LearnSymbols []string            `json:"learn_symbols,omitempty"`
+	ClaimSymbols map[string][]string `json:"claim_symbols,omitempty"`
+	Edit         string              `json:"edit,omitempty"`
+	Checks       map[string]string   `json:"checks,omitempty"`
+	CheckReasons map[string]string   `json:"check_reasons,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -124,6 +136,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Reason:       raw.Reason,
 						Symbols:      raw.Symbols,
 						LearnSymbols: raw.LearnSymbols,
+						ClaimSymbols: raw.ClaimSymbols,
 						Edit:         raw.Edit,
 						Checks:       raw.Checks,
 						CheckReasons: raw.CheckReasons,

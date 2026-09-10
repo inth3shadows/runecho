@@ -158,16 +158,25 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 	if len(lints) > 0 {
 		checks["lint"] = "violation"
 	}
+	// claim_symbols: lint's F821 findings only. call-shape never appears — its
+	// own header says "the symbol resolves but the call does not match it", so
+	// asking the oracle whether the callee was defined would answer yes for every
+	// correct catch. See ClaimSymbols on decisionRecord.
+	claimSyms := map[string][]string{}
+	if ls := lintClaimSymbols(lints); len(ls) > 0 {
+		claimSyms["lint"] = ls
+	}
 	rec := decisionRecord{
-		Mode:     "hook",
-		Repo:     repoName,
-		File:     filePath,
-		Lang:     string(lang),
-		Decision: "ask",
-		Reason:   contractReason(cw != nil, askReason(firedChecks{CallShape: len(ms) > 0, Lint: len(lints) > 0})),
-		Symbols:  syms,
-		Edit:     editHash,
-		Checks:   checks,
+		Mode:         "hook",
+		Repo:         repoName,
+		File:         filePath,
+		Lang:         string(lang),
+		Decision:     "ask",
+		Reason:       contractReason(cw != nil, askReason(firedChecks{CallShape: len(ms) > 0, Lint: len(lints) > 0})),
+		Symbols:      syms,
+		ClaimSymbols: claimSyms,
+		Edit:         editHash,
+		Checks:       checks,
 	}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)

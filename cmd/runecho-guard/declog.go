@@ -51,6 +51,35 @@ type decisionRecord struct {
 	Reason       string   `json:"reason"`
 	Symbols      []string `json:"symbols,omitempty"`
 	LearnSymbols []string `json:"learn_symbols,omitempty"`
+	// ClaimSymbols is check name -> the flagged symbols on this record whose
+	// claim fpaudit's dated git oracle can actually judge (#393). It answers a
+	// DIFFERENT question from LearnSymbols and must not be conflated with it:
+	//
+	//   learn_symbols — what an APPROVAL licenses. Narrow on purpose, because it
+	//     feeds guard.Run's known-set; a wrong entry blinds a later check.
+	//   claim_symbols — what the CHECK ASSERTED. The oracle consults no human
+	//     judgement at all, so an ask being contract-merged (which zeroes
+	//     learn_symbols) says nothing about whether the name resolved, and such
+	//     records DO populate this field.
+	//
+	// Keyed by check rather than flat because two checks can fire on one edit and
+	// make different claims about the same name — and because the oracle asks a
+	// different dated question per check (see guardstats.claimScope). Only checks
+	// whose assertion the oracle can match appear here:
+	//
+	//   violations  — "resolves nowhere in the repo"           (repo-scoped)
+	//   file-scope  — "not reachable in THIS file"             (file-scoped)
+	//   lint        — ruff F821 "undefined name", ident parsed  (repo-scoped)
+	//
+	// Deliberately absent, and the reason is not an oversight in each case:
+	// call-shape flags a callee that resolves BY CONSTRUCTION ("the symbol
+	// resolves but the call does not match it"), duplicate-symbol/dangling/
+	// dropped-import flag names that ARE defined, lint F811 is the duplicate
+	// shape, and qualified asserts package membership — which the oracle cannot
+	// ask, since it strips the qualifier. Recording any of them would score every
+	// correct catch as a false positive, which is the bug guardstats.VerdictNA
+	// was created to fix.
+	ClaimSymbols map[string][]string `json:"claim_symbols,omitempty"`
 	// contract/contractHash are set only on an edit-scope contract ask (#12 D2).
 	// The hash is the contract's content hash AT ACTIVATION, not its hash now:
 	// that is what makes an ask replayable against the exact text that produced
@@ -260,6 +289,7 @@ func logOutcomeForFile(file, editHash string) {
 			Reason:       "approved",
 			Symbols:      rec.Symbols,
 			LearnSymbols: rec.LearnSymbols,
+			ClaimSymbols: rec.ClaimSymbols,
 			Edit:         editHash,
 			Join:         join,
 		})

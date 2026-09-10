@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.48.0] — 2026-09-10
+
+### Changed
+- guard: generate pyBuiltins from the interpreter instead of curating it (#387) (#395)
+
 ## [0.47.3] — 2026-09-09
 
 ### Changed

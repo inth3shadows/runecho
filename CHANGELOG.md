@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.49.0] — 2026-09-10
+
+### Changed
+- guard: say so when an edit-scope contract is filed under a sibling worktree (#385) (#400)
+
 ## [0.48.0] — 2026-09-10
 
 ### Changed

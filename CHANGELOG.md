@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.49.1] — 2026-09-10
+
+### Changed
+- guard/ir: record what each check CLAIMED, so fpaudit can rate more than one of them (#393) (#401)
+
 ## [0.49.0] — 2026-09-10
 
 ### Changed

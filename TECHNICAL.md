@@ -343,11 +343,14 @@ code, so a mutation counts only when ruff reports the *fresh* name at the
 *exact* line and the pre-mutation run did not. Anything else is `discarded` and
 reported as such.
 
-Latest, over 155 stdlib files / 130,869 lines:
+Latest, over the CPython 3.14.7 stdlib — 155 files / 130,869 lines. (The
+interpreter is part of the measurement, not decoration: CI's Python 3.12 gives
+167 files / 130,937 lines. Both were run on this branch and both report 16
+false positives, all FileScope, zero `Run`.)
 
 ```
 oracle: clean=123 silent(F403)=22 noisy=10 unadjudicable=0
-PROVEN FALSE POSITIVES: 40 occurrences (0.31 per KLOC)
+PROVEN FALSE POSITIVES: 16 occurrences (0.12 per KLOC)
 
 SHAPE         OWNER  PROVEN  write-whole  write-new  edit-hunk  inner-hunk  precommit
 bare-call     Run         5        5/5        5/5        5/5         4/4        5/5
@@ -359,12 +362,28 @@ decorator/class-base/annotation/except-class — 0 in every posture
 
 Both shapes `Run` claims to own are closed in every posture. The zero rows are
 `Run`'s documented scope (it is call-only) — now measured rather than assumed.
-The remaining false positives are filed, not tolerated silently: #387
-(`pyBuiltins` missing `__import__`/`SystemError`, and disagreeing with
-`filescope.go`'s own list), #388, #389 and #390. The first is subtracted from
-the fail set by `pyKnownGaps`, which fails in **both** directions — an entry
-that stops firing is fiction and goes red, the same discipline
-`.github/expected-skips.txt` applies to skips.
+
+**Zero `Run` false positives.** #387 (`pyBuiltins` was hand-curated and 38 names
+short) is closed: the set is now generated from the interpreter under `python3
+-S`. `pyKnownGaps` is consequently **empty**, and emptying it is the verification
+rather than cleanup — the allowlist fails on an entry that *stops* firing, the
+same both-directions discipline `.github/expected-skips.txt` applies to skips, so
+the run would have gone red had the entries been left behind.
+
+The remaining 16 are all `FileScope`, hence report-only, and all filed: #388
+(`QUOTE_*`, csv.py), #389 (`LC_ALL`, platform.py), #390 (`replace`, difflib.py).
+Note they are masked from `Run` by corpus VOCABULARY, not by check ownership — a
+reduced corpus (`RUNECHO_ORACLE_PY_FILES`) shrinks the known set and #389 and
+#390 both surface through `Run`. That is expected on a sampled run, and the
+harness says so in the failure message.
+
+**What this number does not prove.** Both arms of the differential are
+structurally blind to *over*-binding a real builtin: ruff shares Python's
+builtins namespace, so it can never adjudicate one, and phase 2's enumerator
+filters `dir(builtins)` out of its own mutation pool. So "16 false positives,
+zero `Run`" is evidence about missing names, not about the 38 added ones. The
+instrument that can speak to those is the dogfood ask log (`fpaudit`), not this
+harness.
 
 **Five postures, and the fifth exists because four were not enough.** The Go
 harness learned that a single posture can report zero while default-on paths

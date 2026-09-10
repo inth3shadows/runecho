@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/snapshot"
@@ -124,6 +125,63 @@ func removeRefreshLock(repoID int64) {
 		return
 	}
 	_ = os.Remove(store.RefreshLockPath(dir, repoID))
+}
+
+// orphanRefreshLocks returns the paths of E6 refresh locks in the store dir
+// whose repo id has no row in `repos`, newest-last by name so the caller can
+// print a stable list.
+//
+// #384: removeRefreshLock stopped the leak at purge time but swept nothing that
+// had already leaked — 116 lock files against 102 enrolments on the box that
+// motivated it. This is the sweeper that was owed.
+//
+// A name RefreshLockID refuses is skipped, never guessed at: this list is what
+// a --yes run deletes, so "did not parse" must mean "not ours".
+func orphanRefreshLocks(live map[int64]struct{}) ([]string, error) {
+	dir, err := runechoDir()
+	if err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(store.RefreshLockGlob(dir))
+	if err != nil {
+		return nil, err
+	}
+	var orphans []string
+	for _, p := range matches {
+		id, ok := store.RefreshLockID(filepath.Base(p))
+		if !ok {
+			continue
+		}
+		if _, ok := live[id]; !ok {
+			orphans = append(orphans, p)
+		}
+	}
+	sort.Strings(orphans)
+	return orphans, nil
+}
+
+// liveRepoIDs projects an enrolment list onto the id set orphanRefreshLocks
+// tests against.
+func liveRepoIDs(repos []snapshot.Repo) map[int64]struct{} {
+	live := make(map[int64]struct{}, len(repos))
+	for i := range repos {
+		live[repos[i].ID] = struct{}{}
+	}
+	return live
+}
+
+// sweepRefreshLocks removes the given lock files, returning how many went away.
+// Best-effort and silent per file, exactly as removeRefreshLock is: a lock is
+// advisory scratch state, and a sweep that aborts halfway because one file was
+// unreadable would leave the store dir in a worse state than not sweeping.
+func sweepRefreshLocks(paths []string) int {
+	removed := 0
+	for _, p := range paths {
+		if err := os.Remove(p); err == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 // enrolledRepoID returns the repo_id of an already-enrolled repo at root, or -1.

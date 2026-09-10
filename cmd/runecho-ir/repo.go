@@ -519,6 +519,7 @@ func runRepoPruneMissing(args []string) int {
 
 	if !*yes {
 		fmt.Printf("\n%d of %d enrolled repo(s) have a missing source root. Nothing deleted.\n", len(missing), len(repos))
+		reportOrphanLocks(repos)
 		fmt.Println("Re-run with --yes to purge them and their history — only once you have")
 		fmt.Println("read the paths above and confirmed they are gone for good, not on an")
 		fmt.Println("unmounted drive or a detached share.")
@@ -537,8 +538,31 @@ func runRepoPruneMissing(args []string) int {
 		purged++
 	}
 	fmt.Printf("Purged %d of %d missing repo(s) and their history.\n", purged, len(missing))
+	// Sweep the backlog #382 left behind (#384). Done here rather than at Open
+	// because prune-missing is human-triggered and already the command that
+	// deletes: a sweep on every command would write to the store dir on a path
+	// nothing currently touches. The id set is re-read AFTER the purges above so
+	// the locks of repos just purged count as orphans too.
+	if repos, err := db.ListRepos(); err == nil {
+		if orphans, err := orphanRefreshLocks(liveRepoIDs(repos)); err == nil && len(orphans) > 0 {
+			fmt.Printf("Swept %d orphaned E6 refresh lock(s).\n", sweepRefreshLocks(orphans))
+		}
+	}
 	if purged != len(missing) {
 		return ExitError
 	}
 	return ExitOK
+}
+
+// reportOrphanLocks prints the orphaned-E6-lock count on a dry-run
+// prune-missing, matching what #382 did for enrolment rot: invisible rot is
+// what lets it grow (#384). Silent when there is nothing to say, and silent on
+// any error — this is a hygiene note attached to another command's output, not
+// a result that command should fail on.
+func reportOrphanLocks(repos []snapshot.Repo) {
+	orphans, err := orphanRefreshLocks(liveRepoIDs(repos))
+	if err != nil || len(orphans) == 0 {
+		return
+	}
+	fmt.Printf("%d orphaned E6 refresh lock(s) in the store dir — swept by the same --yes run.\n", len(orphans))
 }

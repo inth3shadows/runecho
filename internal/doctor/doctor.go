@@ -429,6 +429,9 @@ func checkStore(root string) []Result {
 				Detail: fmt.Sprintf("schema v%d, %d repo(s) enrolled, integrity ok", h.SchemaVersion, h.RepoCount),
 			})
 		}
+		if repos, err := db.ListRepos(); err == nil {
+			out = append(out, checkRefreshLocks(dir, repos))
+		}
 	}
 
 	decisionsPath := filepath.Join(dir, "decisions.jsonl")
@@ -536,4 +539,48 @@ func openStore() (*snapshot.DB, error) {
 		return nil, fmt.Errorf("open %s: %w", dbPath, err)
 	}
 	return db, nil
+}
+
+// checkRefreshLocks reports E6 refresh locks in the store dir whose repo id has
+// no enrolment row (#384).
+//
+// Reported rather than swept, and Warn rather than Fail: a lock is advisory
+// scratch state, not data, so an orphan costs readability and — eventually — a
+// blocked writer, never correctness. Sweeping lives on `repo prune-missing`,
+// which is human-triggered and already the command that deletes. doctor is
+// read-only by contract (#331), so it must not be the thing that removes them.
+//
+// It exists because #382's fix stopped the leak without clearing the backlog,
+// and invisible rot is what let the backlog grow in the first place — the same
+// argument #382 itself made for surfacing enrolment rot in `repo list`.
+func checkRefreshLocks(dir string, repos []snapshot.Repo) Result {
+	live := make(map[int64]struct{}, len(repos))
+	for i := range repos {
+		live[repos[i].ID] = struct{}{}
+	}
+	matches, err := filepath.Glob(store.RefreshLockGlob(dir))
+	if err != nil {
+		return Result{Check: "refresh locks", Status: Warn, Detail: err.Error()}
+	}
+	orphans := 0
+	for _, p := range matches {
+		// A name RefreshLockID refuses is not ours; it is not counted, exactly
+		// as the sweeper would not delete it.
+		if id, ok := store.RefreshLockID(filepath.Base(p)); ok {
+			if _, live := live[id]; !live {
+				orphans++
+			}
+		}
+	}
+	if orphans == 0 {
+		return Result{
+			Check: "refresh locks", Status: OK,
+			Detail: fmt.Sprintf("%d lock(s), none orphaned", len(matches)),
+		}
+	}
+	return Result{
+		Check: "refresh locks", Status: Warn,
+		Detail: fmt.Sprintf("%d of %d E6 refresh lock(s) have no enrolled repo", orphans, len(matches)),
+		Remedy: "runecho-ir repo prune-missing --yes  (sweeps them)",
+	}
 }

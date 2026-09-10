@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inth3shadows/runecho/internal/dirstate"
 	"github.com/inth3shadows/runecho/internal/gitutil"
 )
 
@@ -675,27 +676,16 @@ func (db *DB) backfillCommonDir(repoID int64, commonDir string, cdErr error) {
 	}
 }
 
-// dirExists reports whether p is an existing directory. Only a definitive
-// "not there" (os.ErrNotExist) counts as absent — a permission error or a
-// flaky mount is not evidence the directory is gone, so those are reported as
-// present.
+// dirExists reports whether p might still be a live directory — the tolerant
+// posture, because this is candidate SELECTION: a permission error or a flaky
+// mount is not evidence the directory is gone, so it keeps the candidate in
+// play. Something that exists but is not a directory is out.
 //
-// It does NOT match `rootIsMissing` (which prune-missing uses) or the guard's
-// own dirExists, and saying it did was wrong. The three disagree on two inputs:
-//
-//	input                  rootIsMissing   this        guard's dirExists
-//	ENOENT                 missing         absent      absent
-//	EACCES / EIO           not missing     PRESENT     absent
-//	exists, is a file      not missing     absent      absent
-//
-// That divergence is why the resolver above tests r.Path — the value its caller
-// acts on — rather than trusting these to agree. The guard's copy is separate
-// because this helper is unexported, not because cmd/ cannot import this
-// package: cmd/runecho-guard already does (it calls snapshot.Open).
+// It deliberately does NOT agree with prune-missing's rootIsMissing or the
+// guard's own check, and #386 made that disagreement explicit rather than
+// removing it — the three postures are named in package dirstate, and each
+// caller picks one. The resolver above still tests r.Path (the value its caller
+// acts on) rather than trusting any two of them to agree.
 func dirExists(p string) bool {
-	fi, err := os.Stat(p)
-	if err == nil {
-		return fi.IsDir()
-	}
-	return !os.IsNotExist(err)
+	return dirstate.MayExist(p)
 }

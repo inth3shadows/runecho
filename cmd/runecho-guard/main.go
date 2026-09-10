@@ -77,6 +77,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/inth3shadows/runecho/internal/dirstate"
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/ir"
@@ -1835,11 +1836,14 @@ func worktreeRootFor(dir, repoRoot string) string {
 	return repoRoot
 }
 
-// dirExists reports whether p is an existing directory. Distinct from
-// fileExists, which requires a regular file.
+// dirExists reports whether p is usable as a directory RIGHT NOW — the strict
+// posture (#386). Only a confirmed directory passes: the guard would rather
+// block than validate a symbol against a root it cannot read, so an unreadable
+// path and a non-directory both fail closed here, unlike prune-missing (which
+// must not delete on a flaky mount) and the resolver (which keeps unknown
+// candidates in play). Distinct from fileExists, which requires a regular file.
 func dirExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
+	return dirstate.IsUsable(p)
 }
 
 func fileExists(p string) bool {

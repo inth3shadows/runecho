@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -169,6 +170,17 @@ func contractWarningWith(db *snapshot.DB, repoID int64, repoName, filePath, sess
 		// the D-4 rule itself: no contract means total abstention. Every other
 		// error is a degraded store, which abstains too. Both are nil, and they
 		// are deliberately not distinguished — there is no behaviour to differ.
+		//
+		// One case inside ErrNoActiveContract is NOT the common one and must not
+		// pass silently: the session declared a scope against a SIBLING worktree's
+		// repo id (#385). Then abstaining means the declared scope stopped being
+		// enforced because an unrelated directory changed, which is the #369 shape
+		// — success reported while doing less than claimed. Say so; still abstain,
+		// because a contract filed under another id gives this path no scope to
+		// judge against.
+		if errors.Is(err, snapshot.ErrNoActiveContract) {
+			warnOrphanedContract(db, repoID, repoName, sessionID)
+		}
 		return nil
 	}
 	c, err := contract.Load(active.Path)
@@ -338,4 +350,30 @@ func shortHash(h string) string {
 		return h
 	}
 	return h[:12]
+}
+
+// warnOrphanedContract prints the #385 notice when this (repo, session) has no
+// contract but a sibling worktree of the same repository does.
+//
+// Deliberately fires on EVERY affected edit rather than once per session. The
+// repeat-ask noise this project worries about (#209) is about an ask a user has
+// already judged and declined to act on; this is different in kind — while it
+// prints, a scope the user explicitly declared is NOT being enforced, and every
+// edit it prints on is an edit that went ungoverned. Suppressing it would
+// restore exactly the silence the issue was filed about. It also costs nothing
+// in the ordinary case: the query only runs when a contract lookup already
+// missed, and only under RUNECHO_GUARD_CONTRACT=1.
+//
+// stderr, not an ask: there is no scope to judge this edit against, so there is
+// nothing to ask about. Any error from the probe is swallowed — a degraded
+// store already abstains, and a diagnostic that fails loudly about failing to
+// diagnose is worse than one that stays quiet.
+func warnOrphanedContract(db *snapshot.DB, repoID int64, repoName, sessionID string) {
+	sib, err := db.FindSiblingContract(repoID, sessionID)
+	if err != nil {
+		return
+	}
+	warnf("contract %q is active for sibling worktree %s (repo id %d), but this path resolved to %s (repo id %d) — edit scope is NOT being enforced here.",
+		sib.Name, sib.RepoName, sib.RepoID, repoName, repoID)
+	warnf("  re-activate it here (runecho-ir contract activate %s), or clear it, so the declared scope is enforced again.", sib.Path)
 }

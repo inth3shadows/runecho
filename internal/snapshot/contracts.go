@@ -110,3 +110,57 @@ func (db *DB) DeactivateContract(repoID int64, sessionID string) error {
 	}
 	return nil
 }
+
+// SiblingContract is a contract bound to a DIFFERENT repo id that shares this
+// one's git-common-dir — i.e. another worktree of the same repository.
+type SiblingContract struct {
+	RepoID   int64
+	RepoName string
+	Name     string
+	Path     string
+}
+
+// FindSiblingContract answers "this (repo, session) has no contract — does a
+// sibling worktree of the same repository have one?" (#385).
+//
+// The failure it exists to expose: a contract is bound by repo id, but since
+// #382 a given cwd's id depends on which sibling directories happen to exist at
+// resolution time. Delete an unrelated sibling and the same cwd can resolve to a
+// different id, at which point GetActiveContract returns ErrNoActiveContract and
+// the guard abstains — silently, because "no contract" and "your contract is
+// filed under the other id" are the same answer to that query. That is the #369
+// shape: reporting success while doing less than claimed.
+//
+// The common-dir is what is actually stable across worktrees, so it is the join
+// key here. Rows with no recorded common-dir (pre-V4 enrolments) are excluded
+// rather than treated as matching each other — an empty string is missing data,
+// not a repository they all share.
+//
+// Returns ErrNoActiveContract when there is no such sibling, so a caller can
+// treat "nothing anywhere" with one comparison. Newest binding wins if several
+// siblings have one; the query is bounded to a single row because the caller
+// only needs to know THAT scope is unenforced, not to enumerate every place it
+// might have been declared.
+func (db *DB) FindSiblingContract(repoID int64, sessionID string) (SiblingContract, error) {
+	var s SiblingContract
+	err := db.conn.QueryRow(
+		`SELECT c.repo_id, r.name, c.name, c.path
+		   FROM contracts c
+		   JOIN repos r ON r.id = c.repo_id
+		  WHERE c.session_id = ?
+		    AND c.repo_id != ?
+		    AND r.common_dir IS NOT NULL
+		    AND r.common_dir != ''
+		    AND r.common_dir = (SELECT common_dir FROM repos WHERE id = ?)
+		  ORDER BY c.activated_at DESC
+		  LIMIT 1`,
+		sessionID, repoID, repoID,
+	).Scan(&s.RepoID, &s.RepoName, &s.Name, &s.Path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SiblingContract{}, ErrNoActiveContract
+	}
+	if err != nil {
+		return SiblingContract{}, fmt.Errorf("find sibling contract: %w", err)
+	}
+	return s, nil
+}

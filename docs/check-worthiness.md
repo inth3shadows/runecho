@@ -1,6 +1,8 @@
 # Does this check earn its place?
 
-A rubric for deciding whether RunEcho should add a check for a new defect class.
+A rubric for deciding whether RunEcho should add a check for a new defect class
+(Gates 1-5) — and, since 2026-09-09, whether it should deepen one it already has
+(Gate 0).
 
 Every so often someone asks "can RunEcho also catch X?" — invented dependencies
 (#175), design tokens (#204), and there will be more (i18n keys, feature-flag
@@ -15,6 +17,73 @@ the pitch was. The order matters: a request that fails an early gate is declined
 without spending effort on the later, more expensive ones.
 
 ---
+
+## Gate 0 — Deepening (applies to checks that already exist)
+
+Gates 1–5 govern **new** check classes. They are not the only way scope grows.
+The other way — the one that does not pass any gate today — is *deepening a
+check that already shipped*: one more Python binding form, one more `<`
+disambiguation case, one more receiver shape. Each such step is individually
+cheap and individually defensible, and their sum is a hand-rolled language
+semantic analyzer.
+
+> **An existing check may only be deepened on an observation of it being wrong
+> on real code, plus a measured rate of exposure in the code this guard actually
+> sees. Cite both numbers.**
+
+A constructed test case is not an observation. A plausible input that "would"
+mis-parse is not an observation.
+
+**The evidence a deepening request must produce, in order:**
+
+1. **The observation.** Either of two instruments counts, and only these two:
+   - a live record in `~/.runecho/decisions.jsonl` (`ts`, `file`, `reason`, and
+     for an abstention its `check_reasons` token); or
+   - an **external-oracle-adjudicated** false positive from a differential
+     harness — `resolve_differential_test.go`, the #313 ruff run, the CPython
+     `ast` and compiler differentials. Ruff saying the file is clean while the
+     guard flags it is a proven defect, not a hypothesis.
+2. **The rate — in first-party code.** How often the construct occurs in the
+   population the guard is actually handed: files an agent edits. This is the
+   limb that does the work, and a differential corpus will mislead you on it.
+   Measured 2026-09-09 against 6,944 first-party `.py` files on this machine:
+   backslash-continued `from M import …, \` occurs **0 times** (all 7,769
+   matches machine-wide are vendored `site-packages`), while a SCREAMING_SNAKE
+   keyword argument at a call site occurs in **323 files**. Same corpus, same
+   adjudicator, same "proven false positive" — and a ~300x difference in whether
+   fixing it changes anything. **A proven FP with no first-party exposure is a
+   correct decline.**
+3. **The verdict.** Does `fpaudit` rate it `fp` (the resolver was wrong) or
+   `premature` (the resolver was right and fired early)? **A `premature` finding
+   is never a reason to deepen a parser** — the check fired at the wrong moment,
+   and no amount of resolution accuracy moves that.
+
+**Two standing exemptions, both narrow:**
+
+- A **crash, panic, or hang** in a shipped check is a defect, not a deepening.
+  Fix it.
+- A check the oracle **cannot rate at all** may be extended once, solely to make
+  itself rateable (record its flagged names so `fpaudit` can judge them). That
+  is instrumentation, not depth.
+
+**Why this gate exists.** As of 2026-09-09 the guard's own measurements say the
+resolver is done: `fpaudit` false-positive share fell 15.3% → 1.8% over a month,
+while the *premature* share rose to 73.9%. Continued narrowing buys precision
+the numbers say is already there, against a failure mode parsing cannot reach.
+Recorded in `~/.claude/plans/runecho-direction-2026-09-09.md`.
+
+**Worked application, 2026-09-09.** #387–#390 were filed the same day off one
+#313 differential run — four proven, ruff-adjudicated Python false positives.
+Gate 0 split them 2/2 on limb 2 alone: #387 (missing `__import__` builtin — also
+**20 live log events**, latest on v0.47.1) and #389 (SCREAMING_SNAKE kwarg, 323
+first-party files) proceeded; #388 (0 first-party occurrences) and #390
+(backslash-continued method chain, 4 files machine-wide, all vendored) were
+declined. #390 additionally proposed a *shared* backslash-continuation pre-pass
+covering all three of its symptoms — the single most plausible-sounding
+escalation in the batch, and the one with the least first-party exposure behind
+it. That is the shape this gate exists to catch.
+
+> Test: can you paste the observation AND the first-party rate? If not, decline.
 
 ## Gate 1 — Decidability (fail = decline as a *search* feature, not a guard check)
 

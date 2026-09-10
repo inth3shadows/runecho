@@ -37,6 +37,14 @@ var lintTimeout = 2 * time.Second
 // and the reported findings drift apart.
 const lintSelect = "F821,F811"
 
+// lintRuleUndefinedName is the one selected rule whose finding is a RESOLUTION
+// claim — "Undefined name `x`" asserts x resolves nowhere, which is exactly the
+// dated question fpaudit's oracle asks. F811 ("Redefinition of unused `x`")
+// asserts the opposite: x IS defined, twice. Recording an F811 symbol as a
+// rateable claim would score every correct catch as a false positive — the
+// duplicate-symbol shape, and the bug guardstats.VerdictNA exists to prevent.
+const lintRuleUndefinedName = "F821"
+
 // lintSelectDisplay is lintSelect rendered for the ask header, where a slash
 // reads as "or" — these are alternatives a finding can be, not a list the
 // reader has to supply. Derived rather than written out so the two can never
@@ -108,6 +116,26 @@ func lintSection(sb *strings.Builder, findings []lintFinding) []string {
 		}
 	}
 	return syms
+}
+
+// lintClaimSymbols returns the subset of findings fpaudit's git oracle may judge
+// (#393): F821 only, and only where lintSymbolFromMessage actually recovered an
+// identifier. The rule-code fallback lintSection uses when the message did not
+// parse is an honest label for a human reading the ask, but "F821" is not a name
+// any oracle can look up — it would come back undefined and score as a guard
+// catch, manufacturing a `stands` out of a parse failure.
+//
+// Returns nil rather than an empty slice when nothing qualifies, so callers can
+// leave the check absent from claim_symbols instead of recording an empty list —
+// absent means "not claimable", which is the truth here.
+func lintClaimSymbols(findings []lintFinding) []string {
+	var out []string
+	for _, f := range findings {
+		if f.Rule == lintRuleUndefinedName && f.Symbol != "" {
+			out = append(out, f.Symbol)
+		}
+	}
+	return out
 }
 
 // suppressAlreadyReported drops lint findings whose symbol the additive

@@ -79,7 +79,7 @@ func TestGitOracleBindingsAreFileScoped(t *testing.T) {
 	// `path` and `Path` are bound only in other.py, so they must NOT resolve for
 	// an ask about pkg/target.py.
 	for _, sym := range []string{"path", "Path"} {
-		got, err := g.Defined(root, rev, "py", sym, target)
+		got, err := g.Defined(root, rev, "py", sym, target, ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -88,7 +88,7 @@ func TestGitOracleBindingsAreFileScoped(t *testing.T) {
 		}
 	}
 	// A declaration, by contrast, IS importable and must resolve repo-wide.
-	got, err := g.Defined(root, rev, "py", "unrelated", target)
+	got, err := g.Defined(root, rev, "py", "unrelated", target, ScopeRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestGitOracleBindingInOwnFileResolves(t *testing.T) {
 	rev := commit(t, root, "one", time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC))
 
 	g := GitOracle{Timeout: 20 * time.Second}
-	got, err := g.Defined(root, rev, "py", "Path", "pkg/target.py")
+	got, err := g.Defined(root, rev, "py", "Path", "pkg/target.py", ScopeRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestGitOracleSeesMultilineJSImportMember(t *testing.T) {
 
 	g := GitOracle{Timeout: 20 * time.Second}
 	for _, sym := range []string{"makeSeededRandom", "depthFor"} {
-		got, err := g.Defined(root, rev, "js", sym, "src/lib/db.ts")
+		got, err := g.Defined(root, rev, "js", sym, "src/lib/db.ts", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -147,10 +147,10 @@ func TestGitOracleIsDated(t *testing.T) {
 
 	g := GitOracle{Timeout: 20 * time.Second}
 	file := "pkg/a.py"
-	if got, err := g.Defined(root, revEarly, "py", "later", file); err != nil || got {
+	if got, err := g.Defined(root, revEarly, "py", "later", file, ScopeRepo); err != nil || got {
 		t.Errorf("Defined at early rev = %v (err %v), want false", got, err)
 	}
-	if got, err := g.Defined(root, revLate, "py", "later", file); err != nil || !got {
+	if got, err := g.Defined(root, revLate, "py", "later", file, ScopeRepo); err != nil || !got {
 		t.Errorf("Defined at late rev = %v (err %v), want true", got, err)
 	}
 
@@ -177,13 +177,13 @@ func TestGitOracleRefusesNonIdentifierSymbols(t *testing.T) {
 
 	g := GitOracle{Timeout: 20 * time.Second}
 	for _, bad := range []string{"a b", "x)|(y", "..", "-e", "$(touch pwned)", "a\nb", ""} {
-		_, err := g.Defined(root, rev, "py", bad, "a.py")
+		_, err := g.Defined(root, rev, "py", bad, "a.py", ScopeRepo)
 		if !errors.Is(err, ErrUnsafeSymbol) {
 			t.Errorf("Defined(%q) err = %v, want ErrUnsafeSymbol", bad, err)
 		}
 	}
 	// A qualified name is accepted; its final segment is what gets searched.
-	if _, err := g.Defined(root, rev, "go", "http.Get", "a.py"); err != nil {
+	if _, err := g.Defined(root, rev, "go", "http.Get", "a.py", ScopeRepo); err != nil {
 		t.Errorf("Defined(\"http.Get\") err = %v, want nil", err)
 	}
 }
@@ -405,7 +405,7 @@ func TestGitOracleBareNameIsUsageWithoutAnImportBlock(t *testing.T) {
 	g := GitOracle{Timeout: 20 * time.Second}
 
 	for _, sym := range []string{"payload", "config", "alpha"} {
-		got, err := g.Defined(root, rev, "py", sym, "pkg/target.py")
+		got, err := g.Defined(root, rev, "py", sym, "pkg/target.py", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -414,7 +414,7 @@ func TestGitOracleBareNameIsUsageWithoutAnImportBlock(t *testing.T) {
 		}
 	}
 	for _, sym := range []string{"foo", "bar", "widget"} {
-		got, err := g.Defined(root, rev, "js", sym, "src/app.ts")
+		got, err := g.Defined(root, rev, "js", sym, "src/app.ts", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -437,7 +437,7 @@ func TestGitOracleBareNameResolvesInsideAnImportBlock(t *testing.T) {
 	g := GitOracle{Timeout: 20 * time.Second}
 
 	for _, sym := range []string{"makeSeededRandom", "depthFor"} {
-		got, err := g.Defined(root, rev, "js", sym, "src/lib/db.ts")
+		got, err := g.Defined(root, rev, "js", sym, "src/lib/db.ts", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -446,7 +446,7 @@ func TestGitOracleBareNameResolvesInsideAnImportBlock(t *testing.T) {
 		}
 	}
 	for _, sym := range []string{"make_seeded_random", "depth_for"} {
-		got, err := g.Defined(root, rev, "py", sym, "pkg/mod.py")
+		got, err := g.Defined(root, rev, "py", sym, "pkg/mod.py", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -468,7 +468,7 @@ func TestGitOracleGoStructFieldIsNotADeclaration(t *testing.T) {
 	g := GitOracle{Timeout: 20 * time.Second}
 
 	for _, sym := range []string{"Handler", "count"} {
-		got, err := g.Defined(root, rev, "go", sym, "b.go")
+		got, err := g.Defined(root, rev, "go", sym, "b.go", ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", sym, err)
 		}
@@ -479,7 +479,7 @@ func TestGitOracleGoStructFieldIsNotADeclaration(t *testing.T) {
 	// Accepted, documented miss: a grouped var reads as undefined. If this ever
 	// starts returning true, the struct-field assertion above is what guards the
 	// change from being a regression.
-	if got, err := g.Defined(root, rev, "go", "MaxRetries", "b.go"); err != nil || got {
+	if got, err := g.Defined(root, rev, "go", "MaxRetries", "b.go", ScopeRepo); err != nil || got {
 		t.Logf("grouped var MaxRetries now resolves (%v) — check struct fields still do not", got)
 	}
 }
@@ -505,7 +505,7 @@ func TestGitOracleJSReferenceDoesNotBindItself(t *testing.T) {
 		{"config", "src/victim.ts", "a module-private top-level const in another file is not repo-wide"},
 		{"widgetlib", "src/c.ts", "an import's module path is not an imported name"},
 	} {
-		got, err := g.Defined(root, rev, "js", c.sym, c.rel)
+		got, err := g.Defined(root, rev, "js", c.sym, c.rel, ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", c.sym, err)
 		}
@@ -538,7 +538,7 @@ func TestGitOracleJSRealBindingsStillResolve(t *testing.T) {
 		// An EXPORTED top-level const is repo-wide, so it resolves from another file.
 		{"exported", "src/user.ts"},
 	} {
-		got, err := g.Defined(root, rev, "js", c.sym, c.rel)
+		got, err := g.Defined(root, rev, "js", c.sym, c.rel, ScopeRepo)
 		if err != nil {
 			t.Fatalf("Defined(%q): %v", c.sym, err)
 		}
@@ -556,12 +556,12 @@ func TestGitOraclePyImportPathDoesNotBind(t *testing.T) {
 	g := GitOracle{Timeout: 20 * time.Second}
 
 	for _, sym := range []string{"widgetlib", "deep"} {
-		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py"); err != nil || got {
+		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py", ScopeRepo); err != nil || got {
 			t.Errorf("Defined(%q) = %v (err %v); a module path segment is not a bound name", sym, got, err)
 		}
 	}
 	for _, sym := range []string{"mypkg", "aliased"} {
-		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py"); err != nil || !got {
+		if got, err := g.Defined(root, rev, "py", sym, "pkg/a.py", ScopeRepo); err != nil || !got {
 			t.Errorf("Defined(%q) = %v (err %v); this IS bound by the import", sym, got, err)
 		}
 	}
@@ -588,5 +588,99 @@ func TestGitOracleHeadPrefersDefaultBranch(t *testing.T) {
 	}
 	if head != mainRev {
 		t.Errorf("Head = %s, want origin/master %s", head, mainRev)
+	}
+}
+
+// ScopeFile is the question the file-scope check actually asks. The symbol it
+// flags is normally declared SOMEWHERE in the repo — that is the premise of the
+// finding — so the two scopes must disagree here, or file-scope is unrateable.
+func TestGitOracleScopeFileIgnoresDeclarationsInOtherFiles(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "app/render.py", "def render(x):\n    return x\n")
+	write(t, root, "tests/test_r.py", "def test_it():\n    return render(1)\n")
+	rev := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	const rel = "tests/test_r.py"
+
+	if got, err := g.Defined(root, rev, "py", "render", rel, ScopeRepo); err != nil || !got {
+		t.Fatalf("ScopeRepo Defined(render) = %v (err %v), want true", got, err)
+	}
+	if got, err := g.Defined(root, rev, "py", "render", rel, ScopeFile); err != nil || got {
+		t.Errorf("ScopeFile Defined(render) = %v (err %v), want false — a def in app/render.py is not reachable in %s", got, err, rel)
+	}
+}
+
+// The complement: once the import lands in the edited file, ScopeFile says yes.
+// This is the transition that makes a file-scope `premature` verdict mean
+// "the agent added the import afterwards".
+func TestGitOracleScopeFileSeesTheFilesOwnImport(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "app/render.py", "def render(x):\n    return x\n")
+	write(t, root, "tests/test_r.py", "from app.render import render\n\ndef test_it():\n    return render(1)\n")
+	rev := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	if got, err := g.Defined(root, rev, "py", "render", "tests/test_r.py", ScopeFile); err != nil || !got {
+		t.Errorf("ScopeFile Defined(render) = %v (err %v), want true — the file imports it", got, err)
+	}
+}
+
+// A declaration in the edited file itself also satisfies ScopeFile: the check
+// asks "reachable here", and a local def is the most direct way to be reachable.
+func TestGitOracleScopeFileSeesTheFilesOwnDeclaration(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "pkg/a.py", "def helper():\n    return 1\n\ndef entry():\n    return helper()\n")
+	rev := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	if got, err := g.Defined(root, rev, "py", "helper", "pkg/a.py", ScopeFile); err != nil || !got {
+		t.Errorf("ScopeFile Defined(helper) = %v (err %v), want true", got, err)
+	}
+}
+
+// A file-scoped question with no file is unanswerable. Returning false instead
+// would silently promote it to a guard catch — the audit would report a `stands`
+// it never established.
+func TestGitOracleScopeFileWithoutRelIsUnknown(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "a.py", "def helper():\n    return 1\n")
+	rev := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	got, err := g.Defined(root, rev, "py", "helper", "", ScopeFile)
+	if !errors.Is(err, ErrUnknownScope) {
+		t.Errorf("Defined(rel=\"\", ScopeFile) = (%v, %v), want ErrUnknownScope", got, err)
+	}
+}
+
+// `git grep <pat> <rev> -- ':(literal)x'` exits 1 when x does not exist at rev,
+// which is indistinguishable from "exists, no match". Without a path probe a
+// file created, renamed or deleted between the ask and the commit answers false
+// at BOTH revs and classifies as `stands` — a catch the audit never established.
+// The repo-scoped path has no equivalent exposure: it searches the whole tree.
+func TestGitOracleScopeFileOnAPathMissingAtRevIsUnknown(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "old.py", "def helper():\n    return 1\n")
+	first := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	// The file the ask was about only appears in the SECOND commit.
+	write(t, root, "new.py", "def helper():\n    return 1\n")
+	second := commit(t, root, "two", time.Date(2026, 9, 1, 13, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	got, err := g.Defined(root, first, "py", "helper", "new.py", ScopeFile)
+	if !errors.Is(err, ErrUnknownScope) {
+		t.Errorf("Defined(new.py @ first commit, ScopeFile) = (%v, %v), want ErrUnknownScope — "+
+			"a bare false here reads as a guard catch", got, err)
+	}
+	// Control: at the commit where it does exist, the question is answerable.
+	if got, err := g.Defined(root, second, "py", "helper", "new.py", ScopeFile); err != nil || !got {
+		t.Errorf("control: Defined(new.py @ second commit) = (%v, %v), want (true, nil)", got, err)
+	}
+	// And the repo-scoped question was never exposed to this: it finds the def in
+	// old.py at the first commit regardless of new.py's absence.
+	if got, err := g.Defined(root, first, "py", "helper", "new.py", ScopeRepo); err != nil || !got {
+		t.Errorf("ScopeRepo Defined = (%v, %v), want (true, nil)", got, err)
 	}
 }

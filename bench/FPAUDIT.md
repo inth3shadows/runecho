@@ -91,14 +91,46 @@ resolution), and separating them from genuine catches needs the edit's added
 lines, which the decision log does not record. `stands` is a ceiling on
 correctness, not a measured precision figure.
 
-**86 symbols (`n/a`) are outside what this oracle can judge at all** —
-`duplicate-symbol` and `dangling` ask a different question (the name *is*
-defined; the check is about whether that's a problem), so a resolution
-verdict doesn't apply to them. But `file-scope`, `qualified`, and
-`contract+violations` land in `n/a` too, and for a different reason: the guard
-doesn't record them in `learn_symbols` at all. That's a coverage gap in the
-oracle, not evidence those checks are out of scope — read those `n/a` rows as
-"not yet measurable," not "not applicable."
+**86 symbols (`n/a`) are outside what this oracle can judge at all**, and
+`n/a` is not one thing. Since #393 the audit splits it, because the kinds call
+for opposite responses:
+
+- `not-a-resolution-claim` — the question does not apply. `duplicate-symbol`
+  and `dangling` flag a name that *is* defined (the check is about whether
+  that's a problem); `call-shape` flags a callee that resolves by construction
+  — its own ask says "the symbol resolves but the call does not match it";
+  ruff `F811` is the duplicate shape. Correct and permanent.
+- `no-oracle-question` — a real resolution claim *this* oracle cannot ask.
+  `qualified` and `deps-go` assert package membership, and resolving a
+  qualifier to a package is not something `git grep` does. Honest missing
+  coverage.
+- `mixed-reason` — the ask names both kinds and the record does not say which
+  flagged this symbol. Reported on its own rather than folded into either, so
+  the missing-coverage figure stays trustworthy.
+- `legacy-record` — written before the guard recorded `claim_symbols`.
+  Shrinks on its own as the window moves forward.
+
+`file-scope` and `contract+violations` used to land here and no longer do.
+Both were unrateable for a reason that never applied to them: the audit read
+`learn_symbols`, which is gated on what an **approval licenses** — deliberately
+narrow, because it feeds the guard's own known-set. What the audit needs is what
+the **check asserted**, which is a different question and is now recorded
+separately as `claim_symbols`.
+
+**Each check is asked the question it actually made.** `violations` asserts
+"resolves nowhere in the repo" and is answered tree-wide. `file-scope` and ruff
+`F821` both assert "not reachable in **this file**" — pyflakes resolves against
+the file's own scopes, not the repo's — and are answered against the edited file
+alone. Asking the repo-wide question of either would report every correct catch
+as a false positive: the name they flag is usually declared elsewhere, which is
+the premise of the finding, not evidence against it. That mistake has a
+precedent in this very file — the audit's first run scored `duplicate-symbol` at
+27 fp / 0 stands before `n/a` existed — and it very nearly shipped again here,
+caught in review.
+
+The numbers above predate `claim_symbols`, which only stamps records written by
+a guard new enough to carry it — so the per-check table fills in going forward,
+not retroactively.
 
 **This is one maintainer's dogfood corpus, not a controlled benchmark.** Same
 scope limit as [TOKEN-COST.md](TOKEN-COST.md)'s "one repo" caveat, generalized:

@@ -89,7 +89,9 @@ const (
 	// and never dropped — an audit that silently discards what it cannot see
 	// reports the coverage it wishes it had.
 	VerdictUnknown AuditVerdict = "unknown"
-	// VerdictNA marks a flagged symbol the two dated questions cannot judge.
+	// VerdictNA marks a flagged symbol no dated question can judge. The Note on the
+	// finding says which kind — see the NAReason* constants; they mean opposite
+	// things and must not be read as one bucket.
 	//
 	// Only the hallucination check asserts "this name does not resolve". The
 	// duplicate-symbol check flags a name defined TWICE and the dangling-ref
@@ -99,11 +101,123 @@ const (
 	// catch as a guard resolution bug; the first run of this audit did exactly
 	// that (27 fp, 0 stands for duplicate-symbol) before this bucket existed.
 	//
-	// The guard already draws this line for its own learned-allow store, and for
-	// the same reason — see decisionRecord.LearnSymbols in declog.go. This reuses
-	// that subset rather than re-deriving it.
+	// Which symbols ARE judgeable, and under which question, comes from the
+	// guard's own claim_symbols — see decisionRecord.ClaimSymbols in declog.go.
+	// Deliberately NOT learn_symbols: that field is gated on what an approval
+	// licenses, which is a different question and excludes contract-merged asks.
 	VerdictNA AuditVerdict = "n/a"
 )
+
+// ClaimScope names WHICH dated existence question a check's finding actually
+// makes. It exists because "was this symbol defined at ask time" is not one
+// question — a hallucination flag and a file-scope flag mean different things by
+// "defined", and answering the second with the first reports every correct catch
+// as a false positive.
+type ClaimScope string
+
+const (
+	// ScopeRepo — "this name resolves nowhere in the repository". The additive
+	// hallucination check and ruff F821. This is the only question the oracle
+	// asked before #393.
+	ScopeRepo ClaimScope = "repo"
+	// ScopeFile — "this name is not reachable in THIS file". The file-scope
+	// check. Its findings name symbols that usually ARE declared elsewhere in the
+	// repo; that is the premise of the finding, not evidence against it.
+	ScopeFile ClaimScope = "file"
+)
+
+// claimScope maps a check name (decisionRecord.ClaimSymbols' keys, which are
+// checkOrder's vocabulary) to the question the oracle must ask for it.
+//
+// A check absent from this map is one the guard should never have recorded a
+// claim for. That is treated as a data error rather than defaulted to ScopeRepo:
+// defaulting is how a check with the wrong question silently starts producing
+// confident, wrong verdicts, which is the failure this whole type exists to stop.
+var claimScope = map[string]ClaimScope{
+	"violations": ScopeRepo,
+	// lint is ScopeFile, not ScopeRepo. Ruff's F821 is pyflakes: "undefined
+	// name" means unbound in an enclosing scope of THIS FILE, and says nothing
+	// about the rest of the repo. The guard also runs suppressAlreadyReported
+	// against `violations` before recording, which strips exactly the findings
+	// the repo-wide check already caught — so what survives is dominated by names
+	// that ARE declared elsewhere in the repo and merely unreachable here. Asked
+	// the repo-wide question, near enough all of them would score `fp` and
+	// falsely indict the check.
+	"lint":       ScopeFile,
+	"file-scope": ScopeFile,
+}
+
+// NA reasons. n/a is not one thing, and pooling the kinds is what let #393 sit
+// unnoticed for 95 days: a check that is genuinely out of scope and a check with
+// missing coverage both rendered as a bare "n/a".
+const (
+	// NAReasonNotResolutionClaim — the question does not apply. duplicate-symbol
+	// and dangling flag names that ARE defined; call-shape flags a callee that
+	// resolves by construction; lint F811 is the duplicate shape. Nothing to fix.
+	NAReasonNotResolutionClaim = "not-a-resolution-claim"
+	// NAReasonNoOracleQuestion — a real resolution claim this oracle cannot ask.
+	// qualified and deps-go assert package membership, and resolving a qualifier
+	// to a package is not something GitOracle does. Honest missing coverage.
+	NAReasonNoOracleQuestion = "no-oracle-question"
+	// NAReasonLegacyRecord — written by a guard older than claim_symbols, with a
+	// mixed reason string that cannot be split. Shrinks on its own as the window
+	// moves forward; never a reason to change a check.
+	NAReasonLegacyRecord = "legacy-record"
+	// NAReasonMixedReason — the ask's reason names BOTH an inapplicable check and
+	// an unrateable-real-claim one, and the record does not say which flagged
+	// this symbol. Reported as its own bucket rather than folded into either:
+	// no-oracle-question is the actionable "missing coverage" figure, and
+	// inflating it with symbols that may be duplicate-symbol's would make the one
+	// number this split exists to expose the least trustworthy one in the table.
+	NAReasonMixedReason = "mixed-reason"
+)
+
+// noOracleQuestionChecks and notResolutionClaimChecks are the two kinds of
+// unrateable check, by the name they contribute to decisionRecord.Reason. Only
+// checks that can appear in a reason string belong here — lint is absent because
+// its two rules split across both kinds and the reason cannot say which fired.
+var (
+	// recv-method and var-type are here for the reason the guard gives for
+	// excluding them from claim_symbols in the first place: theirs is a MEMBER
+	// claim ("no such method on this receiver"), which a tree-wide grep cannot
+	// ask — exactly as for qualified. Labelling them not-a-resolution-claim would
+	// read as "correct and permanent" for what is really missing coverage.
+	noOracleQuestionChecks   = []string{"qualified", "deps-go", "recv-method", "var-type"}
+	notResolutionClaimChecks = []string{"duplicate-symbol", "dangling", "dropped-import", "call-shape"}
+)
+
+// naReasonForCheck classifies why an unrateable symbol is unrateable, from the
+// ask's reason string.
+//
+// The reason can be merged ("contract+violations", "violations+dangling"), and
+// the record attributes only the RATEABLE symbols to a check — so for the rest
+// this is the only evidence there is. A merged reason naming both kinds is
+// reported as mixed rather than guessed at, for the same discipline
+// claimedSymbols applies to a pre-#29 mixed reason: an attribution that cannot
+// be established is not invented.
+func naReasonForCheck(reason string) string {
+	namesAny := func(names []string) bool {
+		for _, c := range names {
+			if strings.Contains(reason, c) {
+				return true
+			}
+		}
+		return false
+	}
+	noQuestion, notClaim := namesAny(noOracleQuestionChecks), namesAny(notResolutionClaimChecks)
+	switch {
+	case noQuestion && notClaim:
+		return NAReasonMixedReason
+	case noQuestion:
+		return NAReasonNoOracleQuestion
+	default:
+		// Includes the plain not-a-resolution-claim reasons and anything
+		// unrecognised. Defaulting here is safe in the way defaulting in
+		// claimScope is not: this picks a LABEL for a pair already excluded from
+		// every rate, where claimScope would pick a question and emit a verdict.
+		return NAReasonNotResolutionClaim
+	}
+}
 
 // Oracle answers dated existence questions about a repository. It is an
 // interface so the classification below is testable without a git tree, and so
@@ -122,12 +236,17 @@ type Oracle interface {
 	RevAt(worktree string, ts time.Time) (string, error)
 	// Head returns the current HEAD commit of worktree.
 	Head(worktree string) (string, error)
-	// Defined reports whether sym was resolvable at rev — declared anywhere in
-	// the tree, or bound inside the edited file itself, named by its
-	// repo-relative path rel. lang is the decision record's language tag, used to
-	// pick patterns; an unrecognised tag should widen rather than narrow, since a
-	// missed definition here reads as a guard catch and inflates VerdictStands.
-	Defined(worktree, rev, lang, sym, rel string) (bool, error)
+	// Defined reports whether sym was resolvable at rev under scope — see
+	// ClaimScope. rel is the edited file's repo-relative path. lang is the
+	// decision record's language tag, used to pick patterns; an unrecognised tag
+	// should widen rather than narrow, since a missed definition here reads as a
+	// guard catch and inflates VerdictStands.
+	//
+	// scope is a required parameter rather than a second method on purpose: a
+	// call site can forget to switch methods, but it cannot forget to pass an
+	// argument, and asking the wrong one of these two questions produces a
+	// confident wrong verdict rather than an error.
+	Defined(worktree, rev, lang, sym, rel string, scope ClaimScope) (bool, error)
 }
 
 // defKey memoises one Defined answer. rev is in the key, not just root: the
@@ -135,30 +254,101 @@ type Oracle interface {
 // different commits. rel is in it because a binding resolves only in the file
 // that wrote it, so the same symbol at the same commit legitimately differs
 // between two files.
-type defKey struct{ root, rev, lang, sym, rel string }
+type defKey struct {
+	root, rev, lang, sym, rel string
+	// scope is in the key because the same symbol at the same commit
+	// legitimately answers differently to the two questions — that is the entire
+	// point of ClaimScope. Omitting it would serve a repo-scoped answer to a
+	// file-scoped question from the memo, silently.
+	scope ClaimScope
+}
 
-// hallucinationOrigin returns the set of flagged symbols the audit may judge —
-// the ones whose ask meant "this name does not resolve". See VerdictNA.
+// claimedSymbols returns, for each flagged symbol the audit may judge, the dated
+// question to ask about it. A symbol absent from the result is n/a.
 //
-// The guard writes that subset as learn_symbols. When the field is absent the
-// record predates it (pre-#29), and the reason string is the only evidence left:
-// a reason naming ONLY the hallucination check means every symbol on the record
-// came from it. A mixed reason with no learn_symbols cannot be split and is not
-// guessed at — those symbols are marked n/a rather than attributed.
-func hallucinationOrigin(d *Decision) map[string]bool {
-	out := make(map[string]bool, len(d.Symbols))
+// Three record generations, newest first:
+//
+//   - claim_symbols present (#393). The guard named the check behind each
+//     rateable symbol, so the question comes straight from claimScope. A check
+//     the guard recorded but claimScope does not know is DROPPED, not defaulted —
+//     see claimScope's doc.
+//   - claim_symbols absent, learn_symbols present (#29..#393). learn_symbols is
+//     the hallucination-origin subset, which is exactly the repo-scoped question.
+//     Note this is a coincidence of overlap, not a definition: learn_symbols is
+//     gated on what an APPROVAL licenses, so a contract-merged ask carries an
+//     empty one and its violations stay unrateable on these old records. That is
+//     the coverage gap #393 measured, and it is unfixable retroactively.
+//   - neither (pre-#29). The reason string is the only evidence left: a reason
+//     naming ONLY the hallucination check means every symbol on the record came
+//     from it. A mixed reason cannot be split and is not guessed at.
+func claimedSymbols(d *Decision) map[string]ClaimScope {
+	out := make(map[string]ClaimScope, len(d.Symbols))
+	if d.ClaimSymbols != nil {
+		// Two checks CAN claim the same name on one edit, and first-writer-wins
+		// over Go's randomised map iteration made the verdict depend on which one
+		// the runtime happened to visit first. Measured on a single unmodified
+		// record where file-scope and lint both flagged `render`: ten fpaudit runs
+		// returned `stands` seven times and `fp` three times. An oracle whose
+		// headline rate is not reproducible on an unchanged log is not an oracle.
+		//
+		// So: narrowest scope wins, ties broken by nothing (the scopes are equal).
+		// ScopeFile asks strictly less than ScopeRepo — a name reachable in the
+		// edited file is reachable in the repo, never the reverse — so preferring
+		// it can only move a pair from `fp` toward `stands`/`premature`. That is
+		// the conservative direction: it declines to indict the resolver on a
+		// question the check did not ask, rather than manufacturing a false
+		// positive from a scope mismatch.
+		//
+		// ScopeFile and ScopeRepo are also the ONLY two scopes; a third would need
+		// a real ordering here rather than this two-value rule.
+		for _, check := range sortedKeys(d.ClaimSymbols) {
+			scope, known := claimScope[check]
+			if !known {
+				continue
+			}
+			for _, sym := range d.ClaimSymbols[check] {
+				if prev, dup := out[sym]; dup && prev == ScopeFile {
+					continue
+				}
+				out[sym] = scope
+			}
+		}
+		return out
+	}
 	if d.LearnSymbols != nil {
-		for _, s := range d.LearnSymbols {
-			out[s] = true
+		for _, sym := range d.LearnSymbols {
+			out[sym] = ScopeRepo
 		}
 		return out
 	}
 	if d.Reason == "violations" {
-		for _, s := range d.Symbols {
-			out[s] = true
+		for _, sym := range d.Symbols {
+			out[sym] = ScopeRepo
 		}
 	}
 	return out
+}
+
+// sortedKeys returns m's keys in a stable order, so an audit over an unchanged
+// log produces an unchanged result. Go randomises map iteration deliberately;
+// an offline measurement instrument is exactly the place that must not inherit
+// it.
+func sortedKeys(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// naReasonFor explains why sym on d is unrateable. Split out so the reason is
+// derived in one place for both the finding and the report.
+func naReasonFor(d *Decision) string {
+	if d.ClaimSymbols == nil && d.LearnSymbols == nil && d.Reason != "violations" {
+		return NAReasonLegacyRecord
+	}
+	return naReasonForCheck(d.Reason)
 }
 
 // AuditFinding is one classified (ask, symbol) pair, carrying enough context to
@@ -172,7 +362,18 @@ type AuditFinding struct {
 	GV      string
 	Symbol  string
 	Verdict AuditVerdict
-	// Note explains a VerdictUnknown. Empty otherwise.
+	// Scope is the dated question this pair WOULD be judged by (#393). Set
+	// whenever the record marked the symbol rateable — which includes the
+	// not-an-identifier and unknown pairs, where classify short-circuits before
+	// asking anything, so a populated Scope does not imply the oracle ran. Empty
+	// only on n/a, where no check claimed the symbol at all.
+	//
+	// Carried on the finding so a downstream consumer — the premature-latency
+	// scan, the JSON — re-asks the SAME question rather than defaulting to
+	// repo-wide and silently measuring a different thing.
+	Scope ClaimScope
+	// Note explains a VerdictUnknown (the oracle's error) or a VerdictNA (one of
+	// the NAReason* constants — n/a is not one thing, see #393). Empty otherwise.
 	Note string
 }
 
@@ -185,7 +386,12 @@ type AuditStats struct {
 	Counts   map[AuditVerdict]int
 	ByReason map[string]map[AuditVerdict]int
 	ByLang   map[string]map[AuditVerdict]int
-	Findings []AuditFinding
+	// NAReasons counts the n/a pairs by NAReason* (#393). Reported separately
+	// from Counts[VerdictNA] because the two kinds mean opposite things:
+	// not-a-resolution-claim is correct and permanent, no-oracle-question is
+	// missing coverage. A single pooled n/a hid the second for 95 days.
+	NAReasons map[string]int
+	Findings  []AuditFinding
 }
 
 // Rated is the number of pairs that were both judgeable and answerable.
@@ -224,10 +430,11 @@ func (s AuditStats) Share(v AuditVerdict) float64 {
 // how many hook wirings the machine happened to have.
 func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 	stats := AuditStats{
-		Since:    since,
-		Counts:   map[AuditVerdict]int{},
-		ByReason: map[string]map[AuditVerdict]int{},
-		ByLang:   map[string]map[AuditVerdict]int{},
+		Since:     since,
+		Counts:    map[AuditVerdict]int{},
+		ByReason:  map[string]map[AuditVerdict]int{},
+		ByLang:    map[string]map[AuditVerdict]int{},
+		NAReasons: map[string]int{},
 	}
 
 	// Cache per worktree: resolving a worktree and its HEAD costs a git process
@@ -281,7 +488,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 			wts[d.File] = st
 		}
 
-		judgeable := hallucinationOrigin(d)
+		judgeable := claimedSymbols(d)
 		// One ask can list the same name more than once — the guard emits one
 		// entry per violating LINE, so a helper called three times in one hunk
 		// arrives three times (7 of the 1,028 ask records in the log do this,
@@ -293,9 +500,13 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 				TS: d.TS, Repo: d.Repo, File: d.File, Lang: d.Lang,
 				Reason: d.Reason, GV: d.GV, Symbol: sym,
 			}
+			scope, rateable := judgeable[sym]
+			if rateable {
+				f.Scope = scope
+			}
 			switch {
-			case !judgeable[sym]:
-				f.Verdict = VerdictNA
+			case !rateable:
+				f.Verdict, f.Note = VerdictNA, naReasonFor(d)
 			case st.err != nil:
 				f.Verdict, f.Note = VerdictUnknown, st.err.Error()
 			default:
@@ -305,10 +516,13 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 					r.rev, r.err = o.RevAt(st.root, d.TS)
 					revs[rk] = r
 				}
-				f.Verdict, f.Note = classify(o, st.root, st.rel, st.head, r.rev, r.err, d, sym, defs)
+				f.Verdict, f.Note = classify(o, st.root, st.rel, st.head, r.rev, r.err, d, sym, scope, defs)
 			}
 			stats.Symbols++
 			stats.Counts[f.Verdict]++
+			if f.Verdict == VerdictNA {
+				stats.NAReasons[f.Note]++
+			}
 			bump(stats.ByReason, d.Reason, f.Verdict)
 			bump(stats.ByLang, langLabel(d.Lang), f.Verdict)
 			stats.Findings = append(stats.Findings, f)
@@ -354,7 +568,7 @@ func dedupeStrings(in []string) []string {
 // resolver; if it is true, whether the symbol also exists now tells us
 // nothing. Asking HEAD first and treating "defined now" as the FP signal is
 // the mistake that made hashToSeed read as a false positive for weeks.
-func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision, sym string, defs map[defKey]bool) (AuditVerdict, string) {
+func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision, sym string, scope ClaimScope, defs map[defKey]bool) (AuditVerdict, string) {
 	if isNotIdentifier(d.Lang, sym) {
 		return VerdictNotIdent, ""
 	}
@@ -363,11 +577,11 @@ func classify(o Oracle, root, rel, head, revAt string, revErr error, d *Decision
 	}
 
 	lookup := func(rev string) (bool, error) {
-		k := defKey{root, rev, d.Lang, sym, rel}
+		k := defKey{root: root, rev: rev, lang: d.Lang, sym: sym, rel: rel, scope: scope}
 		if v, ok := defs[k]; ok {
 			return v, nil
 		}
-		v, err := o.Defined(root, rev, d.Lang, sym, rel)
+		v, err := o.Defined(root, rev, d.Lang, sym, rel, scope)
 		if err != nil {
 			return false, err
 		}
@@ -548,7 +762,7 @@ func FormatAudit(s AuditStats) string {
 	}
 
 	fmt.Fprintf(&b, "%d ask event(s), %d flagged symbol(s), %d rated.\n", s.Asks, s.Symbols, s.Rated())
-	fmt.Fprintf(&b, "(%d n/a — outside the hallucination-origin subset the guard records;\n"+
+	fmt.Fprintf(&b, "(%d n/a — the guard recorded no rateable claim for them;\n"+
 		" %d unanswerable by the oracle.)\n\n", s.Counts[VerdictNA], s.Counts[VerdictUnknown])
 
 	rows := []struct {
@@ -573,7 +787,7 @@ func FormatAudit(s AuditStats) string {
 			VerdictUnknown, u)
 	}
 	if n := s.Counts[VerdictNA]; n > 0 {
-		fmt.Fprintf(&b, "  %-18s %5d      -    outside learn_symbols — see the n/a note below\n",
+		fmt.Fprintf(&b, "  %-18s %5d      -    no rateable claim — see the n/a breakdown below\n",
 			VerdictNA, n)
 	}
 
@@ -582,11 +796,34 @@ func FormatAudit(s AuditStats) string {
 	b.WriteString("\nBy language:\n")
 	writeVerdictTable(&b, s.ByLang)
 
-	b.WriteString("\nn/a is NOT all 'not a resolution claim'. duplicate-symbol and dangling flag\n")
-	b.WriteString("names that ARE defined, so the question does not apply to them. But file-scope,\n")
-	b.WriteString("qualified and contract+violations asks land here too, because the guard does not\n")
-	b.WriteString("record them in learn_symbols — those ARE resolution claims this oracle simply\n")
-	b.WriteString("cannot judge, so read their n/a as missing coverage, not as out of scope.\n")
+	if len(s.NAReasons) > 0 {
+		b.WriteString("\nn/a by reason:\n")
+		for _, r := range []struct{ key, what string }{
+			{NAReasonNotResolutionClaim, "the question does not apply — duplicate-symbol/dangling/\n" +
+				"                              dropped-import flag names that ARE defined, call-shape\n" +
+				"                              flags a callee that resolves by construction, and lint\n" +
+				"                              F811 is the duplicate shape. Correct and permanent."},
+			{NAReasonNoOracleQuestion, "a real resolution claim this oracle cannot ask — qualified and\n" +
+				"                              deps-go assert PACKAGE MEMBERSHIP, and resolving a\n" +
+				"                              qualifier to a package is not something it does. This is\n" +
+				"                              missing coverage, not out of scope."},
+			{NAReasonMixedReason, "the ask names both kinds of unrateable check and does not say\n" +
+				"                              which flagged this symbol. Not folded into either — the\n" +
+				"                              missing-coverage figure has to stay trustworthy."},
+			{NAReasonLegacyRecord, "written before claim_symbols existed (#393); the reason string\n" +
+				"                              cannot be split. Shrinks as the window moves forward."},
+		} {
+			if n := s.NAReasons[r.key]; n > 0 {
+				fmt.Fprintf(&b, "  %-26s %5d  %s\n", r.key, n, r.what)
+			}
+		}
+	}
+	b.WriteString("\nEach rated check is asked the question it actually made (#393): violations\n")
+	b.WriteString("asserts 'resolves nowhere in the repo' and is answered tree-wide; file-scope and\n")
+	b.WriteString("ruff F821 assert 'not reachable in THIS file' and are answered against the edited\n")
+	b.WriteString("file alone. Asking the repo-wide question of either would report every correct\n")
+	b.WriteString("catch as a false positive — the name they flag is usually declared elsewhere,\n")
+	b.WriteString("which is the premise of the finding, not evidence against it.\n")
 	b.WriteString("\nA high 'premature' share is not a resolver bug. It means the check fires at\n")
 	b.WriteString("the wrong moment — an agent writing a caller before its callee — and the fix\n")
 	b.WriteString("is to move the check later, not to widen the known-symbol set.\n")
@@ -643,20 +880,31 @@ func PayloadAudit(s AuditStats) map[string]any {
 		if f.Note != "" {
 			m["note"] = f.Note
 		}
+		if f.Scope != "" {
+			m["scope"] = string(f.Scope)
+		}
 		findings = append(findings, m)
 	}
 	counts := map[string]int{}
 	for v, n := range s.Counts {
 		counts[string(v)] = n
 	}
+	// na_reasons is emitted even when empty: a consumer reading it as "which
+	// checks are unrateable and why" needs to tell "no n/a in this window" from
+	// "this build does not report the breakdown".
+	naReasons := map[string]int{}
+	for r, n := range s.NAReasons {
+		naReasons[r] = n
+	}
 	return map[string]any{
 		"since": s.Since.UTC().Format(time.RFC3339),
 		"until": s.Until.UTC().Format(time.RFC3339),
 		"asks":  s.Asks, "symbols": s.Symbols, "rated": s.Rated(),
-		"counts":    counts,
-		"by_reason": nestedPayload(s.ByReason),
-		"by_lang":   nestedPayload(s.ByLang),
-		"findings":  findings,
+		"counts":     counts,
+		"na_reasons": naReasons,
+		"by_reason":  nestedPayload(s.ByReason),
+		"by_lang":    nestedPayload(s.ByLang),
+		"findings":   findings,
 	}
 }
 

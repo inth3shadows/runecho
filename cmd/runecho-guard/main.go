@@ -1277,6 +1277,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// decisionRecord for why the other categories must be excluded.
 	var syms []string
 	var learnSyms []string
+	// claimSyms: check name -> the flagged names whose assertion fpaudit's dated
+	// oracle can judge (#393). Deliberately NOT a subset of learnSyms and
+	// deliberately NOT gated on cw — see ClaimSymbols on decisionRecord: one
+	// field records what an approval licenses, the other what the check claimed,
+	// and a contract-merged ask still made its resolution claim.
+	claimSyms := map[string][]string{}
 	// Contract first: "should you be editing this file at all" precedes "do these
 	// names resolve", and reading it the other way round invites fixing the
 	// symbol and re-submitting the same out-of-scope edit.
@@ -1299,8 +1305,19 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			// of a scope decision. Same reasoning that excludes dangling, dropped and
 			// duplicate approvals (see LearnSymbols on decisionRecord); contracts are
 			// a fourth category that comment did not anticipate.
-			if _, additive := learnEligible[v.Symbol]; cw == nil && additive {
-				learnSyms = append(learnSyms, v.Symbol)
+			//
+			// claimSyms takes the same additive subset for a different reason:
+			// only the additive check asserts "resolves nowhere in the repo".
+			// recv-method and var-type merged their findings into `violations`
+			// above, and theirs is a MEMBER claim ("no such method on this
+			// receiver") — a tree-wide grep would find that name declared on some
+			// other type and score the correct catch as a false positive, exactly
+			// as it would for qualified.
+			if _, additive := learnEligible[v.Symbol]; additive {
+				if cw == nil {
+					learnSyms = append(learnSyms, v.Symbol)
+				}
+				claimSyms["violations"] = append(claimSyms["violations"], v.Symbol)
 			}
 		}
 	}
@@ -1315,6 +1332,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	// snippet, not the file.
 	snippetLineFmt := func(v guard.Violation) string { return fmt.Sprintf("snippet line %d: %s", v.Line, v.Symbol) }
 	writeCheckSection(&sb, &syms, fileScopeAskHeader, fsv, snippetLineFmt)
+	// file-scope is rateable, but only against a FILE-scoped oracle question:
+	// its finding is "this name is not reachable here", and the name is usually
+	// declared elsewhere in the repo — which is why it needs claimScope, not
+	// just a place in this map. qualified and deps-go get no entry: both assert
+	// package membership, and the oracle strips the qualifier.
+	for _, v := range fsv {
+		claimSyms["file-scope"] = append(claimSyms["file-scope"], v.Symbol)
+	}
 	writeCheckSection(&sb, &syms, qualifiedAskHeader, qualifiedV, snippetLineFmt)
 	writeCheckSection(&sb, &syms, depsGoAskHeader, depsGoV, snippetLineFmt)
 	if len(dangling) > 0 {
@@ -1340,9 +1365,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	syms = append(syms, callShapeSection(&sb, callShapes)...)
 	syms = append(syms, lintSection(&sb, lintFindingsList)...)
+	if ls := lintClaimSymbols(lintFindingsList); len(ls) > 0 {
+		claimSyms["lint"] = ls
+	}
 	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
 	hookAsk(out, sb.String())
-	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
+	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, ClaimSymbols: claimSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}

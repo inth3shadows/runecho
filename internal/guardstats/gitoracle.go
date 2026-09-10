@@ -63,6 +63,12 @@ var identRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 // ErrUnsafeSymbol is returned for a flagged name that is not a plain identifier.
 var ErrUnsafeSymbol = errors.New("symbol is not a plain identifier")
 
+// ErrUnknownScope is returned when the oracle has the question but not the
+// context to answer it — today, a ScopeFile query with no repo-relative path.
+// It is an error rather than a false so the pair lands in VerdictUnknown, which
+// is counted and reported, instead of being scored as a guard catch.
+var ErrUnknownScope = errors.New("cannot answer this scope for this record")
+
 // langPathspec limits `git grep` to files of the decision's language. Narrower
 // is better here: a Python symbol "found" in a vendored JS bundle would flip a
 // correct catch to a false VerdictFP. An unknown language searches everything,
@@ -445,11 +451,19 @@ func (g GitOracle) RevAt(worktree string, ts time.Time) (string, error) {
 	return rev, nil
 }
 
-// Defined reports whether sym was resolvable at rev: either declared anywhere in
-// the tree, or bound inside the edited file itself. rel is that file's
-// repo-relative path as returned by Worktree, which is what lets a sibling
-// worktree answer for a vanished one.
-func (g GitOracle) Defined(worktree, rev, lang, sym, rel string) (bool, error) {
+// Defined reports whether sym was resolvable at rev, under the dated question
+// scope names — see ClaimScope. rel is the edited file's repo-relative path as
+// returned by Worktree, which is what lets a sibling worktree answer for a
+// vanished one.
+//
+//	ScopeRepo — declared anywhere in the tree, or bound inside the edited file.
+//	ScopeFile — declared or bound inside the edited file, and nowhere else.
+//
+// The two are not variations on a theme. A file-scope finding names a symbol
+// that is usually declared SOMEWHERE in the repo — that is the premise of the
+// finding, not evidence against it — so answering it with the repo-scoped query
+// reports every correct catch as a false positive.
+func (g GitOracle) Defined(worktree, rev, lang, sym, rel string, scope ClaimScope) (bool, error) {
 	// A qualified name (`http.Gett`, `pkg.Helper`) reaches here from the
 	// dep-qualified check. Resolving one properly means resolving the qualifier
 	// to a package first, which this oracle does not do; searching the final
@@ -463,21 +477,72 @@ func (g GitOracle) Defined(worktree, rev, lang, sym, rel string) (bool, error) {
 		return false, fmt.Errorf("%w: %q", ErrUnsafeSymbol, sym)
 	}
 
+	if scope == ScopeFile {
+		// A file-scoped question without a file is unanswerable, and answering
+		// `false` would silently promote it to a guard catch. Worktree returns rel
+		// empty when it cannot place the path inside the repo.
+		if rel == "" {
+			return false, fmt.Errorf("%w: file-scoped question needs the edited file's path", ErrUnknownScope)
+		}
+		// The same hazard one step later: `git grep <pat> <rev> -- ':(literal)x'`
+		// exits 1 when x does not exist at rev, which is indistinguishable from
+		// "exists, no match" — so a file created, renamed or deleted between the
+		// ask and the commit being asked about would answer `false` at BOTH revs
+		// and classify as `stands`, a catch the audit never established. The
+		// repo-scoped path has no equivalent exposure: it searches the whole tree,
+		// which always exists.
+		exists, err := g.pathExists(worktree, rev, rel)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, fmt.Errorf("%w: %s does not exist at %s", ErrUnknownScope, rel, rev)
+		}
+		pathspec := []string{literalPathspec(rel)}
+		found, err := g.grep(worktree, rev, declPatterns(lang, needle), pathspec)
+		if err != nil || found {
+			return found, err
+		}
+		return g.definedByBinding(worktree, rev, lang, needle, rel)
+	}
+
 	found, err := g.grep(worktree, rev, declPatterns(lang, needle), langPathspec[lang])
 	if err != nil || found {
 		return found, err
 	}
 	// Bindings only count inside the edited file.
 	if rel != "" {
-		inImport, err := g.opensMultilineImport(worktree, rev, lang, rel)
-		if err != nil {
-			return false, err
-		}
-		if pats := bindPatterns(lang, needle, inImport); len(pats) > 0 {
-			return g.grep(worktree, rev, pats, []string{literalPathspec(rel)})
-		}
+		return g.definedByBinding(worktree, rev, lang, needle, rel)
 	}
 	return false, nil
+}
+
+// pathExists reports whether rel is present in rev's tree. Distinct from
+// knowsPath, which asks whether the path ever existed anywhere in history (a
+// repo-identity check); this asks about one specific commit, which is the only
+// thing that makes a file-scoped answer meaningful.
+func (g GitOracle) pathExists(worktree, rev, rel string) (bool, error) {
+	out, err := g.git(worktree, "ls-tree", "--name-only", rev, "--", rel)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// definedByBinding reports whether needle is BOUND (imported, assigned,
+// parameterised) inside rel at rev. Shared by both scopes because a binding has
+// only ever counted inside the edited file — the difference between the scopes
+// is entirely in the declaration query, not this one.
+func (g GitOracle) definedByBinding(worktree, rev, lang, needle, rel string) (bool, error) {
+	inImport, err := g.opensMultilineImport(worktree, rev, lang, rel)
+	if err != nil {
+		return false, err
+	}
+	pats := bindPatterns(lang, needle, inImport)
+	if len(pats) == 0 {
+		return false, nil
+	}
+	return g.grep(worktree, rev, pats, []string{literalPathspec(rel)})
 }
 
 // multilineImportOpener matches a line that opens a multi-line import block:

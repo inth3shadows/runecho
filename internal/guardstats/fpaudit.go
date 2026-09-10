@@ -135,7 +135,15 @@ const (
 // confident, wrong verdicts, which is the failure this whole type exists to stop.
 var claimScope = map[string]ClaimScope{
 	"violations": ScopeRepo,
-	"lint":       ScopeRepo,
+	// lint is ScopeFile, not ScopeRepo. Ruff's F821 is pyflakes: "undefined
+	// name" means unbound in an enclosing scope of THIS FILE, and says nothing
+	// about the rest of the repo. The guard also runs suppressAlreadyReported
+	// against `violations` before recording, which strips exactly the findings
+	// the repo-wide check already caught — so what survives is dominated by names
+	// that ARE declared elsewhere in the repo and merely unreachable here. Asked
+	// the repo-wide question, near enough all of them would score `fp` and
+	// falsely indict the check.
+	"lint":       ScopeFile,
 	"file-scope": ScopeFile,
 }
 
@@ -169,7 +177,12 @@ const (
 // checks that can appear in a reason string belong here — lint is absent because
 // its two rules split across both kinds and the reason cannot say which fired.
 var (
-	noOracleQuestionChecks   = []string{"qualified", "deps-go"}
+	// recv-method and var-type are here for the reason the guard gives for
+	// excluding them from claim_symbols in the first place: theirs is a MEMBER
+	// claim ("no such method on this receiver"), which a tree-wide grep cannot
+	// ask — exactly as for qualified. Labelling them not-a-resolution-claim would
+	// read as "correct and permanent" for what is really missing coverage.
+	noOracleQuestionChecks   = []string{"qualified", "deps-go", "recv-method", "var-type"}
 	notResolutionClaimChecks = []string{"duplicate-symbol", "dangling", "dropped-import", "call-shape"}
 )
 
@@ -271,23 +284,33 @@ type defKey struct {
 func claimedSymbols(d *Decision) map[string]ClaimScope {
 	out := make(map[string]ClaimScope, len(d.Symbols))
 	if d.ClaimSymbols != nil {
-		for check, syms := range d.ClaimSymbols {
+		// Two checks CAN claim the same name on one edit, and first-writer-wins
+		// over Go's randomised map iteration made the verdict depend on which one
+		// the runtime happened to visit first. Measured on a single unmodified
+		// record where file-scope and lint both flagged `render`: ten fpaudit runs
+		// returned `stands` seven times and `fp` three times. An oracle whose
+		// headline rate is not reproducible on an unchanged log is not an oracle.
+		//
+		// So: narrowest scope wins, ties broken by nothing (the scopes are equal).
+		// ScopeFile asks strictly less than ScopeRepo — a name reachable in the
+		// edited file is reachable in the repo, never the reverse — so preferring
+		// it can only move a pair from `fp` toward `stands`/`premature`. That is
+		// the conservative direction: it declines to indict the resolver on a
+		// question the check did not ask, rather than manufacturing a false
+		// positive from a scope mismatch.
+		//
+		// ScopeFile and ScopeRepo are also the ONLY two scopes; a third would need
+		// a real ordering here rather than this two-value rule.
+		for _, check := range sortedKeys(d.ClaimSymbols) {
 			scope, known := claimScope[check]
 			if !known {
 				continue
 			}
-			for _, sym := range syms {
-				// First writer wins, and the map iteration above is unordered — so
-				// this is only deterministic because no two checks in claimScope can
-				// claim the same name on one edit: lint findings whose symbol the
-				// additive check already flagged are dropped upstream by
-				// suppressAlreadyReported, and file-scope is a disjoint check by
-				// construction (its finding is "declared, but not HERE", which the
-				// additive check by definition did not flag). If a third repo-scoped
-				// check is ever added, re-check that invariant rather than assuming it.
-				if _, dup := out[sym]; !dup {
-					out[sym] = scope
+			for _, sym := range d.ClaimSymbols[check] {
+				if prev, dup := out[sym]; dup && prev == ScopeFile {
+					continue
 				}
+				out[sym] = scope
 			}
 		}
 		return out
@@ -303,6 +326,19 @@ func claimedSymbols(d *Decision) map[string]ClaimScope {
 			out[sym] = ScopeRepo
 		}
 	}
+	return out
+}
+
+// sortedKeys returns m's keys in a stable order, so an audit over an unchanged
+// log produces an unchanged result. Go randomises map iteration deliberately;
+// an offline measurement instrument is exactly the place that must not inherit
+// it.
+func sortedKeys(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -326,11 +362,15 @@ type AuditFinding struct {
 	GV      string
 	Symbol  string
 	Verdict AuditVerdict
-	// Scope is the dated question that produced Verdict (#393). Empty on an n/a
-	// or not-an-identifier pair, where no question was asked. Carried on the
-	// finding so a downstream consumer — the premature-latency scan, the JSON —
-	// re-asks the SAME question rather than defaulting to repo-wide and silently
-	// measuring a different thing.
+	// Scope is the dated question this pair WOULD be judged by (#393). Set
+	// whenever the record marked the symbol rateable — which includes the
+	// not-an-identifier and unknown pairs, where classify short-circuits before
+	// asking anything, so a populated Scope does not imply the oracle ran. Empty
+	// only on n/a, where no check claimed the symbol at all.
+	//
+	// Carried on the finding so a downstream consumer — the premature-latency
+	// scan, the JSON — re-asks the SAME question rather than defaulting to
+	// repo-wide and silently measuring a different thing.
 	Scope ClaimScope
 	// Note explains a VerdictUnknown (the oracle's error) or a VerdictNA (one of
 	// the NAReason* constants — n/a is not one thing, see #393). Empty otherwise.
@@ -778,12 +818,12 @@ func FormatAudit(s AuditStats) string {
 			}
 		}
 	}
-	b.WriteString("\nEach rated check is asked the question it actually made (#393): violations and\n")
-	b.WriteString("lint F821 assert 'resolves nowhere in the repo'; file-scope asserts 'not\n")
-	b.WriteString("reachable in THIS file', and is answered against the edited file alone. Asking\n")
-	b.WriteString("the repo-wide question of a file-scope finding would report every correct catch\n")
-	b.WriteString("as a false positive — the name it flags is usually declared elsewhere, which is\n")
-	b.WriteString("the premise of the finding, not evidence against it.\n")
+	b.WriteString("\nEach rated check is asked the question it actually made (#393): violations\n")
+	b.WriteString("asserts 'resolves nowhere in the repo' and is answered tree-wide; file-scope and\n")
+	b.WriteString("ruff F821 assert 'not reachable in THIS file' and are answered against the edited\n")
+	b.WriteString("file alone. Asking the repo-wide question of either would report every correct\n")
+	b.WriteString("catch as a false positive — the name they flag is usually declared elsewhere,\n")
+	b.WriteString("which is the premise of the finding, not evidence against it.\n")
 	b.WriteString("\nA high 'premature' share is not a resolver bug. It means the check fires at\n")
 	b.WriteString("the wrong moment — an agent writing a caller before its callee — and the fix\n")
 	b.WriteString("is to move the check later, not to widen the known-symbol set.\n")

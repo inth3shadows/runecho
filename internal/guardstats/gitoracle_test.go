@@ -653,3 +653,34 @@ func TestGitOracleScopeFileWithoutRelIsUnknown(t *testing.T) {
 		t.Errorf("Defined(rel=\"\", ScopeFile) = (%v, %v), want ErrUnknownScope", got, err)
 	}
 }
+
+// `git grep <pat> <rev> -- ':(literal)x'` exits 1 when x does not exist at rev,
+// which is indistinguishable from "exists, no match". Without a path probe a
+// file created, renamed or deleted between the ask and the commit answers false
+// at BOTH revs and classifies as `stands` — a catch the audit never established.
+// The repo-scoped path has no equivalent exposure: it searches the whole tree.
+func TestGitOracleScopeFileOnAPathMissingAtRevIsUnknown(t *testing.T) {
+	root := gitRepo(t)
+	write(t, root, "old.py", "def helper():\n    return 1\n")
+	first := commit(t, root, "one", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC))
+
+	// The file the ask was about only appears in the SECOND commit.
+	write(t, root, "new.py", "def helper():\n    return 1\n")
+	second := commit(t, root, "two", time.Date(2026, 9, 1, 13, 0, 0, 0, time.UTC))
+
+	g := GitOracle{Timeout: 20 * time.Second}
+	got, err := g.Defined(root, first, "py", "helper", "new.py", ScopeFile)
+	if !errors.Is(err, ErrUnknownScope) {
+		t.Errorf("Defined(new.py @ first commit, ScopeFile) = (%v, %v), want ErrUnknownScope — "+
+			"a bare false here reads as a guard catch", got, err)
+	}
+	// Control: at the commit where it does exist, the question is answerable.
+	if got, err := g.Defined(root, second, "py", "helper", "new.py", ScopeFile); err != nil || !got {
+		t.Errorf("control: Defined(new.py @ second commit) = (%v, %v), want (true, nil)", got, err)
+	}
+	// And the repo-scoped question was never exposed to this: it finds the def in
+	// old.py at the first commit regardless of new.py's absence.
+	if got, err := g.Defined(root, first, "py", "helper", "new.py", ScopeRepo); err != nil || !got {
+		t.Errorf("ScopeRepo Defined = (%v, %v), want (true, nil)", got, err)
+	}
+}

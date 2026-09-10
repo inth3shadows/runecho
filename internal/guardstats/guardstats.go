@@ -98,7 +98,7 @@ type rawDecision struct {
 	Reason       string              `json:"reason"`
 	Symbols      []string            `json:"symbols,omitempty"`
 	LearnSymbols []string            `json:"learn_symbols,omitempty"`
-	ClaimSymbols map[string][]string `json:"claim_symbols,omitempty"`
+	ClaimSymbols map[string][]string `json:"claim_symbols"`
 	Edit         string              `json:"edit,omitempty"`
 	Checks       map[string]string   `json:"checks,omitempty"`
 	CheckReasons map[string]string   `json:"check_reasons,omitempty"`

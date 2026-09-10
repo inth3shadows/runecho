@@ -117,14 +117,16 @@ narrow, because it feeds the guard's own known-set. What the audit needs is what
 the **check asserted**, which is a different question and is now recorded
 separately as `claim_symbols`.
 
-**Each check is asked the question it actually made.** `violations` and ruff
-`F821` assert "resolves nowhere in the repo" and are answered tree-wide.
-`file-scope` asserts "not reachable in **this file**" and is answered against
-the edited file alone. Asking the repo-wide question of a file-scope finding
-would report every correct catch as a false positive — the name it flags is
-usually declared elsewhere, which is the premise of the finding, not evidence
-against it. That mistake has a precedent in this very file: the audit's first
-run scored `duplicate-symbol` at 27 fp / 0 stands before `n/a` existed.
+**Each check is asked the question it actually made.** `violations` asserts
+"resolves nowhere in the repo" and is answered tree-wide. `file-scope` and ruff
+`F821` both assert "not reachable in **this file**" — pyflakes resolves against
+the file's own scopes, not the repo's — and are answered against the edited file
+alone. Asking the repo-wide question of either would report every correct catch
+as a false positive: the name they flag is usually declared elsewhere, which is
+the premise of the finding, not evidence against it. That mistake has a
+precedent in this very file — the audit's first run scored `duplicate-symbol` at
+27 fp / 0 stands before `n/a` existed — and it very nearly shipped again here,
+caught in review.
 
 The numbers above predate `claim_symbols`, which only stamps records written by
 a guard new enough to carry it — so the per-check table fills in going forward,

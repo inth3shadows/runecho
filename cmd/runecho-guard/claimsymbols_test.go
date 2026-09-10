@@ -135,6 +135,18 @@ func TestCallShapeAskClaimsNothing(t *testing.T) {
 	if got := claimSymbolsOf(t, rec)["call-shape"]; got != nil {
 		t.Errorf("claim_symbols[call-shape] = %v, want nothing — the callee resolves by construction", got)
 	}
+	// And the key must still be THERE, empty. `omitempty` on a map drops an empty
+	// one, which would make "this guard, no rateable claim" indistinguishable on
+	// disk from "a guard too old to have the field" — and fpaudit would file
+	// every such ask under legacy-record, a bucket documented as shrinking that
+	// would instead grow with every ask.
+	claims, present := rec["claim_symbols"]
+	if !present {
+		t.Fatalf("claim_symbols key absent from a new-guard ask: %v", rec)
+	}
+	if m, ok := claims.(map[string]any); !ok || len(m) != 0 {
+		t.Errorf("claim_symbols = %v, want an empty object", claims)
+	}
 }
 
 // lintClaimSymbols is the F821/F811 split, unit-tested so it does not depend on

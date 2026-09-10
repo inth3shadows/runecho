@@ -484,6 +484,20 @@ func (g GitOracle) Defined(worktree, rev, lang, sym, rel string, scope ClaimScop
 		if rel == "" {
 			return false, fmt.Errorf("%w: file-scoped question needs the edited file's path", ErrUnknownScope)
 		}
+		// The same hazard one step later: `git grep <pat> <rev> -- ':(literal)x'`
+		// exits 1 when x does not exist at rev, which is indistinguishable from
+		// "exists, no match" — so a file created, renamed or deleted between the
+		// ask and the commit being asked about would answer `false` at BOTH revs
+		// and classify as `stands`, a catch the audit never established. The
+		// repo-scoped path has no equivalent exposure: it searches the whole tree,
+		// which always exists.
+		exists, err := g.pathExists(worktree, rev, rel)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, fmt.Errorf("%w: %s does not exist at %s", ErrUnknownScope, rel, rev)
+		}
 		pathspec := []string{literalPathspec(rel)}
 		found, err := g.grep(worktree, rev, declPatterns(lang, needle), pathspec)
 		if err != nil || found {
@@ -501,6 +515,18 @@ func (g GitOracle) Defined(worktree, rev, lang, sym, rel string, scope ClaimScop
 		return g.definedByBinding(worktree, rev, lang, needle, rel)
 	}
 	return false, nil
+}
+
+// pathExists reports whether rel is present in rev's tree. Distinct from
+// knowsPath, which asks whether the path ever existed anywhere in history (a
+// repo-identity check); this asks about one specific commit, which is the only
+// thing that makes a file-scoped answer meaningful.
+func (g GitOracle) pathExists(worktree, rev, rel string) (bool, error) {
+	out, err := g.git(worktree, "ls-tree", "--name-only", rev, "--", rel)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // definedByBinding reports whether needle is BOUND (imported, assigned,

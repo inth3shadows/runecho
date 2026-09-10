@@ -1,8 +1,40 @@
 package guardstats
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 )
+
+// auditRoundTrip encodes decisions as JSONL and reads them back through
+// LoadReader — the path the real log takes. Two of this file's early tests
+// passed by hand-constructing an in-memory shape the log could not actually
+// hold (an empty claim_symbols map, dropped by `omitempty`), so any assertion
+// about the ABSENT-vs-EMPTY distinction has to go through the encoder.
+func auditRoundTrip(t *testing.T, ds []Decision) []Decision {
+	t.Helper()
+	var b strings.Builder
+	for _, d := range ds {
+		raw := rawDecision{
+			V: 1, GV: d.GV, TS: d.TS.UTC().Format(time.RFC3339), Mode: d.Mode,
+			Repo: d.Repo, File: d.File, Lang: d.Lang, Decision: d.Decision,
+			Reason: d.Reason, Symbols: d.Symbols, LearnSymbols: d.LearnSymbols,
+			ClaimSymbols: d.ClaimSymbols,
+		}
+		line, err := json.Marshal(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	out, err := LoadReader(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 // auditClaimAsk is auditAsk with claim_symbols set — the #393 record shape.
 func auditClaimAsk(at, file, reason string, syms []string, learn []string, claims map[string][]string) Decision {
@@ -111,7 +143,7 @@ func TestAuditCallShapeStaysNAWithTheCorrectReason(t *testing.T) {
 	d := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/a.py", "call-shape",
 		[]string{"fetch_page"}, nil, map[string][]string{})
 
-	s := Audit([]Decision{d}, auditTS("2026-08-01T00:00:00Z"), o)
+	s := Audit(auditRoundTrip(t, []Decision{d}), auditTS("2026-08-01T00:00:00Z"), o)
 	f := s.Findings[0]
 	if f.Verdict != VerdictNA {
 		t.Fatalf("call-shape verdict = %q, want %q", f.Verdict, VerdictNA)
@@ -132,7 +164,7 @@ func TestAuditQualifiedNAReadsAsMissingCoverage(t *testing.T) {
 	d := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/a.go", "qualified",
 		[]string{"pkg.Helper"}, nil, map[string][]string{})
 
-	s := Audit([]Decision{d}, auditTS("2026-08-01T00:00:00Z"), o)
+	s := Audit(auditRoundTrip(t, []Decision{d}), auditTS("2026-08-01T00:00:00Z"), o)
 	if got := s.Findings[0].Note; got != NAReasonNoOracleQuestion {
 		t.Fatalf("na reason = %q, want %q", got, NAReasonNoOracleQuestion)
 	}
@@ -242,5 +274,115 @@ func TestAuditMergedAskRatesItsClaimedHalf(t *testing.T) {
 	}
 	if got := byName["Removed"]; got.Verdict != VerdictNA || got.Note != NAReasonNotResolutionClaim {
 		t.Errorf("Removed = %q/%q, want %q/%q", got.Verdict, got.Note, VerdictNA, NAReasonNotResolutionClaim)
+	}
+}
+
+// The empty-vs-absent distinction, through the encoder. A record the current
+// guard wrote with no rateable claim must NOT read as one written before the
+// field existed: legacy-record is documented as shrinking as the window moves
+// forward, and conflating the two would make it grow with every ask instead.
+func TestAuditEmptyClaimsAreNotLegacyRecords(t *testing.T) {
+	o := &fakeOracle{head: "HEAD", revAt: map[string]string{"": "R0"}}
+
+	modern := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/a.py", "duplicate-symbol",
+		[]string{"Dupe"}, nil, map[string][]string{})
+	legacy := auditAsk("2026-09-01T11:00:00Z", "/wt/b.py", "duplicate-symbol",
+		[]string{"Other"}, nil)
+
+	s := Audit(auditRoundTrip(t, []Decision{modern, legacy}), auditTS("2026-08-01T00:00:00Z"), o)
+	if got := s.Findings[0].Note; got != NAReasonNotResolutionClaim {
+		t.Errorf("modern empty-claims record note = %q, want %q", got, NAReasonNotResolutionClaim)
+	}
+	if got := s.Findings[1].Note; got != NAReasonLegacyRecord {
+		t.Errorf("pre-field record note = %q, want %q", got, NAReasonLegacyRecord)
+	}
+}
+
+// ruff F821 is pyflakes: "undefined name" means unbound in an enclosing scope of
+// THIS FILE. The guard also strips, via suppressAlreadyReported, exactly the
+// findings the repo-wide check already caught — so a surviving lint claim is
+// dominated by names declared elsewhere in the repo. Asked repo-wide, they would
+// score fp and indict the check for being right.
+func TestAuditLintAsksTheFileScopedQuestion(t *testing.T) {
+	o := &fakeOracle{
+		head:  "HEAD",
+		revAt: map[string]string{"": "R0"},
+		scopedDefined: map[[3]string]bool{
+			{"R0", "helper", "repo"}:   true,
+			{"HEAD", "helper", "repo"}: true,
+			{"R0", "helper", "file"}:   false,
+			{"HEAD", "helper", "file"}: false,
+		},
+	}
+	d := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/a.py", "lint",
+		[]string{"helper"}, nil, map[string][]string{"lint": {"helper"}})
+
+	s := Audit(auditRoundTrip(t, []Decision{d}), auditTS("2026-08-01T00:00:00Z"), o)
+	if got := s.Findings[0].Scope; got != ScopeFile {
+		t.Fatalf("lint scope = %q, want %q", got, ScopeFile)
+	}
+	if got := s.Findings[0].Verdict; got != VerdictStands {
+		t.Errorf("lint verdict = %q, want %q — the repo-wide question would say %q", got, VerdictStands, VerdictFP)
+	}
+}
+
+// file-scope and lint DO collide: both fire on a Python Write for a name that is
+// in the repo index but unreachable in the edited file, and suppressAlreadyReported
+// only ever dedupes lint against `violations`. With first-writer-wins over Go's
+// randomised map order, one unmodified record returned `stands` on some runs and
+// `fp` on others. An oracle whose rate is not reproducible on an unchanged log is
+// not an oracle, so the resolution must be deterministic AND narrowest-wins.
+func TestAuditCollidingClaimsAreDeterministicAndNarrowest(t *testing.T) {
+	o := &fakeOracle{
+		head:  "HEAD",
+		revAt: map[string]string{"": "R0"},
+		scopedDefined: map[[3]string]bool{
+			{"R0", "render", "repo"}:   true,
+			{"HEAD", "render", "repo"}: true,
+			{"R0", "render", "file"}:   false,
+			{"HEAD", "render", "file"}: false,
+		},
+	}
+	//
+	// Claimed by violations (ScopeRepo) AND file-scope (ScopeFile) — the pair
+	// whose scopes actually DIVERGE. The production collision this was written
+	// for is file-scope vs lint, but both of those now resolve to ScopeFile, so
+	// using them here would pass under any ordering rule and pin nothing. This
+	// pair is what makes the assertion load-bearing: it fails the moment
+	// resolution goes back to first-writer-wins over an unordered map.
+	d := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/tests/test_r.py", "violations+file-scope",
+		[]string{"render"}, nil, map[string][]string{
+			"violations": {"render"},
+			"file-scope": {"render"},
+		})
+	ds := auditRoundTrip(t, []Decision{d})
+
+	// Repeated because the defect was a coin flip: a single run passed ~70% of
+	// the time even while broken.
+	for i := 0; i < 50; i++ {
+		s := Audit(ds, auditTS("2026-08-01T00:00:00Z"), o)
+		if got := s.Findings[0].Scope; got != ScopeFile {
+			t.Fatalf("run %d: scope = %q, want %q — the narrower question, always", i, got, ScopeFile)
+		}
+		if got := s.Findings[0].Verdict; got != VerdictStands {
+			t.Fatalf("run %d: verdict = %q, want %q", i, got, VerdictStands)
+		}
+	}
+}
+
+// recv-method and var-type assert MEMBER existence ("no such method on this
+// receiver"), which this oracle cannot ask — the same reason qualified is
+// unrateable, and the guard's own comment says so when it excludes them from
+// claim_symbols. Labelling them not-a-resolution-claim would render as "correct
+// and permanent" for what is really missing coverage.
+func TestAuditMemberClaimsReadAsMissingCoverage(t *testing.T) {
+	o := &fakeOracle{head: "HEAD", revAt: map[string]string{"": "R0"}}
+	for _, reason := range []string{"recv-method", "var-type"} {
+		d := auditClaimAsk("2026-09-01T10:00:00Z", "/wt/a.go", reason,
+			[]string{"Client.Fetch"}, nil, map[string][]string{})
+		s := Audit(auditRoundTrip(t, []Decision{d}), auditTS("2026-08-01T00:00:00Z"), o)
+		if got := s.Findings[0].Note; got != NAReasonNoOracleQuestion {
+			t.Errorf("%s na reason = %q, want %q", reason, got, NAReasonNoOracleQuestion)
+		}
 	}
 }

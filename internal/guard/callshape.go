@@ -174,7 +174,7 @@ func ExtractCallShapes(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 		runEnd[j] = len(lines)
 	}
 
-	builtins := builtinsFor(lang)
+	builtins := callshapeBuiltinsFor(lang)
 
 	for i, l := range lines {
 		scan := scans[i]

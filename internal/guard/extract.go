@@ -108,39 +108,122 @@ var jsTestGlobals = setOf(
 	"xit", "xdescribe", "fit", "fdescribe",
 )
 
-var pyBuiltins = setOf(
-	// keywords that can appear immediately before '(' (`return (x)`, `for i in (…)`,
-	// `raise X`, `a or (b)`). Without these, ~half of all Python edits false-positive.
-	"return", "raise", "yield", "assert", "del", "pass", "break", "continue",
-	"global", "nonlocal", "lambda", "with", "as", "from", "import", "in", "is",
-	"and", "or", "not", "if", "elif", "else", "for", "while", "try", "except",
-	"finally", "def", "class", "async", "await", "None", "True", "False",
-	// builtin functions
-	"print", "len", "range", "str", "int", "float", "bool",
-	"list", "dict", "set", "tuple", "type", "isinstance", "issubclass",
-	"super", "enumerate", "zip", "map", "filter", "open",
-	"repr", "getattr", "setattr", "hasattr", "delattr", "format",
-	"sorted", "reversed", "sum", "min", "max", "abs",
-	"any", "all", "next", "iter", "id", "hash", "dir",
-	"vars", "callable", "input", "exit", "quit",
-	"round", "divmod", "pow", "bytes", "bytearray", "frozenset", "complex",
-	"slice", "object", "property", "staticmethod", "classmethod", "memoryview",
-	"ord", "chr", "hex", "oct", "bin", "ascii", "globals", "locals",
-	"eval", "exec", "compile", "breakpoint",
-	// exception hierarchy (constantly raised: `raise ValueError(...)`)
-	"Exception", "BaseException", "ValueError", "TypeError", "KeyError",
-	"IndexError", "AttributeError", "RuntimeError", "OSError", "IOError",
-	"FileNotFoundError", "FileExistsError", "PermissionError", "IsADirectoryError",
-	"NotADirectoryError", "NotImplementedError", "StopIteration",
-	"StopAsyncIteration", "GeneratorExit", "KeyboardInterrupt", "SystemExit",
-	"ArithmeticError", "ZeroDivisionError", "OverflowError", "FloatingPointError",
-	"LookupError", "NameError", "UnboundLocalError", "ImportError",
-	"ModuleNotFoundError", "AssertionError", "TimeoutError", "ConnectionError",
-	"ConnectionResetError", "BrokenPipeError", "RecursionError", "MemoryError",
-	"BufferError", "EOFError", "TabError", "IndentationError", "SyntaxError",
-	"UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError", "Warning",
-	"DeprecationWarning", "UserWarning", "RuntimeWarning",
+// pyCoreBuiltins is every name the Python INTERPRETER resolves without a
+// definition in the file: the keyword list plus the builtins namespace, as seen
+// with site processing disabled.
+//
+// GENERATED, not curated. Regenerate with:
+//
+//	python3 -S -c 'import keyword,builtins; print("\n".join(sorted(set(keyword.kwlist)|set(dir(builtins)))))'
+//
+// Generated from CPython 3.14.7. TestPyBuiltinsCoversInterpreter pins it.
+//
+// The `-S` is load-bearing, not tidiness. `dir(builtins)` is PROCESS STATE, and
+// sitecustomize.py / usercustomize.py mutate it: line_profiler does
+// `builtins.profile = ...`, gettext.install() binds `_`, and conda and Debian
+// both ship a sitecustomize. Regenerating without `-S` on such a machine bakes
+// those names in, where they read as ordinary entries in a 185-name generated
+// block — and a name wrongly in this set silences the guard on that identifier
+// forever. `-S` shuts that route at the source rather than detecting it later.
+//
+// It was hand-maintained until #387 and was 38 names short — `__import__` alone
+// accounted for 19 of the 41 false positives the #313 ruff differential measured
+// over the CPython stdlib. Which omission ever surfaced depended on corpus
+// vocabulary rather than on the guard, which is why enumerating by hand kept
+// missing names.
+//
+// A SUPERSET is the safe direction, so this is generated from the newest
+// interpreter to hand rather than the oldest supported. A name here that an
+// older Python lacks can only make the guard silent on code targeting that
+// version (a false negative, vanishingly rare); a name MISSING here is a false
+// positive on ordinary correct code, which is the defect #387 filed.
+//
+// Soft keywords are excluded with ONE exception. keyword.softkwlist is
+// `match, case, type, _`; `match`, `case` and `_` are absent here because they
+// are ordinary identifiers outside their grammatical position, so folding them
+// in would mask a real hallucination named `match`. `type` IS present and must
+// stay — a genuine builtin (`type(x)`, `type(name, bases, dict)`) that merely
+// also appears in softkwlist. Deleting it to make the set match softkwlist would
+// false-positive on every `type(...)` call in Python.
+// TestPyBuiltinsExcludesSoftKeywords pins both halves.
+var pyCoreBuiltins = setOf(
+	"ArithmeticError", "AssertionError", "AttributeError", "BaseException",
+	"BaseExceptionGroup", "BlockingIOError", "BrokenPipeError", "BufferError",
+	"BytesWarning", "ChildProcessError", "ConnectionAbortedError",
+	"ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
+	"DeprecationWarning", "EOFError", "Ellipsis", "EncodingWarning",
+	"EnvironmentError", "Exception", "ExceptionGroup", "False",
+	"FileExistsError", "FileNotFoundError", "FloatingPointError",
+	"FutureWarning", "GeneratorExit", "IOError", "ImportError", "ImportWarning",
+	"IndentationError", "IndexError", "InterruptedError", "IsADirectoryError",
+	"KeyError", "KeyboardInterrupt", "LookupError", "MemoryError",
+	"ModuleNotFoundError", "NameError", "None", "NotADirectoryError",
+	"NotImplemented", "NotImplementedError", "OSError", "OverflowError",
+	"PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
+	"PythonFinalizationError", "RecursionError", "ReferenceError",
+	"ResourceWarning", "RuntimeError", "RuntimeWarning", "StopAsyncIteration",
+	"StopIteration", "SyntaxError", "SyntaxWarning", "SystemError",
+	"SystemExit", "TabError", "TimeoutError", "True", "TypeError",
+	"UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError",
+	"UnicodeError", "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
+	"ValueError", "Warning", "ZeroDivisionError", "_IncompleteInputError",
+	"__build_class__", "__debug__", "__doc__", "__import__", "__loader__",
+	"__name__", "__package__", "__spec__", "abs", "aiter", "all", "and",
+	"anext", "any", "as", "ascii", "assert", "async", "await", "bin", "bool",
+	"break", "breakpoint", "bytearray", "bytes", "callable", "chr", "class",
+	"classmethod", "compile", "complex", "continue", "def", "del", "delattr",
+	"dict", "dir", "divmod", "elif", "else", "enumerate", "eval", "except",
+	"exec", "filter", "finally", "float", "for", "format", "from", "frozenset",
+	"getattr", "global", "globals", "hasattr", "hash", "hex", "id", "if",
+	"import", "in", "input", "int", "is", "isinstance", "issubclass", "iter",
+	"lambda", "len", "list", "locals", "map", "max", "memoryview", "min",
+	"next", "nonlocal", "not", "object", "oct", "open", "or", "ord", "pass",
+	"pow", "print", "property", "raise", "range", "repr", "return", "reversed",
+	"round", "set", "setattr", "slice", "sorted", "staticmethod", "str", "sum",
+	"super", "try", "tuple", "type", "vars", "while", "with", "yield", "zip",
 )
+
+// pySiteBuiltins are resolved by the `site` module rather than the interpreter
+// core: `python3 -S` does NOT define them, nor do some frozen and embedded
+// interpreters, where a reference is a genuine NameError this guard will miss.
+//
+// Kept deliberately. The guard's contract is "this identifier does not resolve",
+// and in every stock CPython these DO resolve — an agent writing `help(user_id)`
+// meaning a project function gets a working, semantically wrong program, which
+// is a logic defect and out of this check's scope by construction. Dropping them
+// would put the guard in the position of flagging code that runs: measured, 14
+// stdlib files make 44 bare `help(` calls without defining it, ~0.36 per KLOC,
+// larger than this branch's entire remaining false-positive rate of 0.12.
+//
+// `exit` and `quit` are site-injected too and were already in the hand-curated
+// list before #387, so listing all six here is consistency, not a new
+// concession. They are split out rather than folded in so the decision is
+// reviewable — and because callshape treats them differently (see
+// callshapeBuiltinsFor).
+var pySiteBuiltins = setOf("help", "license", "credits", "copyright", "exit", "quit")
+
+// pyBuiltins is what the RESOLVE check consults: a name in it is never a
+// hallucination, so the guard stays silent on it.
+//
+// TWO CONSUMERS, TWO CONTRACTS — a name added here changes both, and they do not
+// mean the same thing by membership:
+//
+//   - extractRefs (below) — "this reference resolves", so do not flag it.
+//   - ExtractCallShapes (callshape.go) — "never check this call's ARITY".
+//     Membership suppresses shape extraction entirely, which is NOT the same
+//     claim; callshape therefore consults callshapeBuiltinsFor, not this set.
+var pyBuiltins = unionOf(pyCoreBuiltins, pySiteBuiltins)
+
+// unionOf returns a new set holding every member of the given sets.
+func unionOf(sets ...map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, s := range sets {
+		for k := range s {
+			out[k] = struct{}{}
+		}
+	}
+	return out
+}
 
 func setOf(ss ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ss))
@@ -1529,6 +1612,40 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		}
 	}
 	return refs
+}
+
+// pyCallShapeRedeclarable are builtins a project realistically redeclares, and
+// which callshape must therefore NOT skip.
+//
+// Membership in pyBuiltins means two different things to its two consumers, and
+// only one of them is defensible for these names. For the RESOLVE check,
+// `credits` is a builtin and a reference to it resolves — correct. For CALLSHAPE,
+// skipping means "never check this call's arity", and a repo that writes
+// `def credits(name, amount)` has a real declaration: the builtin is shadowed and
+// irrelevant, so suppressing shape extraction throws away the one check that had
+// something true to say about `credits(user, 10, "usd")`.
+//
+// Measured against master over #387's batch: these six went shapes=1 -> shapes=0,
+// losing arity checking. `print`/`len`/`type` were already 0 and stay 0, so
+// excluding only this set costs nothing elsewhere — nobody redeclares `print` and
+// gets a useful arity check out of it.
+var pyCallShapeRedeclarable = unionOf(pySiteBuiltins, setOf("aiter", "anext"))
+
+// callshapeBuiltinsFor is builtinsFor for the CALL-SHAPE check, whose contract is
+// "never check this call's arity" rather than "this reference resolves". See
+// pyCallShapeRedeclarable.
+func callshapeBuiltinsFor(lang Lang) map[string]struct{} {
+	if lang != LangPython {
+		return builtinsFor(lang)
+	}
+	out := make(map[string]struct{}, len(pyBuiltins))
+	for k := range pyBuiltins {
+		if _, redeclarable := pyCallShapeRedeclarable[k]; redeclarable {
+			continue
+		}
+		out[k] = struct{}{}
+	}
+	return out
 }
 
 func builtinsFor(lang Lang) map[string]struct{} {

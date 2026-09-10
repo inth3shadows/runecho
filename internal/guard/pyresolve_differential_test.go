@@ -1053,8 +1053,22 @@ func TestPyResolveNoFalsePositivesAgainstRuff(t *testing.T) {
 	}
 
 	if len(runFPs) > 0 {
-		t.Errorf("PROVEN FALSE POSITIVES: guard.Run flagged %d site(s) on file(s) ruff proves clean — every one of "+
-			"these is a defect with no counter-argument:\n%s", len(runFPs), formatPyFlagBlock("Run false positives", runFPs))
+		// The sampled-corpus caveat belongs in the MESSAGE, not only in a comment
+		// nobody opens while chasing a red test. On a reduced corpus the repo-wide
+		// known set is smaller, so filed defects that the full stdlib's vocabulary
+		// resolves (#389's LC_ALL, #390's replace) surface here through Run. That
+		// is expected, not a regression — and the flags to look at are in Run, not
+		// FileScope, which is where the previous wording sent people.
+		caveat := ""
+		if !fullDefaultCorpus {
+			caveat = "\n\nNOTE: this run used a REDUCED corpus, so some of these are expected. " +
+				"A smaller known set unmasks defects the full stdlib resolves — #389 (LC_ALL, platform.py) " +
+				"and #390 (replace, difflib.py) both fire through Run below full size. Re-run without " +
+				"RUNECHO_ORACLE_PY_FILES/RUNECHO_ORACLE_PY_CORPUS before treating these as new."
+		}
+		t.Errorf("PROVEN FALSE POSITIVES: guard.Run flagged %d site(s) on file(s) ruff proves clean — on the "+
+			"full default corpus every one of these is a defect with no counter-argument:%s\n%s",
+			len(runFPs), caveat, formatPyFlagBlock("Run false positives", runFPs))
 	}
 }
 
@@ -1068,26 +1082,40 @@ type pyKnownGap struct {
 }
 
 // pyKnownGaps subtracts measured-but-filed defects from phase 1's FAIL set.
+// It is EMPTY, and keeping it (rather than deleting the mechanism) is
+// deliberate: the next filed-but-unfixed false positive should go here rather
+// than weaken a fail condition.
 //
-// Keyed by SYMBOL, not by file:line. A file:line entry would still stop
-// matching when the corpus moves — that is not what symbol keying prevents,
-// and the STALE check above fails loudly either way, it does not fail
-// silently. What symbol keying actually buys: (1) it tolerates the whole
-// class the issue names, not one accidental occurrence of it, so the entry
-// stays meaningful across CPython versions where the surrounding code
-// differs; and (2) it survives line-number drift between interpreter
-// versions, where a file:line entry would go stale on every version bump
-// even though the underlying gap (an incomplete pyBuiltins) hasn't changed.
+// Keyed by SYMBOL, not by file:line. A file:line entry would still stop matching
+// when the corpus moves — that is not what symbol keying prevents, and the STALE
+// check above fails loudly either way. What symbol keying buys: it tolerates the
+// whole class an issue names rather than one accidental occurrence, and it
+// survives line-number drift between interpreter versions.
 //
-// Both entries here are #387 — an incomplete pyBuiltins that also disagrees with
-// filescope.go's own separate list. #388 (backslash-continued `from M import`)
-// needs no entry: it surfaces only through FileScope, which is already
-// report-only above. If FileScope is ever promoted to a fail condition, #388's
-// symbols must be added here or that promotion goes red on a filed defect.
-var pyKnownGaps = map[string]pyKnownGap{
-	"__import__":  {"#387", "pyBuiltins omits __import__; filescope.go:60 has it, extract.go:111-143 does not"},
-	"SystemError": {"#387", "pyBuiltins omits the SystemError builtin exception"},
-}
+// #387 was the only occupant (pyBuiltins missing __import__ and SystemError).
+// Generating pyBuiltins from the interpreter closed it, and the entries were
+// deleted rather than left behind because the STALE check fails on an entry that
+// stops firing — so emptying this map is the verification that the fix landed,
+// not cleanup after it.
+//
+// #388, #389 and #390 deliberately get NO entry, and the reason is corpus
+// vocabulary, NOT check ownership. An earlier version of this comment claimed
+// they "surface only through FileScope, which is report-only". That is false and
+// was measured false: at RUNECHO_ORACLE_PY_FILES=40, #390's `replace`
+// (difflib.py) fires through Run in three postures and #389's `LC_ALL`
+// (platform.py) in two. They are invisible at FULL corpus size only because the
+// repo-wide known set happens to contain those names — locale.py defines
+// LC_ALL, and some stdlib module defines a `replace`. They still FIRE at full
+// size — just through FileScope, which is report-only — so "masked" means
+// masked from Run, not silent. See
+// pyresolve_race_test.go, which says the same thing about why the race
+// scale-down does not reduce the corpus.
+//
+// So any of them appearing as a Run false positive on the DEFAULT corpus is a
+// genuine regression in the known set, and should go red here rather than be
+// allowlisted away. A sampled run (RUNECHO_ORACLE_PY_FILES) that goes red on
+// them is expected, not a bug — look in Run, not FileScope.
+var pyKnownGaps = map[string]pyKnownGap{}
 
 // ---------------------------------------------------------------------------
 // Phase 2 — false negatives, proven by a ruff-adjudicated mutation

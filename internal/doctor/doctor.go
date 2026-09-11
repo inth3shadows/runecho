@@ -53,8 +53,9 @@ type Result struct {
 // limitation rather than refactoring 11 files into a registry for this issue.
 var knownGateFlags = []string{
 	"CALLSHAPE", "CONTRACT", "DANGLING", "DEPS_GO", "DROPPED_IMPORT",
-	"DUPLICATE", "FILESCOPE", "LEARN", "LEARN_N", "LEARN_TTL_DAYS", "LINT",
-	"MAX_AGE", "QUALIFIED", "RECVMETHOD", "SKIP", "STRICT", "VARTYPE",
+	"DUPLICATE", "ENROLL_NOTICE", "FILESCOPE", "LEARN", "LEARN_N",
+	"LEARN_TTL_DAYS", "LINT", "MAX_AGE", "QUALIFIED", "RECVMETHOD", "SKIP",
+	"STRICT", "VARTYPE",
 }
 
 // hookFiles maps each installed git hook to the binary installHooks (cmd/

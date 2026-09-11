@@ -558,6 +558,49 @@ func UniqueName(db *DB, desired string) (string, error) {
 	}
 }
 
+// Resolution is everything Resolve learned about dir: the enrolled repo when
+// one was found, plus the git identities the resolver computed on its way
+// there.
+//
+// The identities are populated where the resolver actually needed them, which
+// is not every path. CommonDir is set whenever dir is in a git tree at all
+// (tier 1 always asks). TopLevel is only ever asked for when tier 1 does not
+// settle the answer, so the O(1) common-dir fast path — the steady state for
+// every enrolled repo — returns OK with TopLevel EMPTY. It is guaranteed on the
+// miss path, which is the one path a caller reads it on; do not read it as
+// "this dir has no working tree" on a hit. Populating it unconditionally would
+// buy nothing and cost the fast path a git subprocess, which is the whole point
+// of the fast path.
+//
+// The identities are carried on the MISS path deliberately. Resolving an
+// unenrolled tree already runs `rev-parse --git-common-dir`, `rev-parse
+// --show-toplevel` and `git worktree list`; before #392 all three results were
+// discarded along with the "not enrolled" answer, so the one caller that needs
+// to NAME the unenrolled repo (the guard's enrollment notice) would have had to
+// spend a fourth subprocess re-deriving data already in hand.
+//
+// Fault is the other thing the tri-return shape cannot say. ResolveRepo's
+// contract folds "transient DB error" into "not enrolled" (see warnResolve
+// below), which is correct for fail-open behaviour and wrong for anything that
+// PERSISTS a conclusion: a momentarily unreadable history.db on an enrolled
+// repo would otherwise be recorded as "this repo is not enrolled" for good.
+type Resolution struct {
+	Repo      *Repo  // the enrolled repo; nil unless OK
+	Root      string // the enrolled path (repo.Path); "" unless OK
+	CommonDir string // git-common-dir of dir; "" when dir is not in a git tree
+	TopLevel  string // worktree top; always set on a miss, best-effort on a hit (see above)
+	Fault     bool   // a real DB error was hit — "not enrolled" is NOT established
+	OK        bool   // an enrolled repo was resolved
+}
+
+// hit finalizes a Resolution as a successful resolution, keeping the identities
+// and the fault bit recorded so far. Value receiver: every warn that could set
+// Fault has already run by the time a tier returns.
+func (r Resolution) hit(repo *Repo, root string) Resolution {
+	r.Repo, r.Root, r.OK = repo, root, true
+	return r
+}
+
 // ResolveRepo finds the enrolled repo whose git tree contains dir and returns
 // it with the enrolled path (repoRoot) and ok=true. Returns ok=false when no
 // enrolled repo is reachable from dir (not enrolled, non-git dir, or DB error).
@@ -577,12 +620,23 @@ func UniqueName(db *DB, desired string) (string, error) {
 // a different directory (e.g. the user's actual cwd for live IR generation)
 // should ignore repoRoot and use their own path.
 func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
+	r := db.Resolve(dir)
+	return r.Repo, r.Root, r.OK
+}
+
+// Resolve is ResolveRepo's full answer: the same three tiers, in the same order,
+// with the same fail-open posture — see ResolveRepo above for the tier
+// documentation, which is not repeated here. It exists so a caller can also read
+// the git identities and the DB-fault bit that the tri-return cannot carry.
+func (db *DB) Resolve(dir string) Resolution {
+	var res Resolution
 	// The Get* helpers return (nil, nil) for "not enrolled" (sql.ErrNoRows), so a
 	// non-nil error here is ALWAYS a real DB fault. We still degrade to ok=false
 	// (callers — guard included — must stay fail-open), but a transient DB error
 	// is otherwise indistinguishable from "not enrolled"; warn so the fault is
 	// debuggable rather than silent. Matches the package's degraded-state warnings.
 	warnResolve := func(tier string, err error) {
+		res.Fault = true
 		fmt.Fprintf(os.Stderr, "runecho: ResolveRepo %s lookup failed (treating as not-enrolled): %v\n", tier, err)
 	}
 
@@ -594,17 +648,19 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 	// O(1) fast path; the path tie-break only runs in the rare multi-enrollment case.
 	commonDir, cdErr := gitutil.CommonDir(dir)
 	if cdErr == nil {
+		res.CommonDir = commonDir
 		repos, err := db.GetReposByCommonDir(commonDir)
 		switch {
 		case err != nil:
 			warnResolve("common-dir", err)
 		case len(repos) == 1:
-			return repos[0], repos[0].Path, true
+			return res.hit(repos[0], repos[0].Path)
 		case len(repos) > 1:
 			if top, e := gitutil.TopLevel(dir); e == nil {
+				res.TopLevel = top
 				for _, r := range repos {
 					if filepath.Clean(r.Path) == filepath.Clean(top) {
-						return r, r.Path, true
+						return res.hit(r, r.Path)
 					}
 				}
 			}
@@ -628,10 +684,10 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 			// by the guard, while a fully live sibling was skipped to choose it.
 			for _, r := range repos {
 				if dirExists(r.Path) {
-					return r, r.Path, true
+					return res.hit(r, r.Path)
 				}
 			}
-			return repos[0], repos[0].Path, true
+			return res.hit(repos[0], repos[0].Path)
 		}
 	}
 	// Tier 2: git top-level → exact path lookup. A TopLevel error (dir is a bare
@@ -640,11 +696,12 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 	// on error and fall through, rather than returning not-enrolled here.
 	topLevel, tlErr := gitutil.TopLevel(dir)
 	if tlErr == nil {
+		res.TopLevel = topLevel
 		if r, err := db.GetRepoByPath(topLevel); err != nil {
 			warnResolve("top-level", err)
 		} else if r != nil {
 			db.backfillCommonDir(r.ID, commonDir, cdErr)
-			return r, topLevel, true
+			return res.hit(r, topLevel)
 		}
 	}
 	// Tier 3: worktree shim — check all registered worktree paths. Keyed on `dir`,
@@ -661,10 +718,10 @@ func (db *DB) ResolveRepo(dir string) (repo *Repo, repoRoot string, ok bool) {
 			warnResolve("worktree", err)
 		} else if r != nil {
 			db.backfillCommonDir(r.ID, commonDir, cdErr)
-			return r, wt, true
+			return res.hit(r, wt)
 		}
 	}
-	return nil, "", false
+	return res
 }
 
 // backfillCommonDir records common_dir on a repo resolved via a compat tier so

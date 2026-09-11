@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/guard"
 )
@@ -39,7 +40,8 @@ type hookEdit struct {
 //
 // It does NOT survive the other two, but call-shape does, and that is why the
 // contract binding is no longer the only thing answered here (#261). res.NoRepo
-// means an unenrolled tree, which cannot hold a binding, and res.Warn
+// means an unenrolled tree, which cannot hold a binding (it carries its own
+// one-time notice instead — see enrollNotice), and res.Warn
 // (schema-newer) returns before ResolveRepo ever runs because the binary cannot
 // read the store at all — cw is nil in both by construction. Call-shape has no
 // store dependency at all: it resolves a call against declarations in the file
@@ -59,8 +61,8 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 	// answering call-shape there would trade a loud "your binary is stale" for
 	// a quiet keyword finding, and log reason "call-shape" in place of
 	// "schema-newer" — deleting the exact signal #207's gv stamp exists to
-	// preserve. The other two degraded arms lose nothing: NoRepo is silent by
-	// design, and the strict store-degraded advisory rides along on the ask.
+	// preserve. The other two degraded arms lose nothing: NoRepo's own advisory
+	// and the strict store-degraded one both ride along on the ask.
 	var degradedShapes []guard.CallShapeMismatch
 	if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
 		// Same construction as the enrolled path. Duplicated rather than hoisted
@@ -95,13 +97,27 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 			degradedLint, _ = lintFindingsWithReason(filePath, hookText(edit.ToolName, edit.NewString, edit.Content, edit.Edits))
 		}
 	}
-	// Under strict, a store-degraded edit gets an advisory saying symbol
-	// validation is off. An ask returns before that switch, so the advisory
-	// rides along on the ask rather than being dropped: the finding and the
-	// fact that coverage was incomplete are both true, and the user needs
-	// both. NoRepo is silent by design and contributes nothing here.
+	// Both degraded arms that can speak produce their advisory here, before the
+	// ask, because an ask returns before the defer switch: an advisory computed
+	// later would simply be dropped whenever a store-free check fired. Under
+	// strict, a store-degraded edit says symbol validation is off; an unenrolled
+	// tree says the repo is not enrolled, once and only once. The finding and
+	// the fact that coverage was incomplete are both true and the user needs
+	// both. The two are mutually exclusive by construction — NoRepo means no
+	// store row was resolved at all — so a switch, not two ifs.
 	var advisory string
-	if !res.NoRepo && strictMode() {
+	switch {
+	case res.NoRepo:
+		// #392: the unenrolled arm is silent except for ONE notice per repo,
+		// naming the repo that is going unguarded. Computed HERE, before the
+		// ask, so it rides along on an ask exactly as the strict advisory does
+		// — and so the marker is written either way. Were it computed only in
+		// the defer arm, an edit that happened to trip call-shape or lint would
+		// consume the "first edit" without saying anything, and the notice
+		// would arrive on the NEXT edit instead. Returns "" for every repo
+		// already noticed, which is all of them after the first edit.
+		advisory = enrollNotice(res, time.Now())
+	case strictMode():
 		advisory = strictStoreDegradedAdvisory
 	}
 	if askWithoutIndex(out, res.Contract, degradedShapes, degradedLint, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
@@ -113,8 +129,18 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 		hookDeferContext(out, res.Warn)
 		logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
 	case res.NoRepo:
-		// Not enrolled — silent skip; strict does not change this.
-		hookDefer()
+		// Not enrolled — silent skip; strict does not change this. The one
+		// exception is the first edit in a given repo, which carries the
+		// enrollment notice computed above (#392); advisory is "" on every
+		// later edit, and the log record is identical either way. The reason
+		// stays "no-repo" deliberately: guardstats, the census and TECHNICAL.md
+		// all bucket on that exact string, and the marker file is the notice's
+		// own audit trail.
+		if advisory != "" {
+			hookDeferContext(out, advisory)
+		} else {
+			hookDefer()
+		}
 		logDecision(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"})
 	default:
 		// Store accessible but degraded (no snapshot, no symbols, etc.).

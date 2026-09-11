@@ -259,7 +259,14 @@ so with `RUNECHO_GUARD_CONTRACT=1` / `RUNECHO_GUARD_CALLSHAPE=1` /
 `RUNECHO_GUARD_LINT=1` those three still answer on a repo with no usable
 snapshot, and the latter two also answer on an unenrolled tree (#261). A
 schema-newer store is never one of these: that advisory is surfaced instead,
-because a stale binary is the thing the user has to fix first. Repo
+because a stale binary is the thing the user has to fix first. "Repo not
+enrolled" has one more exception of its own (#392): the FIRST edit in a given
+unenrolled repo attaches a one-time notice naming the repo and the
+`runecho-ir repo add` command, so silence never reads as coverage. It is keyed
+on the git common-dir in `$RUNECHO_HOME/enroll-notices.json` — not the worktree
+top-level, which in a bare-repo claudew layout would fire once per session —
+and every later edit in that repo is silent again. `RUNECHO_GUARD_ENROLL_NOTICE=0`
+turns it off. Repo
 resolution is three-tier: git-common-dir key (O(1), schema V4) → enrolled-path
 lookup → worktree-list scan, backfilling `common_dir` on a hit so the next fire
 takes the fast path.
@@ -664,7 +671,8 @@ newer-than-supported database.
 | `RUNECHO_BIN_DIR` | `~/.local/bin` | Install target used by `install.sh` |
 | `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
-| `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are always skipped silently regardless of this flag. |
+| `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are skipped regardless of this flag — their one notice is governed by `RUNECHO_GUARD_ENROLL_NOTICE`, not by strict. |
+| `RUNECHO_GUARD_ENROLL_NOTICE` | on | Set to `0` to suppress the one-time notice attached to the first edit in an unenrolled git repo (#392). Keyed on the git common-dir in `$RUNECHO_HOME/enroll-notices.json`, capped at 256 repos (oldest `first_seen` evicted); a repo is named once and then never again. Silent when `$RUNECHO_HOME` cannot be written — an unrecordable notice would otherwise fire on every edit |
 | `RUNECHO_GENERATE_TIMEOUT` | `30s` | CLI-only override of the IR-generation wall-clock bound. A Go duration (`5m`), or `off`/`none`/`0` to disable. The MCP server keeps the fixed 30s budget |
 | `RUNECHO_DEBUG` | — | Set to `1` to trace the E6 auto-refresh branch into `decisions.jsonl` (`mode:"e6"`). Off by default so the hot path writes nothing extra |
 

@@ -438,6 +438,15 @@ Common situations:
   silently deferring. Repos that have never been enrolled are still skipped
   silently — strict only tightens the behaviour for enrolled repos where the
   guard cannot reach the store or a snapshot.
+- **The hook says a repo is not enrolled** — that is the one thing an
+  unenrolled repo does say, once. The first edit the hook sees in a git repo
+  nobody has run `runecho-ir repo add` on attaches a note naming the repo and
+  the command, so silence never gets mistaken for coverage; every later edit
+  there is silent again. It is a note, not a prompt: nothing is enrolled unless
+  you run the command. Set `RUNECHO_GUARD_ENROLL_NOTICE=0` to turn it off. The
+  notice is remembered per git common-dir in
+  `~/.runecho/enroll-notices.json`, so all the worktrees of one repo share a
+  single notice.
 
 The same validation core also powers the Claude Code edit-time hook. See
 [TECHNICAL.md](TECHNICAL.md#the-guard-runecho-guard) for the exact hook

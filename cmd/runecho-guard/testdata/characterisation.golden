@@ -1,0 +1,60 @@
+### clean-edit-enrolled
+exit=0
+stdout=
+record={"check_reasons":{"qualified":"no-module-path"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"skipped","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":null,"decision":"defer","file":"<REPO>/main.go","lang":"go","mode":"hook","reason":"clean","repo":"r","v":1}
+
+### hallucination-write-with-suggestions
+exit=0
+stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 symbol reference(s) not found in the indexed code — possible hallucination:\n  snippet line 3: ProcesData  (did you mean \"ProcessData\"?)\nApprove if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable."}}
+record={"check_reasons":{"qualified":"no-module-path"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"skipped","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"violation"},"claim_symbols":{"violations":["ProcesData"]},"decision":"ask","edit":"b6428e42fef1","file":"<REPO>/main.go","lang":"go","learn_symbols":["ProcesData"],"mode":"hook","reason":"violations","repo":"r","symbols":["ProcesData"],"v":1}
+
+### stale-ir-but-clean
+exit=0
+stdout={"hookSpecificOutput":{"additionalContext":"RunEcho IR is 0 day(s) stale; symbol checks may be incomplete — run `runecho-ir repo reindex`.","hookEventName":"PreToolUse"}}
+record={"check_reasons":{"qualified":"no-module-path"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"skipped","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":null,"decision":"defer","file":"<REPO>/main.go","lang":"go","mode":"hook","reason":"stale-ir","repo":"r","v":1}
+
+### oversized-pre-edit-file-strict
+exit=0
+stdout={"hookSpecificOutput":{"additionalContext":"[runecho-guard] 1 check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check abstained on degraded input) — coverage was incomplete for this edit.","hookEventName":"PreToolUse"}}
+record={"check_reasons":{"file-scope":"oversized-pre-edit-file"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"skipped","file-scope":"unknown","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":null,"decision":"defer","file":"<REPO>/big.py","lang":"py","mode":"hook","reason":"check-degraded","repo":"r","v":1}
+
+### unenrolled-repo
+exit=0
+stdout={"hookSpecificOutput":{"additionalContext":"[runecho-guard] This git repo is not enrolled in RunEcho, so symbol validation is OFF for edits under \"<REPO>\". If the user wants it guarded, the command is `runecho-ir repo add '<REPO>'` — offer it; do not run it unprompted. One-time notice per repo (RUNECHO_GUARD_ENROLL_NOTICE=0 disables it); every later edit here is silent.","hookEventName":"PreToolUse"}}
+record={"claim_symbols":null,"decision":"defer","file":"<REPO>/main.go","lang":"go","mode":"hook","reason":"no-repo","v":1}
+
+### schema-newer
+exit=0
+stdout={"hookSpecificOutput":{"additionalContext":"runecho-guard is older than the RunEcho store — symbol validation is DISABLED until the guard binary is rebuilt (bash install.sh).","hookEventName":"PreToolUse"}}
+record={"claim_symbols":null,"decision":"defer","file":"<REPO>/main.go","lang":"go","mode":"hook","reason":"schema-newer","v":1}
+
+### empty-input
+exit=0
+stdout=
+record={"claim_symbols":null,"decision":"defer","file":"<REPO>/main.go","mode":"hook","reason":"empty-input","v":1}
+
+### bad-path-nul
+exit=0
+stdout=
+record={"claim_symbols":null,"decision":"defer","mode":"hook","reason":"bad-path","v":1}
+
+### unknown-lang-markdown
+exit=0
+stdout=
+record={"claim_symbols":null,"decision":"defer","file":"<REPO>/NOTES.md","mode":"hook","reason":"unknown-lang","v":1}
+
+### multiedit-dropped-import
+exit=0
+stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 import(s) removed by this edit are still used below — likely a dropped import (will fail at runtime):\n  path — still used at snippet line 2\nApprove if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable."}}
+record={"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"violation","duplicate-symbol":"skipped","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":{},"decision":"ask","edit":"1ba1f45a5f83","file":"<REPO>/m.py","lang":"py","mode":"hook","reason":"dropped-import","repo":"r","symbols":["path"],"v":1}
+
+### duplicate-symbol
+exit=0
+stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 new symbol(s) already exist as definitions elsewhere — possible duplicate/reimplementation:\n  Helper — also defined in a.go\nApprove if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable."}}
+record={"check_reasons":{"qualified":"no-module-path"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"violation","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":{},"decision":"ask","edit":"89669f7a91f3","file":"<REPO>/b.go","lang":"go","mode":"hook","reason":"duplicate-symbol","repo":"r","symbols":["Helper"],"v":1}
+
+### callshape-on-unenrolled
+exit=0
+stdout={"hookSpecificOutput":{"additionalContext":"[runecho-guard] This git repo is not enrolled in RunEcho, so symbol validation is OFF for edits under \"<REPO>\". If the user wants it guarded, the command is `runecho-ir repo add '<REPO>'` — offer it; do not run it unprompted. One-time notice per repo (RUNECHO_GUARD_ENROLL_NOTICE=0 disables it); every later edit here is silent.","hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 keyword argument(s) the declaration does not accept — the symbol resolves but the call does not match it:\n  snippet line 5: fetch(timeuot=…)  (did you mean \"timeout\"?) — fetch is declared at line 1 and accepts: url, timeout\nApprove if the call is legitimate (a dynamic or re-bound callee, or a signature this edit does not show). RUNECHO_GUARD_CALLSHAPE=0 disables this check; RUNECHO_GUARD_SKIP=1 disables the guard."}}
+record={"checks":{"call-shape":"violation"},"claim_symbols":{},"decision":"ask","edit":"5a746bf31a24","file":"<REPO>/client.py","lang":"py","mode":"hook","reason":"call-shape","symbols":["fetch"],"v":1}
+

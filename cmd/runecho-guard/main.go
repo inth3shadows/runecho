@@ -16,7 +16,13 @@
 //	                            degraded conditions that normally warn-and-pass instead
 //	                            return exit 1; in hook mode, degraded conditions emit
 //	                            an advisory via additionalContext but still exit 0.
-//	                            Repo-not-enrolled is always a silent skip (not degraded).
+//	                            Repo-not-enrolled is not a degraded state and strict
+//	                            does not change it; see RUNECHO_GUARD_ENROLL_NOTICE.
+//	RUNECHO_GUARD_ENROLL_NOTICE=0
+//	                            suppress the one-time notice emitted the first time an
+//	                            edit lands in an unenrolled git repo (default ON). The
+//	                            notice names the repo once per git common-dir and then
+//	                            never again; every later edit there is silent.
 //	RUNECHO_GUARD_LEARN=1      enable C3 learned-allow: auto-suppress asks for
 //	                            symbols approved >= N times per repo (default OFF).
 //	RUNECHO_GUARD_LEARN_N=<n>  approval count before a symbol is trusted (default 2)
@@ -1823,6 +1829,16 @@ type lookupResult struct {
 	Contract   *contractWarning
 	NoRepo     bool
 	OK         bool
+	// GitCommonDir and GitTopLevel identify the unenrolled tree the edit landed
+	// in, and are populated ONLY on the NoRepo return — the resolver computed
+	// both on its way to "not enrolled" and used to throw them away (#392). They
+	// are the enrollment notice's whole input: the common-dir is its dedupe key
+	// (stable across the per-session worktrees of a bare-repo claudew layout,
+	// where a top-level key would fire every session), the top-level is the path
+	// `runecho-ir repo add` would be given. Both are "" when dir is not in a git
+	// worktree at all, which is what keeps the notice off /tmp scratch edits.
+	GitCommonDir string
+	GitTopLevel  string
 }
 
 // ignorePathFor resolves the .runechoguardignore for the working tree containing
@@ -1902,12 +1918,31 @@ func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 	}
 	defer db.Close()
 
-	repo, repoRoot, resolved := db.ResolveRepo(dir)
-	if !resolved {
-		// Not enrolled — silent skip, not a degraded state. No contract either:
-		// a binding is stored per repo, so an unenrolled tree cannot have one.
-		return lookupResult{NoRepo: true}
+	r := db.Resolve(dir)
+	if !r.OK {
+		// Not enrolled — not a degraded state. No contract either: a binding is
+		// stored per repo, so an unenrolled tree cannot have one. Carry the git
+		// identities the resolver already computed so answerDegradedStore can
+		// name the repo in a one-time enrollment notice (#392); the arm stays
+		// silent when the notice is off, already given, or dir is not in a tree.
+		//
+		// A real DB error is the exception, and it withholds the IDENTITIES
+		// rather than changing the arm. ResolveRepo has always folded "DB fault"
+		// into "not enrolled" so callers stay fail-open, and guardstats, the
+		// census and TECHNICAL.md all bucket this shape as reason "no-repo" —
+		// re-routing a transient SQLITE_BUSY to "store-degraded" would move
+		// events between buckets a measurement reads. What a fault must not do
+		// is feed the NOTICE, which writes a permanent "already told them this
+		// repo is unenrolled" marker: an enrolled repo whose history.db blipped
+		// would be silenced for good and told the wrong thing on the way. No
+		// identities, no notice, no marker — and the log is unchanged.
+		res := lookupResult{NoRepo: true}
+		if !r.Fault {
+			res.GitCommonDir, res.GitTopLevel = r.CommonDir, r.TopLevel
+		}
+		return res
 	}
+	repo, repoRoot := r.Repo, r.Root
 
 	// Resolved before the snapshot and symbol steps so it survives them: an
 	// index that is missing or unreadable says nothing about whether this edit
@@ -2167,8 +2202,9 @@ func runechoDir() (string, error) { return store.RunechoDir() }
 // strictMode reports whether RUNECHO_GUARD_STRICT=1 is set. When true,
 // degraded states (store unavailable, schema mismatch, no snapshot, etc.)
 // cause pre-commit to exit 1 instead of 0, and hook mode emits an advisory
-// via additionalContext instead of silently deferring. Repo-not-enrolled is
-// always a silent skip regardless of strict (not a degraded state).
+// via additionalContext instead of silently deferring. Repo-not-enrolled is not
+// a degraded state and strict does not change it: it is silent apart from the
+// one-time enrollment notice, which has its own gate (see enrollnotice.go).
 func strictMode() bool { return os.Getenv("RUNECHO_GUARD_STRICT") == "1" }
 
 // degradedExit returns 1 when strict mode is active, 0 otherwise. Used at

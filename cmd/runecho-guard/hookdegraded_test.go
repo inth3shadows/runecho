@@ -7,9 +7,15 @@
 //
 // The three arms answer three different degraded states and must stay
 // distinguishable: schema-newer is loud regardless of strict mode, an unenrolled
-// tree is silent by design, and a store that opened but has no usable snapshot is
-// silent unless strict. Collapsing any two would be invisible to a test that only
-// checked "the guard did not ask".
+// tree is silent apart from its own one-time enrollment notice, and a store that
+// opened but has no usable snapshot is silent unless strict. Collapsing any two
+// would be invisible to a test that only checked "the guard did not ask".
+//
+// The unenrolled cases here carry no git identities, which is the state of an
+// edit outside any git tree — the arm's silent shape. The notice's own firing,
+// deduping and gating live in enrollnotice_test.go, driven end-to-end through
+// real repos; this file only pins that a NoRepo result with nothing to notice
+// stays as quiet as it always was, and that strict does not change that.
 package main
 
 import (
@@ -40,8 +46,17 @@ func TestAnswerDegradedStore_DeferArms(t *testing.T) {
 			wantContext: "newer runecho",
 		},
 		{
-			name:       "unenrolled tree is silent by design",
+			name:       "unenrolled non-git tree has nothing to notice and stays silent",
 			res:        lookupResult{NoRepo: true},
+			wantReason: "no-repo",
+		},
+		{
+			// Strict is not the notice's gate — RUNECHO_GUARD_ENROLL_NOTICE is.
+			// Wiring the unenrolled arm's advisory into the strict branch would
+			// pass every other case in this file.
+			name:       "unenrolled tree stays silent under strict too",
+			res:        lookupResult{NoRepo: true},
+			strict:     true,
 			wantReason: "no-repo",
 		},
 		{

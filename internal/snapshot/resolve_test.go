@@ -546,3 +546,84 @@ func TestResolveRepo_MultiMatchFallbackJudgesThePathItReturns(t *testing.T) {
 			"liveness must be judged on the returned path", repo.ID, deadID, liveID)
 	}
 }
+
+// TestResolve_ReportsGitIdentityOnMiss pins #392's premise: the resolver runs
+// `rev-parse --git-common-dir` and `rev-parse --show-toplevel` on its way to
+// "not enrolled", and Resolve hands both back instead of discarding them with
+// the answer. A caller that needs to NAME the unenrolled repo would otherwise
+// have to spend a fourth git subprocess re-deriving what tier 1 and tier 2
+// already computed.
+func TestResolve_ReportsGitIdentityOnMiss(t *testing.T) {
+	root := t.TempDir()
+	resolveGitInit(t, root)
+	db, _ := openTemp(t)
+
+	res := db.Resolve(root)
+	if res.OK {
+		t.Fatal("Resolve resolved an unenrolled repo")
+	}
+	wantCD, err := gitutil.CommonDir(root)
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	wantTop, err := gitutil.TopLevel(root)
+	if err != nil {
+		t.Fatalf("TopLevel: %v", err)
+	}
+	if res.CommonDir != wantCD {
+		t.Errorf("CommonDir = %q, want %q", res.CommonDir, wantCD)
+	}
+	if res.TopLevel != wantTop {
+		t.Errorf("TopLevel = %q, want %q", res.TopLevel, wantTop)
+	}
+	if res.Fault {
+		t.Error("Fault set on a clean not-enrolled miss — a miss is not a fault")
+	}
+
+	// A directory outside any git tree has neither identity, which is what lets
+	// a caller distinguish "unenrolled repo" from "not a repo at all" without
+	// running git itself.
+	if plain := db.Resolve(t.TempDir()); plain.CommonDir != "" || plain.TopLevel != "" {
+		t.Errorf("non-git dir reported identities: common-dir=%q top=%q", plain.CommonDir, plain.TopLevel)
+	}
+}
+
+// TestResolve_FaultIsNotAMiss pins the other thing ResolveRepo's tri-return
+// cannot say. Its contract deliberately folds a transient DB error into
+// ok=false so callers stay fail-open — right for judging one edit, wrong for any
+// caller that PERSISTS the conclusion. Fault is how those callers tell the two
+// apart.
+func TestResolve_FaultIsNotAMiss(t *testing.T) {
+	root := t.TempDir()
+	resolveGitInit(t, root)
+	db, _ := openTemp(t)
+	if _, err := db.EnrollRepo("r", root, root, 0); err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+
+	// Control first: the same repo, unenrolled and healthy, must NOT be a fault
+	// — otherwise "Fault" would just be a synonym for "did not resolve".
+	other := t.TempDir()
+	resolveGitInit(t, other)
+	if res := db.Resolve(other); res.OK || res.Fault {
+		t.Fatalf("healthy unenrolled miss reported OK=%v Fault=%v", res.OK, res.Fault)
+	}
+
+	// Closing the connection makes every lookup tier return a real DB error.
+	db.Close()
+	origErr := os.Stderr
+	rErr, wErr, _ := os.Pipe()
+	os.Stderr = wErr
+	res := db.Resolve(root)
+	wErr.Close()
+	os.Stderr = origErr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, rErr)
+
+	if res.OK {
+		t.Fatal("Resolve ok=true on a closed DB; want fail-open")
+	}
+	if !res.Fault {
+		t.Error("a closed DB resolved as a plain not-enrolled miss; Fault must distinguish it")
+	}
+}

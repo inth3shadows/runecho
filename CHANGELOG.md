@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-09-11
+
+### Changed
+- guard: say once when an edit lands in an unenrolled git repo (#392) (#403)
+
 ## [0.49.1] — 2026-09-10
 
 ### Changed

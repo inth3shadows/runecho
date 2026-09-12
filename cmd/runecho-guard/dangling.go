@@ -297,6 +297,24 @@ func (f firedChecks) anyNonViolation() bool {
 // byte-identical, so a bucket that does not involve them is comparable across
 // the change; one that does is not, and cannot be made so.
 func askReason(f firedChecks) string {
+	parts := f.firedNames()
+	if len(parts) == 0 {
+		return "violations"
+	}
+	return strings.Join(parts, "+")
+}
+
+// firedNames returns the names of the checks that fired, in checkOrder's
+// canonical order. Extracted from askReason (#267) so that askReason's log
+// reason and firedGates' user-facing remedy list read ONE list of eleven rather
+// than two hand-kept-in-sync copies: a twelfth check added to only one of them
+// would be logged but left with no remedy named, or the reverse, and neither
+// failure is visible in any single test.
+//
+// askReason's own output stays byte-identical by construction — this is the
+// same loop over the same ordered pairs, with only the join lifted out — which
+// matters because #330 freezes decisionRecord.Reason's format.
+func (f firedChecks) firedNames() []string {
 	var parts []string
 	for _, e := range []struct {
 		on   bool
@@ -318,8 +336,5 @@ func askReason(f firedChecks) string {
 			parts = append(parts, e.name)
 		}
 	}
-	if len(parts) == 0 {
-		return "violations"
-	}
-	return strings.Join(parts, "+")
+	return parts
 }

@@ -218,7 +218,10 @@ func renderHookDecision(out io.Writer, v verification) int {
 	if ls := lintClaimSymbols(lintFindingsList); len(ls) > 0 {
 		claimSyms["lint"] = ls
 	}
-	fmt.Fprintf(&sb, "Approve if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable.")
+	// Trailer built from the checks that actually fired (#267): .runechoguardignore
+	// reaches only the additive check, so offering it for a dangling/call-shape/lint
+	// finding sent the user to a file that would not change the answer. See remedy.go.
+	sb.WriteString(askTrailer(fired))
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, ClaimSymbols: claimSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
 	if cw != nil {

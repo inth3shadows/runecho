@@ -130,11 +130,13 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 	}
 	syms := callShapeSection(&sb, ms)
 	syms = append(syms, lintSection(&sb, lints)...)
-	// Not the full ask's trailer. That one offers .runechoguardignore, which
-	// guard.Run consumes and neither store-free check consults — and on an
-	// unenrolled tree there is no resolved repo root to hold one anyway. Naming
-	// a remedy that cannot work is worse than naming fewer: the user tries it,
-	// nothing changes, and the next ask reads as the guard being broken.
+	// Not the full ask's trailer. That one offers .runechoguardignore when the
+	// additive check fired — #267 made it conditional, on this same argument —
+	// and guard.Run is the only consumer, which neither store-free check is. On
+	// an unenrolled tree there is no resolved repo root to hold one anyway.
+	// Naming a remedy that cannot work is worse than naming fewer: the user
+	// tries it, nothing changes, and the next ask reads as the guard being
+	// broken.
 	sb.WriteString(askWithoutIndexTrailer(len(ms) > 0, len(lints) > 0))
 	hookAskContext(out, sb.String(), advisory)
 

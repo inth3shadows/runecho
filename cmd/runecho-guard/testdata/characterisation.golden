@@ -45,12 +45,12 @@ record={"claim_symbols":null,"decision":"defer","file":"<REPO>/NOTES.md","mode":
 
 ### multiedit-dropped-import
 exit=0
-stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 import(s) removed by this edit are still used below — likely a dropped import (will fail at runtime):\n  path — still used at snippet line 2\nApprove if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable."}}
+stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 import(s) removed by this edit are still used below — likely a dropped import (will fail at runtime):\n  path — still used at snippet line 2\nApprove if these are legitimate (new/local/dynamic, or an intended removal). RUNECHO_GUARD_DROPPED_IMPORT=0 disables that check; RUNECHO_GUARD_SKIP=1 disables the guard."}}
 record={"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"violation","duplicate-symbol":"skipped","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":{},"decision":"ask","edit":"1ba1f45a5f83","file":"<REPO>/m.py","lang":"py","mode":"hook","reason":"dropped-import","repo":"r","symbols":["path"],"v":1}
 
 ### duplicate-symbol
 exit=0
-stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 new symbol(s) already exist as definitions elsewhere — possible duplicate/reimplementation:\n  Helper — also defined in a.go\nApprove if these are legitimate (new/local/dynamic, or an intended removal). Silence repeats via .runechoguardignore, or RUNECHO_GUARD_SKIP=1 to disable."}}
+stdout={"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[runecho-guard] 1 new symbol(s) already exist as definitions elsewhere — possible duplicate/reimplementation:\n  Helper — also defined in a.go\nApprove if these are legitimate (new/local/dynamic, or an intended removal). RUNECHO_GUARD_DUPLICATE=0 disables that check; RUNECHO_GUARD_SKIP=1 disables the guard."}}
 record={"check_reasons":{"qualified":"no-module-path"},"checks":{"call-shape":"skipped","dangling":"skipped","deps-go":"skipped","dropped-import":"skipped","duplicate-symbol":"violation","file-scope":"skipped","lint":"skipped","qualified":"skipped","recv-method":"skipped","var-type":"skipped","violations":"ok"},"claim_symbols":{},"decision":"ask","edit":"89669f7a91f3","file":"<REPO>/b.go","lang":"go","mode":"hook","reason":"duplicate-symbol","repo":"r","symbols":["Helper"],"v":1}
 
 ### callshape-on-unenrolled

@@ -269,7 +269,13 @@ unenrolled repo attaches a one-time notice naming the repo and the
 on the git common-dir in `$RUNECHO_HOME/enroll-notices.json` — not the worktree
 top-level, which in a bare-repo claudew layout would fire once per session —
 and every later edit in that repo is silent again. `RUNECHO_GUARD_ENROLL_NOTICE=0`
-turns it off. Repo
+turns it off. The notice also reaches a machine where nothing has EVER been
+enrolled (#402): with no `history.db` the guard used to return store-degraded
+before the unenrolled arm existed, so the one user it was built for — hook wired,
+nothing enrolled — was told nothing. That arm now resolves the repo's git
+identities directly (no store to resolve against) and creates `$RUNECHO_HOME`
+itself, `0700`, to hold the marker. It still never creates `history.db`: opening
+one would migrate a schema from a PreToolUse hook. Repo
 resolution is three-tier: git-common-dir key (O(1), schema V4) → enrolled-path
 lookup → worktree-list scan, backfilling `common_dir` on a hit so the next fire
 takes the fast path.
@@ -675,7 +681,7 @@ newer-than-supported database.
 | `RUNECHO_GUARD_SKIP` | — | Set to `1` to bypass the guard entirely (both modes), e.g. `RUNECHO_GUARD_SKIP=1 git commit …` |
 | `RUNECHO_GUARD_MAX_AGE` | `24h` | IR staleness threshold (Go duration). Past it, pre-commit warns and hook mode attaches an advisory instead of judging against stale facts |
 | `RUNECHO_GUARD_STRICT` | — | Set to `1` for fail-closed behaviour: pre-commit exits 1 on degraded states (store unreachable, no snapshot, schema mismatch, oversized diff); hook mode emits an advisory instead of silently deferring. Unenrolled repos are skipped regardless of this flag — their one notice is governed by `RUNECHO_GUARD_ENROLL_NOTICE`, not by strict. |
-| `RUNECHO_GUARD_ENROLL_NOTICE` | on | Set to `0` to suppress the one-time notice attached to the first edit in an unenrolled git repo (#392). Keyed on the git common-dir in `$RUNECHO_HOME/enroll-notices.json`, capped at 256 repos (oldest `first_seen` evicted); a repo is named once and then never again. Silent when `$RUNECHO_HOME` cannot be written — an unrecordable notice would otherwise fire on every edit |
+| `RUNECHO_GUARD_ENROLL_NOTICE` | on | Set to `0` to suppress the one-time notice attached to the first edit in an unenrolled git repo (#392). Keyed on the git common-dir in `$RUNECHO_HOME/enroll-notices.json`, capped at 256 repos (oldest `first_seen` evicted); a repo is named once and then never again. Silent when `$RUNECHO_HOME` cannot be created or written — an unrecordable notice would otherwise fire on every edit. Fires on a machine with no store at all, where the guard creates that directory (`0700`) but never a `history.db` (#402) |
 | `RUNECHO_GENERATE_TIMEOUT` | `30s` | CLI-only override of the IR-generation wall-clock bound. A Go duration (`5m`), or `off`/`none`/`0` to disable. The MCP server keeps the fixed 30s budget |
 | `RUNECHO_DEBUG` | — | Set to `1` to trace the E6 auto-refresh branch into `decisions.jsonl` (`mode:"e6"`). Off by default so the hot path writes nothing extra |
 
@@ -828,7 +834,9 @@ binary was six releases stale (#207). Records predating the field report as
 `unknown` rather than being attributed to whatever is installed now.
 
 `decision` is `ask`, `defer`, or `outcome`; `reason` classifies why. Defer
-reasons: `clean`, `stale-ir`, `no-repo`, `store-degraded`, `check-degraded`,
+reasons: `clean`, `stale-ir`, `no-repo` (which since #402 also covers a machine
+with no store at all — previously `store-degraded`, and in practice unlogged,
+since the log needs the same directory), `store-degraded`, `check-degraded`,
 `schema-newer`, `unknown-lang`, `bad-path`, `empty-input`, `parse-fail`. Ask
 reasons name the checks that fired, joined with `+` when several do:
 `violations`, `file-scope`, `qualified`, `deps-go`, `dangling`,

@@ -1186,8 +1186,10 @@ type lookupResult struct {
 	NoRepo     bool
 	OK         bool
 	// GitCommonDir and GitTopLevel identify the unenrolled tree the edit landed
-	// in, and are populated ONLY on the NoRepo return — the resolver computed
-	// both on its way to "not enrolled" and used to throw them away (#392). They
+	// in, and are populated ONLY on a NoRepo return — on the resolver's, which
+	// computed both on its way to "not enrolled" and used to throw them away
+	// (#392), and on the no-store-at-all one, which calls gitutil directly
+	// because there is no store to resolve against (#402). They
 	// are the enrollment notice's whole input: the common-dir is its dedupe key
 	// (stable across the per-session worktrees of a bare-repo claudew layout,
 	// where a top-level key would fire every session), the top-level is the path
@@ -1261,7 +1263,28 @@ func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 	}
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return lookupResult{}
+		// #402: no store at all means nothing has ever been enrolled, so this is
+		// the unenrolled arm — read the way runPreCommit already reads it ("not
+		// installed" is not a degraded state), and the exact population the #392
+		// notice was built for. Before this the arm returned a zero result, whose
+		// NoRepo=false made enrollNotice refuse at its first gate: the notice
+		// reached repo 2..N and never repo 1.
+		//
+		// The stat itself STAYS. OpenFast runs setPragmas + migrate, and sql.Open
+		// on a missing path creates the file, so opening here would make a
+		// PreToolUse hook create and migrate a database on someone's first edit.
+		//
+		// The identities are not store data — Resolve fills them from these same
+		// two gitutil calls before it consults any table — so the arm can name the
+		// repo without a DB. Both or neither, which is what keeps gate 3 (and the
+		// notice) off a dir that is not in a git worktree.
+		res := lookupResult{NoRepo: true}
+		if cd, cdErr := gitutil.CommonDir(dir); cdErr == nil {
+			if top, tlErr := gitutil.TopLevel(dir); tlErr == nil {
+				res.GitCommonDir, res.GitTopLevel = cd, top
+			}
+		}
+		return res
 	}
 	// OpenFast skips the on-open integrity scan — this read path fires on every
 	// edit and must stay cheap; integrity is the writer's concern.

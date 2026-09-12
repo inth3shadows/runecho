@@ -24,7 +24,9 @@ no remote service to compromise.
 The central store (`~/.runecho/history.db`, override via `RUNECHO_HOME`) holds,
 per enrolled repo: absolute file paths, SHA-256 content hashes, and symbol
 names/kinds. It does **not** store raw source code or file contents. The store
-directory is created `0700` and its contents `0600` — `history.db` and its
+directory is created `0700` — by `runecho-ir`, and by `runecho-guard` when it
+records an enrollment notice on a machine that has none yet (#402) — and its
+contents `0600` — `history.db` and its
 WAL/SHM sidecars (`internal/snapshot/db.go`), the guard's decision log
 (`cmd/runecho-guard/declog.go`), the learned-allow store, the dependency-export
 cache, and the periodic-reindex log. Protection is standard Unix file

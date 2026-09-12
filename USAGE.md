@@ -446,7 +446,8 @@ Common situations:
   you run the command. Set `RUNECHO_GUARD_ENROLL_NOTICE=0` to turn it off. The
   notice is remembered per git common-dir in
   `~/.runecho/enroll-notices.json`, so all the worktrees of one repo share a
-  single notice.
+  single notice. This works on a fresh install that has enrolled nothing yet —
+  the first such edit creates `~/.runecho` to hold the marker.
 
 The same validation core also powers the Claude Code edit-time hook. See
 [TECHNICAL.md](TECHNICAL.md#the-guard-runecho-guard) for the exact hook

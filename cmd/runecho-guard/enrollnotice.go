@@ -48,7 +48,10 @@ import (
 //
 // The marker file lives in RUNECHO_HOME beside learned-allow.json — the
 // precedent in this package for guard-owned state — and never in the repo, so a
-// hook can never mutate a git-tracked file behind the user's back.
+// hook can never mutate a git-tracked file behind the user's back. That
+// directory is the one thing the guard will CREATE (0700, in recordEnrollNotice,
+// #402): a machine that has never run `runecho-ir` does not have it, and that
+// machine is precisely the one this notice was built to reach.
 
 // enrollNoticeFile is the marker filename inside RUNECHO_HOME.
 const enrollNoticeFile = "enroll-notices.json"
@@ -135,6 +138,22 @@ func saveEnrollNotices(dir string, en enrollNotices) error {
 // guarantee is "exactly once where the lock can be taken, at most one duplicate
 // otherwise".
 func recordEnrollNotice(dir, key, top string, now time.Time) bool {
+	// #402: a box where nothing was ever enrolled has no RUNECHO_HOME at all.
+	// runecho-ir creates it (mustOpenDB) and the guard never has, so without this
+	// both WithFileLock's O_CREATE and AtomicWriteFile fail and the one user the
+	// notice exists for is told nothing. Created HERE, at the last gate, so a
+	// non-git scratch edit (gate 3) or an already-noticed repo (gate 5) never
+	// makes a directory. 0700 matches mustOpenDB and SECURITY.md; MkdirAll leaves
+	// an existing directory's mode alone.
+	//
+	// Returning false on failure is belt-and-braces rather than load-bearing:
+	// ignoring the error would still end in silence, because the two writes below
+	// fail anyway and WithFileLock is fail-open. It is written explicitly so the
+	// "unrecordable marker buys silence, never a nag" invariant is stated at the
+	// point it is established instead of being implied two calls away.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false
+	}
 	recorded := false
 	store.WithFileLock(filepath.Join(dir, enrollNoticeFile+".lock"), func() {
 		en := loadEnrollNotices(dir)
@@ -291,7 +310,8 @@ func enrollNoticeText(top, commonDir string) string {
 //  3. dir is inside a git worktree at all — both identities present
 //  4. RUNECHO_HOME resolves
 //  5. not already noticed (unlocked fast read)
-//  6. the marker records now (locked re-check + write); if it does not, silence
+//  6. the store dir exists or can be created, and the marker records now (locked
+//     re-check + write); if it does not, silence
 //
 // There is deliberately no "skip anything under os.TempDir()" gate. Every test
 // here runs in t.TempDir(), so such a gate would make the notice unfirable in

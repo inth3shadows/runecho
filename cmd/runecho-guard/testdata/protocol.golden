@@ -1,0 +1,16 @@
+### enrolled-clean
+exit=0
+{"protocol":1,"path":"<PATH>","lang":"go","index":{"repo":"r","snapshot_at":"<TS>"},"results":[{"check":"violations","verdict":"ok"},{"check":"file-scope","verdict":"skipped"},{"check":"qualified","verdict":"skipped","reason":"no-module-path"},{"check":"deps-go","verdict":"skipped"},{"check":"dangling","verdict":"skipped"},{"check":"dropped-import","verdict":"skipped"},{"check":"duplicate-symbol","verdict":"skipped"},{"check":"call-shape","verdict":"skipped"},{"check":"recv-method","verdict":"skipped"},{"check":"var-type","verdict":"skipped"},{"check":"lint","verdict":"skipped"}]}
+
+### enrolled-violation-with-suggestions
+exit=0
+{"protocol":1,"path":"<PATH>","lang":"go","index":{"repo":"r","snapshot_at":"<TS>"},"results":[{"check":"violations","verdict":"violation","evidence":[{"symbol":"ProcesData","line":3,"line_space":"file","suggestions":["ProcessData"]}]},{"check":"file-scope","verdict":"skipped"},{"check":"qualified","verdict":"skipped","reason":"no-module-path"},{"check":"deps-go","verdict":"skipped"},{"check":"dangling","verdict":"skipped"},{"check":"dropped-import","verdict":"skipped"},{"check":"duplicate-symbol","verdict":"skipped"},{"check":"call-shape","verdict":"skipped"},{"check":"recv-method","verdict":"skipped"},{"check":"var-type","verdict":"skipped"},{"check":"lint","verdict":"skipped"}]}
+
+### unenrolled-everything-unknown
+exit=0
+{"protocol":1,"path":"<PATH>","lang":"go","index":null,"results":[{"check":"violations","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"file-scope","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"qualified","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"deps-go","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"dangling","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"dropped-import","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"duplicate-symbol","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"call-shape","verdict":"skipped"},{"check":"recv-method","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"var-type","verdict":"unknown","reason":"no-repo","class":"degraded"},{"check":"lint","verdict":"skipped"}]}
+
+### error-document
+exit=2
+{"protocol":1,"error":"unsupported-protocol","index":null}
+

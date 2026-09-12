@@ -99,8 +99,10 @@ Three binaries make up the surface area:
   an agent finds definitions without grepping or guessing.
 - **`runecho-guard`** — a guard that checks new code against the indexed IR and
   flags references to symbols that don't exist (likely hallucinations). Runs as a
-  git pre-commit hook, or as a Claude Code `PreToolUse` hook that vets every
-  `Edit`/`Write`/`MultiEdit` before it lands.
+  git pre-commit hook, as a Claude Code `PreToolUse` hook that vets every
+  `Edit`/`Write`/`MultiEdit` before it lands, or as `--protocol` — an edit on
+  stdin, a versioned verdict document on stdout, for anything that is not Claude
+  Code.
 
 ```
 source ──▶ parser ──▶ IR (hashed) ──▶ snapshot ──▶ ~/.runecho/history.db
@@ -230,7 +232,7 @@ not general-purpose code intelligence.
 |---|---|
 | `cmd/runecho-ir/` | The CLI: snapshot, diff, map, log, churn, verify, truth-trail, validate-claims, contract, guard-stats, fpreport, fpaudit, repo, backup, install — plus indexing, which is the no-subcommand default (`runecho-ir <path>`), not an `index` subcommand |
 | `cmd/runecho-mcp/` | The stdio MCP oracle server |
-| `cmd/runecho-guard/` | The guard: pre-commit mode + Claude Code hook mode, plus the opt-in checks |
+| `cmd/runecho-guard/` | The guard: pre-commit mode, Claude Code hook mode, and `--protocol` (the versioned stdin/stdout verdict contract), plus the opt-in checks |
 | `internal/parser/` | Per-language structure extraction (Go/JS/TS/JSX/TSX/.gs/Python/shell/Rust/Ruby) |
 | `internal/ir/` | IR build, deterministic hashing, JSON storage |
 | `internal/snapshot/` | Central store: migrations, registry, diff, churn, contracts, backup |

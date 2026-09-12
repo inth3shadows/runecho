@@ -48,55 +48,13 @@ type hookEdit struct {
 // in front of it, so those are precisely the states where it still answers
 // correctly and was silent.
 func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePath string, lang guard.Lang, removedText string) bool {
-	// Gated on the flag AND on Python so the default path pays nothing. An
-	// unenrolled tree is the common case for a globally installed hook, and
-	// charging every edit there a file read for a check nobody switched on is
-	// the trade this gate exists to refuse — the alternative considered was
-	// hoisting readFileLines above the store gate unconditionally.
-	//
-	// res.Warn is excluded deliberately. Schema-newer means this binary cannot
-	// read the store at all, and that advisory is surfaced ALWAYS, strict or
-	// not, because the fix is "reinstall" and nothing else the guard says
-	// matters until it happens. An ask returns before the switch below, so
-	// answering call-shape there would trade a loud "your binary is stale" for
-	// a quiet keyword finding, and log reason "call-shape" in place of
-	// "schema-newer" — deleting the exact signal #207's gv stamp exists to
-	// preserve. The other two degraded arms lose nothing: NoRepo's own advisory
-	// and the strict store-degraded one both ride along on the ask.
-	var degradedShapes []guard.CallShapeMismatch
-	if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
-		// Same construction as the enrolled path. Duplicated rather than hoisted
-		// because the two are mutually exclusive — this branch returns — so
-		// hoisting would charge every ENROLLED edit for a read it already does
-		// further down, to save a read this branch only makes when the flag is on.
-		preLines := readFileLines(filePath)
-		fd := guard.FileDiff{
-			Path:       filePath,
-			AddedLines: hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits),
-			SeedByLine: hookSeedByLine(edit.ToolName, edit.OldString, edit.Edits, preLines, lang),
-		}
-		degradedShapes = callShapeMismatches(lang, preLines, fd, edit.ToolName, removedText)
-	}
-	// Lint answers here for exactly the same reason call-shape does (#261): it
-	// has no store dependency at all — ruff reads the Write payload's own
-	// content and nothing else — so an unenrolled tree, the common case for a
-	// globally installed hook, is precisely where the flag would otherwise be
-	// advertised ("needs no index", TECHNICAL.md) and silently do nothing.
-	// res.Warn is excluded on the same grounds as above: the schema-newer
-	// advisory must not be traded for a quiet finding.
-	//
-	// No suppressAlreadyReported call here, deliberately: guard.Run never ran
-	// on this path (that IS the degraded state), so there are no additive
-	// findings for a lint finding to duplicate.
-	var degradedLint []lintFinding
-	if res.Warn == "" && lintEnabled() && edit.ToolName == "Write" && lang == guard.LangPython {
-		if _, err := exec.LookPath("ruff"); err == nil {
-			// Abstain reason is discarded rather than surfaced: this branch is
-			// ALREADY degraded and says so through its own advisory, and there
-			// is no per-check results slice here to carry a Verdict.
-			degradedLint, _ = lintFindingsWithReason(filePath, hookText(edit.ToolName, edit.NewString, edit.Content, edit.Edits))
-		}
-	}
+	// The two store-free checks are computed by storeFreeChecks, which #394 split
+	// out so the protocol renderer can report a VERDICT for them on this arm
+	// rather than the nothing the hook needs. The hook wants only the findings;
+	// it discards the results slice, because a degraded-store ask has never
+	// carried a per-check map (see askWithoutIndex) and #394 does not change
+	// what the hook logs.
+	degradedShapes, degradedLint, _ := storeFreeChecks(res, edit, filePath, lang, removedText)
 	// Both degraded arms that can speak produce their advisory here, before the
 	// ask, because an ask returns before the defer switch: an advisory computed
 	// later would simply be dropped whenever a store-free check fired. Under
@@ -153,4 +111,81 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 		logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
 	}
 	return false
+}
+
+// storeFreeChecks runs the two checks that need no store row at all — call-shape
+// (it resolves a call against declarations in the file in front of it) and lint
+// (ruff reads the Write payload's own content) — for an edit whose store lookup
+// failed. #261 wired them into the hook's degraded arm; #394 split them out here
+// so the protocol renderer can report a verdict for them on the same arm.
+//
+// It returns the findings the hook renders AND the CheckResults only the
+// protocol consumes. The hook discards the latter deliberately: a degraded-store
+// ask has never carried a per-check map, and changing that would shift
+// fpreport's CheckRuns tallies for a surface this issue is not about.
+//
+// The nine store-DEPENDENT checks are not here. They cannot answer without an
+// index, and the protocol synthesises their Unknown from the arm's own defer
+// reason rather than pretending this function skipped them.
+func storeFreeChecks(res lookupResult, edit hookEdit, filePath string, lang guard.Lang, removedText string) ([]guard.CallShapeMismatch, []lintFinding, []CheckResult) {
+	var degradedShapes []guard.CallShapeMismatch
+	var degradedLint []lintFinding
+	var shapeReason, lintReason string
+	// Gated on the flag AND on Python so the default path pays nothing. An
+	// unenrolled tree is the common case for a globally installed hook, and
+	// charging every edit there a file read for a check nobody switched on is
+	// the trade this gate exists to refuse — the alternative considered was
+	// hoisting readFileLines above the store gate unconditionally.
+	//
+	// res.Warn is excluded deliberately. Schema-newer means this binary cannot
+	// read the store at all, and that advisory is surfaced ALWAYS, strict or
+	// not, because the fix is "reinstall" and nothing else the guard says
+	// matters until it happens. An ask returns before the switch below, so
+	// answering call-shape there would trade a loud "your binary is stale" for
+	// a quiet keyword finding, and log reason "call-shape" in place of
+	// "schema-newer" — deleting the exact signal #207's gv stamp exists to
+	// preserve. The other two degraded arms lose nothing: NoRepo's own advisory
+	// and the strict store-degraded one both ride along on the ask.
+	if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
+		// Same construction as the enrolled path. Duplicated rather than hoisted
+		// because the two are mutually exclusive — this branch returns — so
+		// hoisting would charge every ENROLLED edit for a read it already does
+		// further down, to save a read this branch only makes when the flag is on.
+		preLines := readFileLines(filePath)
+		fd := guard.FileDiff{
+			Path:       filePath,
+			AddedLines: hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits),
+			SeedByLine: hookSeedByLine(edit.ToolName, edit.OldString, edit.Edits, preLines, lang),
+		}
+		degradedShapes, shapeReason = callShapeMismatchesWithReason(lang, preLines, fd, edit.ToolName, removedText)
+	}
+	// Lint answers here for exactly the same reason call-shape does (#261): it
+	// has no store dependency at all — ruff reads the Write payload's own
+	// content and nothing else — so an unenrolled tree, the common case for a
+	// globally installed hook, is precisely where the flag would otherwise be
+	// advertised ("needs no index", TECHNICAL.md) and silently do nothing.
+	// res.Warn is excluded on the same grounds as above: the schema-newer
+	// advisory must not be traded for a quiet finding.
+	//
+	// No suppressAlreadyReported call here, deliberately: guard.Run never ran
+	// on this path (that IS the degraded state), so there are no additive
+	// findings for a lint finding to duplicate.
+	if res.Warn == "" && lintEnabled() && edit.ToolName == "Write" && lang == guard.LangPython {
+		if _, err := exec.LookPath("ruff"); err == nil {
+			// The abstain reason is CAPTURED now (#394), not discarded. The hook
+			// still has nowhere to put it — a degraded-store ask carries no
+			// per-check map — but the protocol document must say "unknown, and
+			// here is why" rather than collapsing an abstention into silence.
+			degradedLint, lintReason = lintFindingsWithReason(filePath, hookText(edit.ToolName, edit.NewString, edit.Content, edit.Edits))
+		}
+	}
+	callShapeResult := CheckResult{Check: "call-shape", Verdict: VerdictSkipped}
+	if res.Warn == "" && callShapeEnabled() && lang == guard.LangPython {
+		callShapeResult = classifyResult("call-shape", len(degradedShapes) > 0, shapeReason)
+	}
+	lintResult := CheckResult{Check: "lint", Verdict: VerdictSkipped}
+	if res.Warn == "" && lintEnabled() && edit.ToolName == "Write" && lang == guard.LangPython {
+		lintResult = classifyResult("lint", len(degradedLint) > 0, lintReason)
+	}
+	return degradedShapes, degradedLint, []CheckResult{callShapeResult, lintResult}
 }

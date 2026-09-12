@@ -6,6 +6,8 @@
 //
 //	runecho-guard [--dry-run] [--verbose]
 //	runecho-guard --hook-mode  (Claude Code PreToolUse hook — reads JSON from stdin)
+//	runecho-guard --protocol   (verification protocol #394 — an edit on stdin, a
+//	                            versioned verdict document on stdout; see TECHNICAL.md)
 //
 // Environment:
 //
@@ -108,6 +110,7 @@ func runArgs(args []string) int {
 	verbose := fs.Bool("verbose", false, "print every checked symbol")
 	hookMode := fs.Bool("hook-mode", false, "Claude Code PreToolUse hook mode — reads JSON from stdin, writes JSON to stdout")
 	outcomeMode := fs.Bool("outcome-mode", false, "Claude Code PostToolUse outcome recorder — reads JSON from stdin, logs approved if a recent ask exists for the edited file")
+	protocolMode := fs.Bool("protocol", false, "verification protocol mode (#394) — reads an edit as JSON on stdin, writes a versioned verdict document on stdout")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -116,6 +119,19 @@ func runArgs(args []string) int {
 	if *showVersion {
 		fmt.Println(version.Version)
 		return 0
+	}
+
+	// Protocol mode is dispatched BEFORE the bypass check, deliberately.
+	// RUNECHO_GUARD_SKIP turns off ENFORCEMENT — it is the escape hatch for "let
+	// this edit/commit through". Protocol mode enforces nothing: it answers a
+	// question someone asked explicitly, and honouring SKIP here would return a
+	// silent success to a consumer that has no way to tell that from "no
+	// findings". Every per-check gate still applies (see runProtocolMode).
+	if *protocolMode {
+		// Same 16 MiB stdin cap and same reasoning as hook mode below.
+		return protocolPanicBarrier(os.Stdout, func(out io.Writer) int {
+			return runProtocolMode(io.LimitReader(os.Stdin, 16<<20), out)
+		})
 	}
 
 	// Bypass check after flag parsing. In hook mode this defers (emits nothing),

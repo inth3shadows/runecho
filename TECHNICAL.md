@@ -157,7 +157,8 @@ repo — diffs never cross repo boundaries.
 
 The guard validates *new* code against the enrolled repo's indexed symbols and
 flags bare function calls that resolve to nothing — the signature shape of a
-hallucinated API. Two modes share the same validation core:
+hallucinated API. Three modes share the same validation core (`verifyEdit`,
+`cmd/runecho-guard/verify.go`); each is a renderer over it:
 
 - **Pre-commit mode** (default; installed by `install.sh --hook`). Reads
   `git diff --cached --unified=0`, validates added lines, and exits 1 with a
@@ -168,6 +169,8 @@ hallucinated API. Two modes share the same validation core:
   → `permissionDecision: "ask"` with the violation list as the reason. The guard
   never auto-approves — on a clean check it emits nothing and defers to the
   normal permission flow.
+- **Protocol mode** (`--protocol`). The surface-agnostic one: an edit on stdin,
+  a versioned verdict document on stdout. See below.
 
 Validation is a two-pass static check: first collect every definition the change
 itself introduces (plus the on-disk file's own definitions and imports, so local
@@ -694,6 +697,118 @@ checks](#opt-in-checks) for what each one asks about.
 | `RUNECHO_GUARD_LEARN` | — | `1` enables C3 learned-allow suppression |
 | `RUNECHO_GUARD_LEARN_N` | `2` | Approvals before a symbol is trusted |
 | `RUNECHO_GUARD_LEARN_TTL_DAYS` | `14` | Days an entry survives without re-approval |
+
+### The verification protocol (`--protocol`, protocol 1)
+
+Before #394 the guard spoke Claude Code's `PreToolUse` JSON and nothing else, so
+that schema was *also* RunEcho's only verification interface: a CI step, a
+different agent surface or an autonomous harness had to impersonate a hook
+payload to ask a question the guard already knew the answer to. `--protocol` is
+the same core behind a contract RunEcho owns.
+
+Named `--protocol`, not `--verify`: `runecho-ir verify` already means something
+different (diff the session-start snapshot against live `ir.json`). It is also
+unrelated to `internal/mcp`'s `DefaultProtocolVersion`, which is an MCP *spec
+revision date* governed by an external spec; this is an integer document version.
+
+**Request** — one JSON object on stdin. Exactly one of `content` (a Write) or
+`hunks` (an Edit, or a MultiEdit when there is more than one):
+
+```json
+{"protocol": 1, "path": "/abs/path/app.py", "content": "<whole proposed file>"}
+{"protocol": 1, "path": "/abs/path/app.py", "hunks": [{"old": "…", "new": "…"}]}
+```
+
+`path` must be absolute — repo resolution, the contract root and ruff's
+`--stdin-filename` are all keyed on it. **The file at `path` must still hold its
+PRE-edit content, and `hunks[].old` must match it byte-for-byte**, exactly as
+Claude Code's Edit tool requires: every seeder locates a hunk by matching `old`
+against the file on disk. A harness that normalises whitespace loses the seed,
+and a lost seed fails *toward flagging*, never toward silence.
+
+**Response** — one JSON object on stdout, newline-terminated:
+
+```json
+{"protocol": 1, "path": "/abs/path/app.py", "lang": "py",
+ "index": {"repo": "myrepo", "snapshot_at": "2026-09-11T23:01:39Z"},
+ "results": [
+   {"check": "violations", "verdict": "violation",
+    "evidence": [{"symbol": "procesData", "line": 3, "line_space": "file",
+                  "suggestions": ["processData"]}]},
+   {"check": "file-scope", "verdict": "unknown", "reason": "dynamic-binding", "class": "gate"},
+   {"check": "lint", "verdict": "skipped"}
+ ]}
+```
+
+`index` is what the verdicts were judged against, and is `null` when no store
+resolved. It is there because a stale snapshot is the one coverage loss no
+per-check verdict can express: every check can run to completion, report `ok`,
+and still be answering about code as it was a week ago. `RUNECHO_GUARD_MAX_AGE`
+is deliberately not exported — a consumer's staleness policy is its own.
+
+**Evidence**, per check. Every object carries `symbol`; `line` is always
+accompanied by `line_space` (`"snippet"` numbers the edit hunk, gap-joined for a
+multi-hunk edit; `"file"` numbers the file as proposed).
+
+| check(s) | extras |
+|---|---|
+| `violations`, `recv-method`, `var-type`, `qualified`, `deps-go`, `file-scope` | `suggestions` |
+| `dangling` | `referrers` (no line) |
+| `duplicate-symbol` | `locations` (no line) |
+| `dropped-import` | — |
+| `call-shape` | `keyword`, `accepted`, `decl_line`, `decl_line_space`, `suggestions` |
+| `lint` | `rule`, `message`; `line_space` is always `"file"` |
+
+`decl_line_space` is separate from `line_space` on purpose: a declaration is read
+from the *added text* when the edit rewrites the signature and from the file
+otherwise, so the call and the declaration can live in different spaces.
+
+**What protocol 1 promises.**
+
+- `results` carries every check this binary knows, **each exactly once**, in
+  `checkOrder` order. A check is never silently absent — contrast the decision
+  log's `checks` map, where a pre-commit record legitimately omits seven. Key by
+  `check` name, not position.
+- `verdict` is exactly one of `ok | violation | unknown | skipped`.
+- **`unknown` never collapses into `ok`.** `ok` is emitted only when the check
+  ran to completion on complete input.
+- Every `unknown` carries `class`: `"gate"` (the check saw a candidate and
+  declined it on its own precision gate) or `"degraded"` (input or environment
+  was missing, so coverage was genuinely lost). The hook's strict "coverage was
+  incomplete" advisory is `count(unknown && class == "degraded") > 0` — the
+  protocol makes it derivable rather than adding a field for it.
+- Every `violation` carries non-empty `evidence`.
+- Reason tokens are stable kebab-case, with no paths or error text.
+- **Exit 0 means a document was written; it is not a verdict.** A document full
+  of violations exits 0. Exit 2 means no verdicts could be produced and an error
+  document `{"protocol":1,"error":"<token>"}` was written instead. Error tokens:
+  `unsupported-protocol`, `malformed-input`, `missing-path`, `relative-path`,
+  `bad-path`, `ambiguous-edit`, `missing-edit`, `empty-hunks`, `panic`.
+
+**May change within protocol 1** (a consumer MUST tolerate): new check names
+appended to `results`; new keys on any object; new `reason` tokens; new `error`
+tokens; new evidence extras; new optional request keys.
+
+**Forces protocol 2:** removing or renaming a check, key, or verdict token;
+changing a verdict's meaning; breaking any promise above; an incompatible request
+shape; changing exit-code semantics.
+
+**What it ignores.** `RUNECHO_GUARD_SKIP` (that disables *enforcement*; this
+enforces nothing, and returning a silent success to a caller that cannot
+distinguish it from "no findings" would be worse than answering) and
+`RUNECHO_GUARD_STRICT` (nothing to escalate — `class` already carries it). Every
+per-check `RUNECHO_GUARD_*` gate still applies, so a verdict never disagrees with
+the hook on the same machine.
+
+**Not in v1:** the edit-scope contract (it is bound to a Claude Code
+`session_id`, and is an intent check rather than a fact check); per-check
+`elapsed_ms`; writes to `decisions.jsonl` — `fpreport` and `fpaudit` filter on
+`mode == "hook"`, and a CI consumer replaying hundreds of edits would swamp the
+dogfood stream the un-gating decisions read.
+
+**Suggested consumer policy** (guidance, not exit codes): `violation` → fail;
+`unknown` with `class: "degraded"` → warn; `class: "gate"` → ignore; and combine
+all of it with `index.snapshot_at` age.
 
 ### Decision log
 

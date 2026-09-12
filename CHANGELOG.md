@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.53.0] — 2026-09-12
+
+### Changed
+- guard: name only the remedies that can actually silence what fired (#267) (#408)
+
 ## [0.52.0] — 2026-09-12
 
 ### Changed

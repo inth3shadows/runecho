@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-09-12
+
 ### Added
 - guard: `--protocol`, a versioned stdin/stdout verification protocol (#394).
   An edit in, a `protocol: 1` verdict document out — every check reported exactly

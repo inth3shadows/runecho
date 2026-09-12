@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-09-12
+
+### Changed
+- guard: reach the user with no store at all with the enrollment notice (#402) (#405)
+
 ## [0.51.0] — 2026-09-12
 
 ### Added

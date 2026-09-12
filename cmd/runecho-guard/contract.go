@@ -77,9 +77,11 @@ func (cw *contractWarning) drifted() bool { return cw.ActivatedHash != cw.Curren
 //
 // The ignorefile disclaimer is not padding either. In a merged ask this section
 // sits beside the fact checks' trailer, which offers .runechoguardignore as the
-// way to silence repeats — and that file is read only by guard.Run, never here.
-// A user who reaches for it would watch the symbol half go quiet while the
-// contract half kept asking, and conclude the guard was broken.
+// way to silence repeats whenever the additive check fired (#267 made that
+// conditional, but the additive check is the modal one, so the disclaimer still
+// earns its line) — and that file is read only by guard.Run, never here. A user
+// who reaches for it would watch the symbol half go quiet while the contract
+// half kept asking, and conclude the guard was broken.
 func (cw *contractWarning) section() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[runecho-guard] this edit is outside the scope declared by contract %q:\n", cw.Name)

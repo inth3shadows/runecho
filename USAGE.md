@@ -425,7 +425,9 @@ Common situations:
 
 - **It flagged something real** (a dynamic or generated symbol) — add that name
   on its own line to `.runechoguardignore` at the repo root, or refresh the map
-  with `runecho-ir repo reindex <name>`.
+  with `runecho-ir repo reindex <name>`. `.runechoguardignore` covers the
+  **unresolved-symbol check only**; the other checks are silenced by their own
+  `RUNECHO_GUARD_*=0` setting, and the report names the one that applies.
 - **You need this one commit through right now** —
   `RUNECHO_GUARD_SKIP=1 git commit …`.
 - **It warns the index is stale** — run `runecho-ir repo reindex <name>`; the

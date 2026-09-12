@@ -482,7 +482,10 @@ func runPreCommit(dryRun, verbose bool) int {
 	writeCheckSection(os.Stderr, &syms, qualifiedAskHeader, qualifiedV, pathLineFmt)
 	writeCheckSection(os.Stderr, &syms, depsGoAskHeader, depsGoV, pathLineFmt)
 	fmt.Fprintf(os.Stderr, "\nNote: only bare calls are checked (method calls x.Foo() are skipped).\n")
-	fmt.Fprintf(os.Stderr, "Add false positives to .runechoguardignore, or bypass with RUNECHO_GUARD_SKIP=1.\n")
+	// Same #267 defect as the hook ask, on this surface: file-scope, qualified and
+	// deps-go findings are not silenceable by .runechoguardignore, which guard.Run
+	// alone consumes. See remedy.go.
+	fmt.Fprintf(os.Stderr, "%s\n", precommitRemedyLine(fired))
 
 	// Log after the stderr report — fail-open: log errors are silently discarded.
 	logDecision(decisionRecord{

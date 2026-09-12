@@ -224,47 +224,8 @@ func runHookCase(t *testing.T, c hookCase) {
 		}
 	}
 
-	// A temp repo with the edited file on disk holding its PRE-edit content:
-	// wholeFileText reads this to diff old-vs-new (PreToolUse fires before the
-	// write lands).
-	root := t.TempDir()
-	gitInit(t, root)
-	// Resolve symlinks (macOS /var -> /private/var) before anything derives a path
-	// from root: repo resolution keys on the git common dir, and enrolling one
-	// spelling while looking up another abstains every check silently.
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		root = r
-	}
-	for rel, content := range c.Files {
-		if rel == c.File {
-			t.Fatalf("%s: `files` may not contain the edited file — use `old` for its pre-edit content", c.Name)
-		}
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	edited := filepath.Join(root, filepath.FromSlash(c.File))
-	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if c.NoPreEditFile {
-		if c.Old != "" {
-			t.Fatalf("%s: no_pre_edit_file and a non-empty `old` are contradictory", c.Name)
-		}
-	} else if err := os.WriteFile(edited, []byte(c.Old), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	top := enrollSnapshot(t, root, c.Enroll, c.Refs)
-	if c.Contract != "" {
-		activateContract(t, top, c)
-	}
-	setFlags := flagController(t, c.Flags)
-	body := hookBody(t, c, edited)
+	root, edited, setFlags, body := setupHookCase(t, c)
+	_ = root
 
 	// Structural anti-vacuous probe: resolve each pinned symbol through the guard's
 	// OWN store path (openLatestSnapshot → DefsOfName), the exact lookup the check
@@ -594,4 +555,60 @@ func enrollSnapshot(t *testing.T, root string, files, refs map[string][]string) 
 		t.Fatalf("SaveSnapshot: %v", err)
 	}
 	return top
+}
+
+// setupHookCase builds the world one fixture describes: a temp repo with the
+// edited file at its PRE-edit content, any extra worktree files, the enrolled
+// snapshot, an activated contract, a flag controller and the rendered payload.
+//
+// Split out of runHookCase by #394 so TestProtocolCorpusParity can replay the
+// SAME fixtures through the protocol renderer. Duplicating it there instead
+// would have been the worse trade: a parity test whose setup has drifted from
+// the thing it claims parity with proves nothing, and the drift is invisible.
+// runHookCase's behaviour is unchanged — bench/hookmutate scores it, and the
+// survivor set is the check that this stayed true.
+func setupHookCase(t *testing.T, c hookCase) (string, string, func(bool), string) {
+	t.Helper()
+	// A temp repo with the edited file on disk holding its PRE-edit content:
+	// wholeFileText reads this to diff old-vs-new (PreToolUse fires before the
+	// write lands).
+	root := t.TempDir()
+	gitInit(t, root)
+	// Resolve symlinks (macOS /var -> /private/var) before anything derives a path
+	// from root: repo resolution keys on the git common dir, and enrolling one
+	// spelling while looking up another abstains every check silently.
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	for rel, content := range c.Files {
+		if rel == c.File {
+			t.Fatalf("%s: `files` may not contain the edited file — use `old` for its pre-edit content", c.Name)
+		}
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edited := filepath.Join(root, filepath.FromSlash(c.File))
+	if err := os.MkdirAll(filepath.Dir(edited), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if c.NoPreEditFile {
+		if c.Old != "" {
+			t.Fatalf("%s: no_pre_edit_file and a non-empty `old` are contradictory", c.Name)
+		}
+	} else if err := os.WriteFile(edited, []byte(c.Old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	top := enrollSnapshot(t, root, c.Enroll, c.Refs)
+	if c.Contract != "" {
+		activateContract(t, top, c)
+	}
+	setFlags := flagController(t, c.Flags)
+	body := hookBody(t, c, edited)
+	return root, edited, setFlags, body
 }

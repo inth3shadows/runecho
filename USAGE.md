@@ -452,6 +452,30 @@ The same validation core also powers the Claude Code edit-time hook. See
 [TECHNICAL.md](TECHNICAL.md#the-guard-runecho-guard) for the exact hook
 behavior.
 
+### Ask the guard directly
+
+Anything that can write JSON to a pipe can get the same verdicts the hook gets,
+without pretending to be Claude Code:
+
+```bash
+echo '{"protocol":1,"path":"'$PWD'/app.py","content":"import os\n\ndef go():\n    return proces_data()\n"}' \
+  | runecho-guard --protocol | jq '.results[] | select(.verdict != "skipped")'
+```
+
+```json
+{"check": "violations", "verdict": "violation",
+ "evidence": [{"symbol": "proces_data", "line": 4, "line_space": "file",
+               "suggestions": ["process_data"]}]}
+```
+
+Two things worth knowing before you wire it into CI. **Exit 0 means the guard
+answered, not that it was happy** — a document full of violations exits 0, so
+read `.results`, not `$?`. And **`unknown` is not `ok`**: a check that could not
+run says so, with a `class` of `gate` (it declined one candidate on its own
+precision rule — ignorable) or `degraded` (coverage was genuinely lost — worth a
+warning). Full contract, including what may change without a version bump:
+[TECHNICAL.md](TECHNICAL.md#the-verification-protocol---protocol-protocol-1).
+
 ### Measure how often the guard is wrong
 
 Every guard decision is logged to `~/.runecho/decisions.jsonl`. Three commands

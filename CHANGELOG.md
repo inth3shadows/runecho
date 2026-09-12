@@ -16,6 +16,19 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- guard: `--protocol`, a versioned stdin/stdout verification protocol (#394).
+  An edit in, a `protocol: 1` verdict document out — every check reported exactly
+  once, `unknown` never collapsed into `ok`, and per-check evidence. Anything that
+  can write JSON to a pipe now gets the same verdicts the Claude Code hook gets,
+  without impersonating a hook payload.
+
+### Changed
+- guard: `runHookMode` split into a verification core (`verifyEdit`) and a hook
+  renderer, so the Claude Code hook is one renderer over the core rather than the
+  architecture itself (#394). No change to what the hook says or logs — pinned by
+  a byte-level characterisation golden.
+
 ## [0.50.0] — 2026-09-11
 
 ### Changed

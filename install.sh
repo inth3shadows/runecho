@@ -141,7 +141,7 @@ CFG
   exit 0
 fi
 
-command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.25+)." >&2; exit 1; }
+command -v go >/dev/null 2>&1 || { echo "install.sh: ERROR: Go toolchain not found (need Go 1.26+)." >&2; exit 1; }
 
 # The Python and JS/TS symbol parsers use a pure-Go (CGO-free) tree-sitter
 # runtime. Its grammar package can embed all ~206 grammars (~20MB); these build

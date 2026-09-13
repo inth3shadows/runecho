@@ -32,7 +32,7 @@
 # tag list has exactly one home. The test asserts this file contains no
 # `grammar_subset` literal. Do not "simplify" it into a direct go build.
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
 # bash: install.sh is a bash script, not POSIX sh — alpine's default shell will
 #       not run it.

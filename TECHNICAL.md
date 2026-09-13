@@ -995,9 +995,9 @@ Fuzz targets: `FuzzGoParser`, `FuzzJSParser`, `FuzzPythonParser`,
 `FuzzLoadReader`.
 
 **gofmt version.** CI resolves Go from `go-version-file: go.mod`, so the Format
-gate runs the toolchain pinned there (1.25.0), not whatever is newest locally. A
+gate runs the toolchain pinned there (1.26.0), not whatever is newest locally. A
 newer local gofmt can report phantom failures; match CI with
-`$(GOTOOLCHAIN=go1.25.0 go env GOROOT)/bin/gofmt -l .`.
+`$(GOTOOLCHAIN=go1.26.0 go env GOROOT)/bin/gofmt -l .`.
 
 ## Parser Capability Matrix
 

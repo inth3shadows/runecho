@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.53.1] — 2026-09-13
+
+### Changed
+- build: raise the Go floor to 1.26 (#407) (#409)
+
 ## [0.53.0] — 2026-09-12
 
 ### Changed

@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.54.1] — 2026-09-23
+
 ### Changed
 - types: close the boundary-typing gaps from #365 in idiomatic Go, with no
   change to the wire format. The MCP `structure` schema's `detail` enum and

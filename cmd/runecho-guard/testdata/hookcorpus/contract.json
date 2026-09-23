@@ -152,7 +152,7 @@
   },
   {
     "name": "contract-other-session-approval-still-asks",
-    "desc": "#209: an approval recorded under ANOTHER session id answers nothing for this one — concurrent agents in one repo must each answer for their own scope",
+    "desc": "#209: session sess-other asked about and APPROVED this exact edit under the same contract; sess-corpus has not. Its memo must answer nothing here — concurrent agents in one repo each answer for their own scope. The write side already refuses to record from another session's ask, so this is the only fixture that reaches the memo's read-side session key",
     "check": "contract",
     "flags": [
       "RUNECHO_GUARD_CONTRACT=1",

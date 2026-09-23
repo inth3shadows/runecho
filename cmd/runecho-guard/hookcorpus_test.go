@@ -164,8 +164,10 @@ type hookCase struct {
 	Session         string `json:"session,omitempty"`
 	ActivateSession string `json:"activate_session,omitempty"`
 	// PriorApproval replays an approved out-of-scope edit BEFORE the checked
-	// run (#209): the PreToolUse ask, then a PostToolUse outcome for the same
-	// tool_input attributed to this session id. ApprovalFile is the repo-relative
+	// run (#209): the PreToolUse ask and the PostToolUse outcome for the same
+	// tool_input, BOTH in this session (which gets the same contract bound). A
+	// memo is only ever written from a session's own ask, so a different session
+	// here is the one way to prove the READ side keys on session too. ApprovalFile is the repo-relative
 	// file that earlier edit touched (defaults to File). The corpus is otherwise
 	// single-shot, and the once-per-binding memo is invisible to a single shot —
 	// it only changes the SECOND answer — so without these the mutation harness
@@ -358,7 +360,7 @@ func primeApproval(t *testing.T, c hookCase, root, edited string, setFlags func(
 	}
 	setFlags(true)
 	raw := rawHookBody(t, c, target)
-	if _, _, d := runHook(t, withSession(t, c.Session, raw)); d.Hook.PermissionDec != "ask" {
+	if _, _, d := runHook(t, withSession(t, c.PriorApproval, raw)); d.Hook.PermissionDec != "ask" {
 		t.Fatalf("%s: prior_approval precondition — the earlier edit must itself ask, or there is nothing to approve", c.Name)
 	}
 	runOutcomeMode(strings.NewReader(withSession(t, c.PriorApproval, raw)))
@@ -403,6 +405,13 @@ func activateContract(t *testing.T, top string, c hookCase) {
 	}
 	if err := db.ActivateContract(repo.ID, sess, parsed.Name, parsed.Path, parsed.Hash); err != nil {
 		t.Fatalf("%s: ActivateContract: %v", c.Name, err)
+	}
+	// A prior approval from ANOTHER session needs that session to have the same
+	// contract bound, or its earlier edit could not have asked at all.
+	if c.PriorApproval != "" && c.PriorApproval != sess {
+		if err := db.ActivateContract(repo.ID, c.PriorApproval, parsed.Name, parsed.Path, parsed.Hash); err != nil {
+			t.Fatalf("%s: ActivateContract(%s): %v", c.Name, c.PriorApproval, err)
+		}
 	}
 }
 

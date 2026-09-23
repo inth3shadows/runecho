@@ -108,18 +108,32 @@ const (
 	DetailFull    Detail = "full"
 )
 
+// detailValues is the single list of Detail members: structureSchema's enum and
+// ParseDetail's accepted set and error text are all built from it, so the
+// advertised schema and the parse gate cannot drift apart (#365).
+var detailValues = []Detail{DetailTree, DetailSymbols, DetailHashes, DetailFull}
+
+// detailEnum renders detailValues for the JSON schema and for error messages.
+func detailEnum() []string {
+	out := make([]string, len(detailValues))
+	for i, d := range detailValues {
+		out[i] = string(d)
+	}
+	return out
+}
+
 // ParseDetail turns a raw wire string into a Detail, or "" plus an error naming
 // the expected members. An empty raw string is NOT valid (structure never sends
 // one — the default is applied before parsing by the schema's absence of a
 // default, then again here only as defense-in-depth); callers that need the
 // symbols default apply it before calling.
 func ParseDetail(raw string) (Detail, error) {
-	switch Detail(raw) {
-	case DetailTree, DetailSymbols, DetailHashes, DetailFull:
-		return Detail(raw), nil
-	default:
-		return "", fmt.Errorf("bad detail %q: want tree|symbols|hashes|full", raw)
+	for _, d := range detailValues {
+		if Detail(raw) == d {
+			return d, nil
+		}
 	}
+	return "", fmt.Errorf("bad detail %q: want %s", raw, strings.Join(detailEnum(), "|"))
 }
 
 func structureSchema() map[string]any {
@@ -128,7 +142,7 @@ func structureSchema() map[string]any {
 		"properties": map[string]any{
 			"repo":  map[string]any{"type": "string", "description": "name of an enrolled repo (see `health`/registry)"},
 			"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional glob filters; return only matching files (e.g. \"internal/mcp/**\" or \"*.go\"). `**` matches across directories. Omit for the whole repo."},
-			"detail": map[string]any{"type": "string", "enum": []string{"tree", "symbols", "hashes", "full"},
+			"detail": map[string]any{"type": "string", "enum": detailEnum(),
 				"description": "tree = file paths + symbol counts only (cheapest); symbols (default) = per-file symbols[] (name/kind/line, plus `doc` — the verbatim first line of the symbol's doc comment where it has one, absent otherwise; it is the one field NOT verified against the code, so treat it as what the author wrote, not as checked intent) + refs; hashes = symbols plus each symbol's content hash (~2.5x the tokens; only needed to detect body-level drift, which `hash`/`diff`/`status` answer far more cheaply); full = also the legacy imports/functions/classes/exports arrays + symbol_hashes (redundant with symbols[], for back-compat)"},
 		},
 		"required": []string{"repo"},

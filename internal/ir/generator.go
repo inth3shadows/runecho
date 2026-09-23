@@ -878,6 +878,30 @@ func (g *Generator) parseFile(path string) (FileIR, error) {
 	}, nil
 }
 
+// Symbol kinds: the complete vocabulary symbolsFromStructure emits, which is
+// the only place a Symbol.Kind is minted (#365). Untyped string constants on
+// purpose — Symbol.Kind stays a plain string, so the parsers' literals and any
+// importer of ir.Symbol need no conversion — but every consumer that means one
+// of these should say so by name. SymbolKinds is the list; a test asserts it
+// matches what symbolsFromStructure can actually emit, so a new kind cannot be
+// added without the list (and every doc that points at it) learning about it.
+const (
+	KindFunction       = "function"
+	KindClass          = "class"
+	KindExport         = "export"
+	KindImport         = "import"
+	KindUnexported     = "unexported"
+	KindField          = "field"
+	KindImportName     = "import_name"
+	KindExportWildcard = "export_wildcard"
+)
+
+// SymbolKinds lists every Kind a Symbol can carry.
+var SymbolKinds = []string{
+	KindFunction, KindClass, KindExport, KindImport,
+	KindUnexported, KindField, KindImportName, KindExportWildcard,
+}
+
 // symbolsFromStructure folds the parser's parallel arrays and "kind:name"-keyed
 // hash/line maps into the canonical, sorted []Symbol. path and src additionally
 // feed importedNames, which extracts the locally-bound names an import
@@ -896,28 +920,28 @@ func symbolsFromStructure(s parser.FileStructure, path, src string) []Symbol {
 			syms = append(syms, Symbol{Name: n, Kind: kind, Line: s.SymbolLines[key], Hash: s.SymbolHashes[key], Doc: s.SymbolDocs[key]})
 		}
 	}
-	add(s.Functions, "function")
-	add(s.Classes, "class")
-	add(s.Exports, "export")
-	add(s.Imports, "import")
+	add(s.Functions, KindFunction)
+	add(s.Classes, KindClass)
+	add(s.Exports, KindExport)
+	add(s.Imports, KindImport)
 	// Unexported top-level declarations (Go). Same mechanism as "import_name"
 	// above and for the same reason: SymbolsForLatestSnapshot reads names
 	// regardless of kind, so a distinct kind makes these resolvable at edit time
 	// while leaving every exported-API-surface consumer — which filters on
 	// function/class — showing exactly what it showed before.
-	add(s.Unexported, "unexported")
+	add(s.Unexported, KindUnexported)
 	// Struct fields, receiver-qualified. Same kind mechanism again; needed because
 	// a func-typed field is called exactly like a method, so the receiver-method
 	// check cannot tell an invented member from a real field without them.
-	add(s.Fields, "field")
-	add(importedNames(path, src), "import_name")
+	add(s.Fields, KindField)
+	add(importedNames(path, src), KindImportName)
 	// Module specifiers behind a bare `export * from './mod'` re-export
 	// (JS/TS). The names that re-export actually binds aren't enumerable from
 	// this file alone (see FileStructure.WildcardReexports) — recording the
 	// specifier under its own kind keeps the fact visible (`runecho-ir map`/
 	// `locate`) instead of the prior silent drop, without fabricating export
 	// names this file doesn't itself define.
-	add(s.WildcardReexports, "export_wildcard")
+	add(s.WildcardReexports, KindExportWildcard)
 	sortSymbols(syms)
 	return syms
 }

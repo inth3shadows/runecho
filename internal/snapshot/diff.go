@@ -134,19 +134,19 @@ func computeDiff(
 		aHash, inA := aFiles[path]
 		bHash, inB := bFiles[path]
 
-		var status string
+		var status FileStatus
 		switch {
 		case inA && !inB:
-			status = "removed"
+			status = FileRemoved
 		case !inA && inB:
-			status = "added"
+			status = FileAdded
 		case aHash == bHash:
-			status = "unchanged"
+			status = FileUnchanged
 		default:
-			status = "modified"
+			status = FileModified
 		}
 
-		if status == "unchanged" {
+		if status == FileUnchanged {
 			continue // skip unchanged files from diff output
 		}
 
@@ -270,7 +270,7 @@ func FormatCompact(d DiffResult) string {
 	// (#141). The per-modification symbol total stays "~%d".
 	changedCount := 0
 	for _, f := range d.Files {
-		if f.Status == "modified" || f.Status == "added" || f.Status == "removed" {
+		if f.Status == FileModified || f.Status == FileAdded || f.Status == FileRemoved {
 			changedCount++
 		}
 	}
@@ -551,10 +551,10 @@ func FormatFull(d DiffResult) string {
 	)
 
 	// Group by status.
-	groups := map[string][]FileDiff{
-		"modified": {},
-		"added":    {},
-		"removed":  {},
+	groups := map[FileStatus][]FileDiff{
+		FileModified: {},
+		FileAdded:    {},
+		FileRemoved:  {},
 	}
 	for _, f := range d.Files {
 		groups[f.Status] = append(groups[f.Status], f)
@@ -567,9 +567,9 @@ func FormatFull(d DiffResult) string {
 		fmt.Fprintf(&sb, "\n%s (%d %s):\n", strings.ToUpper(label), len(files), pluralWord(len(files), "file"))
 		for _, f := range files {
 			suffix := ""
-			if f.Status == "added" {
+			if f.Status == FileAdded {
 				suffix = "  [NEW FILE]"
-			} else if f.Status == "removed" {
+			} else if f.Status == FileRemoved {
 				suffix = "  [DELETED]"
 			}
 			fmt.Fprintf(&sb, "  %s%s\n", f.Path, suffix)
@@ -585,9 +585,9 @@ func FormatFull(d DiffResult) string {
 		}
 	}
 
-	writeGroup("modified", groups["modified"])
-	writeGroup("added", groups["added"])
-	writeGroup("removed", groups["removed"])
+	writeGroup(string(FileModified), groups[FileModified])
+	writeGroup(string(FileAdded), groups[FileAdded])
+	writeGroup(string(FileRemoved), groups[FileRemoved])
 
 	fmt.Fprintf(&sb, "\nSummary: +%s, -%s, ~%s across %s\n",
 		plural(d.TotalAdded, "symbol"),

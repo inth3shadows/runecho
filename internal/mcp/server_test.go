@@ -145,3 +145,23 @@ func TestUnknownMethod(t *testing.T) {
 		t.Fatal("unknown method should return a JSON-RPC error")
 	}
 }
+
+// The typed ToolResult must put the same bytes on the wire the map did:
+// isError omitted on success, present and true on failure (#365).
+func TestToolResultWireShape(t *testing.T) {
+	for _, tc := range []struct {
+		isErr bool
+		want  string
+	}{
+		{false, `{"content":[{"type":"text","text":"hi"}]}`},
+		{true, `{"content":[{"type":"text","text":"hi"}],"isError":true}`},
+	} {
+		b, err := json.Marshal(toolResult("hi", tc.isErr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != tc.want {
+			t.Errorf("toolResult(isErr=%v) = %s, want %s", tc.isErr, b, tc.want)
+		}
+	}
+}

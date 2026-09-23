@@ -61,17 +61,29 @@ type SnapshotMeta struct {
 // SymbolDelta is a single symbol added, removed, or modified.
 type SymbolDelta struct {
 	Name string
-	Kind string // "function" | "class" | "export" | "import"
+	Kind string // one of ir.SymbolKinds (e.g. ir.KindFunction); kept a plain string so importers of this type need no conversion
 	// Hash is the symbol's body hash, when the parser produced one (AST-extracted
 	// functions). Empty means "no body hash available" — such a symbol can only be
 	// added/removed, never reported "modified". Not serialized in diff output.
 	Hash string `json:"-"`
 }
 
+// FileStatus is a file's change state between two snapshots (#365). A named
+// type so every producer and consumer uses the four constants below rather than
+// re-spelling literals; it marshals as the same string it always did.
+type FileStatus string
+
+const (
+	FileAdded     FileStatus = "added"
+	FileRemoved   FileStatus = "removed"
+	FileModified  FileStatus = "modified"
+	FileUnchanged FileStatus = "unchanged"
+)
+
 // FileDiff is the structural diff for one file between two snapshots.
 type FileDiff struct {
 	Path       string
-	Status     string // "added" | "removed" | "modified" | "unchanged"
+	Status     FileStatus
 	HashBefore string
 	HashAfter  string
 	Added      []SymbolDelta

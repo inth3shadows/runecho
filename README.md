@@ -139,6 +139,7 @@ full semantic analysis.
    …or **build from source** (needs Go 1.26+), which also installs the guard hooks:
    ```bash
    bash install.sh
+   runecho-ir install --periodic   # optional, run inside the checkout: hourly reindex that also keeps the binaries at the newest release
    ```
 2. Enrol a repo and capture its current structure:
    ```bash

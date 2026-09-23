@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -15,28 +14,31 @@ import (
 	"github.com/inth3shadows/runecho/internal/version"
 )
 
-// installTimeout bounds the foreground rebuild. The hook runs synchronously, so
-// git blocks on it — an unbounded `bash install.sh` (three go builds, plus a
-// possible GOTOOLCHAIN download on a mismatched Go) could hang an interactive
-// `git pull`/`git checkout` indefinitely. On timeout we fail open (advisory),
-// which is strictly better than a hung git operation.
-const installTimeout = 5 * time.Minute
+// installTimeout bounds one rebuild (three go builds, plus a possible
+// GOTOOLCHAIN download on a mismatched Go). Rebuilds run from the periodic job
+// and an explicit `--reinstall` only — never from a hook — but an unbounded one
+// would still let a hung build overlap the next hourly tick. On timeout we fail
+// open (one log line). Part of the per-tick budget pinned against
+// freshenInterval.
+var installTimeout = 5 * time.Minute // var only so a test can shrink it
 
 // version-check keeps the INSTALLED runecho binaries in step with the source a
 // worktree has checked out. It exists because on 2026-07-23 the installed guard
 // went stale three times in one session while newer versions shipped, and two of
 // that session's published quality numbers were fossils written by an old binary.
 // "Reinstall after every merge" is not a fix — that habit had already failed
-// three times. So the post-merge/post-checkout hooks call this automatically.
+// three times.
 //
-// This is the standalone, directly-testable form of that logic. It lives here —
-// not only inside a generated hook body — because logic reachable only through a
-// hook entry point is exactly the untested-surface gap #227 names.
+// Two modes, split by #375:
+//   - ADVISORY (no flag; what the post-merge/post-checkout hooks run with
+//     --quiet): compares the installed stamp with the nearest tag reachable from
+//     HEAD and prints one BEHIND line. It NEVER fetches and NEVER executes
+//     anything, so a checkout — of anyone's branch — runs nothing.
+//   - --reinstall: delegates to freshen, which builds origin's newest release
+//     from an exported tree (see freshen.go for the trust statement). The
+//     periodic job calls freshen directly on a timer.
 //
-// It NEVER fetches (that would tax every pull and worktree creation): it compares
-// against tags already present locally, guaranteeing source/install parity, not
-// freshness against the remote. And it never fails the operation it hooks — every
-// exit path is ExitOK.
+// It never fails the operation it hooks — every exit path is ExitOK.
 
 const runechoModuleLine = "module github.com/inth3shadows/runecho"
 
@@ -78,24 +80,6 @@ func isRunechoTree(top string) bool {
 	return false
 }
 
-// defaultTrusted answers "is HEAD contained in origin's default branch".
-//
-// Containment of HEAD, not of the tag (#373). A tag check does not close the
-// hole and it is worth being explicit about why, because it is the obvious fix
-// and it is wrong: install.sh, and every line of Go it compiles, comes from the
-// CHECKED-OUT WORKTREE. A fork's PR branch based on master resolves a legitimate
-// release tag by ancestry, passes any amount of tag verification, and still gets
-// its own worktree's install.sh executed. The tag says nothing about the bytes
-// that run. Only containment of HEAD does.
-func defaultTrusted(top string) (bool, string, error) {
-	ref, err := gitutil.RemoteDefaultRef(top, "origin")
-	if err != nil {
-		return false, "", err
-	}
-	ok, err := gitutil.Contains(top, "HEAD", ref)
-	return ok, ref, err
-}
-
 // Seams overridden in tests. Real implementations shell out to git / install.sh.
 var (
 	// vcNewestTag returns the nearest tag by ancestry (git describe --abbrev=0).
@@ -103,26 +87,30 @@ var (
 	// is also the highest version reachable; the direction is safe regardless
 	// (under-reporting only ever skips a rebuild, never forces a downgrade).
 	vcNewestTag = gitutil.DescribeTag
-	// vcRunInstall rebuilds the binaries from the source tree at top, targeting
-	// binDir (where the currently-running binary lives) so a custom-dir install
-	// refreshes in place rather than spraying a second copy into ~/.local/bin.
+	// vcRunInstall runs install.sh from the exported tree at top, stamped
+	// version, targeting binDir (where the currently-running binary lives) so a
+	// custom-dir install refreshes in place rather than spraying a second copy
+	// into ~/.local/bin, with goDir prepended to PATH (see resolveGoDir).
 	vcRunInstall = defaultRunInstall
-	// vcTrusted reports whether the CHECKED-OUT revision is one the user already
-	// trusts, and names the ref that defined "trusted" so the skip message can
-	// say what it measured against.
-	vcTrusted = defaultTrusted
 	// vcReadStamp returns the version the freshly-installed binary at path
 	// reports (`<path> --version`) — read AFTER a reinstall to confirm the stamp
 	// actually advanced, since a build can exit 0 without moving it.
 	vcReadStamp = defaultReadStamp
 )
 
-func defaultRunInstall(top, binDir string) error {
+func defaultRunInstall(top, binDir, version, goDir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", filepath.Join(top, "install.sh"))
 	cmd.Dir = top
-	cmd.Env = append(os.Environ(), "RUNECHO_BIN_DIR="+binDir)
+	killGroupOnCancel(cmd)
+	// RUNECHO_VERSION: the exported tree has no .git, so install.sh's own
+	// `git describe` would stamp "dev"; the version is known — it is the tag
+	// freshen chose. Appended last so they win over any inherited value.
+	cmd.Env = append(os.Environ(),
+		"RUNECHO_BIN_DIR="+binDir,
+		"RUNECHO_VERSION="+version,
+		"PATH="+goDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -142,12 +130,12 @@ func defaultReadStamp(binPath string) string {
 }
 
 // runVersionCheck reports installed-vs-newest-reachable-tag and, with --reinstall,
-// rebuilds when the installed binary is behind. Always returns ExitOK: a freshness
-// check must never fail the git operation that triggered it.
+// installs origin's newest release when behind (freshen). Always returns ExitOK:
+// a freshness check must never fail the git operation that triggered it.
 func runVersionCheck(args []string) int {
 	fs := flag.NewFlagSet("version-check", flag.ContinueOnError)
-	reinstall := fs.Bool("reinstall", false, "rebuild from source when the installed binary is behind the newest reachable tag")
-	quiet := fs.Bool("quiet", false, "print nothing when already up to date or not applicable (for hook use)")
+	reinstall := fs.Bool("reinstall", false, "install origin's newest release when the installed binary is behind it (fetches; builds an exported tree, never the checkout)")
+	quiet := fs.Bool("quiet", false, "print nothing when already up to date or not applicable (for hook use); with --reinstall, stays the offline advisory (legacy hook bodies)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
 	}
@@ -173,6 +161,26 @@ func runVersionCheck(args []string) int {
 		return ExitOK
 	}
 
+	// --reinstall never builds THIS tree: it builds origin's newest release from
+	// the repo this tree belongs to (#375). The checked-out revision only
+	// identifies which repository to ask.
+	//
+	// `--reinstall --quiet` together is the body every hook written BEFORE #375
+	// runs, and installed hooks are only rewritten by re-running `install`. So
+	// that exact combination stays the offline advisory it has to be on a git
+	// operation's latency path — no network, no build, silent when current —
+	// rather than turning every checkout into a fetch and a possible 5-minute
+	// build. A person asking for a rebuild does not pass --quiet.
+	if *reinstall && !*quiet {
+		gitDir, err := gitutil.CommonDir(top)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "version-check: cannot resolve the git dir of %s: %v\n", top, err)
+			return ExitOK
+		}
+		fmt.Fprintln(os.Stderr, "version-check: asking origin for its newest release (may fetch and build — can take a few minutes)...")
+		return freshen(gitDir, os.Stdout)
+	}
+
 	installed := semverCore(version.Version)
 	newest := semverCore(func() string { t, _ := vcNewestTag(top); return t }())
 	if newest == "" {
@@ -185,103 +193,8 @@ func runVersionCheck(args []string) int {
 		return ExitOK
 	}
 
-	// Behind. Report-only mode never touches the disk.
-	if !*reinstall {
-		fmt.Printf("version-check: installed %s is BEHIND %s — run 'bash %s/install.sh' or 'runecho-ir version-check --reinstall'\n",
-			disp(installed), newest, top)
-		return ExitOK
-	}
-
-	// Everything below this line executes the checked-out tree. install.sh is run
-	// as bash, and it compiles the whole source tree, so reaching vcRunInstall is
-	// running THIS revision's code. `git checkout` is not an act of trust — on a
-	// public repo, checking out a contributor's branch to read the diff is routine
-	// — and this path is silent by design (--quiet in the hook, ExitOK always).
-	// So the revision has to be one the user already has: contained in origin's
-	// default branch. See defaultTrusted for why the tag cannot stand in for this.
-	//
-	// Fails closed. An error means "could not confirm", which is not permission.
-	//
-	// SCOPE, precisely (#374 review): containment of HEAD is NECESSARY, not
-	// sufficient. install.sh runs from the WORKING TREE, so uncommitted edits to
-	// tracked files and untracked .go files that `go build ./...` compiles are
-	// outside what this gate authorises. A reviewer tried and failed to construct
-	// an attacker-reachable route into that state — `gh pr checkout` puts changes
-	// in tracked files, which `git checkout` restores — so it is recorded as a
-	// known limit rather than implied away. Closing it properly means not
-	// executing the worktree at all; see the note below.
-	//
-	// COST, stated because it is real and larger than it first looks. A branch of
-	// your own stops being contained at its FIRST COMMIT, not merely when unpushed
-	// — and on a squash-merge repo the local default branch can diverge from
-	// origin's too (measured here: master 1 ahead / 6 behind, gate refuses). So in
-	// a worktree-per-task workflow this auto-refresh is inert nearly always.
-	// `runecho-ir version-check` without --quiet still reports it, and
-	// `bash install.sh` still works.
-	//
-	// The successor, deliberately NOT folded in here: build from a DETACHED
-	// WORKTREE at refs/remotes/origin/<default> instead of gating the current one.
-	// It restores the refresh on any branch and dissolves the scope limit above.
-	// Note `git archive` does NOT work for this — install.sh:164 stamps the build
-	// with `git describe`, and an archive has no .git, so every build would stamp
-	// "dev" and re-fire forever. It also needs its tag source moved off HEAD, since
-	// a fork fetch can pollute refs/tags.
-	trusted, trustRef, err := vcTrusted(top)
-	if err != nil {
-		// Forced, not merely expected. Every vcTrusted today returns false
-		// alongside its error, so the gate WOULD hold without this line — which is
-		// precisely the problem: fail-closed would be a property of the callee
-		// rather than of this gate, and a later (true, ref, err) would walk
-		// straight through. Pinned by TestVersionCheck_TrustedTrueWithErrorSkips.
-		trusted = false
-		// vcInfo, not os.Stderr: every other "nothing to do" exit in this function
-		// honours --quiet, and --quiet's own help text promises silence when "not
-		// applicable". This path fires on every checkout and merge for anyone whose
-		// remote is not named origin, so an unconditional write is permanent noise
-		// in the hook -- the spam mode the Windows branch already exists to avoid.
-		vcInfo(*quiet, "version-check: cannot confirm the checked-out revision is trusted, skipping auto-reinstall: %v", err)
-	}
-	if !trusted {
-		if err == nil {
-			vcInfo(*quiet, "version-check: installed %s is BEHIND %s, but HEAD is not contained in %s — skipping auto-reinstall. Run 'bash %s/install.sh' if you trust this revision.",
-				disp(installed), newest, trustRef, top)
-		}
-		return ExitOK
-	}
-
-	// Windows cannot replace a running .exe, so install.sh's rebuild of
-	// runecho-ir.exe would fail on every checkout and the hook would spam a failed
-	// build. Fall back to the advisory and let the user reinstall when no runecho
-	// process holds the file — better than a self-inflicted error loop.
-	if runtime.GOOS == "windows" {
-		fmt.Printf("version-check: installed %s is BEHIND %s — run 'bash %s/install.sh' (auto-reinstall is skipped on Windows: a running binary can't be replaced)\n",
-			disp(installed), newest, top)
-		return ExitOK
-	}
-
-	self, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "runecho: cannot resolve own path, skipping auto-reinstall: %v\n", err)
-		return ExitOK
-	}
-	binDir := filepath.Dir(self)
-
-	fmt.Printf("runecho: installed %s is behind %s — reinstalling...\n", disp(installed), newest)
-	if err := vcRunInstall(top, binDir); err != nil {
-		fmt.Fprintf(os.Stderr, "runecho: reinstall FAILED — run 'bash install.sh' from %s: %v\n", top, err)
-		return ExitOK
-	}
-
-	// A zero exit is not proof the stamp moved (tags unfetched, wrong tree, a
-	// stamping change). Re-read the just-built binary; reporting success from the
-	// exit status alone would leave a stale binary re-firing on every checkout.
-	now := vcReadStamp(self) // already a vX.Y.Z core (defaultReadStamp applies semverCore)
-	if versionBehind(now, newest) || now == "" {
-		fmt.Fprintf(os.Stderr, "runecho: reinstall reported success but the binary still says %s (want %s)\n",
-			disp(now), newest)
-	} else {
-		fmt.Printf("runecho: now %s\n", now)
-	}
+	fmt.Printf("version-check: installed %s is BEHIND %s — run 'bash %s/install.sh' or 'runecho-ir version-check --reinstall' (installs origin's newest release)\n",
+		disp(installed), newest, top)
 	return ExitOK
 }
 

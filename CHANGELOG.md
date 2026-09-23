@@ -16,6 +16,40 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- freshness (#375): the installed binaries are now kept at the newest release by
+  the hourly periodic job instead of by the git hooks. `runecho-ir install
+  --periodic`, run from inside the runecho checkout (or with
+  `--source=<checkout>`), adds a second hourly entry, `runecho-ir freshen
+  <git-common-dir>` (a `:30` crontab line, or the `com.runecho.freshen`
+  LaunchAgent). It is separate from the reindex entry, so a binary that
+  predates it can only fail its own line, never the reindex. Each tick lists
+  origin's release tags
+  (`ls-remote`). When the installed binary is behind, it fetches, checks that
+  the tag's commit is on origin's default branch, and runs `install.sh` from a
+  `git archive` export of that commit with `RUNECHO_VERSION=<tag>`. The
+  checked-out tree is never executed. Each tick logs one `freshen:` line.
+- The post-merge/post-checkout hooks now only warn (`version-check --quiet`,
+  offline). They no longer rebuild.
+- `runecho-ir version-check --reinstall` now installs origin's newest release
+  through the same path. It no longer builds the checked-out tree.
+  `--reinstall --quiet`, the body of hooks installed before this change, stays
+  the offline advisory. An old hook therefore never fetches or builds, even
+  before `runecho-ir install` rewrites it.
+- Re-running `install --periodic` outside the checkout keeps an existing
+  freshen entry.
+- A run that finds `$RUNECHO_HOME/freshen.lock` held skips instead of
+  queueing.
+- The install timeout is a hard limit: it kills install.sh's whole process
+  group.
+- `$RUNECHO_HOME/no-auto-install` is an opt-out that cron and launchd can see
+  (they don't read `RUNECHO_NO_AUTO_INSTALL` from a shell profile).
+
+### Removed
+- The #373 HEAD-containment gate. It guarded against running the checked-out
+  tree, which nothing does anymore, and it had left auto-refresh inert on
+  nearly every branch.
+
 ## [0.54.1] — 2026-09-23
 
 ### Changed

@@ -99,8 +99,14 @@ func TestInstallHooks_FreshnessFoldedIn(t *testing.T) {
 
 	for _, name := range []string{"post-merge", "post-checkout"} {
 		body := read(name)
-		if !strings.Contains(body, "version-check --reinstall --quiet") {
-			t.Errorf("%s missing the freshness check:\n%s", name, body)
+		if !strings.Contains(body, "version-check --quiet") {
+			t.Errorf("%s missing the freshness advisory:\n%s", name, body)
+		}
+		// #375: a hook must never rebuild. A checkout is not an act of trust, and
+		// --reinstall now fetches and builds — work that belongs on the periodic
+		// job, not on a git operation's latency path.
+		if strings.Contains(body, "--reinstall") {
+			t.Errorf("%s still rebuilds from a hook:\n%s", name, body)
 		}
 		if !strings.Contains(body, "repo reindex") {
 			t.Errorf("%s lost the E6 reindex line:\n%s", name, body)

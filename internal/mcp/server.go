@@ -296,12 +296,23 @@ func (s *Server) invoke(t Tool, args json.RawMessage) (text string, err error) {
 	return t.Handler(args)
 }
 
-func toolResult(text string, isErr bool) map[string]any {
-	r := map[string]any{"content": []map[string]any{{"type": "text", "text": text}}}
-	if isErr {
-		r["isError"] = true
-	}
-	return r
+// ToolResult is the MCP tools/call result shape (#365). Typed rather than a
+// map[string]any so the content item's fields and the isError flag cannot be
+// misspelled or mistyped at a call site; the bytes on the wire are unchanged —
+// isError is omitted on success, exactly as the map omitted the key.
+type ToolResult struct {
+	Content []ToolContent `json:"content"`
+	IsError bool          `json:"isError,omitempty"`
+}
+
+// ToolContent is one content item. Only text is ever produced.
+type ToolContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func toolResult(text string, isErr bool) ToolResult {
+	return ToolResult{Content: []ToolContent{{Type: "text", Text: text}}, IsError: isErr}
 }
 
 func (s *Server) ok(id json.RawMessage, result any) response {

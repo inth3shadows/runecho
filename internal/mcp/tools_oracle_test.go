@@ -658,3 +658,21 @@ func TestWithoutSymbolHashes_DoesNotMutateInput(t *testing.T) {
 		t.Errorf("nil input should return nil, got %v", got)
 	}
 }
+
+// The schema's advertised enum and the parse gate must accept exactly the same
+// values — one list, not two copies that drift (#365).
+func TestDetailSchemaMatchesParseGate(t *testing.T) {
+	props := structureSchema()["properties"].(map[string]any)
+	enum := props["detail"].(map[string]any)["enum"].([]string)
+	if len(enum) != len(detailValues) {
+		t.Fatalf("schema enum %v vs detailValues %v", enum, detailValues)
+	}
+	for _, v := range enum {
+		if _, err := ParseDetail(v); err != nil {
+			t.Errorf("schema advertises %q but ParseDetail rejects it: %v", v, err)
+		}
+	}
+	if _, err := ParseDetail("bogus"); err == nil {
+		t.Error("ParseDetail accepted a value outside the enum")
+	}
+}

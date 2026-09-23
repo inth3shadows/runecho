@@ -37,7 +37,7 @@ func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 			return ChurnReport{}, fmt.Errorf("diff snapshots %d→%d: %w", metas[i].ID, metas[i+1].ID, err)
 		}
 		for _, fd := range diff.Files {
-			if fd.Status != "unchanged" {
+			if fd.Status != FileUnchanged {
 				fileChanges[fd.Path]++
 			}
 			for _, sym := range fd.Added {

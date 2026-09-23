@@ -16,6 +16,14 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- types: close the boundary-typing gaps from #365 in idiomatic Go, with no
+  change to the wire format. The MCP `structure` schema's `detail` enum and
+  `ParseDetail` now share one list; `tools/call` results are a typed
+  `ToolResult`; `FileDiff.Status` is a `snapshot.FileStatus` with constants; and
+  `ir.SymbolKinds` names all eight symbol kinds, pinned by a test against what
+  the IR generator actually emits. The `SymbolDelta` comment had listed four.
+
 ## [0.54.0] — 2026-09-23
 
 ### Added

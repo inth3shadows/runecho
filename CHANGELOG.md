@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.54.2] — 2026-09-23
+
 ### Changed
 - freshness (#375): the installed binaries are now kept at the newest release by
   the hourly periodic job instead of by the git hooks. `runecho-ir install

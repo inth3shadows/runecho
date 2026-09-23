@@ -227,12 +227,25 @@ func runRepoReindex(args []string) int {
 	// deletes anything.
 	prune := fs.Bool("prune", false, "after reindexing, trim reindex history to --keep per repo")
 	keep := fs.Int("keep", defaultPruneKeep, "with --prune: reindex snapshots to keep per repo")
+	// --freshen is what the periodic job passes to keep the installed binaries
+	// at origin's newest release (#375). A flag for the same no-shell reason as
+	// --prune. It runs AFTER reindex and prune, so indexing never waits on a
+	// build, and it never changes this command's exit code.
+	freshenSrc := fs.String("freshen", "", "with --all: afterwards, install origin's newest release from this git dir if the binaries are behind")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
 	}
 
 	if *all {
-		return runRepoReindexAll(*prune, *keep)
+		code := runRepoReindexAll(*prune, *keep)
+		if *freshenSrc != "" {
+			freshen(*freshenSrc, os.Stdout)
+		}
+		return code
+	}
+	if *freshenSrc != "" {
+		fmt.Fprintln(os.Stderr, "runecho-ir repo reindex: --freshen applies to --all (the periodic job); use `runecho-ir version-check --reinstall` by hand")
+		return ExitError
 	}
 	if *prune {
 		fmt.Fprintln(os.Stderr, "runecho-ir repo reindex: --prune applies to --all; use `repo prune --repo=<name>` for one repo")

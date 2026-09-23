@@ -20,39 +20,30 @@ matters: a change that overwrites one silently disables the other's feature.
 |---|---|---|
 | `pre-commit` | `runecho-ir install` → `installHooks` (`cmd/runecho-ir/install.go`) | runs `runecho-guard` at commit time |
 | `post-commit` | same | background `runecho-ir repo reindex .` |
-| `post-merge` | same | `version-check --reinstall` (freshness), then background `runecho-ir repo reindex .` |
-| `post-checkout` | same, on branch switches only (`$3 == 1`) | `version-check --reinstall` (freshness), then background `runecho-ir repo reindex .` |
+| `post-merge` | same | `version-check --quiet` (freshness **advisory** — never builds), then background `runecho-ir repo reindex .` |
+| `post-checkout` | same, on branch switches only (`$3 == 1`) | `version-check --quiet` (advisory), then background `runecho-ir repo reindex .` |
 | `pre-push` | `bash install.sh --hook-pre-push` (`githooks/pre-push`) | rejects a non-monotonic `vX.Y.Z` tag push |
 
 The three reindex hooks are the E6 auto-fresh-IR feature (#20/#21). They keep the
 IR index current, and **every guard answer is computed from that index** — so
 anything that overwrites `post-merge` or `post-checkout` degrades the guard
-silently rather than loudly. The #228 freshness check (auto-reinstall when the
-installed binary is behind the newest reachable tag) is folded into these SAME
-two hooks — never a separate installer, which is what collided in #226 — so both
-features share one hook body: freshness runs first, then the background reindex
-picks up the just-rebuilt binary.
+silently rather than loudly. The #228 freshness check is folded into these SAME
+two hooks — never a separate installer, which is what collided in #226 — but
+since #375 the hooks only **advise**: one offline "installed vX is BEHIND vY"
+line, and they execute nothing. `git checkout` of a contributor's branch is not
+an act of trust, so no hook may run the checked-out tree.
 
-The freshness half also requires the checked-out revision to be **contained in
-`origin`'s default branch** (#373). Reaching the rebuild runs `install.sh`, which
-compiles the whole worktree, so it runs that revision's code — and `git checkout`
-of a contributor's branch is not an act of trust. The gate is on HEAD, not on the
-tag: a fork branch based on master resolves a legitimate release tag by ancestry,
-so no amount of tag verification closes it.
-
-**Know the cost before relying on this feature.** A branch stops being contained
-at its FIRST COMMIT — not merely when unpushed — and on a squash-merge repo the
-local default branch drifts from `origin/master` too (measured 2026-08-29: the
-`master` worktree here was 1 ahead / 6 behind, and the gate refused it). In the
-worktree-per-task workflow above, that means **auto-refresh is inert nearly
-always**. `runecho-ir version-check` without `--quiet` still reports it, and
-`bash install.sh` still works. Two other consequences: the remote name `origin`
-is hardcoded, so a differently-named remote loses the feature silently; and if
-`origin/HEAD` is unset while both `origin/main` and `origin/master` exist, the
-lookup refuses rather than guessing (`git remote set-head origin -a` fixes it).
-
-The successor — build from a **detached worktree** at
-`refs/remotes/origin/<default>` rather than gating the current one — would
-restore it on any branch. `git archive` does NOT work for that: `install.sh:164`
-stamps the build with `git describe`, and an archive has no `.git`, so every
-build would stamp `dev` and re-fire forever.
+**Where rebuilds happen (#375).** Only in `freshen` (`cmd/runecho-ir/freshen.go`),
+reached from the hourly periodic job (`repo reindex --all --prune
+--freshen=<git-common-dir>`, written by `runecho-ir install --periodic` run from
+inside this checkout) and from an explicit `runecho-ir version-check
+--reinstall`. It asks origin for its tags (`ls-remote`), and when the installed
+binary is behind the newest `vX.Y.Z` it fetches, requires that tag's commit to be
+contained in origin's default branch, exports it with `git archive`, and runs
+**that** tree's `install.sh` with `RUNECHO_VERSION=<tag>`. Local branches,
+worktrees and local `refs/tags` are never consulted, and the checked-out tree is
+never executed — which is why #373's HEAD-containment gate (inert on nearly every
+branch) is gone. `git archive` works because the version is known from origin and
+`install.sh` honours `RUNECHO_VERSION` (the Dockerfile precedent); without it the
+build would stamp `dev`. The remote name `origin` is hardcoded (fail-closed,
+logged). Every tick writes one `freshen:` line to `~/.runecho/logs/reindex.log`.

@@ -30,9 +30,10 @@ const Timeout = 2 * time.Second
 //   - GIT_CONFIG_NOSYSTEM=1 ignores /etc/gitconfig.
 //   - GIT_TERMINAL_PROMPT=0 prevents an interactive-credential hang.
 //
-// The commands runecho runs today (rev-parse, worktree list, diff --cached) don't
-// invoke config-defined programs, so this is a standing guard rather than a fix
-// for a live vector.
+// The commands runecho runs don't invoke config-defined programs, so this is a
+// standing guard rather than a fix for a live vector. Most are local (rev-parse,
+// worktree list, diff --cached); RemoteTags and Fetch reach the network, and
+// only from the periodic freshness job or an explicit reinstall (#375).
 func Command(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
@@ -222,4 +223,90 @@ func Contains(dir, rev, ref string) (bool, error) {
 		return false, fmt.Errorf("%w: %s", err, msg)
 	}
 	return false, err
+}
+
+// The three functions below reach the NETWORK (ls-remote, fetch) or write a
+// tree to disk (archive), so they take a caller-supplied context instead of
+// Timeout: that 2s budget belongs to the PreToolUse hook, and these run only
+// from the periodic freshness job and an explicit `version-check --reinstall`
+// (#375) — never from a hook. GIT_TERMINAL_PROMPT=0 (see Command) makes an
+// authenticated remote fail fast rather than hang on a credential prompt.
+
+// RemoteTags lists the tags a remote serves right now, as tag name → commit sha.
+// An annotated tag's peeled `^{}` line wins over its tag-object line, so every
+// value is a commit. It reads the REMOTE's list, not local refs/tags — which a
+// fork fetch can pollute, since tags auto-follow any fetched commit they point at.
+func RemoteTags(ctx context.Context, dir, remote string) (map[string]string, error) {
+	var stderr strings.Builder
+	cmd := Command(ctx, dir, "ls-remote", "--tags", remote)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	tags := map[string]string{}
+	peeled := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		sha, ref, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || !strings.HasPrefix(ref, "refs/tags/") {
+			continue
+		}
+		name := strings.TrimPrefix(ref, "refs/tags/")
+		if base, isPeeled := strings.CutSuffix(name, "^{}"); isPeeled {
+			tags[base], peeled[base] = sha, true
+			continue
+		}
+		if !peeled[name] {
+			tags[name] = sha
+		}
+	}
+	return tags, nil
+}
+
+// Fetch updates dir's remote-tracking refs from remote.
+func Fetch(ctx context.Context, dir, remote string) error {
+	var stderr strings.Builder
+	cmd := Command(ctx, dir, "fetch", "--quiet", remote)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
+}
+
+// Export writes the tree at rev into dest (which must exist), via
+// `git archive --format=tar <rev> | tar -x -C dest` — two processes, no shell.
+// The result has no .git: nothing in it can reach the repository's config,
+// hooks or worktree registry.
+func Export(ctx context.Context, dir, rev, dest string) error {
+	archive := Command(ctx, dir, "archive", "--format=tar", rev)
+	var archErr, tarErr strings.Builder
+	archive.Stderr = &archErr
+	pipe, err := archive.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	untar := exec.CommandContext(ctx, "tar", "-x", "-C", dest)
+	untar.Stdin = pipe
+	untar.Stderr = &tarErr
+	if err := archive.Start(); err != nil {
+		return err
+	}
+	if err := untar.Run(); err != nil {
+		_ = archive.Wait()
+		return fmt.Errorf("tar: %w: %s", err, strings.TrimSpace(tarErr.String()))
+	}
+	if err := archive.Wait(); err != nil {
+		if msg := strings.TrimSpace(archErr.String()); msg != "" {
+			return fmt.Errorf("git archive: %w: %s", err, msg)
+		}
+		return fmt.Errorf("git archive: %w", err)
+	}
+	return nil
 }

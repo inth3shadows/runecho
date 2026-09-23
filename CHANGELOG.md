@@ -16,6 +16,26 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- freshness (#375): the installed binaries are now kept at the newest release by
+  the hourly periodic job instead of by the git hooks. `runecho-ir install
+  --periodic`, run from inside the runecho checkout (or with
+  `--source=<checkout>`), writes `repo reindex --all --prune
+  --freshen=<git-common-dir>`. Each tick lists origin's release tags
+  (`ls-remote`). When the installed binary is behind, it fetches, checks that
+  the tag's commit is on origin's default branch, and runs `install.sh` from a
+  `git archive` export of that commit with `RUNECHO_VERSION=<tag>`. The
+  checked-out tree is never executed. Each tick logs one `freshen:` line.
+- The post-merge/post-checkout hooks now only warn (`version-check --quiet`,
+  offline). They no longer rebuild.
+- `runecho-ir version-check --reinstall` now installs origin's newest release
+  through the same path. It no longer builds the checked-out tree.
+
+### Removed
+- The #373 HEAD-containment gate. It guarded against running the checked-out
+  tree, which nothing does anymore, and it had left auto-refresh inert on
+  nearly every branch.
+
 ## [0.54.1] — 2026-09-23
 
 ### Changed

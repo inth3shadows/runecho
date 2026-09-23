@@ -55,7 +55,7 @@ func TestNoCrontabYet(t *testing.T) {
 func TestInstallCron_RefusesToOverwriteWhenReadFails(t *testing.T) {
 	wrote := fakeCrontab(t, `echo "/var/spool/cron/crontabs/u: Permission denied" >&2; exit 1`)
 
-	err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log")
+	err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log", "")
 	if err == nil {
 		t.Fatal("installCron returned nil on an unreadable crontab — it would have overwritten it")
 	}
@@ -71,14 +71,14 @@ func TestInstallCron_RefusesToOverwriteWhenReadFails(t *testing.T) {
 func TestInstallCron_TreatsNoCrontabAsEmpty(t *testing.T) {
 	wrote := fakeCrontab(t, `echo "no crontab for u" >&2; exit 1`)
 
-	if err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log"); err != nil {
+	if err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log", ""); err != nil {
 		t.Fatalf("installCron on a user with no crontab: %v", err)
 	}
 	got, err := os.ReadFile(wrote)
 	if err != nil {
 		t.Fatalf("nothing written: %v", err)
 	}
-	want := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log") + "\n"
+	want := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log", "") + "\n"
 	if string(got) != want {
 		t.Errorf("wrote %q, want %q (a leading blank line means the empty-crontab split was not skipped)", got, want)
 	}
@@ -87,7 +87,7 @@ func TestInstallCron_TreatsNoCrontabAsEmpty(t *testing.T) {
 func TestInstallCron_PreservesExistingEntriesAndReplacesItsOwn(t *testing.T) {
 	wrote := fakeCrontab(t, `printf '%s\n' "0 2 * * * /home/u/backup.sh" "# a comment" "0 * * * * /old/runecho-ir reindex # runecho"; exit 0`)
 
-	if err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log"); err != nil {
+	if err := installCron("/usr/local/bin/runecho-ir", "/tmp/reindex.log", ""); err != nil {
 		t.Fatalf("installCron: %v", err)
 	}
 	got, err := os.ReadFile(wrote)
@@ -97,7 +97,7 @@ func TestInstallCron_PreservesExistingEntriesAndReplacesItsOwn(t *testing.T) {
 	want := strings.Join([]string{
 		"0 2 * * * /home/u/backup.sh",
 		"# a comment",
-		cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log"),
+		cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log", ""),
 	}, "\n") + "\n"
 	if string(got) != want {
 		t.Errorf("wrote:\n%s\nwant:\n%s", got, want)

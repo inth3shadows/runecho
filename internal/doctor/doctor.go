@@ -81,13 +81,19 @@ func Run(root string) []Result {
 // two cannot drift.
 const periodicPruneArg = "--prune"
 
+// periodicFreshenArg is the flag that makes the hourly job keep the installed
+// binaries at origin's newest release (#375). Reported, never warned about:
+// it only applies to a from-source install, and a Homebrew/goreleaser user with
+// --periodic cannot and should not satisfy it.
+const periodicFreshenArg = "--freshen"
+
 // checkPeriodic reports whether the installed hourly reindex job also prunes.
 //
 // This check exists because upgrading the binary does NOT rewrite the schedule.
 // The cron line and the LaunchAgent plist are written once, by
 // `runecho-ir install --periodic`; install.sh does not touch them, and neither
-// does the version-check --reinstall path the post-merge/post-checkout hooks
-// run. So a machine that installed the periodic job before retention shipped
+// does a rebuild (`version-check --reinstall` or the job's own --freshen,
+// #375). So a machine that installed the periodic job before retention shipped
 // keeps running the old reindex-only command forever, and its store keeps
 // growing — on exactly the long-lived installs #351 was filed about.
 //
@@ -119,10 +125,15 @@ func classifyPeriodic(entry, where string, found bool) []Result {
 			Detail: "installed in " + where + " but does NOT prune — snapshot history grows without bound (#351)",
 			Remedy: "runecho-ir install --periodic   # rewrites the schedule to `repo reindex --all --prune`",
 		}}
+	case !strings.Contains(entry, periodicFreshenArg):
+		return []Result{{
+			Check: name, Status: OK,
+			Detail: "installed in " + where + " and prunes; does not keep the binaries fresh — for a from-source install, re-run `runecho-ir install --periodic` from inside the runecho checkout (#375)",
+		}}
 	default:
 		return []Result{{
 			Check: name, Status: OK,
-			Detail: "installed in " + where + " and prunes",
+			Detail: "installed in " + where + ", prunes, and keeps the binaries at origin's newest release",
 		}}
 	}
 }

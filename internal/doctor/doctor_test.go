@@ -453,3 +453,26 @@ func launchdPlistFixture() string {
 </dict>
 </plist>`
 }
+
+// #375: whether the job freshens is reported in the detail, never as a warning —
+// it only applies to from-source installs.
+func TestCheckPeriodic_ReportsFreshen(t *testing.T) {
+	base := `0 * * * * '/home/u/bin/runecho-ir' repo reindex --all --prune`
+	for _, tc := range []struct {
+		entry, want string
+	}{
+		{base + ` >>/tmp/r.log 2>&1 # runecho`, "does not keep the binaries fresh"},
+		{base + ` --freshen='/home/u/src/runecho/.bare' >>/tmp/r.log 2>&1 # runecho`, "keeps the binaries at origin's newest release"},
+	} {
+		r := find(classifyPeriodic(tc.entry, "crontab", true), "periodic reindex")
+		if r == nil {
+			t.Fatal("no periodic reindex result")
+		}
+		if r.Status != OK {
+			t.Errorf("status = %q, want %q — freshen is optional", r.Status, OK)
+		}
+		if !strings.Contains(r.Detail, tc.want) {
+			t.Errorf("detail %q should contain %q", r.Detail, tc.want)
+		}
+	}
+}

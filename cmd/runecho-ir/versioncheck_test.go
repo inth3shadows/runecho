@@ -105,77 +105,31 @@ func runechoRepo(t *testing.T, tag string) string {
 	return dir
 }
 
+// withSeams pins the installed version and restores every rebuild seam after
+// the test. Git itself is never stubbed: the repos are real, with local-path
+// remotes, so gitutil runs as shipped.
 func withSeams(t *testing.T, ver string) {
 	t.Helper()
 	origVer := version.Version
-	origRun, origStamp, origTrusted := vcRunInstall, vcReadStamp, vcTrusted
+	origRun, origStamp, origLook := vcRunInstall, vcReadStamp, fzLookPath
 	version.Version = ver
-	// runechoRepo has no origin remote, so the real defaultTrusted would fail
-	// closed and every reinstall test would pass for the wrong reason. Tests that
-	// are ABOUT the trust gate override this again; see versioncheck_trust_test.go.
-	vcTrusted = func(string) (bool, string, error) { return true, "refs/remotes/origin/master", nil }
+	// A deterministic toolchain answer, so no test depends on the machine's PATH.
+	fzLookPath = func(string) (string, error) { return "/fake/go/bin/go", nil }
+	vcRunInstall = func(top, binDir, ver, goDir string) error {
+		t.Fatalf("unexpected rebuild (top=%s version=%s)", top, ver)
+		return nil
+	}
 	t.Cleanup(func() {
 		version.Version = origVer
-		vcRunInstall, vcReadStamp, vcTrusted = origRun, origStamp, origTrusted
+		vcRunInstall, vcReadStamp, fzLookPath = origRun, origStamp, origLook
 	})
 }
 
-func TestVersionCheck_UpToDate_NoReinstall(t *testing.T) {
-	repo := runechoRepo(t, "v0.16.1")
-	withSeams(t, "v0.16.1")
-	called := false
-	vcRunInstall = func(top, binDir string) error { called = true; return nil }
-
-	if code := runVersionCheck([]string{"--reinstall", "--quiet", repo}); code != ExitOK {
-		t.Fatalf("exit = %d, want ExitOK", code)
-	}
-	if called {
-		t.Error("reinstall ran while already up to date")
-	}
-}
-
-func TestVersionCheck_Behind_Reinstalls(t *testing.T) {
-	repo := runechoRepo(t, "v0.17.0")
-	withSeams(t, "v0.16.1") // behind the tag
-	ran := false
-	vcRunInstall = func(top, binDir string) error {
-		ran = true
-		if top != mustTop(t, repo) {
-			t.Errorf("install run against %q, want %q", top, repo)
-		}
-		return nil
-	}
-	vcReadStamp = func(binPath string) string { return "v0.17.0" } // stamp advanced
-
-	if code := runVersionCheck([]string{"--reinstall", repo}); code != ExitOK {
-		t.Fatalf("exit = %d, want ExitOK", code)
-	}
-	if !ran {
-		t.Error("reinstall did not run while behind")
-	}
-}
-
-func TestVersionCheck_ReinstallDidNotAdvance(t *testing.T) {
-	// A build that exits 0 but leaves the stamp behind must be reported, not
-	// declared a success — otherwise the hook re-fires forever silently.
-	repo := runechoRepo(t, "v0.17.0")
-	withSeams(t, "v0.16.1")
-	vcRunInstall = func(top, binDir string) error { return nil }
-	vcReadStamp = func(binPath string) string { return "v0.16.1" } // did NOT move
-
-	// Still ExitOK (never fail the git op); the warning goes to stderr.
-	if code := runVersionCheck([]string{"--reinstall", repo}); code != ExitOK {
-		t.Fatalf("exit = %d, want ExitOK", code)
-	}
-}
-
 func TestVersionCheck_OptOut(t *testing.T) {
-	repo := runechoRepo(t, "v0.17.0")
+	clone := clonedRunechoRepo(t, "v0.17.0")
 	withSeams(t, "v0.16.1")
 	t.Setenv("RUNECHO_NO_AUTO_INSTALL", "1")
-	vcRunInstall = func(top, binDir string) error { t.Fatal("reinstall ran despite opt-out"); return nil }
-
-	if code := runVersionCheck([]string{"--reinstall", repo}); code != ExitOK {
+	if code := runVersionCheck([]string{"--reinstall", clone}); code != ExitOK {
 		t.Fatalf("exit = %d, want ExitOK", code)
 	}
 }
@@ -195,10 +149,52 @@ func TestVersionCheck_ForeignTree_NoOp(t *testing.T) {
 	cmd.Run()
 	exec.Command("git", "-C", dir, "tag", "v9.9.9").Run()
 
-	withSeams(t, "v0.0.1")
-	vcRunInstall = func(top, binDir string) error { t.Fatal("reinstall ran in a foreign repo"); return nil }
+	withSeams(t, "v0.0.1") // any rebuild fails the test
 	if code := runVersionCheck([]string{"--reinstall", "--quiet", dir}); code != ExitOK {
 		t.Fatalf("exit = %d, want ExitOK", code)
+	}
+}
+
+// TestVersionCheck_AdvisoryNeverExecutes is #373's chain re-pinned for the hook
+// path (#375): a branch not in origin, carrying its own high tag and its own
+// install.sh. The hooks run version-check WITHOUT --reinstall, and that mode
+// must never build anything — whatever is checked out.
+func TestVersionCheck_AdvisoryNeverExecutes(t *testing.T) {
+	clone := clonedRunechoRepo(t, "v0.16.1")
+	forkBranch(t, clone)
+	withSeams(t, "v0.16.1") // any rebuild fails the test
+	for _, args := range [][]string{{"--quiet", clone}, {clone}} {
+		if code := runVersionCheck(args); code != ExitOK {
+			t.Fatalf("exit = %d, want ExitOK", code)
+		}
+	}
+}
+
+// TestVersionCheck_ReinstallUsesOriginNotWorktree: --reinstall from a fork
+// branch builds ORIGIN's newest release from an exported tree, never the
+// checked-out worktree with its v99 tag and modified install.sh.
+func TestVersionCheck_ReinstallUsesOriginNotWorktree(t *testing.T) {
+	clone := clonedRunechoRepo(t, "v0.17.0")
+	upstreamInstall := readFile(t, filepath.Join(clone, "install.sh"))
+	forkBranch(t, clone)
+	withSeams(t, "v0.16.1")
+	ran := false
+	vcRunInstall = func(top, binDir, ver, goDir string) error {
+		ran = true
+		if ver != "v0.17.0" {
+			t.Errorf("built %s, want origin's v0.17.0", ver)
+		}
+		if got := readFile(t, filepath.Join(top, "install.sh")); got != upstreamInstall {
+			t.Errorf("ran the worktree's install.sh, not origin's:\n%s", got)
+		}
+		return nil
+	}
+	vcReadStamp = func(string) string { return "v0.17.0" }
+	if code := runVersionCheck([]string{"--reinstall", clone}); code != ExitOK {
+		t.Fatalf("exit = %d, want ExitOK", code)
+	}
+	if !ran {
+		t.Error("--reinstall did not build while behind origin's release")
 	}
 }
 

@@ -78,14 +78,14 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 	case strictMode():
 		advisory = strictStoreDegradedAdvisory
 	}
-	if askWithoutIndex(out, res.Contract, degradedShapes, degradedLint, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
+	if askWithoutIndex(out, res.Contract, res.ContractSuppressed, degradedShapes, degradedLint, filePath, lang, res.RepoName, advisory, editFingerprint(edit)) {
 		return true
 	}
 	switch {
 	case res.Warn != "":
 		// Schema-newer: already loud regardless of strict — surfaced always.
 		hookDeferContext(out, res.Warn)
-		logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"})
+		logDecision(noteContractSuppressed(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "schema-newer"}, res.ContractSuppressed))
 	case res.NoRepo:
 		// Not enrolled — silent skip; strict does not change this. The one
 		// exception is the first edit in a given repo, which carries the
@@ -99,7 +99,7 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 		} else {
 			hookDefer()
 		}
-		logDecision(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"})
+		logDecision(noteContractSuppressed(decisionRecord{Mode: "hook", File: filePath, Lang: string(lang), Decision: "defer", Reason: "no-repo"}, res.ContractSuppressed))
 	default:
 		// Store accessible but degraded (no snapshot, no symbols, etc.).
 		// Under strict, surface an advisory so the user knows validation is off.
@@ -108,7 +108,7 @@ func answerDegradedStore(out io.Writer, res lookupResult, edit hookEdit, filePat
 		} else {
 			hookDefer()
 		}
-		logDecision(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"})
+		logDecision(noteContractSuppressed(decisionRecord{Mode: "hook", Repo: res.RepoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "store-degraded"}, res.ContractSuppressed))
 	}
 	return false
 }

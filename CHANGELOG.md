@@ -16,6 +16,22 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- guard: a repeat out-of-scope contract ask is asked once per file, not once per
+  edit (#209). Once this session has **approved** an edit to a file under the
+  active contract, further edits to that file stop asking — keyed on (session,
+  activation hash, file), recorded only from an observed PostToolUse approval
+  joined by edit fingerprint, never from the ask. The scope itself does not
+  change: other out-of-scope files still ask, other sessions still ask, and
+  re-activating edited contract text starts clean. Approvals under
+  `bypassPermissions`/`dontAsk` are not remembered. `RUNECHO_GUARD_CONTRACT_ONCE=0`
+  turns it off. Store: `$RUNECHO_HOME/contract-approvals.json` (1024 entries,
+  7-day TTL).
+- guard: decision records carry `suppressed` (e.g. `["contract"]`) when a check
+  fired and was silenced before rendering, and `fpreport` shows it per check as
+  `+N suppressed` (JSON `suppressed`), deduped against hook re-invocation. It is
+  not an ask: the would-have-asked volume is `total + suppressed`.
+
 ## [0.53.1] — 2026-09-13
 
 ### Changed

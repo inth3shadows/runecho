@@ -82,6 +82,11 @@ type Decision struct {
 	// candidate". No report aggregates it yet; it is read via jq and by
 	// whichever slice of #243/#315 needs it.
 	CheckReasons map[string]string
+	// Suppressed names the checks that fired on this edit but were silenced
+	// before rendering (#209: a repeat contract ask an earlier approval already
+	// answered). Nil on records that suppressed nothing and on every record
+	// written before the field existed.
+	Suppressed []string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
@@ -102,6 +107,7 @@ type rawDecision struct {
 	Edit         string              `json:"edit,omitempty"`
 	Checks       map[string]string   `json:"checks,omitempty"`
 	CheckReasons map[string]string   `json:"check_reasons,omitempty"`
+	Suppressed   []string            `json:"suppressed,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -140,6 +146,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Edit:         raw.Edit,
 						Checks:       raw.Checks,
 						CheckReasons: raw.CheckReasons,
+						Suppressed:   raw.Suppressed,
 					})
 				}
 			}

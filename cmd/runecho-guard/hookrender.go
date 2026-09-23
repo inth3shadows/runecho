@@ -24,6 +24,10 @@ import (
 // returning the process exit code (always 0 — the guard defers, it never
 // blocks from here).
 func renderHookDecision(out io.Writer, v verification) int {
+	// Every record this renderer writes carries the #209 suppression marker when
+	// a repeat contract ask was silenced for this edit — whichever record that
+	// turns out to be (a defer, or a fact-check ask the contract no longer joins).
+	logHook := func(rec decisionRecord) { logDecision(noteContractSuppressed(rec, v.ContractSuppressed)) }
 	// The four bail arms answer without any check having run. Each keeps the
 	// exact log reason, the exact fields, and the exact contract-first ordering
 	// its arm had when it lived inline: bad-path deliberately logs NO file (the
@@ -34,18 +38,18 @@ func renderHookDecision(out io.Writer, v verification) int {
 			return 0
 		}
 		hookDefer()
-		logDecision(decisionRecord{Mode: "hook", File: v.Path, Decision: "defer", Reason: bailEmptyInput})
+		logHook(decisionRecord{Mode: "hook", File: v.Path, Decision: "defer", Reason: bailEmptyInput})
 		return 0
 	case bailBadPath:
 		hookDefer()
-		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: bailBadPath})
+		logHook(decisionRecord{Mode: "hook", Decision: "defer", Reason: bailBadPath})
 		return 0
 	case bailUnknownLang:
 		if askContractOnly(out, v.Contract, v.Path, v.Lang, editFingerprint(v.Edit), nil, nil) {
 			return 0
 		}
 		hookDefer()
-		logDecision(decisionRecord{Mode: "hook", File: v.Path, Decision: "defer", Reason: bailUnknownLang})
+		logHook(decisionRecord{Mode: "hook", File: v.Path, Decision: "defer", Reason: bailUnknownLang})
 		return 0
 	case bailDegradedStore:
 		answerDegradedStore(out, v.Lookup, v.Edit, v.Path, v.Lang, v.RemovedText)
@@ -110,13 +114,13 @@ func renderHookDecision(out io.Writer, v verification) int {
 		// — the noise that trains a user to stop reading it.
 		if degraded > 0 && strictMode() {
 			hookDeferContext(out, fmt.Sprintf("[runecho-guard] %d check(s) could not run to completion (pre-edit file unreadable/oversized, a store query failed, or a check abstained on degraded input) — coverage was incomplete for this edit.", degraded))
-			logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded", Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
+			logHook(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: "check-degraded", Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
 			return 0
 		}
 		// If the IR is stale the check may be incomplete — say so via
 		// additionalContext (which informs Claude without forcing an allow/deny).
 		staleReason := hookDeferStale(out, latest)
-		logDecision(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason, Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
+		logHook(decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "defer", Reason: staleReason, Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)})
 		return 0
 	}
 
@@ -225,8 +229,8 @@ func renderHookDecision(out io.Writer, v verification) int {
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, ClaimSymbols: claimSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
 	if cw != nil {
-		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
+		rec.Contract, rec.ContractHash, rec.ContractSession = cw.Name, shortHash(cw.ActivatedHash), contractSessionTag(cw.SessionID)
 	}
-	logDecision(rec)
+	logHook(rec)
 	return 0
 }

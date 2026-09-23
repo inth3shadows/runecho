@@ -194,7 +194,7 @@ func TestLogOutcomeForFile_EnrichesAndRecords(t *testing.T) {
 		Symbols: []string{"Ghost"}, LearnSymbols: []string{"Ghost"},
 	})
 
-	logOutcomeForFile(file, "")
+	logOutcomeForFile(file, "", "", "")
 
 	// Outcome row carries symbols + repo forwarded from the ask.
 	rec := readLastDecisionLog(t)
@@ -229,7 +229,7 @@ func TestLogOutcomeForFile_OnlyLearnsHallucinationOrigin(t *testing.T) {
 		LearnSymbols: []string{"Ghost"},            // only the hallucination is learn-eligible
 	})
 
-	logOutcomeForFile(file, "")
+	logOutcomeForFile(file, "", "", "")
 
 	store := loadLearnedAllow(home)
 	if store.Repos["r"]["Ghost"].Count != 1 {
@@ -335,8 +335,8 @@ func TestLogOutcomeForFile_SecondFireIsSuppressed(t *testing.T) {
 		Symbols: []string{"Foo"}, LearnSymbols: []string{"Foo"},
 	})
 
-	logOutcomeForFile(file, "") // plugin hook
-	logOutcomeForFile(file, "") // hand-merged settings.json hook, same edit
+	logOutcomeForFile(file, "", "", "") // plugin hook
+	logOutcomeForFile(file, "", "", "") // hand-merged settings.json hook, same edit
 
 	if got := countOutcomes(t, home, file); got != 1 {
 		t.Errorf("outcome records = %d, want 1 — a double-wired PostToolUse "+
@@ -359,11 +359,11 @@ func TestLogOutcomeForFile_LaterAskIsStillRecorded(t *testing.T) {
 	}
 
 	logDecision(ask)
-	logOutcomeForFile(file, "")
-	logOutcomeForFile(file, "") // duplicate fire, suppressed
+	logOutcomeForFile(file, "", "", "")
+	logOutcomeForFile(file, "", "", "") // duplicate fire, suppressed
 
-	logDecision(ask)            // a second, genuine edit to the same file
-	logOutcomeForFile(file, "") // must be recorded
+	logDecision(ask)                    // a second, genuine edit to the same file
+	logOutcomeForFile(file, "", "", "") // must be recorded
 
 	if got := countOutcomes(t, home, file); got != 2 {
 		t.Errorf("outcome records = %d, want 2 (one per genuine ask) — the dedupe "+
@@ -425,7 +425,7 @@ func TestLogOutcomeForFile_ConcurrentFiresWriteOnce(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start // release together to maximise overlap
-				logOutcomeForFile(file, "")
+				logOutcomeForFile(file, "", "", "")
 			}()
 		}
 		close(start)

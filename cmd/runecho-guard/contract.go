@@ -51,6 +51,10 @@ type contractWarning struct {
 	// silently excluding non-code files, which is where the design says scope
 	// drift most often lands.
 	RepoName string
+	// File is the edited path as the tool call carried it, cleaned — the third
+	// key of the once-per-binding memo (#209, contractonce.go), which must match
+	// what the PostToolUse side records from the same tool_input.
+	File string
 }
 
 // drifted reports whether the contract file changed after it was activated.
@@ -90,8 +94,17 @@ func (cw *contractWarning) section() string {
 		fmt.Fprintf(&sb, "  note: %s changed after activation (%s → %s) — this check used the CURRENT file.\n",
 			cw.ContractPath, shortHash(cw.ActivatedHash), shortHash(cw.CurrentHash))
 	}
-	fmt.Fprintf(&sb, "Approve if the edit is legitimate — an out-of-scope edit often is. "+
-		"The scope lives in %s; widen it there, or drop it for this session with:\n", cw.ContractPath)
+	sb.WriteString("Approve if the edit is legitimate — an out-of-scope edit often is.")
+	if contractOnceEnabled() {
+		// #209: say what an approval buys, so the user is not left wondering
+		// whether approving once has quietly widened the scope. It has not. The
+		// dependency is named because the guard cannot see it from here: with no
+		// PostToolUse --outcome-mode hook wired, or a harness that omits
+		// session_id there, nothing is recorded and every edit keeps asking — a
+		// promise stated flatly would then be false on every repeat.
+		sb.WriteString(" Approving records an answer for this file: later edits to it in this session, under this activation, stop asking (recorded by the PostToolUse --outcome-mode hook). The scope itself does not change, and other out-of-scope files still ask.")
+	}
+	fmt.Fprintf(&sb, " The scope lives in %s; widen it there, or drop it for this session with:\n", cw.ContractPath)
 	fmt.Fprintf(&sb, "  runecho-ir contract deactivate --dir %s --session %s\n", cw.RepoRoot, cw.SessionID)
 	sb.WriteString("(.runechoguardignore does not apply to a contract — only the contract file controls scope.)\n")
 	return sb.String()
@@ -215,6 +228,7 @@ func contractWarningWith(db *snapshot.DB, repoID int64, repoName, filePath, sess
 		ActivatedHash: active.ContentHash,
 		CurrentHash:   c.Hash,
 		RepoName:      repoName,
+		File:          filepath.Clean(filePath),
 	}
 }
 
@@ -317,9 +331,11 @@ func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang g
 		Reason:       "contract",
 		Contract:     cw.Name,
 		ContractHash: shortHash(cw.ActivatedHash),
-		Edit:         editHash,
-		Checks:       checks,
-		CheckReasons: checkReasons,
+		// ContractSession: see decisionRecord.
+		ContractSession: contractSessionTag(cw.SessionID),
+		Edit:            editHash,
+		Checks:          checks,
+		CheckReasons:    checkReasons,
 	})
 	return true
 }

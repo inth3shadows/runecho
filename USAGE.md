@@ -573,6 +573,13 @@ claim. `asks` and `rate` keep their old meaning, so **`--max-rate` gates on
 exactly what it always did** — including its mixed-version refusal, which counts
 builds that contributed a rateable ask, not builds that merely appear.
 
+A `+N suppressed` on a **By check (split)** row counts repeats that an earlier
+approval silenced (#209: the contract check asks once per file per activation).
+They are not asks and sit outside every rate and total; the check's
+would-have-asked volume is `total + suppressed`. In `--json` the same number is
+`suppressed` on each `by_check` row — only there: no other breakdown can
+attribute a suppression, so the field is absent rather than a misleading `0`.
+
 The approval rate is an **upper bound** on the false-positive rate: an approved
 ask is one the guard raised and the user waved through, but some of those
 approvals are the user fixing the flagged symbol rather than dismissing a wrong

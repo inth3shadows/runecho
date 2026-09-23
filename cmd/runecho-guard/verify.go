@@ -50,7 +50,8 @@ const (
 // it find", and only a renderer needs both at once.
 type verification struct {
 	// Bail is "" when the checks ran. Otherwise it names the early return, and
-	// every field below except Edit/Path/Lang/Contract/Lookup/RemovedText is zero.
+	// every field below except Edit/Path/Lang/Contract/ContractSuppressed/Lookup/
+	// RemovedText is zero.
 	Bail string
 
 	Edit     hookEdit
@@ -58,6 +59,10 @@ type verification struct {
 	Lang     guard.Lang
 	Lookup   lookupResult
 	Contract *contractWarning
+	// ContractSuppressed: a repeat contract ask an earlier approval answered
+	// (#209). Mutually exclusive with Contract; see splitContractOnce.
+	// Unset on the degraded-store bail, whose renderer reads Lookup's copy.
+	ContractSuppressed *contractWarning
 
 	// RemovedText is only carried for the degraded-store bail, whose renderer
 	// re-derives the store-free checks from it.
@@ -139,12 +144,14 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		// contract at all. This path costs a single store open, only for a
 		// session that named a contract, and leaves the log alone when it
 		// abstains.
+		cw, sc := splitContractOnce(contractWarningFor(filePath, sessionID))
 		return verification{
-			Bail:     bailEmptyInput,
-			Edit:     edit,
-			Path:     filePath,
-			Lang:     guard.LangFor(filePath),
-			Contract: contractWarningFor(filePath, sessionID),
+			Bail:               bailEmptyInput,
+			Edit:               edit,
+			Path:               filePath,
+			Lang:               guard.LangFor(filePath),
+			Contract:           cw,
+			ContractSuppressed: sc,
 		}
 	}
 	// Reject null bytes (invalid on all supported OSes) and extreme lengths.
@@ -162,12 +169,14 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		// pays for its own store open; every other edit picks it up from
 		// lookupSymbolsFor below. nil (abstain) unless the flag is on AND this
 		// session explicitly activated a contract AND the path fell outside it.
+		cw, sc := splitContractOnce(contractWarningFor(filePath, sessionID))
 		return verification{
-			Bail:     bailUnknownLang,
-			Edit:     edit,
-			Path:     filePath,
-			Lang:     lang,
-			Contract: contractWarningFor(filePath, sessionID),
+			Bail:               bailUnknownLang,
+			Edit:               edit,
+			Path:               filePath,
+			Lang:               lang,
+			Contract:           cw,
+			ContractSuppressed: sc,
 		}
 	}
 
@@ -175,12 +184,14 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	cw := res.Contract
 	if !res.OK {
 		return verification{
-			Bail:        bailDegradedStore,
-			Edit:        edit,
-			Path:        filePath,
-			Lang:        lang,
-			Lookup:      res,
-			Contract:    cw,
+			Bail:     bailDegradedStore,
+			Edit:     edit,
+			Path:     filePath,
+			Lang:     lang,
+			Lookup:   res,
+			Contract: cw,
+			// No ContractSuppressed here: answerDegradedStore reads it off Lookup,
+			// and a second copy is state that can drift from the one read.
 			RemovedText: removedText,
 		}
 	}
@@ -592,21 +603,23 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	}
 	results = append(results, danglingResult, droppedResult, duplicateResult, callShapeResult)
 	return verification{
-		Edit:          edit,
-		Path:          filePath,
-		Lang:          lang,
-		Lookup:        res,
-		Contract:      cw,
-		Results:       results,
-		Violations:    violations,
-		LearnEligible: learnEligible,
-		FileScope:     fsv,
-		Qualified:     qualifiedV,
-		DepsGo:        depsGoV,
-		Dangling:      dangling,
-		Dropped:       droppedImps,
-		Duplicates:    duplicates,
-		CallShapes:    callShapes,
-		Lint:          lintFindingsList,
+		Edit:     edit,
+		Path:     filePath,
+		Lang:     lang,
+		Lookup:   res,
+		Contract: cw,
+		// ContractSuppressed: the renderer stamps it on whichever record it writes.
+		ContractSuppressed: res.ContractSuppressed,
+		Results:            results,
+		Violations:         violations,
+		LearnEligible:      learnEligible,
+		FileScope:          fsv,
+		Qualified:          qualifiedV,
+		DepsGo:             depsGoV,
+		Dangling:           dangling,
+		Dropped:            droppedImps,
+		Duplicates:         duplicates,
+		CallShapes:         callShapes,
+		Lint:               lintFindingsList,
 	}
 }

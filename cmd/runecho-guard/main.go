@@ -511,8 +511,13 @@ func runPreCommit(dryRun, verbose bool) int {
 // in is explicit (not os.Stdin) so tests can call it without a subprocess.
 func runOutcomeMode(in io.Reader) int {
 	var payload struct {
-		ToolName  string `json:"tool_name"`
-		ToolInput struct {
+		ToolName string `json:"tool_name"`
+		// SessionID and PermissionMode are common to every hook event. They key
+		// and gate the contract once-per-binding memo (#209); an absent session
+		// id records no memo, so the next out-of-scope edit asks again.
+		SessionID      string `json:"session_id"`
+		PermissionMode string `json:"permission_mode"`
+		ToolInput      struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"`
 			NewString string   `json:"new_string"`
@@ -544,7 +549,7 @@ func runOutcomeMode(in io.Reader) int {
 		Content:   payload.ToolInput.Content,
 		Edits:     payload.ToolInput.Edits,
 	})
-	logOutcomeForFile(payload.ToolInput.FilePath, editHash)
+	logOutcomeForFile(payload.ToolInput.FilePath, editHash, payload.SessionID, payload.PermissionMode)
 	// E6 auto-fresh IR: reindex the edited file so the NEXT PreToolUse check sees
 	// symbols this edit added — closes the stale-IR false-positive class. Fail-open.
 	refreshIRForFile(payload.ToolInput.FilePath)
@@ -1186,8 +1191,12 @@ type lookupResult struct {
 	RepoName   string
 	Warn       string
 	Contract   *contractWarning
-	NoRepo     bool
-	OK         bool
+	// ContractSuppressed is the contract warning an earlier approval already
+	// answered (#209) — non-nil exactly when Contract was nil-normalised by
+	// splitContractOnce. Carried only so the record this edit writes can say so.
+	ContractSuppressed *contractWarning
+	NoRepo             bool
+	OK                 bool
 	// GitCommonDir and GitTopLevel identify the unenrolled tree the edit landed
 	// in, and are populated ONLY on a NoRepo return — on the resolver's, which
 	// computed both on its way to "not enrolled" and used to throw them away
@@ -1329,16 +1338,16 @@ func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 	// Resolved before the snapshot and symbol steps so it survives them: an
 	// index that is missing or unreadable says nothing about whether this edit
 	// is inside the scope the session declared.
-	cw := contractWarningWith(db, repo.ID, repo.Name, filePath, sessionID)
+	cw, sc := splitContractOnce(contractWarningWith(db, repo.ID, repo.Name, filePath, sessionID))
 
 	snaps, err := db.List(repo.ID, 1)
 	if err != nil || len(snaps) == 0 {
-		return lookupResult{RepoName: repo.Name, Contract: cw}
+		return lookupResult{RepoName: repo.Name, Contract: cw, ContractSuppressed: sc}
 	}
 
 	syms, err := db.SymbolsForLatestSnapshot(repo.ID)
 	if err != nil {
-		return lookupResult{RepoName: repo.Name, Contract: cw}
+		return lookupResult{RepoName: repo.Name, Contract: cw, ContractSuppressed: sc}
 	}
 
 	return lookupResult{
@@ -1348,6 +1357,8 @@ func lookupSymbolsFor(dir, filePath, sessionID string) lookupResult {
 		RepoName:   repo.Name,
 		Contract:   cw,
 		OK:         true,
+		// ContractSuppressed: see the field doc.
+		ContractSuppressed: sc,
 	}
 }
 
@@ -1479,6 +1490,15 @@ func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int)
 				// stderr only: in hook mode stdout is the JSON protocol channel, and
 				// the operator still needs the panic to be diagnosable.
 				warnf("%s panicked — edit deferred, NOT blocked: %v", name, r)
+				// Logged for the PreToolUse hook only (#209 review): a panicked
+				// retry otherwise leaves no trace, and the contract once-memo reads
+				// the log to decide whether an earlier ask was still the guard's
+				// last word on an edit. File-less, like the timeout record, because
+				// the payload may be what panicked. Other names (tests, outcome
+				// mode) keep the old stderr-only behaviour.
+				if name == "hook-mode" {
+					logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "panic"})
+				}
 				done <- result{code: 0, panicked: true}
 			}
 		}()

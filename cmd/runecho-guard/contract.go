@@ -331,9 +331,11 @@ func askContractOnly(out io.Writer, cw *contractWarning, filePath string, lang g
 		Reason:       "contract",
 		Contract:     cw.Name,
 		ContractHash: shortHash(cw.ActivatedHash),
-		Edit:         editHash,
-		Checks:       checks,
-		CheckReasons: checkReasons,
+		// ContractSession: see decisionRecord.
+		ContractSession: contractSessionTag(cw.SessionID),
+		Edit:            editHash,
+		Checks:          checks,
+		CheckReasons:    checkReasons,
 	})
 	return true
 }

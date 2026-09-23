@@ -257,9 +257,11 @@ activation hash, cleaned absolute path) in `$RUNECHO_HOME/contract-approvals.jso
 (1024 entries, oldest evicted; 7-day TTL), written by `--outcome-mode` only when
 the outcome joined its ask **by edit fingerprint** (never the time-window
 fallback), that ask is still the guard's last word on the edit (no later hook
-record for the same file other than a #252 re-fire of the same ask, and no
-timeout — otherwise a denied ask whose identical retry was answered by a defer
-would be remembered as approved), and the payload's `permission_mode` is not
+record for the same file other than a #252 re-fire of the same ask, and no hook
+timeout or panic — otherwise a denied ask whose identical retry was answered by a
+defer would be remembered as approved), that ask was raised in the approving
+outcome's own session (contract asks carry a hashed `contract_session` tag), and
+the payload's `permission_mode` is not
 `bypassPermissions` or `dontAsk` — an ask nobody saw is not an answer. Re-activating the same text keeps
 the memo; re-activating edited text starts clean. A silenced repeat is logged on
 the record the hook writes anyway, as `suppressed: ["contract"]` plus the
@@ -884,6 +886,9 @@ long the decision took, so `fpreport` and `runecho-guard` now join on it first
 (bounded by `KeyedOutcomeJoinWindow`/`maxKeyedOutcomeAge`, 24h — see
 `cmd/runecho-guard/declog.go` and `internal/guardstats/fpreport.go`) and fall
 back to the original 5-minute window only when no fingerprint match exists.
+
+A PreToolUse hook panic now logs a file-less `{decision: defer, reason: panic}`
+record (#209), as the timeout path already did, so a panicked run is visible.
 
 `suppressed` (#209) names checks that fired on this edit and were silenced before
 rendering — today only `contract`, by the once-per-binding memo. It rides on

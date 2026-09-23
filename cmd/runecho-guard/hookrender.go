@@ -229,7 +229,7 @@ func renderHookDecision(out io.Writer, v verification) int {
 	hookAsk(out, sb.String())
 	rec := decisionRecord{Mode: "hook", Repo: repoName, File: filePath, Lang: string(lang), Decision: "ask", Reason: contractReason(cw != nil, askReason(fired)), Symbols: syms, LearnSymbols: learnSyms, ClaimSymbols: claimSyms, Edit: editFingerprint(edit), Checks: checkStatusMap(results), CheckReasons: checkReasonMap(results)}
 	if cw != nil {
-		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
+		rec.Contract, rec.ContractHash, rec.ContractSession = cw.Name, shortHash(cw.ActivatedHash), contractSessionTag(cw.SessionID)
 	}
 	logHook(rec)
 	return 0

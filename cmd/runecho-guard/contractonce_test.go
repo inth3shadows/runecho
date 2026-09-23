@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -428,7 +429,8 @@ func TestContract_WindowJoinDoesNotWriteMemo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("RUNECHO_HOME", home)
 	file := "/some/repo/internal/a.go"
-	logDecision(decisionRecord{Mode: "hook", File: file, Decision: "ask", Reason: "contract", Contract: "scope", ContractHash: "abcdefabcdef"})
+	// Session tag present, so the window join is the ONLY reason for no memo.
+	logDecision(decisionRecord{Mode: "hook", File: file, Decision: "ask", Reason: "contract", Contract: "scope", ContractHash: "abcdefabcdef", ContractSession: contractSessionTag("sess")})
 	approveEdit(t, "sess", "", file, "x\n")
 	if rec := readLastDecisionLog(t); rec["decision"] != "outcome" || rec["join"] != "window" {
 		t.Fatalf("precondition: expected a window-joined outcome; got %v", rec)
@@ -485,22 +487,35 @@ func TestAnswerDegradedStore_StampsSuppressedContract(t *testing.T) {
 func TestContract_MemoOnlyWhenTheJoinedAskStillStands(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_CONTRACT_ONCE", "")
 	const file = "/r/internal/a.go"
-	ask := decisionRecord{Mode: "hook", File: file, Decision: "ask", Reason: "contract", Contract: "scope", ContractHash: "abcdefabcdef", Edit: "e1"}
+	ask := decisionRecord{Mode: "hook", File: file, Decision: "ask", Reason: "contract", Contract: "scope", ContractHash: "abcdefabcdef", ContractSession: contractSessionTag("sess"), Edit: "e1"}
+	otherSessAsk := ask
+	otherSessAsk.ContractSession = contractSessionTag("sess-b")
+	legacyAsk := ask
+	legacyAsk.ContractSession = ""
 	for name, tc := range map[string]struct {
+		first *decisionRecord // the joined ask; nil = ask
 		after []decisionRecord
 		want  bool
 	}{
-		"no later record (control)":         {nil, true},
-		"#252 re-fire of the same ask":      {[]decisionRecord{ask}, true},
-		"later defer for the same file":     {[]decisionRecord{{Mode: "hook", File: file, Decision: "defer", Reason: "clean"}}, false},
-		"later fileless timeout":            {[]decisionRecord{{Mode: "hook", Decision: "defer", Reason: "timeout"}}, false},
-		"later ask for a different edit":    {[]decisionRecord{{Mode: "hook", File: file, Decision: "ask", Reason: "violations", Edit: "e2"}}, false},
-		"later record for a different file": {[]decisionRecord{{Mode: "hook", File: "/r/other.go", Decision: "defer", Reason: "clean"}}, true},
+		"no later record (control)":         {nil, nil, true},
+		"#252 re-fire of the same ask":      {nil, []decisionRecord{ask}, true},
+		"later defer for the same file":     {nil, []decisionRecord{{Mode: "hook", File: file, Decision: "defer", Reason: "clean"}}, false},
+		"later hook timeout":                {nil, []decisionRecord{{Mode: "hook", Decision: "defer", Reason: "timeout"}}, false},
+		"later hook panic":                  {nil, []decisionRecord{{Mode: "hook", Decision: "defer", Reason: "panic"}}, false},
+		"later OUTCOME-mode timeout":        {nil, []decisionRecord{{Mode: "outcome", Decision: "defer", Reason: "timeout"}}, true},
+		"later ask for a different edit":    {nil, []decisionRecord{{Mode: "hook", File: file, Decision: "ask", Reason: "violations", Edit: "e2"}}, false},
+		"later record for a different file": {nil, []decisionRecord{{Mode: "hook", File: "/r/other.go", Decision: "defer", Reason: "clean"}}, true},
+		"ask raised in another session":     {&otherSessAsk, nil, false},
+		"ask with no session tag (legacy)":  {&legacyAsk, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("RUNECHO_HOME", home)
-			logDecision(ask)
+			first := ask
+			if tc.first != nil {
+				first = *tc.first
+			}
+			logDecision(first)
 			for _, r := range tc.after {
 				logDecision(r)
 			}
@@ -567,4 +582,49 @@ func TestContract_UncleanPathStillSuppresses(t *testing.T) {
 	mustAsk(t, contractPayload(t, sess, a, body), "first edit")
 	approveEdit(t, sess, "", a, body)
 	mustNotAsk(t, contractPayload(t, sess, a, body+"\n"), "repeat edit through the same unclean path")
+}
+
+// A panicked PreToolUse run must leave a record: without one, a denied ask
+// whose identical retry panicked reads as still standing (#209 review).
+func TestDeferOnPanic_HookModeLogsPanic(t *testing.T) {
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	deferOnPanic("hook-mode", io.Discard, func(io.Writer) int { panic("boom") })
+	rec := readLastDecisionLog(t)
+	if rec["mode"] != "hook" || rec["decision"] != "defer" || rec["reason"] != "panic" {
+		t.Errorf("hook-mode panic logged %v, want a hook/defer/panic record", rec)
+	}
+	if _, ok := rec["file"]; ok {
+		t.Errorf("panic record must be file-less (the payload may be what panicked): %v", rec)
+	}
+}
+
+// The entry cap does not bound the file: 1024 entries with long paths pass the
+// read bound, and a store past it loads EMPTY — so the next write would keep
+// only itself and wipe every other session's memos. The write path must keep
+// the store inside the bound, newest entries first.
+func TestContractOnce_StoreStaysWithinReadBound(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT_ONCE", "")
+	dir := t.TempDir()
+	now := time.Now()
+	long := "/" + strings.Repeat("d", 3000)
+	for i := 0; i < 600; i++ {
+		recordContractApproval(dir, "s", "h", fmt.Sprintf("%s/%d", long, i), now.Add(time.Duration(i)*time.Second))
+	}
+	fi, err := os.Stat(filepath.Join(dir, contractApprovalsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > maxContractApprovalBytes {
+		t.Fatalf("store is %d bytes, past the %d-byte read bound — it would now load empty", fi.Size(), maxContractApprovalBytes)
+	}
+	last := now.Add(599 * time.Second)
+	// ~340 of these entries fit the bound. Eviction keeps the newest ~340, so
+	// /300 survives; the old reset-on-overflow behaviour restarted the store
+	// around entry 340 and lost it — which is the bug this pins.
+	if !contractApproved(dir, "s", "h", long+"/599", last) || !contractApproved(dir, "s", "h", long+"/300", last) {
+		t.Error("the newest entries that fit the bound must all survive eviction")
+	}
+	if contractApproved(dir, "s", "h", long+"/0", last) {
+		t.Error("the oldest entries are the ones evicted")
+	}
 }

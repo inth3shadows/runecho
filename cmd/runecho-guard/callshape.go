@@ -181,7 +181,7 @@ func askWithoutIndex(out io.Writer, cw, sc *contractWarning, ms []guard.CallShap
 		Checks:       checks,
 	}
 	if cw != nil {
-		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
+		rec.Contract, rec.ContractHash, rec.ContractSession = cw.Name, shortHash(cw.ActivatedHash), contractSessionTag(cw.SessionID)
 	}
 	logDecision(noteContractSuppressed(rec, sc))
 	return true

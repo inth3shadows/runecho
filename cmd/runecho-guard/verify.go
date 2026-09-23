@@ -61,6 +61,7 @@ type verification struct {
 	Contract *contractWarning
 	// ContractSuppressed: a repeat contract ask an earlier approval answered
 	// (#209). Mutually exclusive with Contract; see splitContractOnce.
+	// Unset on the degraded-store bail, whose renderer reads Lookup's copy.
 	ContractSuppressed *contractWarning
 
 	// RemovedText is only carried for the degraded-store bail, whose renderer
@@ -189,9 +190,9 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 			Lang:     lang,
 			Lookup:   res,
 			Contract: cw,
-			// Degraded-store renderer reads it off Lookup; mirrored for symmetry.
-			ContractSuppressed: res.ContractSuppressed,
-			RemovedText:        removedText,
+			// No ContractSuppressed here: answerDegradedStore reads it off Lookup,
+			// and a second copy is state that can drift from the one read.
+			RemovedText: removedText,
 		}
 	}
 	// Destructure into the locals the rest of the flow already uses.

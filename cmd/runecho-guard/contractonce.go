@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -164,13 +166,25 @@ func recordContractApproval(dir, session, hash, file string, now time.Time) {
 			kept = append(kept, e)
 		}
 		kept = append(kept, contractApproval{Session: session, Hash: hash, File: file, At: nowStr})
+		// RFC3339 UTC strings sort chronologically. Stable, so equal timestamps
+		// keep insertion order and the new entry stays last.
+		sort.SliceStable(kept, func(i, j int) bool { return kept[i].At < kept[j].At })
 		if len(kept) > maxContractApprovals {
-			// RFC3339 UTC strings sort chronologically. Stable, so equal
-			// timestamps keep insertion order and the new entry stays last.
-			sort.SliceStable(kept, func(i, j int) bool { return kept[i].At < kept[j].At })
 			kept = kept[len(kept)-maxContractApprovals:]
 		}
-		ca.Entries = kept
+		// The entry cap alone does not bound the FILE: paths run to 4096 bytes,
+		// so 1024 long entries can pass maxContractApprovalBytes — and a store
+		// past that bound loads empty on BOTH paths, so the next write would
+		// truncate every other session's memos to this one entry. Evict oldest
+		// until it fits; the new entry is last, and one entry always fits.
+		for {
+			ca.Entries = kept
+			b, err := json.Marshal(contractApprovals{V: 1, Entries: kept})
+			if err != nil || len(b) <= maxContractApprovalBytes || len(kept) <= 1 {
+				break
+			}
+			kept = kept[1:]
+		}
 		_ = saveContractApprovals(dir, ca)
 	})
 }
@@ -214,6 +228,21 @@ func splitContractOnce(cw *contractWarning) (ask, suppressed *contractWarning) {
 	return cw, nil
 }
 
+// contractSessionTag is the short, stable tag of a session id stamped on
+// contract asks (decisionRecord.ContractSession), so an outcome can only record
+// a memo from an ask made in ITS OWN session. Ask records otherwise carry no
+// session, and two sessions making the byte-identical edit to one file would
+// join each other's asks (#209 review). Hashed rather than raw: the log is
+// read by reports that have no use for the id, and the tag is all the check
+// needs. "" for an empty id, which matches nothing.
+func contractSessionTag(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:6])
+}
+
 // noteContractSuppressed stamps a decision record with the fact that a repeat
 // contract ask was silenced for this edit (#209). It rides on whatever record
 // the hook was going to write anyway, so the would-have-asked volume the issue
@@ -249,6 +278,17 @@ func noteContractSuppressed(rec decisionRecord, sc *contractWarning) decisionRec
 // memo costs every ask for that file. Reads the same bounded tail as
 // recentUnrecordedAsk; anything unreadable, or an ask no longer in the window,
 // reads as "does not stand".
+//
+// A hook panic logs a file-less {defer, panic} record for the same reason
+// (deferOnPanic), so a panicked retry is visible too.
+//
+// Residuals, stated rather than implied away: (1) a retry killed from OUTSIDE
+// — the harness's own hook timeout, SIGKILL — leaves no record, so a denied ask
+// whose retry died that way still reads as standing; (2) when guardTimeout fires,
+// fn keeps running and can log its ask a moment AFTER the timeout record, so the
+// order reads ask-after-timeout for an ask nobody saw. The second needs a hook
+// that already ran ~4s and a sub-millisecond race. Nothing in the log can
+// distinguish either; RUNECHO_GUARD_CONTRACT_ONCE=0 is the escape.
 func contractAskStillStands(path string, ask decisionRecord, file, editHash string) bool {
 	if editHash == "" {
 		return false
@@ -274,7 +314,7 @@ func contractAskStillStands(path string, ask decisionRecord, file, editHash stri
 	r := bufio.NewReader(f)
 	for {
 		line, readErr := r.ReadString('\n')
-		if len(line) > 0 && (strings.Contains(line, needle) || strings.Contains(line, `"timeout"`)) {
+		if len(line) > 0 && (strings.Contains(line, needle) || strings.Contains(line, `"timeout"`) || strings.Contains(line, `"panic"`)) {
 			var cur decisionRecord
 			if json.Unmarshal([]byte(line), &cur) == nil && cur.Decision != "outcome" {
 				switch {
@@ -282,7 +322,9 @@ func contractAskStillStands(path string, ask decisionRecord, file, editHash stri
 					stands = true // the joined ask, or a #252 re-fire of it
 				case cur.File == file && cur.Mode == "hook":
 					stands = false // answered by a later record for this file
-				case cur.File == "" && cur.Reason == "timeout":
+				case cur.File == "" && cur.Mode == "hook" && (cur.Reason == "timeout" || cur.Reason == "panic"):
+					// PreToolUse timeouts and panics only. An outcome-mode timeout
+					// (a slow E6 reindex, possibly in another session) answers no ask.
 					stands = false
 				}
 			}

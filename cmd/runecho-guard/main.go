@@ -1490,6 +1490,15 @@ func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int)
 				// stderr only: in hook mode stdout is the JSON protocol channel, and
 				// the operator still needs the panic to be diagnosable.
 				warnf("%s panicked — edit deferred, NOT blocked: %v", name, r)
+				// Logged for the PreToolUse hook only (#209 review): a panicked
+				// retry otherwise leaves no trace, and the contract once-memo reads
+				// the log to decide whether an earlier ask was still the guard's
+				// last word on an edit. File-less, like the timeout record, because
+				// the payload may be what panicked. Other names (tests, outcome
+				// mode) keep the old stderr-only behaviour.
+				if name == "hook-mode" {
+					logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "panic"})
+				}
 				done <- result{code: 0, panicked: true}
 			}
 		}()

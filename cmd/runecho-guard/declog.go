@@ -119,6 +119,12 @@ type decisionRecord struct {
 	// learned-allow suppressions are invisible in the log today and could adopt
 	// it. Absent when nothing was suppressed.
 	Suppressed []string `json:"suppressed,omitempty"`
+	// ContractSession is contractSessionTag of the session a contract ask was
+	// raised in. Set on contract asks only; the once-per-binding memo requires
+	// it to match the approving outcome's session, so one session can never
+	// record an answer from another session's ask. Absent on records from older
+	// guards, which therefore record no memo (the fail-safe direction).
+	ContractSession string `json:"contract_session,omitempty"`
 	// Edit is a fingerprint of the tool call's edit content (see
 	// editFingerprint), stamped on ask records so the matching PostToolUse
 	// outcome can be joined precisely instead of by a (file, time-window) guess
@@ -341,7 +347,9 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 		ask, askJoin, wrote = rec, join, true
 		// Decided under the lock, against the same log the join just read — see
 		// contractAskStillStands for the denied-then-retried sequence it closes.
-		askStands = join == "edit" && rec.Contract != "" && contractAskStillStands(filepath.Join(dir, "decisions.jsonl"), rec, file, editHash)
+		askStands = join == "edit" && rec.Contract != "" &&
+			rec.ContractSession != "" && rec.ContractSession == contractSessionTag(sessionID) &&
+			contractAskStillStands(filepath.Join(dir, "decisions.jsonl"), rec, file, editHash)
 	})
 	if !wrote {
 		return

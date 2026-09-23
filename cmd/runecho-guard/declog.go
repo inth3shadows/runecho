@@ -102,8 +102,23 @@ type decisionRecord struct {
 	// record by logOutcomeForFile — approving an out-of-scope edit says the edit
 	// was fine, never that the scope should widen, and there is no learned-allow
 	// analogue here on purpose (a scope that trains itself wider is not a scope).
+	// The once-per-binding memo (#209, contractonce.go) is not one either:
+	// learned-allow widens what the guard BELIEVES, repo-wide and for every
+	// session; the memo widens nothing — it stops one session re-asking one
+	// question it already answered, for one file, under one activation. It reads
+	// these two fields off the ASK record, which is why they need not ride on
+	// the outcome.
 	Contract     string `json:"contract,omitempty"`
 	ContractHash string `json:"contract_hash,omitempty"`
+	// Suppressed names the checks that fired on this edit and were silenced
+	// before rendering — today only "contract", when the once-per-binding memo
+	// (#209, contractonce.go) says this session already approved an edit to this
+	// file under this activation. Contract/ContractHash are stamped alongside it,
+	// so a suppressed repeat is attributable to its binding even though the
+	// record itself is a defer (or a fact-check ask). Generic by design:
+	// learned-allow suppressions are invisible in the log today and could adopt
+	// it. Absent when nothing was suppressed.
+	Suppressed []string `json:"suppressed,omitempty"`
 	// Edit is a fingerprint of the tool call's edit content (see
 	// editFingerprint), stamped on ask records so the matching PostToolUse
 	// outcome can be joined precisely instead of by a (file, time-window) guess
@@ -291,13 +306,19 @@ const (
 // be taken) and a no-op on non-Unix. So this closes the race on Unix and remains
 // best-effort elsewhere — it is not an absolute guarantee, and the comments and
 // docs must not claim one.
-func logOutcomeForFile(file, editHash string) {
+//
+// sessionID and permissionMode come from the PostToolUse payload and feed only
+// the contract once-per-binding memo (#209, contractonce.go); pass "" when the
+// caller has neither, which records no memo — the fail-safe direction.
+func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 	dir, err := runechoDir()
 	if err != nil {
 		return
 	}
 
 	var ask decisionRecord
+	var askJoin string
+	var askStands bool
 	var wrote bool
 	store.WithFileLock(filepath.Join(dir, "decisions.jsonl.lock"), func() {
 		rec, join, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file, editHash)
@@ -317,7 +338,10 @@ func logOutcomeForFile(file, editHash string) {
 			Edit:         editHash,
 			Join:         join,
 		})
-		ask, wrote = rec, true
+		ask, askJoin, wrote = rec, join, true
+		// Decided under the lock, against the same log the join just read — see
+		// contractAskStillStands for the denied-then-retried sequence it closes.
+		askStands = join == "edit" && rec.Contract != "" && contractAskStillStands(filepath.Join(dir, "decisions.jsonl"), rec, file, editHash)
 	})
 	if !wrote {
 		return
@@ -329,6 +353,15 @@ func logOutcomeForFile(file, editHash string) {
 	// before this field existed have a nil LearnSymbols, so they simply train
 	// nothing (fail-safe: under-trains rather than mis-trains).
 	recordApprovals(dir, ask.Repo, ask.LearnSymbols, time.Now())
+
+	// The contract half of an approved ask answers a path-only question, so it
+	// is answered whatever else the ask was about — merged asks included. Only
+	// on the fingerprint join: a window-guessed pairing might attribute an
+	// approval to the wrong edit, and a memo written from a guess would suppress
+	// an ask nobody answered. At worst the strict join asks once more.
+	if askJoin == "edit" && askStands && humanApproval(permissionMode) {
+		recordContractApproval(dir, sessionID, ask.ContractHash, filepath.Clean(file), time.Now())
+	}
 }
 
 // recentUnrecordedAsk returns the MOST RECENT "ask" record for file in

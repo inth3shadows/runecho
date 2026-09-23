@@ -145,6 +145,35 @@
       "desc": "INSERTED fault: the check skips source files — the mirror half"
     },
     {
+      "id": "contract/once-read-gate",
+      "file": "cmd/runecho-guard/contractonce.go",
+      "find": "\tif contractApproved(dir, cw.SessionID, shortHash(cw.ActivatedHash), cw.File, time.Now()) {",
+      "replace": "\tif false && contractApproved(dir, cw.SessionID, shortHash(cw.ActivatedHash), cw.File, time.Now()) {",
+      "desc": "#209: the memo is never consulted, so an approved file asks again on every edit"
+    },
+    {
+      "id": "contract/once-session-key",
+      "file": "cmd/runecho-guard/contractonce.go",
+      "find": "\t\tif e.Session != session || e.Hash != hash || e.File != file {",
+      "replace": "\t\tif e.Hash != hash || e.File != file {",
+      "desc": "#209: one session's approval silences the same file for every other session"
+    },
+    {
+      "id": "contract/once-file-key",
+      "file": "cmd/runecho-guard/contractonce.go",
+      "find": "\t\tif e.Session != session || e.Hash != hash || e.File != file {",
+      "replace": "\t\tif e.Session != session || e.Hash != hash {",
+      "desc": "#209: one approval silences every out-of-scope file — a session-wide scope waiver"
+    },
+    {
+      "id": "contract/once-hash-key",
+      "file": "cmd/runecho-guard/contractonce.go",
+      "find": "\t\tif e.Session != session || e.Hash != hash || e.File != file {",
+      "replace": "\t\tif e.Session != session || e.File != file {",
+      "known_gap": "the corpus activates one contract per fixture and cannot express a re-activation; TestContract_ReactivationSemantics and TestContractOnce_RecordThenApproved pin it",
+      "desc": "#209: re-activating EDITED contract text keeps the old answers"
+    },
+    {
       "id": "duplicate/flag-gate",
       "file": "cmd/runecho-guard/duplicate.go",
       "find": "func duplicateEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DUPLICATE\") == \"1\" }",

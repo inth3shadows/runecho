@@ -100,5 +100,78 @@
     "expect_symbols": [
       "scope"
     ]
+  },
+  {
+    "name": "contract-repeat-after-approval-silent",
+    "desc": "#209: this session already approved an out-of-scope edit to THIS file under THIS activation, so the repeat is silent — and the record says what was silenced, or the would-have-asked volume becomes unmeasurable. The memo only changes the SECOND answer, which is why the corpus needed prior_approval to see it at all",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1",
+      "RUNECHO_GUARD_CONTRACT_ONCE=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "prior_approval": "sess-corpus",
+    "expect_ask": false,
+    "expect_suppressed": [
+      "contract"
+    ]
+  },
+  {
+    "name": "contract-approval-covers-one-file-only",
+    "desc": "#209: an approval for internal/other/y.go answers nothing about x.go. The memo is per-file — a key that dropped the file would turn one approval into a session-wide scope waiver, which is scope widening by another name",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1",
+      "RUNECHO_GUARD_CONTRACT_ONCE=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "prior_approval": "sess-corpus",
+    "approval_file": "internal/other/y.go",
+    "expect_ask": true,
+    "expect_symbols": [
+      "scope"
+    ]
+  },
+  {
+    "name": "contract-other-session-approval-still-asks",
+    "desc": "#209: an approval recorded under ANOTHER session id answers nothing for this one — concurrent agents in one repo must each answer for their own scope",
+    "check": "contract",
+    "flags": [
+      "RUNECHO_GUARD_CONTRACT=1",
+      "RUNECHO_GUARD_CONTRACT_ONCE=1"
+    ],
+    "enroll": {
+      "cmd/runecho-guard/main.go": [
+        "KnownFunc"
+      ]
+    },
+    "session": "sess-corpus",
+    "contract": "name: scope\ndescription: only the guard package\n\ncmd/runecho-guard/**\n",
+    "file": "internal/other/x.go",
+    "old": "package other\n",
+    "new": "package other\n\nfunc added() {}\n",
+    "prior_approval": "sess-other",
+    "expect_ask": true,
+    "expect_symbols": [
+      "scope"
+    ]
   }
 ]

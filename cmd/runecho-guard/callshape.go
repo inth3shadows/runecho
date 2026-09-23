@@ -114,7 +114,7 @@ func askWithoutIndexTrailer(hasShapes, hasLints bool) string {
 // text and its "contract" log reason are untouched by this path existing.
 //
 // editHash is threaded straight through to the ask record — see askContractOnly.
-func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMismatch, lints []lintFinding, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
+func askWithoutIndex(out io.Writer, cw, sc *contractWarning, ms []guard.CallShapeMismatch, lints []lintFinding, filePath string, lang guard.Lang, repoName, advisory, editHash string) bool {
 	if len(ms) == 0 && len(lints) == 0 {
 		// nil checks: this whole function is the degraded-store path, which has
 		// no per-check results slice to project (see answerDegradedStore's doc).
@@ -183,7 +183,7 @@ func askWithoutIndex(out io.Writer, cw *contractWarning, ms []guard.CallShapeMis
 	if cw != nil {
 		rec.Contract, rec.ContractHash = cw.Name, shortHash(cw.ActivatedHash)
 	}
-	logDecision(rec)
+	logDecision(noteContractSuppressed(rec, sc))
 	return true
 }
 

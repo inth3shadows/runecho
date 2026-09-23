@@ -1142,3 +1142,98 @@ func TestFPReport_CheckRunsIgnoresUnrecognizedVerdict(t *testing.T) {
 		t.Errorf("CheckRuns[violations].OK = %d, want 1 — the corrupted later record must not overwrite it", got)
 	}
 }
+
+// #209: a suppressed repeat is counted per check, OUTSIDE the ask totals, and
+// deduped against hook re-invocation (#252 measured defers re-firing at 1.27x).
+// Without the dedupe, three fires of one suppressed edit would read as three
+// repeats the memo saved the user from.
+func TestFPReport_SuppressedRepeatsPerCheck_Deduped(t *testing.T) {
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	sup := func(off int, dec, reason, file string) Decision {
+		return Decision{
+			TS: base.Add(time.Duration(off) * time.Second), Mode: "hook", Lang: "go",
+			Decision: dec, Reason: reason, File: file, Suppressed: []string{"contract"},
+		}
+	}
+	decisions := []Decision{
+		{TS: base, Mode: "hook", Lang: "go", Decision: "ask", Reason: "contract", File: "a.go"},
+		// One suppressed edit, re-invoked three times within the same second.
+		sup(60, "defer", "clean", "a.go"),
+		sup(60, "defer", "clean", "a.go"),
+		sup(60, "defer", "clean", "a.go"),
+		// A second, distinct suppressed edit.
+		sup(120, "defer", "clean", "a.go"),
+		// A pre-commit record is never a hook repeat.
+		{TS: base.Add(180 * time.Second), Mode: "precommit", Decision: "defer", Reason: "clean", File: "a.go", Suppressed: []string{"contract"}},
+	}
+	s := FPReport(decisions, base.Add(-time.Hour), 5)
+	c := s.ByCheck["contract"]
+	if c.Suppressed != 2 {
+		t.Errorf("ByCheck[contract].Suppressed = %d, want 2", c.Suppressed)
+	}
+	if c.Total() != 1 {
+		t.Errorf("suppressed repeats must not count as asks: Total() = %d, want 1", c.Total())
+	}
+	if got := FormatFP(s); !strings.Contains(got, "+2 suppressed") {
+		t.Errorf("FormatFP must show the suppressed count:\n%s", got)
+	}
+	found := false
+	for _, m := range PayloadFP(s)["by_check"].([]map[string]any) {
+		if m["check"] == "contract" {
+			found = true
+			if m["suppressed"] != 2 {
+				t.Errorf("JSON by_check[contract].suppressed = %v, want 2", m["suppressed"])
+			}
+		}
+	}
+	if !found {
+		t.Error("JSON by_check has no contract row")
+	}
+	for _, m := range PayloadFP(s)["by_lang"].([]map[string]any) {
+		if _, ok := m["suppressed"]; ok {
+			t.Errorf("by_lang rows cannot attribute suppressions and must not claim 0: %v", m)
+		}
+	}
+}
+
+// A check whose every fire in the window was a suppressed repeat has no ask:
+// the row must say so, not blame a missing join key, and its JSON coverage must
+// be null rather than a "fully rated" 1.
+func TestFPReport_SuppressedOnlyRow(t *testing.T) {
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	sup := Decision{TS: base, Mode: "hook", Lang: "go", Decision: "defer", Reason: "clean", File: "a.go", Suppressed: []string{"contract"}}
+
+	// Alone in the window: the early "no asks" return must still surface it.
+	if out := FormatFP(FPReport([]Decision{sup}, base.Add(-time.Hour), 5)); !strings.Contains(out, "contract: 1 repeat(s) suppressed") {
+		t.Errorf("an asks-free window hid its suppressed repeats:\n%s", out)
+	}
+
+	// Beside another check's ask, the split table prints the contract row.
+	decisions := []Decision{sup, {TS: base.Add(time.Minute), Mode: "hook", Lang: "go", Decision: "ask", Reason: "violations", File: "b.go", Symbols: []string{"X"}}}
+	s := FPReport(decisions, base.Add(-time.Hour), 5)
+	out := FormatFP(s)
+	var row string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "contract ") {
+			row = l
+		}
+	}
+	if strings.Contains(row, "join key") || !strings.Contains(row, "no asks") || !strings.Contains(row, "+1 suppressed") {
+		t.Errorf("suppressed-only row misdescribed: %q\n%s", row, out)
+	}
+	for _, m := range PayloadFP(s)["by_check"].([]map[string]any) {
+		if m["check"] == "contract" && m["coverage"] != nil {
+			t.Errorf("coverage = %v, want null for a row with no asks", m["coverage"])
+		}
+	}
+}
+
+func TestLoadReader_ReadsSuppressed(t *testing.T) {
+	ds, err := LoadReader(strings.NewReader(`{"v":1,"ts":"2026-09-23T12:00:00Z","mode":"hook","decision":"defer","reason":"clean","suppressed":["contract"]}` + "\n"))
+	if err != nil || len(ds) != 1 {
+		t.Fatalf("LoadReader: %v, %d records", err, len(ds))
+	}
+	if got := ds[0].Suppressed; len(got) != 1 || got[0] != "contract" {
+		t.Errorf("Suppressed = %v, want [contract]", got)
+	}
+}

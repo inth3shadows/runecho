@@ -68,6 +68,12 @@ type FPBucket struct {
 	Asks     int `json:"asks"`
 	Approved int `json:"approved"`
 	Unrated  int `json:"unrated"`
+	// Suppressed counts repeat fires silenced before rendering (#209): edits on
+	// which this check would have asked, had an earlier approval not already
+	// answered the same question. Not an ask — it is outside Asks, Unrated and
+	// Total() — so the would-have-asked volume is Total() + Suppressed. Deduped
+	// against hook re-invocation like asks are (#252: defers re-fire at 1.27x).
+	Suppressed int `json:"suppressed"`
 	// Latency is ask→approval latency over this bucket's MATCHED asks only
 	// (the Approved count, not Asks — an ask with no approved outcome
 	// contributes no sample). See LatencyStats.
@@ -249,8 +255,12 @@ type FPStats struct {
 	// (#12 D2) fires on a PATH and stamps no symbols, so most of its asks are
 	// unrateable and its Rate() is computed over the minority that co-fired with
 	// a symbol-bearing check — the opposite of a random sample. Read
-	// FPBucket.Coverage before acting on any row here; #209's suppression design
-	// and the keep/close call on #12 are the decisions this warning exists for.
+	// FPBucket.Coverage before acting on any row here; the keep/close call on #12
+	// is the decision this warning exists for.
+	//
+	// ByCheck is also the only map that carries FPBucket.Suppressed (#209): a
+	// suppressed repeat names a check, never a compound reason, so ByReason and
+	// the other breakdowns have nothing to attribute it to.
 	ByCheck map[string]FPBucket
 	ByLang  map[string]FPBucket
 	// ByVersion buckets asks by the guard binary that wrote them (UnknownVersion
@@ -416,6 +426,10 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	// `asks` so no later change can accidentally hand one to matchOutcome.
 	var unratedAsks []Decision
 	eventSeen := map[string]bool{}
+	// suppressedSeen dedupes #209 suppression markers the way eventSeen dedupes
+	// asks. Its own map, and keyed with the decision type too: a suppressed
+	// marker usually rides on a DEFER, which eventSeen never sees.
+	suppressedSeen := map[string]bool{}
 	for _, d := range decisions {
 		if d.TS.Before(since) {
 			continue
@@ -452,6 +466,16 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 				continue
 			}
 			s.CheckRuns[check] = t
+		}
+		if d.Mode == "hook" && len(d.Suppressed) > 0 {
+			if k := d.Decision + "\x02" + askEventKey(d); !suppressedSeen[k] {
+				suppressedSeen[k] = true
+				for _, c := range d.Suppressed {
+					bkt := s.ByCheck[c]
+					bkt.Suppressed++
+					s.ByCheck[c] = bkt
+				}
+			}
 		}
 		switch d.Decision {
 		case "ask":
@@ -839,6 +863,13 @@ func FormatFP(s FPStats) string {
 	// entirely of them must not report itself as empty (#254).
 	if s.Window.Total() == 0 {
 		fmt.Fprintf(&b, "\nNo hook-mode asks in window.\n")
+		// A window whose only contract fires were suppressed repeats (#209) is
+		// not an idle one; say so rather than let the early return hide it.
+		for _, c := range sortedFPKeys(s.ByCheck) {
+			if n := s.ByCheck[c].Suppressed; n > 0 {
+				fmt.Fprintf(&b, "  %s: %d repeat(s) suppressed by an earlier approval\n", c, n)
+			}
+		}
 		return b.String()
 	}
 
@@ -872,7 +903,7 @@ func FormatFP(s FPStats) string {
 		fpRow(&b, reason, 28, s.ByReason[reason])
 	}
 
-	fmt.Fprintf(&b, "\nBy check (split, one ask counted once per check it fired):\n")
+	fmt.Fprintf(&b, "\nBy check (split, one ask counted once per check it fired; +N suppressed = repeats an earlier approval silenced, not asks):\n")
 	for _, c := range sortedFPKeys(s.ByCheck) {
 		fpRow(&b, c, 28, s.ByCheck[c])
 	}
@@ -938,9 +969,15 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 	// Total here instead would silently change what the column means between
 	// rows, so a reader comparing two rows would be comparing two quantities.
 	fmt.Fprintf(b, "  %-*s %4d ask  ", width, name, bkt.Asks)
-	if bkt.Asks == 0 {
+	switch {
+	case bkt.Total() == 0:
+		// Only reachable on a ByCheck row whose every fire was a suppressed
+		// repeat (#209). "No ask carries a join key" would be false — there is
+		// no ask at all.
+		fmt.Fprintf(b, "  no asks")
+	case bkt.Asks == 0:
 		fmt.Fprintf(b, "  no rate (no ask here carries a join key)")
-	} else {
+	default:
 		fmt.Fprintf(b, "%4d approved  %5.0f%%", bkt.Approved, 100*bkt.Rate())
 		if bkt.Latency.N > 0 {
 			fmt.Fprintf(b, "  (median %s)", formatLatency(bkt.Latency.MedianS))
@@ -953,6 +990,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 		}
 		fmt.Fprintf(b, "  %s +%d unrated (rate covers %s)",
 			mark, bkt.Unrated, coveragePct(bkt))
+	}
+	if bkt.Suppressed > 0 {
+		fmt.Fprintf(b, "  +%d suppressed", bkt.Suppressed)
 	}
 	fmt.Fprint(b, "\n")
 }
@@ -1026,9 +1066,17 @@ func PayloadFP(s FPStats) map[string]any {
 		if b.Asks > 0 {
 			rate = b.Rate()
 		}
+		// Same rule for coverage on a ByCheck row that only ever suppressed
+		// (#209): it has no ask to cover, and Coverage()'s 1 would read as "fully
+		// rated". Scoped to that row shape so an empty window keeps its existing
+		// payload.
+		var coverage any = b.Coverage()
+		if b.Total() == 0 && b.Suppressed > 0 {
+			coverage = nil
+		}
 		return map[string]any{
 			"asks": b.Asks, "approved": b.Approved, "rate": rate,
-			"unrated": b.Unrated, "total": b.Total(), "coverage": b.Coverage(),
+			"unrated": b.Unrated, "total": b.Total(), "coverage": coverage,
 			"latency": latencyPayload(b.Latency),
 		}
 	}
@@ -1042,6 +1090,9 @@ func PayloadFP(s FPStats) map[string]any {
 	for _, c := range sortedFPKeys(s.ByCheck) {
 		m := bucket(s.ByCheck[c])
 		m["check"] = c
+		// ByCheck rows only: no other breakdown can attribute a suppression
+		// (see FPStats.ByCheck), so a 0 there would be a claim, not a count.
+		m["suppressed"] = s.ByCheck[c].Suppressed
 		checks = append(checks, m)
 	}
 	langs := make([]map[string]any, 0, len(s.ByLang))

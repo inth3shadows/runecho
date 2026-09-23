@@ -163,6 +163,19 @@ type hookCase struct {
 	// agent in the same repo answer for a scope it never accepted.
 	Session         string `json:"session,omitempty"`
 	ActivateSession string `json:"activate_session,omitempty"`
+	// PriorApproval replays an approved out-of-scope edit BEFORE the checked
+	// run (#209): the PreToolUse ask, then a PostToolUse outcome for the same
+	// tool_input attributed to this session id. ApprovalFile is the repo-relative
+	// file that earlier edit touched (defaults to File). The corpus is otherwise
+	// single-shot, and the once-per-binding memo is invisible to a single shot —
+	// it only changes the SECOND answer — so without these the mutation harness
+	// could not see the memo's read gate or its key at all.
+	PriorApproval string `json:"prior_approval,omitempty"`
+	ApprovalFile  string `json:"approval_file,omitempty"`
+	// ExpectSuppressed pins the decision record's `suppressed` field on the
+	// checked run — the only trace a silenced repeat leaves, and the number
+	// fpreport's ByCheck[..].Suppressed is built from.
+	ExpectSuppressed []string `json:"expect_suppressed,omitempty"`
 	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
 	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
 	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
@@ -225,7 +238,9 @@ func runHookCase(t *testing.T, c hookCase) {
 	}
 
 	root, edited, setFlags, body := setupHookCase(t, c)
-	_ = root
+	if c.PriorApproval != "" {
+		primeApproval(t, c, root, edited, setFlags)
+	}
 
 	// Structural anti-vacuous probe: resolve each pinned symbol through the guard's
 	// OWN store path (openLatestSnapshot → DefsOfName), the exact lookup the check
@@ -311,6 +326,42 @@ func runHookCase(t *testing.T, c hookCase) {
 			t.Errorf("expected no ask, got:\n%s", d.Hook.PermissionReason)
 		}
 	}
+	if len(c.ExpectSuppressed) > 0 {
+		rec := readLastDecisionLog(t)
+		if rec == nil {
+			t.Fatalf("no decision logged, want suppressed %v", c.ExpectSuppressed)
+		}
+		raw, _ := rec["suppressed"].([]any)
+		got := make([]string, 0, len(raw))
+		for _, v := range raw {
+			s, _ := v.(string)
+			got = append(got, s)
+		}
+		if strings.Join(got, ",") != strings.Join(c.ExpectSuppressed, ",") {
+			t.Errorf("decision-log suppressed = %v, want %v — a silenced repeat that leaves no trace makes the would-have-asked volume unmeasurable", got, c.ExpectSuppressed)
+		}
+	}
+}
+
+// primeApproval replays the earlier, approved edit a PriorApproval fixture
+// describes: the ask it must have produced, then the PostToolUse outcome that
+// approves it under c.PriorApproval's session. Flags are left ON afterwards;
+// every branch of runHookCase sets them explicitly before its own runs.
+func primeApproval(t *testing.T, c hookCase, root, edited string, setFlags func(bool)) {
+	t.Helper()
+	target := edited
+	if c.ApprovalFile != "" {
+		target = filepath.Join(root, filepath.FromSlash(c.ApprovalFile))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setFlags(true)
+	raw := rawHookBody(t, c, target)
+	if _, _, d := runHook(t, withSession(t, c.Session, raw)); d.Hook.PermissionDec != "ask" {
+		t.Fatalf("%s: prior_approval precondition — the earlier edit must itself ask, or there is nothing to approve", c.Name)
+	}
+	runOutcomeMode(strings.NewReader(withSession(t, c.PriorApproval, raw)))
 }
 
 // activateContract writes the fixture's contract into the worktree and activates

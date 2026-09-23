@@ -135,6 +135,7 @@ is fully finished.
 | `cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (default OFF except `qualified`, default ON since #314 — see Configuration) | `guard` |
 | `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) | — |
 | `cmd/runecho-guard/learnedallow.go` | C3 learned-allow store with count threshold + TTL decay | `store` |
+| `cmd/runecho-guard/contractonce.go` | Once-per-binding memo for repeat contract asks (#209): written from an approved outcome, read on the would-ask path | `store` |
 
 ## The MCP Oracle Tools
 
@@ -232,7 +233,7 @@ change date is only valid for combinations that involve none of them.
 | Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` (default **ON**; `=0` disables) | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
 | Dependency qualified | `RUNECHO_GUARD_DEPS_GO` (default off) | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
-| Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2) |
+| Edit-scope contract | `RUNECHO_GUARD_CONTRACT` | The edit falls outside the session's active contract (#12 D1/D2). Asked once per file per activation: after this session approves an out-of-scope edit to a file, later edits to that file are silent (#209) |
 | Receiver method | `RUNECHO_GUARD_RECVMETHOD` | (Go) `r.Foo()` inside `func (r *T)` where `T` has no member `Foo`. The receiver is the one value in Go whose type is written lexically, so this needs no type inference. Five gates keep it precision-first, the last being an embedding backstop: it fires only on a name the repository has never seen in any form |
 | Call-shape agreement | `RUNECHO_GUARD_CALLSHAPE` | (Python) A keyword argument the callee's declaration does not accept — the name resolves, the call does not match it (#243). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot (#261) |
 | Pre-write lint substrate | `RUNECHO_GUARD_LINT` | (Python, **Write only**) A trusted whole-file linter (`ruff`, rules F821/F811) run against the proposed file content before it reaches disk (#333). Needs no index, so it also answers on unenrolled trees and on a store with no usable snapshot. Reports true file line numbers, not the hunk-relative "snippet line N" every other hook-mode check carries. Findings the always-on additive check already reported are suppressed, so one hallucination is never counted twice. Requires `ruff` on `PATH` — absent, the check stays silent (fail-open). Edit/MultiEdit is an explicit non-goal for v1 — see the lint call site's comment in `runHookMode` (`cmd/runecho-guard/main.go`) for why |
@@ -244,6 +245,25 @@ being asked about, and the entry decays if not re-approved within
 one-way ratchet, so a symbol approved once and later deleted does not stay
 allowed forever. Only *hallucination-origin* approvals train it: approving a
 dangling or duplicate ask says the edit was fine, never that the name resolves.
+
+The contract check's **once-per-binding memo** (#209,
+`RUNECHO_GUARD_CONTRACT_ONCE`, default on) is deliberately *not* a learned-allow
+analogue. Learned-allow changes what the guard believes — a name enters the
+known-set repo-wide, for every session. The memo changes nothing believed: the
+contract is untouched, every other out-of-scope file and every other session
+still asks, and it only stops one session re-asking a question it already
+answered — this file, under this activation. It is keyed on (session id, short
+activation hash, cleaned absolute path) in `$RUNECHO_HOME/contract-approvals.json`
+(1024 entries, oldest evicted; 7-day TTL), written by `--outcome-mode` only when
+the outcome joined its ask **by edit fingerprint** (never the time-window
+fallback), that ask is still the guard's last word on the edit (no later hook
+record for the same file other than a #252 re-fire of the same ask, and no
+timeout — otherwise a denied ask whose identical retry was answered by a defer
+would be remembered as approved), and the payload's `permission_mode` is not
+`bypassPermissions` or `dontAsk` — an ask nobody saw is not an answer. Re-activating the same text keeps
+the memo; re-activating edited text starts clean. A silenced repeat is logged on
+the record the hook writes anyway, as `suppressed: ["contract"]` plus the
+`contract`/`contract_hash` it would have asked under.
 
 **Fail-open by design.** Not installed, repo not enrolled, no snapshot, DB
 error, a hung git subprocess (2s cap, `gitutil.Timeout`), or the guard process
@@ -698,6 +718,7 @@ checks](#opt-in-checks) for what each one asks about.
 | `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
 | `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
 | `RUNECHO_GUARD_CONTRACT` | — | `1` enables the edit-scope contract check |
+| `RUNECHO_GUARD_CONTRACT_ONCE` | on | Set to `0` to ask on every out-of-scope edit again, disabling the once-per-binding memo (#209) — both its read and its write. The A/B instrument if `fpreport`'s `suppressed` count is ever doubted |
 | `RUNECHO_GUARD_CALLSHAPE` | — | `1` enables call-shape agreement (Python) |
 | `RUNECHO_GUARD_LINT` | — | `1` enables the gated pre-write ruff lint substrate (Python, Write-only, F821/F811) |
 | `RUNECHO_GUARD_LEARN` | — | `1` enables C3 learned-allow suppression |
@@ -863,6 +884,11 @@ long the decision took, so `fpreport` and `runecho-guard` now join on it first
 (bounded by `KeyedOutcomeJoinWindow`/`maxKeyedOutcomeAge`, 24h — see
 `cmd/runecho-guard/declog.go` and `internal/guardstats/fpreport.go`) and fall
 back to the original 5-minute window only when no fingerprint match exists.
+
+`suppressed` (#209) names checks that fired on this edit and were silenced before
+rendering — today only `contract`, by the once-per-binding memo. It rides on
+whatever record the hook writes (usually a defer), so `fpreport` counts it per
+check as `+N suppressed`, outside every ask total.
 
 `checks` (#333) and `check_reasons` (#359) are the per-check half of the record,
 written on hook ask/defer and pre-commit ask records. `checks` maps each check

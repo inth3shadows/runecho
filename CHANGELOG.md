@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.54.0] — 2026-09-23
+
 ### Added
 - guard: a repeat out-of-scope contract ask is asked once per file, not once per
   edit (#209). Once this session has **approved** an edit to a file under the

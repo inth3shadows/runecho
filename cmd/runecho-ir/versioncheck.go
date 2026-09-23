@@ -20,7 +20,7 @@ import (
 // would still let a hung build overlap the next hourly tick. On timeout we fail
 // open (one log line). Part of the per-tick budget pinned against
 // freshenInterval.
-const installTimeout = 5 * time.Minute
+var installTimeout = 5 * time.Minute // var only so a test can shrink it
 
 // version-check keeps the INSTALLED runecho binaries in step with the source a
 // worktree has checked out. It exists because on 2026-07-23 the installed guard
@@ -103,6 +103,7 @@ func defaultRunInstall(top, binDir, version, goDir string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", filepath.Join(top, "install.sh"))
 	cmd.Dir = top
+	killGroupOnCancel(cmd)
 	// RUNECHO_VERSION: the exported tree has no .git, so install.sh's own
 	// `git describe` would stamp "dev"; the version is known — it is the tag
 	// freshen chose. Appended last so they win over any inherited value.
@@ -134,7 +135,7 @@ func defaultReadStamp(binPath string) string {
 func runVersionCheck(args []string) int {
 	fs := flag.NewFlagSet("version-check", flag.ContinueOnError)
 	reinstall := fs.Bool("reinstall", false, "install origin's newest release when the installed binary is behind it (fetches; builds an exported tree, never the checkout)")
-	quiet := fs.Bool("quiet", false, "print nothing when already up to date or not applicable (for hook use)")
+	quiet := fs.Bool("quiet", false, "print nothing when already up to date or not applicable (for hook use); with --reinstall, stays the offline advisory (legacy hook bodies)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
 	}
@@ -163,12 +164,20 @@ func runVersionCheck(args []string) int {
 	// --reinstall never builds THIS tree: it builds origin's newest release from
 	// the repo this tree belongs to (#375). The checked-out revision only
 	// identifies which repository to ask.
-	if *reinstall {
+	//
+	// `--reinstall --quiet` together is the body every hook written BEFORE #375
+	// runs, and installed hooks are only rewritten by re-running `install`. So
+	// that exact combination stays the offline advisory it has to be on a git
+	// operation's latency path — no network, no build, silent when current —
+	// rather than turning every checkout into a fetch and a possible 5-minute
+	// build. A person asking for a rebuild does not pass --quiet.
+	if *reinstall && !*quiet {
 		gitDir, err := gitutil.CommonDir(top)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "version-check: cannot resolve the git dir of %s: %v\n", top, err)
 			return ExitOK
 		}
+		fmt.Fprintln(os.Stderr, "version-check: asking origin for its newest release (may fetch and build — can take a few minutes)...")
 		return freshen(gitDir, os.Stdout)
 	}
 

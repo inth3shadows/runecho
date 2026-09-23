@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestInstallCron_TreatsNoCrontabAsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nothing written: %v", err)
 	}
-	want := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log", "") + "\n"
+	want := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log") + "\n"
 	if string(got) != want {
 		t.Errorf("wrote %q, want %q (a leading blank line means the empty-crontab split was not skipped)", got, want)
 	}
@@ -97,9 +98,51 @@ func TestInstallCron_PreservesExistingEntriesAndReplacesItsOwn(t *testing.T) {
 	want := strings.Join([]string{
 		"0 2 * * * /home/u/backup.sh",
 		"# a comment",
-		cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log", ""),
+		cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log"),
 	}, "\n") + "\n"
 	if string(got) != want {
 		t.Errorf("wrote:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// Re-running `install --periodic` from outside the runecho checkout must carry
+// an existing --freshen forward rather than silently dropping it: the job is
+// replaced wholesale and doctor never warns about a missing flag (#375 review).
+func TestInstallPeriodic_KeepsExistingFreshen(t *testing.T) {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		t.Skip("exercises the cron path")
+	}
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	src := t.TempDir() // stands in for the recorded .bare
+	existing := cronEntry("/b/runecho-ir", "/l/r.log") + "\n" + freshenCronEntry("/b/runecho-ir", "/l/r.log", src)
+	wrote := fakeCrontab(t, "printf '%s\\n' '"+strings.ReplaceAll(existing, "'", `'\''`)+"'; exit 0")
+	t.Chdir(t.TempDir()) // not a runecho checkout
+
+	if err := installPeriodic(""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(wrote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := existingFreshenSource(string(b)); got != src {
+		t.Errorf("rewritten job lost --freshen (got %q, want %q):\n%s", got, src, b)
+	}
+}
+
+// With a source, installCron writes BOTH lines, each tagged so a later install
+// strips and rewrites them together.
+func TestInstallCron_WritesFreshenLine(t *testing.T) {
+	wrote := fakeCrontab(t, `echo "no crontab for u" >&2; exit 1`)
+	if err := installCron("/b/runecho-ir", "/l/r.log", "/src/.bare"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(wrote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := cronEntry("/b/runecho-ir", "/l/r.log") + "\n" + freshenCronEntry("/b/runecho-ir", "/l/r.log", "/src/.bare") + "\n"
+	if string(b) != want {
+		t.Errorf("crontab written:\n%s\nwant:\n%s", b, want)
 	}
 }

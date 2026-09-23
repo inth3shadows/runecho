@@ -5,9 +5,11 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -24,6 +26,10 @@ func runInstall(args []string) int {
 	source := fs.String("source", "", "with --periodic: the runecho checkout whose origin the job keeps the binaries fresh from (default: the current directory, #375)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
+	}
+	if *source != "" && !*periodic {
+		fmt.Fprintln(os.Stderr, "runecho-ir install: --source only applies with --periodic (it chooses where the periodic job keeps the binaries fresh from)")
+		return ExitError
 	}
 
 	// If a root path was given (or we're inside a git repo), install hooks.
@@ -210,8 +216,10 @@ func reindexLogPath() (string, error) {
 }
 
 // installPeriodic installs an hourly reindex job via launchd (macOS) or cron
-// (Linux). When source resolves to a runecho checkout, the job also keeps the
-// installed binaries at origin's newest release (--freshen, #375).
+// (Linux). When source resolves to a runecho checkout it also installs a second
+// hourly entry, `runecho-ir freshen <git-common-dir>`, that keeps the installed
+// binaries at origin's newest release (#375) — separate so a binary without the
+// freshen command can never break the reindex entry.
 func installPeriodic(source string) error {
 	irBin, err := os.Executable()
 	if err != nil {
@@ -222,6 +230,18 @@ func installPeriodic(source string) error {
 		return err
 	}
 	gitDir, note := detectFreshenSource(source)
+	// Re-running `install --periodic` from somewhere else (another repo is the
+	// natural place to run `install`) must not silently drop a freshen entry the
+	// user set up earlier: the entries are REPLACED wholesale, and doctor only
+	// reports a missing freshen entry, never warns. So with no source here, carry
+	// the existing entry's value forward. An explicit --source still wins.
+	if gitDir == "" && source == "" {
+		if prev := existingFreshenSource(currentPeriodicJob()); prev != "" {
+			if fi, err := os.Stat(prev); err == nil && fi.IsDir() {
+				gitDir, note = prev, "Kept the existing freshen entry for "+prev+" (pass --source=<checkout> to change it)."
+			}
+		}
+	}
 	if note != "" {
 		fmt.Println(note)
 	}
@@ -251,6 +271,9 @@ func detectFreshenSource(source string) (gitDir, note string) {
 	}
 	top, err := gitutil.TopLevel(abs)
 	if err != nil || !isRunechoTree(top) {
+		if source != "" {
+			return "", fmt.Sprintf("Note: --source=%s is not a runecho checkout, so the job will not keep the binaries fresh.", source)
+		}
 		return "", "Note: not run from a runecho checkout, so the job will not keep the binaries fresh. " +
 			"Re-run `runecho-ir install --periodic` from inside it (or pass --source=<checkout>) to enable that (#375)."
 	}
@@ -261,18 +284,93 @@ func detectFreshenSource(source string) (gitDir, note string) {
 	return gitDir, ""
 }
 
+// Where each scheduler carries the freshen source: cron as the cronQuote'd word
+// after `freshen`, launchd as the XML-escaped <string> after <string>freshen.
+var (
+	cronFreshenArg    = regexp.MustCompile(`' freshen ('(?:[^']|'\\'')*')`)
+	launchdFreshenArg = regexp.MustCompile(`<string>freshen</string>\s*<string>([^<]*)</string>`)
+)
+
+// existingFreshenSource extracts the freshen source from installed schedule
+// text (crontab lines or plists), undoing the quoting freshenCronEntry /
+// freshenPlist applied. "" when there is none.
+func existingFreshenSource(job string) string {
+	if m := launchdFreshenArg.FindStringSubmatch(job); m != nil {
+		return html.UnescapeString(m[1])
+	}
+	if m := cronFreshenArg.FindStringSubmatch(job); m != nil {
+		v := strings.ReplaceAll(m[1], `\%`, "%")
+		v = strings.TrimSuffix(strings.TrimPrefix(v, "'"), "'")
+		return strings.ReplaceAll(v, `'\''`, "'")
+	}
+	return ""
+}
+
+// currentPeriodicJob returns the freshen schedule runecho installed, or "": the
+// freshen LaunchAgent plist on macOS, else the `# runecho` crontab lines.
+func currentPeriodicJob() string {
+	if runtime.GOOS == "darwin" {
+		if dir, err := launchAgentsDir(); err == nil {
+			if b, err := os.ReadFile(filepath.Join(dir, freshenAgentPlist)); err == nil {
+				return string(b)
+			}
+		}
+		return ""
+	}
+	out, err := exec.Command("crontab", "-l").Output()
+	if err != nil {
+		return ""
+	}
+	var mine []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "# runecho") {
+			mine = append(mine, line)
+		}
+	}
+	return strings.Join(mine, "\n")
+}
+
 // installLaunchd writes a launchd plist and loads it (macOS).
 func installLaunchd(irBin, logPath, gitDir string) error {
+	if err := writeLaunchAgent("com.runecho.reindex.plist", launchdPlist(irBin, logPath, logPath)); err != nil {
+		return err
+	}
+	fmt.Println("Periodic reindex installed (hourly via launchd)")
+	// The freshen agent is written, or removed, to match gitDir — so re-running
+	// without a source (and none to carry forward) leaves no stale agent behind.
+	if gitDir == "" {
+		removeLaunchAgent(freshenAgentPlist)
+		return nil
+	}
+	if err := writeLaunchAgent(freshenAgentPlist, freshenPlist(irBin, logPath, logPath, gitDir)); err != nil {
+		return err
+	}
+	fmt.Printf("Binary freshness installed (hourly via launchd, from %s)\n", gitDir)
+	return nil
+}
+
+// freshenAgentPlist is the freshen LaunchAgent's file name (label
+// com.runecho.freshen).
+const freshenAgentPlist = "com.runecho.freshen.plist"
+
+func launchAgentsDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("resolve home dir: %w", err)
+		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
-	agentsDir := filepath.Join(home, "Library", "LaunchAgents")
+	return filepath.Join(home, "Library", "LaunchAgents"), nil
+}
+
+// writeLaunchAgent writes a plist into ~/Library/LaunchAgents and (re)loads it.
+func writeLaunchAgent(name, plist string) error {
+	agentsDir, err := launchAgentsDir()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
 	}
-	plistPath := filepath.Join(agentsDir, "com.runecho.reindex.plist")
-	plist := launchdPlist(irBin, logPath, logPath, gitDir)
+	plistPath := filepath.Join(agentsDir, name)
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -281,8 +379,21 @@ func installLaunchd(irBin, logPath, gitDir string) error {
 	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
 		return fmt.Errorf("launchctl load: %w", err)
 	}
-	fmt.Printf("Periodic reindex installed (hourly): %s\n", plistPath)
 	return nil
+}
+
+// removeLaunchAgent unloads and deletes a plist if present; best-effort.
+func removeLaunchAgent(name string) {
+	agentsDir, err := launchAgentsDir()
+	if err != nil {
+		return
+	}
+	plistPath := filepath.Join(agentsDir, name)
+	if _, err := os.Stat(plistPath); err != nil {
+		return
+	}
+	_ = exec.Command("launchctl", "unload", plistPath).Run()
+	_ = os.Remove(plistPath)
 }
 
 // launchdPlist renders the hourly-reindex LaunchAgent. Split out of
@@ -294,13 +405,8 @@ func installLaunchd(irBin, logPath, gitDir string) error {
 // ProgramArguments is an argv array executed with no shell, which is why
 // retention is a `--prune` FLAG rather than a chained `&& repo prune` — a
 // chained command is expressible in the crontab line and not here, and one
-// scheduler quietly not pruning is exactly the asymmetry #351 is about. The same
-// holds for --freshen=<gitDir> (#375), present only when gitDir is non-empty.
-func launchdPlist(irBin, outLog, errLog, gitDir string) string {
-	freshenArg := ""
-	if gitDir != "" {
-		freshenArg = "\n\t\t<string>--freshen=" + xmlEscape(gitDir) + "</string>"
-	}
+// scheduler quietly not pruning is exactly the asymmetry #351 is about.
+func launchdPlist(irBin, outLog, errLog string) string {
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -313,7 +419,7 @@ func launchdPlist(irBin, outLog, errLog, gitDir string) string {
 		<string>repo</string>
 		<string>reindex</string>
 		<string>--all</string>
-		<string>--prune</string>%s
+		<string>--prune</string>
 	</array>
 	<key>StartInterval</key>
 	<integer>3600</integer>
@@ -323,7 +429,33 @@ func launchdPlist(irBin, outLog, errLog, gitDir string) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, xmlEscape(irBin), freshenArg, xmlEscape(outLog), xmlEscape(errLog))
+`, xmlEscape(irBin), xmlEscape(outLog), xmlEscape(errLog))
+}
+
+// freshenPlist renders the hourly freshen LaunchAgent (#375): its own agent so
+// a binary lacking the freshen command cannot break the reindex agent.
+func freshenPlist(irBin, outLog, errLog, gitDir string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.runecho.freshen</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>freshen</string>
+		<string>%s</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+</dict>
+</plist>
+`, xmlEscape(irBin), xmlEscape(gitDir), xmlEscape(outLog), xmlEscape(errLog))
 }
 
 // xmlEscape escapes s for inclusion in an XML text node, using encoding/xml so
@@ -367,15 +499,15 @@ func cronQuote(s string) string {
 // --prune keeps the store bounded on the same schedule that fills it, without a
 // second crontab line to install, quote and keep in sync. It never vacuums: a
 // full rewrite of a multi-gigabyte file has no business on an hourly timer.
-// --freshen=<gitDir> (#375) keeps the installed binaries at origin's newest
-// release; present only when gitDir is non-empty, and cron-quoted like every
-// other path here.
-func cronEntry(irBin, logPath, gitDir string) string {
-	freshenArg := ""
-	if gitDir != "" {
-		freshenArg = " --freshen=" + cronQuote(gitDir)
-	}
-	return fmt.Sprintf("0 * * * * %s repo reindex --all --prune%s >>%s 2>&1 # runecho", cronQuote(irBin), freshenArg, cronQuote(logPath))
+func cronEntry(irBin, logPath string) string {
+	return fmt.Sprintf("0 * * * * %s repo reindex --all --prune >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(logPath))
+}
+
+// freshenCronEntry is the second hourly line (#375), at :30 so it never starts
+// alongside the reindex. Its own line, not a reindex flag: a binary that lacks
+// the freshen command then fails only this line, and the reindex keeps running.
+func freshenCronEntry(irBin, logPath, gitDir string) string {
+	return fmt.Sprintf("30 * * * * %s freshen %s >>%s 2>&1 # runecho", cronQuote(irBin), cronQuote(gitDir), cronQuote(logPath))
 }
 
 // noCrontabYet reports whether crontab -l's stderr means "this user has no
@@ -398,7 +530,10 @@ func noCrontabYet(stderr string) bool {
 
 // installCron adds an hourly crontab entry on Linux/other.
 func installCron(irBin, logPath, gitDir string) error {
-	entry := cronEntry(irBin, logPath, gitDir)
+	entries := []string{cronEntry(irBin, logPath)}
+	if gitDir != "" {
+		entries = append(entries, freshenCronEntry(irBin, logPath, gitDir))
+	}
 	// Read existing crontab, strip any prior runecho entry, append new one.
 	lsCmd := exec.Command("crontab", "-l")
 	var lsErr bytes.Buffer
@@ -422,7 +557,7 @@ func installCron(irBin, logPath, gitDir string) error {
 			filtered = append(filtered, l)
 		}
 	}
-	filtered = append(filtered, entry)
+	filtered = append(filtered, entries...)
 	input := strings.Join(filtered, "\n") + "\n"
 	cmd := exec.Command("crontab", "-")
 	cmd.Stdin = strings.NewReader(input)
@@ -430,5 +565,8 @@ func installCron(irBin, logPath, gitDir string) error {
 		return fmt.Errorf("install crontab: %w", err)
 	}
 	fmt.Println("Periodic reindex installed (hourly via cron)")
+	if gitDir != "" {
+		fmt.Printf("Binary freshness installed (hourly via cron, from %s)\n", gitDir)
+	}
 	return nil
 }

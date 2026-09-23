@@ -266,10 +266,13 @@ func RemoteTags(ctx context.Context, dir, remote string) (map[string]string, err
 	return tags, nil
 }
 
-// Fetch updates dir's remote-tracking refs from remote.
+// Fetch updates dir's remote-tracking refs (refs/remotes/<remote>/*) from
+// remote's branches. The refspec is explicit because a plain `git clone --bare`
+// configures none, and a bare fetch would then update nothing the caller could
+// resolve (#375 review) — a no-op refresh that looks like success.
 func Fetch(ctx context.Context, dir, remote string) error {
 	var stderr strings.Builder
-	cmd := Command(ctx, dir, "fetch", "--quiet", remote)
+	cmd := Command(ctx, dir, "fetch", "--quiet", remote, "+refs/heads/*:refs/remotes/"+remote+"/*")
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
@@ -299,6 +302,10 @@ func Export(ctx context.Context, dir, rev, dest string) error {
 		return err
 	}
 	if err := untar.Run(); err != nil {
+		// Close OUR copy of the read end first: while it stays open, git archive
+		// blocks on a full pipe instead of taking SIGPIPE, and Wait would sit
+		// until the context deadline.
+		_ = pipe.Close()
 		_ = archive.Wait()
 		return fmt.Errorf("tar: %w: %s", err, strings.TrimSpace(tarErr.String()))
 	}

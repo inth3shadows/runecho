@@ -86,6 +86,8 @@ func run() int {
 			return runInstall(os.Args[2:])
 		case "version-check":
 			return runVersionCheck(os.Args[2:])
+		case "freshen":
+			return runFreshenCmd(os.Args[2:])
 		case "doctor":
 			return runDoctor(os.Args[2:])
 		case "truth-trail":
@@ -128,6 +130,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo prune [--keep=30] [--repo=<name>] [--dry-run] [--vacuum]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic [--source=<checkout>]] [--force] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir version-check [--reinstall] [--quiet] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir freshen <git-common-dir>   (scheduled by install --periodic)")
 	fmt.Fprintln(os.Stderr, "       runecho-ir doctor [--json] [--strict] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir backup [dest.db]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir truth-trail [--since=session-start] [--session=<id>] [--text=<file>] [root]")

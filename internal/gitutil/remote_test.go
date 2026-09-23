@@ -122,3 +122,57 @@ func TestExport_UnknownRevErrors(t *testing.T) {
 		t.Error("exporting an unknown rev must error")
 	}
 }
+
+// If tar dies, git archive must not sit blocked on a full pipe until the
+// deadline: the read end has to be closed (review finding). A payload well past
+// the 64K pipe buffer makes the hang reachable.
+func TestExport_TarFailureDoesNotHang(t *testing.T) {
+	up, clone := remoteRepo(t)
+	big := make([]byte, 1<<20)
+	for i := range big {
+		big[i] = byte(i*7 + i/13)
+	}
+	os.WriteFile(filepath.Join(up, "BIG"), big, 0o644)
+	for _, a := range [][]string{{"add", "BIG"}, {"commit", "-qm", "big"}} {
+		cmd := exec.Command("git", append([]string{"-C", up}, a...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	if err := Fetch(ctx10(t), clone, "origin"); err != nil {
+		t.Fatal(err)
+	}
+	notADir := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(notADir, nil, 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := Export(ctx, clone, headOf(t, up), notADir); err == nil {
+		t.Fatal("extracting into a non-directory must fail")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("Export took %s after tar failed — git archive was left blocked on the pipe", d)
+	}
+}
+
+// A plain `git clone --bare` configures no fetch refspec, so a bare `git fetch
+// origin` updates no refs/remotes/* at all and the default-branch lookup that
+// follows can never resolve (#375 review). Fetch's explicit refspec makes it work.
+func TestFetch_BareCloneWithoutRefspec(t *testing.T) {
+	up, _ := remoteRepo(t)
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	if out, err := exec.Command("git", "clone", "-q", "--bare", up, bare).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if err := Fetch(ctx10(t), bare, "origin"); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := RemoteDefaultRef(bare, "origin")
+	if err != nil {
+		t.Fatalf("default branch unresolvable after Fetch: %v", err)
+	}
+	if ok, err := Contains(bare, headOf(t, up), ref); err != nil || !ok {
+		t.Errorf("upstream HEAD not contained in %s after Fetch (ok=%v err=%v)", ref, ok, err)
+	}
+}

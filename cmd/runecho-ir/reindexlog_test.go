@@ -62,7 +62,7 @@ func TestReindexLogPath_DirIsOwnerOnly(t *testing.T) {
 // `%` there is turned into a newline by cron itself — splitting the command and
 // feeding the remainder as stdin — before any shell parsing happens.
 func TestCronEntry_QuotesBothPaths(t *testing.T) {
-	entry := cronEntry("/opt/bin/runecho-ir", "/home/u/.runecho 100%/logs/reindex.log", "")
+	entry := cronEntry("/opt/bin/runecho-ir", "/home/u/.runecho 100%/logs/reindex.log")
 
 	if strings.Contains(entry, "%") && !strings.Contains(entry, `\%`) {
 		t.Errorf("cron entry leaves a bare %%: %q", entry)

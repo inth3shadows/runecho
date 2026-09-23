@@ -226,7 +226,7 @@ func TestReindexAll_PruneNeverVacuums(t *testing.T) {
 // launchd takes an argv array with no shell, which is why this is a flag rather
 // than a chained `&& repo prune`.
 func TestPeriodicJobPrunes(t *testing.T) {
-	entry := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log", "")
+	entry := cronEntry("/usr/local/bin/runecho-ir", "/tmp/reindex.log")
 	if !strings.Contains(entry, "repo reindex --all --prune") {
 		t.Errorf("cron entry %q does not prune; the hourly job will grow the store unbounded", entry)
 	}
@@ -234,7 +234,7 @@ func TestPeriodicJobPrunes(t *testing.T) {
 		t.Errorf("cron entry %q vacuums on every tick; that rewrites the whole store hourly", entry)
 	}
 
-	plist := launchdPlist("/usr/local/bin/runecho-ir", "/tmp/out.log", "/tmp/err.log", "")
+	plist := launchdPlist("/usr/local/bin/runecho-ir", "/tmp/out.log", "/tmp/err.log")
 	if !strings.Contains(plist, "<string>--prune</string>") {
 		t.Errorf("launchd plist does not pass --prune:\n%s", plist)
 	}

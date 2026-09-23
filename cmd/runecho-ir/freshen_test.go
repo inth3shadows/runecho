@@ -7,8 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests drive freshen against REAL git repos with local-path remotes, so
@@ -74,8 +76,8 @@ func readFile(t *testing.T, p string) string {
 
 func gitDirOf(clone string) string { return filepath.Join(clone, ".git") }
 
-// runFreshen runs freshen against the clone and returns what it wrote.
-func runFreshen(t *testing.T, clone string) string {
+// freshenOut runs freshen against the clone and returns what it wrote.
+func freshenOut(t *testing.T, clone string) string {
 	t.Helper()
 	var out bytes.Buffer
 	if code := freshen(gitDirOf(clone), &out); code != ExitOK {
@@ -109,7 +111,7 @@ func TestFreshen_InstallsNewestOriginTag(t *testing.T) {
 		return nil
 	}
 	vcReadStamp = func(string) string { return "v0.17.0" }
-	out := runFreshen(t, clone)
+	out := freshenOut(t, clone)
 	if !ran {
 		t.Fatalf("no rebuild while behind origin's release:\n%s", out)
 	}
@@ -140,7 +142,7 @@ func TestFreshen_TagSourceIsOriginNotLocalRefs(t *testing.T) {
 		return nil
 	}
 	vcReadStamp = func(string) string { return "v0.17.0" }
-	runFreshen(t, clone)
+	freshenOut(t, clone)
 	if !ran {
 		t.Error("no rebuild while behind origin's release")
 	}
@@ -170,7 +172,7 @@ func TestFreshen_SeesTagPushedAfterClone(t *testing.T) {
 		return nil
 	}
 	vcReadStamp = func(string) string { return "v0.18.0" }
-	runFreshen(t, clone)
+	freshenOut(t, clone)
 	if !ran {
 		t.Error("a release pushed after the clone was never built")
 	}
@@ -190,7 +192,7 @@ func TestFreshen_TagOffDefaultBranchIsSkipped(t *testing.T) {
 	trustGit(t, up, "tag", "v0.18.0")
 	trustGit(t, up, "checkout", "-q", "master")
 	withSeams(t, "v0.17.0") // any rebuild fails the test
-	if out := runFreshen(t, clone); !strings.Contains(out, "not contained") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "not contained") {
 		t.Errorf("want a 'not contained' line:\n%s", out)
 	}
 }
@@ -200,7 +202,7 @@ func TestFreshen_NeverDowngradesOrRebuildsWhenCurrent(t *testing.T) {
 		t.Run(installed, func(t *testing.T) {
 			clone := clonedRunechoRepo(t, "v0.17.0")
 			withSeams(t, installed) // any rebuild fails the test
-			if out := runFreshen(t, clone); !strings.Contains(out, "up to date") {
+			if out := freshenOut(t, clone); !strings.Contains(out, "up to date") {
 				t.Errorf("want an 'up to date' line:\n%s", out)
 			}
 		})
@@ -210,7 +212,7 @@ func TestFreshen_NeverDowngradesOrRebuildsWhenCurrent(t *testing.T) {
 func TestFreshen_UnstampedInstallIsNotManaged(t *testing.T) {
 	clone := clonedRunechoRepo(t, "v0.17.0")
 	withSeams(t, "dev")
-	if out := runFreshen(t, clone); !strings.Contains(out, "unstamped") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "unstamped") {
 		t.Errorf("want an 'unstamped' line:\n%s", out)
 	}
 }
@@ -219,7 +221,7 @@ func TestFreshen_OriginUnreachableFailsOpen(t *testing.T) {
 	clone := clonedRunechoRepo(t, "v0.17.0")
 	trustGit(t, clone, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "nonexistent"))
 	withSeams(t, "v0.16.1")
-	if out := runFreshen(t, clone); !strings.Contains(out, "cannot list origin's tags") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "cannot list origin's tags") {
 		t.Errorf("want a 'cannot list' line:\n%s", out)
 	}
 }
@@ -234,7 +236,7 @@ func TestFreshen_ForeignExportRefused(t *testing.T) {
 	trustGit(t, up, "commit", "-qam", "swap module")
 	trustGit(t, up, "tag", "v0.18.0")
 	withSeams(t, "v0.17.0")
-	if out := runFreshen(t, clone); !strings.Contains(out, "not the runecho source") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "not the runecho source") {
 		t.Errorf("want a refusal line:\n%s", out)
 	}
 }
@@ -243,7 +245,7 @@ func TestFreshen_OptOutEnv(t *testing.T) {
 	clone := clonedRunechoRepo(t, "v0.17.0")
 	withSeams(t, "v0.16.1")
 	t.Setenv("RUNECHO_NO_AUTO_INSTALL", "1")
-	if out := runFreshen(t, clone); !strings.Contains(out, "RUNECHO_NO_AUTO_INSTALL") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "RUNECHO_NO_AUTO_INSTALL") {
 		t.Errorf("want the opt-out named:\n%s", out)
 	}
 }
@@ -256,7 +258,7 @@ func TestFreshen_NoGoToolchainFailsOpen(t *testing.T) {
 	fzGoroot = func() string { return "" }
 	goCandidateDirs = nil
 	t.Cleanup(func() { fzGoroot, goCandidateDirs = origGoroot, origCands })
-	if out := runFreshen(t, clone); !strings.Contains(out, "no go toolchain") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "no go toolchain") {
 		t.Errorf("want a 'no go toolchain' line naming the remedy:\n%s", out)
 	}
 }
@@ -266,7 +268,7 @@ func TestFreshen_ReinstallThatDidNotAdvanceIsReported(t *testing.T) {
 	withSeams(t, "v0.16.1")
 	vcRunInstall = func(top, binDir, ver, goDir string) error { return nil }
 	vcReadStamp = func(string) string { return "v0.16.1" }
-	if out := runFreshen(t, clone); !strings.Contains(out, "still says v0.16.1") {
+	if out := freshenOut(t, clone); !strings.Contains(out, "still says v0.16.1") {
 		t.Errorf("a build that did not move the stamp must be reported:\n%s", out)
 	}
 }
@@ -284,7 +286,7 @@ func TestFreshen_TickBudgetBelowInterval(t *testing.T) {
 func TestFreshen_PrintsExactlyOneLinePerRun(t *testing.T) {
 	clone := clonedRunechoRepo(t, "v0.17.0")
 	withSeams(t, "v0.17.0")
-	out := runFreshen(t, clone)
+	out := freshenOut(t, clone)
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 1 {
 		t.Fatalf("want exactly one line, got %d:\n%s", len(lines), out)
@@ -319,11 +321,13 @@ func TestResolveGoDir_Order(t *testing.T) {
 			return false
 		}
 	}
-	if got := resolveGoDir(found, "/goroot", has("/goroot/bin/go")); got != "/path/bin" {
-		t.Errorf("PATH must win: got %q", got)
+	// GOROOT leads: it built this binary, while cron's PATH may hold a distro
+	// go too old for go.mod (review finding).
+	if got := resolveGoDir(found, "/goroot", has("/goroot/bin/go")); got != "/goroot/bin" {
+		t.Errorf("the building toolchain's GOROOT must win: got %q", got)
 	}
-	if got := resolveGoDir(missing, "/goroot", has("/goroot/bin/go")); got != "/goroot/bin" {
-		t.Errorf("GOROOT must come second: got %q", got)
+	if got := resolveGoDir(found, "/gone", has()); got != "/path/bin" {
+		t.Errorf("PATH comes second when GOROOT is gone: got %q", got)
 	}
 	if got := resolveGoDir(missing, "/goroot", has("/home/linuxbrew/.linuxbrew/bin/go")); got != "/home/linuxbrew/.linuxbrew/bin" {
 		t.Errorf("fixed candidates come last: got %q", got)
@@ -333,26 +337,25 @@ func TestResolveGoDir_Order(t *testing.T) {
 	}
 }
 
-func TestCronEntry_Freshen(t *testing.T) {
-	if e := cronEntry("/b/runecho-ir", "/l/r.log", ""); strings.Contains(e, "--freshen") {
-		t.Errorf("no source must mean no flag: %s", e)
+func TestFreshenCronEntry(t *testing.T) {
+	if e := cronEntry("/b/runecho-ir", "/l/r.log"); strings.Contains(e, "freshen") {
+		t.Errorf("the reindex line must not carry freshen (#375 review): %s", e)
 	}
-	e := cronEntry("/b/runecho-ir", "/l/r.log", "/src/it's 100%/.bare")
-	if !strings.Contains(e, `--freshen='/src/it'\''s 100\%/.bare'`) {
-		t.Errorf("source not cron-quoted: %s", e)
-	}
-	if !strings.Contains(e, "--all --prune --freshen=") || !strings.HasSuffix(e, "# runecho") {
-		t.Errorf("unexpected shape: %s", e)
+	e := freshenCronEntry("/b/runecho-ir", "/l/r.log", "/src/it's 100%/.bare")
+	if !strings.HasPrefix(e, "30 * * * * '/b/runecho-ir' freshen '/src/it'\\''s 100\\%/.bare' >>") || !strings.HasSuffix(e, "# runecho") {
+		t.Errorf("unexpected freshen line: %s", e)
 	}
 }
 
-func TestLaunchdPlist_Freshen(t *testing.T) {
-	if p := launchdPlist("/b/ir", "/o", "/e", ""); strings.Contains(p, "--freshen") {
-		t.Errorf("no source must mean no argv element:\n%s", p)
+func TestFreshenPlist(t *testing.T) {
+	if p := launchdPlist("/b/ir", "/o", "/e"); strings.Contains(p, "freshen") {
+		t.Errorf("the reindex agent must not carry freshen:\n%s", p)
 	}
-	p := launchdPlist("/b/ir", "/o", "/e", "/src/a&b/.bare")
-	if !strings.Contains(p, "<string>--prune</string>\n\t\t<string>--freshen=/src/a&amp;b/.bare</string>\n\t</array>") {
-		t.Errorf("freshen argv element missing or unescaped:\n%s", p)
+	p := freshenPlist("/b/ir", "/o", "/e", "/src/a&b/.bare")
+	for _, want := range []string{"<string>com.runecho.freshen</string>", "<string>freshen</string>\n\t\t<string>/src/a&amp;b/.bare</string>"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("freshen plist missing %q:\n%s", want, p)
+		}
 	}
 }
 
@@ -384,8 +387,110 @@ func mustCommonDir(t *testing.T, dir string) string {
 	return filepath.Clean(strings.TrimSpace(string(out)))
 }
 
-func TestRepoReindex_FreshenRequiresAll(t *testing.T) {
-	if code := runRepoReindex([]string{"--freshen=/x", "somerepo"}); code != ExitError {
-		t.Errorf("--freshen without --all: exit %d, want ExitError", code)
+// install.sh's failure output is many lines; the log's contract is one
+// timestamped line per tick (review finding).
+func TestFreshenLine_FoldsAndCaps(t *testing.T) {
+	var out bytes.Buffer
+	freshenLine(&out, "FAILED: %s", "line1\nline2\r\nline3")
+	if got := strings.Count(out.String(), "\n"); got != 1 {
+		t.Errorf("want one line, got %d newlines: %q", got, out.String())
+	}
+	out.Reset()
+	freshenLine(&out, "%s", strings.Repeat("x", maxFreshenLine*2))
+	if len([]rune(out.String())) > maxFreshenLine+64 {
+		t.Errorf("line not capped: %d runes", len([]rune(out.String())))
+	}
+}
+
+// Re-running `install --periodic` elsewhere must be able to carry an existing
+// --freshen forward, which needs the quoting undone exactly (review finding).
+func TestExistingFreshenSource_RoundTrips(t *testing.T) {
+	for _, dir := range []string{"/src/runecho/.bare", "/src/it's 100%/.bare", "/src/a&b <c>/.bare"} {
+		if got := existingFreshenSource(cronEntry("/b/ir", "/l/r.log") + "\n" + freshenCronEntry("/b/ir", "/l/r.log", dir)); got != dir {
+			t.Errorf("cron round-trip: got %q, want %q", got, dir)
+		}
+		if got := existingFreshenSource(freshenPlist("/b/ir", "/o", "/e", dir)); got != dir {
+			t.Errorf("launchd round-trip: got %q, want %q", got, dir)
+		}
+	}
+	if got := existingFreshenSource(cronEntry("/b/ir", "/l/r.log")); got != "" {
+		t.Errorf("a job without the flag must yield \"\", got %q", got)
+	}
+}
+
+func TestInstall_SourceRequiresPeriodic(t *testing.T) {
+	if code := runInstall([]string{"--source=/x"}); code != ExitError {
+		t.Errorf("--source without --periodic: exit %d, want ExitError", code)
+	}
+}
+
+func TestDetectFreshenSource_BadExplicitSourceSaysSo(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "typo")
+	if _, note := detectFreshenSource(bad); !strings.Contains(note, "--source="+bad) {
+		t.Errorf("note should name the bad --source, got %q", note)
+	}
+}
+
+func TestRunFreshenCmd_Usage(t *testing.T) {
+	for _, args := range [][]string{nil, {"a", "b"}, {"--help"}} {
+		if code := runFreshenCmd(args); code != ExitError {
+			t.Errorf("runFreshenCmd(%v) = %d, want ExitError", args, code)
+		}
+	}
+}
+
+// cron and launchd never read a shell profile, so the opt-out a scheduled run
+// can see is a file (#375 review).
+func TestFreshen_OptOutFile(t *testing.T) {
+	clone := clonedRunechoRepo(t, "v0.17.0")
+	withSeams(t, "v0.16.1") // any rebuild fails the test
+	if err := os.WriteFile(filepath.Join(os.Getenv("RUNECHO_HOME"), noAutoInstallFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := freshenOut(t, clone); !strings.Contains(out, noAutoInstallFile) {
+		t.Errorf("want the opt-out file named:\n%s", out)
+	}
+}
+
+// A run that finds the lock held skips instead of queueing, so one hung build
+// can never stack every later tick behind it (#375 review).
+func TestFreshen_BusyLockSkips(t *testing.T) {
+	clone := clonedRunechoRepo(t, "v0.17.0")
+	withSeams(t, "v0.16.1") // any rebuild fails the test
+	release, ok := tryFreshenLock(os.Getenv("RUNECHO_HOME"))
+	if !ok {
+		t.Fatal("could not take the lock in a fresh RUNECHO_HOME")
+	}
+	defer release()
+	if runtime.GOOS == "windows" {
+		t.Skip("no flock")
+	}
+	if out := freshenOut(t, clone); !strings.Contains(out, "still running") {
+		t.Errorf("want a 'still running' skip:\n%s", out)
+	}
+}
+
+// installTimeout must be a HARD limit: killing only bash leaves install.sh's
+// children holding the output pipe, and Wait blocks until they finish on their
+// own (#375 review).
+func TestDefaultRunInstall_TimeoutKillsTheGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are unix-only")
+	}
+	top := t.TempDir()
+	script := "#!/usr/bin/env bash\n( sleep 30; echo late ) &\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(top, "install.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := installTimeout
+	installTimeout = time.Second
+	t.Cleanup(func() { installTimeout = orig })
+	start := time.Now()
+	err := defaultRunInstall(top, t.TempDir(), "v0.0.1", "/usr/bin")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("want a timeout error, got %v", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("returned after %s — the background build outlived the timeout", d)
 	}
 }

@@ -462,7 +462,8 @@ func TestCheckPeriodic_ReportsFreshen(t *testing.T) {
 		entry, want string
 	}{
 		{base + ` >>/tmp/r.log 2>&1 # runecho`, "does not keep the binaries fresh"},
-		{base + ` --freshen='/home/u/src/runecho/.bare' >>/tmp/r.log 2>&1 # runecho`, "keeps the binaries at origin's newest release"},
+		{base + ` >>/tmp/r.log 2>&1 # runecho` + "\n" + `30 * * * * '/home/u/bin/runecho-ir' freshen '/home/u/src/runecho/.bare' >>/tmp/r.log 2>&1 # runecho`, "keeps the binaries at origin's newest release"},
+		{"<string>--prune</string>\n<string>com.runecho.freshen</string><string>freshen</string>", "keeps the binaries at origin's newest release"},
 	} {
 		r := find(classifyPeriodic(tc.entry, "crontab", true), "periodic reindex")
 		if r == nil {

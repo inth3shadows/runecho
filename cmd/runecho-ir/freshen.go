@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -17,10 +18,17 @@ import (
 
 // freshen keeps the INSTALLED binaries at the newest release (#375). It is the
 // only code path that rebuilds them automatically, and it runs from exactly two
-// places: the hourly periodic job (`repo reindex --all --prune --freshen=<dir>`)
-// and an explicit `runecho-ir version-check --reinstall`. The git hooks only
-// advise (`version-check --quiet`), so nothing on a checkout or merge executes
+// places: its own hourly schedule entry (`runecho-ir freshen <git-common-dir>`,
+// written by `install --periodic` beside the reindex entry) and an explicit
+// `runecho-ir version-check --reinstall`. The git hooks only advise
+// (`version-check --quiet`), so nothing on a checkout or merge executes
 // anything.
+//
+// Its OWN entry, not a flag on `repo reindex` (#375 review): a binary that
+// predates freshen — e.g. `bash install.sh` from an old worktree — would reject
+// an unknown reindex flag and skip the hourly reindex altogether, and every
+// guard answer is computed from that index. Separately scheduled, such a binary
+// fails only this line.
 //
 // Trust statement. A rebuild runs install.sh from a commit that (a) origin
 // currently serves as a vX.Y.Z tag and (b) is contained in origin's default
@@ -47,10 +55,22 @@ const (
 	lsRemoteTimeout = 30 * time.Second
 	fetchTimeout    = 60 * time.Second
 	exportTimeout   = 30 * time.Second
-	// freshenInterval is the periodic job's cadence. One tick's worst case must
-	// fit inside it, so two ticks can never overlap (no lock needed); pinned by
-	// TestFreshen_TickBudgetBelowInterval.
+	// freshenInterval is the schedule's cadence. freshen's worst case fits inside
+	// it (pinned by TestFreshen_TickBudgetBelowInterval; installTimeout is a hard
+	// limit — see killGroupOnCancel), but an interactive --reinstall can still
+	// coincide with a tick. So runs take freshenLockFile WITHOUT waiting: a
+	// second run logs that one is already in progress and skips, rather than
+	// building into the same bin dir at once or queueing behind a hung build.
 	freshenInterval = time.Hour
+	freshenLockFile = "freshen.lock"
+	// noAutoInstallFile is the opt-out a scheduled job can actually see: cron
+	// and launchd never read a shell profile, so RUNECHO_NO_AUTO_INSTALL
+	// exported there would be invisible to the only automatic rebuilder left.
+	noAutoInstallFile = "no-auto-install"
+	// maxFreshenLine caps one log line. install.sh's failure output (a compile
+	// error, a module download) runs to many lines; the log's contract is one
+	// timestamped line per tick.
+	maxFreshenLine = 1500
 )
 
 // releaseTag matches a release tag exactly: no pre-release, no suffix. A tag
@@ -77,16 +97,19 @@ var goCandidateDirs = []string{
 }
 
 // resolveGoDir returns the directory holding a usable `go`, or "" if none is
-// found: PATH first, then the toolchain that built this binary, then the fixed
-// candidates. Pure over its three inputs so every branch is testable.
+// found: the toolchain that built this binary first, then PATH, then the fixed
+// candidates. GOROOT leads because it is known-good — it just built a working
+// runecho — while cron's /usr/bin:/bin PATH can hold a distro `go` too old for
+// go.mod (Debian ships GOTOOLCHAIN=local, so it fails rather than upgrading).
+// Pure over its three inputs so every branch is testable.
 func resolveGoDir(lookPath func(string) (string, error), goroot string, exists func(string) bool) string {
-	if p, err := lookPath("go"); err == nil {
-		return filepath.Dir(p)
-	}
 	if goroot != "" {
 		if dir := filepath.Join(goroot, "bin"); exists(filepath.Join(dir, "go")) {
 			return dir
 		}
+	}
+	if p, err := lookPath("go"); err == nil {
+		return filepath.Dir(p)
 	}
 	for _, dir := range goCandidateDirs {
 		if exists(filepath.Join(dir, "go")) {
@@ -115,19 +138,55 @@ func newestReleaseTag(tags map[string]string) (tag, sha string) {
 	return tag, sha
 }
 
-// freshenLine writes one timestamped line.
+// freshenLine writes exactly one timestamped line: embedded newlines (install.sh
+// output in an error) are folded and the message is capped at maxFreshenLine.
 func freshenLine(w io.Writer, format string, a ...any) {
-	fmt.Fprintf(w, "%s freshen: %s\n", fzNow().UTC().Format(time.RFC3339), fmt.Sprintf(format, a...))
+	msg := fmt.Sprintf(format, a...)
+	msg = strings.ReplaceAll(strings.ReplaceAll(msg, "\r\n", "\n"), "\n", " | ")
+	if r := []rune(msg); len(r) > maxFreshenLine {
+		msg = string(r[:maxFreshenLine]) + "…"
+	}
+	fmt.Fprintf(w, "%s freshen: %s\n", fzNow().UTC().Format(time.RFC3339), msg)
 }
 
 // freshen brings the installed binaries up to origin's newest release, building
 // from gitDir (a git common dir: `.bare` in a bare-worktree layout, `<root>/.git`
-// in a plain clone). Always ExitOK — see the file comment.
+// in a plain clone). Always ExitOK — see the file comment. Serialized across
+// processes on $RUNECHO_HOME/freshen.lock (see freshenInterval); if the lock
+// cannot be taken it runs unlocked, as every other lock in this codebase does.
 func freshen(gitDir string, w io.Writer) int {
 	if os.Getenv("RUNECHO_NO_AUTO_INSTALL") == "1" {
 		freshenLine(w, "RUNECHO_NO_AUTO_INSTALL=1 — skipped")
 		return ExitOK
 	}
+	dir, err := runechoDir()
+	if err != nil {
+		return freshenLocked(gitDir, w)
+	}
+	if _, err := os.Stat(filepath.Join(dir, noAutoInstallFile)); err == nil {
+		freshenLine(w, "%s exists — skipped (remove it to resume automatic updates)", filepath.Join(dir, noAutoInstallFile))
+		return ExitOK
+	}
+	release, ok := tryFreshenLock(dir)
+	if !ok {
+		freshenLine(w, "another freshen is still running (%s held) — skipped", filepath.Join(dir, freshenLockFile))
+		return ExitOK
+	}
+	defer release()
+	return freshenLocked(gitDir, w)
+}
+
+// runFreshenCmd is `runecho-ir freshen <git-common-dir>`, the scheduled entry.
+// Exit 0 on every path once the argument is present — see freshen.
+func runFreshenCmd(args []string) int {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(os.Stderr, "Usage: runecho-ir freshen <git-common-dir>   (normally run by the periodic job; by hand, use `version-check --reinstall`)")
+		return ExitError
+	}
+	return freshen(args[0], os.Stdout)
+}
+
+func freshenLocked(gitDir string, w io.Writer) int {
 	if runtime.GOOS == "windows" {
 		freshenLine(w, "skipped on Windows (a running binary cannot be replaced) — run install.sh by hand")
 		return ExitOK

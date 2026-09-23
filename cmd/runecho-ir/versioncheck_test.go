@@ -111,9 +111,14 @@ func runechoRepo(t *testing.T, tag string) string {
 func withSeams(t *testing.T, ver string) {
 	t.Helper()
 	origVer := version.Version
-	origRun, origStamp, origLook := vcRunInstall, vcReadStamp, fzLookPath
+	origRun, origStamp, origLook, origGoroot := vcRunInstall, vcReadStamp, fzLookPath, fzGoroot
 	version.Version = ver
-	// A deterministic toolchain answer, so no test depends on the machine's PATH.
+	// freshen takes a lock and reads an opt-out file under RUNECHO_HOME; a test
+	// must never touch the real one (#375 review: it created ~/.runecho/freshen.lock).
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	// A deterministic toolchain answer, so no test depends on the machine's
+	// GOROOT or PATH.
+	fzGoroot = func() string { return "" }
 	fzLookPath = func(string) (string, error) { return "/fake/go/bin/go", nil }
 	vcRunInstall = func(top, binDir, ver, goDir string) error {
 		t.Fatalf("unexpected rebuild (top=%s version=%s)", top, ver)
@@ -121,7 +126,7 @@ func withSeams(t *testing.T, ver string) {
 	}
 	t.Cleanup(func() {
 		version.Version = origVer
-		vcRunInstall, vcReadStamp, fzLookPath = origRun, origStamp, origLook
+		vcRunInstall, vcReadStamp, fzLookPath, fzGoroot = origRun, origStamp, origLook, origGoroot
 	})
 }
 
@@ -160,13 +165,29 @@ func TestVersionCheck_ForeignTree_NoOp(t *testing.T) {
 // install.sh. The hooks run version-check WITHOUT --reinstall, and that mode
 // must never build anything — whatever is checked out.
 func TestVersionCheck_AdvisoryNeverExecutes(t *testing.T) {
-	clone := clonedRunechoRepo(t, "v0.16.1")
+	// Origin AHEAD of the install: routed into freshen by mistake, this would
+	// really build — and withSeams fails the test if it does (#375 review found
+	// the earlier all-v0.16.1 setup passed with the gate removed).
+	clone := clonedRunechoRepo(t, "v0.17.0")
 	forkBranch(t, clone)
 	withSeams(t, "v0.16.1") // any rebuild fails the test
 	for _, args := range [][]string{{"--quiet", clone}, {clone}} {
 		if code := runVersionCheck(args); code != ExitOK {
 			t.Fatalf("exit = %d, want ExitOK", code)
 		}
+	}
+}
+
+// `--reinstall --quiet` is the body of every hook installed before #375, and
+// installed hooks are only rewritten by re-running `install`. It must stay the
+// offline advisory, or upgrading the binary turns every checkout into a fetch
+// and a possible multi-minute build (review finding). Origin is AHEAD here, so
+// a regression would really build — and withSeams fails the test if it does.
+func TestVersionCheck_LegacyHookBodyStaysAdvisory(t *testing.T) {
+	clone := clonedRunechoRepo(t, "v0.17.0")
+	withSeams(t, "v0.16.1") // behind origin; any rebuild fails the test
+	if code := runVersionCheck([]string{"--reinstall", "--quiet", clone}); code != ExitOK {
+		t.Fatalf("exit = %d, want ExitOK", code)
 	}
 }
 

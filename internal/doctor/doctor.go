@@ -81,11 +81,14 @@ func Run(root string) []Result {
 // two cannot drift.
 const periodicPruneArg = "--prune"
 
-// periodicFreshenArg is the flag that makes the hourly job keep the installed
-// binaries at origin's newest release (#375). Reported, never warned about:
-// it only applies to a from-source install, and a Homebrew/goreleaser user with
-// --periodic cannot and should not satisfy it.
-const periodicFreshenArg = "--freshen"
+// hasFreshenEntry reports whether the installed schedule includes the hourly
+// `runecho-ir freshen <dir>` entry (#375) — a second crontab line or a second
+// LaunchAgent. Reported, never warned about: it only applies to a from-source
+// install, and a Homebrew/goreleaser user with --periodic cannot and should not
+// satisfy it.
+func hasFreshenEntry(entry string) bool {
+	return strings.Contains(entry, " freshen ") || strings.Contains(entry, "<string>freshen</string>")
+}
 
 // checkPeriodic reports whether the installed hourly reindex job also prunes.
 //
@@ -125,7 +128,7 @@ func classifyPeriodic(entry, where string, found bool) []Result {
 			Detail: "installed in " + where + " but does NOT prune — snapshot history grows without bound (#351)",
 			Remedy: "runecho-ir install --periodic   # rewrites the schedule to `repo reindex --all --prune`",
 		}}
-	case !strings.Contains(entry, periodicFreshenArg):
+	case !hasFreshenEntry(entry):
 		return []Result{{
 			Check: name, Status: OK,
 			Detail: "installed in " + where + " and prunes; does not keep the binaries fresh — for a from-source install, re-run `runecho-ir install --periodic` from inside the runecho checkout (#375)",
@@ -147,6 +150,12 @@ func installedPeriodicJob() (entry, where string, found bool) {
 	if home, err := os.UserHomeDir(); err == nil {
 		plist := filepath.Join(home, "Library", "LaunchAgents", "com.runecho.reindex.plist")
 		if b, err := os.ReadFile(plist); err == nil {
+			// The freshen agent is a separate plist (#375); fold it in so the
+			// verdict can see it.
+			fp := filepath.Join(home, "Library", "LaunchAgents", "com.runecho.freshen.plist")
+			if fb, err := os.ReadFile(fp); err == nil {
+				b = append(append(b, '\n'), fb...)
+			}
 			return string(b), plist, true
 		}
 	}
@@ -156,12 +165,21 @@ func installedPeriodicJob() (entry, where string, found bool) {
 	if err != nil {
 		return "", "", false
 	}
+	var reindex string
+	var others []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "# runecho") && strings.Contains(line, "repo reindex") {
-			return line, "crontab", true
+		switch {
+		case !strings.Contains(line, "# runecho"):
+		case reindex == "" && strings.Contains(line, "repo reindex"):
+			reindex = line
+		default:
+			others = append(others, line) // e.g. the freshen line (#375)
 		}
 	}
-	return "", "", false
+	if reindex == "" {
+		return "", "", false
+	}
+	return strings.Join(append([]string{reindex}, others...), "\n"), "crontab", true
 }
 
 // resolvedBin returns the absolute, symlink-resolved path exec.LookPath finds
@@ -209,7 +227,10 @@ func checkBinaries(root string) []Result {
 			out = append(out, Result{
 				Check: name, Status: Fail,
 				Detail: fmt.Sprintf("%s is %s, behind source tag %s", path, dispVer(installed), newestCore),
-				Remedy: "run 'runecho-ir version-check --reinstall'",
+				// Two remedies because this check compares against the tag reachable
+				// from the checkout, while --reinstall installs ORIGIN's newest release
+				// (#375) — they differ when a local tag is unpushed.
+				Remedy: fmt.Sprintf("run 'bash %s/install.sh' (builds this checkout), or 'runecho-ir version-check --reinstall' (installs origin's newest release)", root),
 			})
 			continue
 		}

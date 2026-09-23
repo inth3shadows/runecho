@@ -661,27 +661,35 @@ trade-off is that a store-wide prune is no longer atomic; partial progress is
 the better failure mode here, since pruned history is redundant by construction.
 
 When `install --periodic` is run from inside the runecho checkout (or given
-`--source=<checkout>`), the job also carries `--freshen=<git-common-dir>` (#375):
-after reindex and prune it keeps the **installed binaries** at origin's newest
-release. It lists origin's tags with `ls-remote` (never local `refs/tags`, which
+`--source=<checkout>`), it also installs a second hourly entry, `runecho-ir
+freshen <git-common-dir>` (#375) — a `:30` crontab line, or the
+`com.runecho.freshen` LaunchAgent — that keeps the **installed binaries** at
+origin's newest release. It is a separate entry rather than a reindex flag so
+that a binary predating it (say, `bash install.sh` from an old worktree) fails
+only its own line instead of skipping the reindex. It lists origin's tags with `ls-remote` (never local `refs/tags`, which
 a fork fetch can pollute), and if the installed stamp is behind the newest
 `vX.Y.Z` it fetches, requires that tag's commit to be contained in origin's
 default branch, exports it with `git archive` into a private temp dir, and runs
 that tree's `install.sh` with `RUNECHO_VERSION=<tag>`. The checked-out tree is
 never executed, which is why the git hooks now only advise. A cron or launchd job
-has a minimal `PATH`, so `go` is resolved from `PATH`, then the GOROOT of the
-toolchain that built the binary, then a short list of common install dirs.
-Every tick writes exactly one timestamped `freshen:` line to the reindex log
-(including "up to date"), and every failure is fail-open. `runecho-ir doctor`
-reports whether the job freshens, without warning — it only applies to
-from-source installs. An existing job gains the flag by re-running
-`install --periodic` from the checkout.
+has a minimal `PATH`, so `go` is resolved from the GOROOT of the toolchain that
+built the binary (known-good), then `PATH`, then a short list of common install
+dirs. The build timeout is hard: install.sh runs in its own process group,
+killed whole. Every tick writes exactly one timestamped `freshen:` line to the
+reindex log (including "up to date"), and every failure is fail-open. A run that
+finds `$RUNECHO_HOME/freshen.lock` held skips instead of queueing behind it.
+Scheduled jobs never read a shell profile, so the opt-out they honour is the file
+`$RUNECHO_HOME/no-auto-install` (the `RUNECHO_NO_AUTO_INSTALL=1` env var still
+works for interactive runs). `runecho-ir doctor` reports whether the schedule
+freshens, without warning — it only applies to from-source installs. An existing
+schedule gains the entry by re-running `install --periodic` from the checkout;
+re-running it elsewhere keeps an existing entry.
 
 The installed hourly job runs `repo reindex --all --prune`, which keeps the
 store bounded on the same schedule that fills it. **Upgrading the binary does
 not rewrite an existing schedule** — the cron line and LaunchAgent plist are
 written once by `install --periodic`, and neither `install.sh` nor a rebuild
-(`version-check --reinstall`, or the job's own `--freshen`) touches them. A machine that installed the periodic
+(`version-check --reinstall`, or the scheduled `freshen`) touches them. A machine that installed the periodic
 job before retention shipped keeps running the old reindex-only command, so
 `runecho-ir doctor` reports a `periodic reindex` warning with the remedy
 (`install --periodic` rewrites it). It is a **flag** rather than a

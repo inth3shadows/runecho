@@ -173,3 +173,32 @@ func SeedStatesAt(lang Lang, fileLines []AddedLine, idxs []int) map[int]SeedStat
 func seedStateBefore(lang Lang, fileLines []AddedLine, idx int) SeedState {
 	return SeedStatesAt(lang, fileLines, []int{idx})[idx]
 }
+
+// PrepareSeeds reads each AbsPath diff's file once and attaches its seed table,
+// so every check that seeds from it shares one read and one walk instead of
+// each re-reading the file (#295). Call it after setting AbsPath; a diff it
+// skips (no AbsPath, unknown language) keeps reading on demand.
+func PrepareSeeds(diffs []FileDiff) {
+	for i := range diffs {
+		fd := &diffs[i]
+		if fd.AbsPath == "" {
+			continue
+		}
+		lang := LangFor(fd.Path)
+		if lang == LangUnknown {
+			continue
+		}
+		fd.seeds = loadSeedTable(lang, fd.AbsPath)
+		fd.seedsPrepared = true
+	}
+}
+
+// seedTable returns fd's AbsPath seed table for lang: the one PrepareSeeds
+// attached when it was built for the same language (or its failed read, nil),
+// else a fresh read.
+func (fd FileDiff) seedTable(lang Lang) *seedTable {
+	if fd.seedsPrepared && (fd.seeds == nil || fd.seeds.lang == lang) {
+		return fd.seeds
+	}
+	return loadSeedTable(lang, fd.AbsPath)
+}

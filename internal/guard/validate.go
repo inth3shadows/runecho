@@ -216,7 +216,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 // depths being Python-only.
 func seedFunc(lang Lang, fd FileDiff) func(int) string {
 	if fd.AbsPath != "" {
-		t := loadSeedTable(lang, fd.AbsPath)
+		t := fd.seedTable(lang)
 		if t == nil {
 			return nil
 		}
@@ -241,7 +241,7 @@ func depthSeedFunc(lang Lang, fd FileDiff, field func(SeedState) int, byLine map
 		return nil
 	}
 	if fd.AbsPath != "" {
-		t := loadSeedTable(lang, fd.AbsPath)
+		t := fd.seedTable(lang)
 		if t == nil {
 			return nil
 		}

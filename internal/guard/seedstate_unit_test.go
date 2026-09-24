@@ -113,3 +113,31 @@ func TestSeedStatesAtMatchesSinglePositions(t *testing.T) {
 		t.Fatalf("idx 22 is inside a multi-line def in the fixture; a zero state means the fixture moved")
 	}
 }
+
+// TestPrecommitReadsSeedFileOnce pins #295's pre-commit half: once
+// PrepareSeeds has run, Run and the file-scope check together read a staged
+// Python file's seed source exactly once, not once per seed func per check.
+func TestPrecommitReadsSeedFileOnce(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mod.py")
+	src := "cfg = {\n    \"a\": 1,\n}\n\ndef f(a,\n      b=[1]):\n    return a\n"
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	orig := readSeedFile
+	readSeedFile = func(name string) ([]byte, error) {
+		if name == p {
+			reads++
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { readSeedFile = orig })
+
+	diffs := []FileDiff{{Path: "mod.py", AbsPath: p, AddedLines: []AddedLine{{LineNo: 2, Text: `    "a": helper(1),`}}}}
+	PrepareSeeds(diffs)
+	Run(map[string]struct{}{}, "", diffs)
+	FileScopeViolationsWithReason(LangPython, TextToAddedLines(src), diffs[0], map[string]struct{}{})
+	if reads != 1 {
+		t.Fatalf("seed file read %d times, want exactly 1", reads)
+	}
+}

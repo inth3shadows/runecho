@@ -342,6 +342,9 @@ func runPreCommit(dryRun, verbose bool) int {
 	for i := range diffs {
 		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}
+	// One read and one seed walk per staged file, shared by guard.Run and the
+	// file-scope/call-shape checks below (#295).
+	guard.PrepareSeeds(diffs)
 
 	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
 	ignorePath := ignorePathFor(cwd, repoRoot)

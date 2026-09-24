@@ -338,10 +338,14 @@ func runPreCommit(dryRun, verbose bool) int {
 	// produced a path that does not exist, which disabled seeding and made a
 	// symbol defined in the staged file itself read as unresolved (issue #371).
 	// A file that still can't be read disables seeding for that entry alone
-	// (fail-open, handled in openSeedFor).
+	// (fail-open, handled in guard.loadSeedTable).
 	for i := range diffs {
 		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}
+	// One seed read and walk per staged file, shared by guard.Run and the
+	// file-scope check below (#295). The whole-file folds (readFileLines) still
+	// read separately.
+	guard.PrepareSeeds(diffs)
 
 	// Ignorefile at the committing worktree root (NOT repoRoot — see ignorePathFor).
 	ignorePath := ignorePathFor(cwd, repoRoot)
@@ -879,35 +883,74 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 // behavior, so a bad match degrades to today's noise rather than to a missed
 // hallucination.
 func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
-	return hookSeedByLineFromIndices(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
+	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).open
 }
 
-// hookSeedByLineFromIndices is hookSeedByLine's core, taking an
-// already-computed hookBlockIndices result. Split out (code-review finding
-// on PR #334, #294's own follow-on) so a caller building seeds for several
-// of these *ByLine functions at once — the diffs construction in
-// runHookMode below builds five — computes hookBlockIndices ONCE and shares
-// it, instead of each function re-walking blockStartLine's matching logic
-// independently on every hook invocation.
-func hookSeedByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
+// hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
+// the synthetic LineNo that starts each block (see hookBlockIndices). A block
+// with no entry reads the zero value — "starts outside any string / at depth 0".
+type hookSeeds struct {
+	open                             map[int]string
+	brace, bracket, defSig, paramSig map[int]int
+}
+
+// hookSeedMaps builds all of an edit's per-block seeds from one
+// hookBlockIndices result, with ONE walk of fileLines up to the furthest block
+// (guard.SeedStatesAt). It replaced five builders that each re-walked
+// fileLines[:idx] per block (#295), which for an edit near the end of a large
+// file meant five O(file) walks on the hook's latency path.
+//
+// A zero field is omitted from its map, so a nil map means "no block starts
+// inside anything" — what every consumer already reads a missing entry as. The
+// four depths are tracked for Python only (guard.SeedStatesAt leaves them 0
+// elsewhere), so their maps stay nil for every other language.
+func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
+	var s hookSeeds
 	if len(indices) == 0 {
-		return nil
+		return s
 	}
-	seeds := make(map[int]string)
-	for start, idx := range indices {
-		if open := guard.OpenStateBefore(lang, fileLines, idx); open != "" {
-			seeds[start] = open
+	idxs := make([]int, 0, len(indices))
+	for _, idx := range indices {
+		idxs = append(idxs, idx)
+	}
+	states := guard.SeedStatesAt(lang, fileLines, idxs)
+	setInt := func(m *map[int]int, start, v int) {
+		if v == 0 {
+			return
 		}
+		if *m == nil {
+			*m = make(map[int]int)
+		}
+		(*m)[start] = v
 	}
-	if len(seeds) == 0 {
-		return nil
+	for start, idx := range indices {
+		st := states[idx]
+		if st.Open != "" {
+			if s.open == nil {
+				s.open = make(map[int]string)
+			}
+			s.open[start] = st.Open
+		}
+		setInt(&s.brace, start, st.Brace)
+		setInt(&s.bracket, start, st.Bracket)
+		setInt(&s.defSig, start, st.DefSig)
+		setInt(&s.paramSig, start, st.ParamSig)
 	}
-	return seeds
+	return s
+}
+
+// applyTo sets fd's per-block seed maps.
+func (s hookSeeds) applyTo(fd *guard.FileDiff) {
+	fd.SeedByLine = s.open
+	fd.PyBraceDepthByLine = s.brace
+	fd.PyBracketDepthByLine = s.bracket
+	fd.PyDefSigDepthByLine = s.defSig
+	fd.PyParamSigDepthByLine = s.paramSig
 }
 
 // hookBlockIndices resolves, per added-line block, the 0-based index in
-// fileLines where that block's PRE-EDIT text sits — the position both
-// hookSeedByLine and hookBraceDepthByLine need. Shared here (code-review finding
+// fileLines where that block's PRE-EDIT text sits — the position every
+// per-block seed (hookSeedMaps) is read at. Shared here (code-review finding
 // on PR #290's brace-depth-seeding follow-up) rather than each independently
 // running blockStartLine plus the MultiEdit line arithmetic: two copies of that
 // arithmetic could silently diverge on a future edit to one but not the other,
@@ -960,130 +1003,10 @@ func hookBlockIndices(toolName, oldString string, edits []editOp, fileLines []gu
 // statement-start position reads as a definition rather than a reference. Shares
 // hookSeedByLine's block-position resolution via hookBlockIndices, so the two
 // seeds always land on the same block boundaries by construction rather than by
-// two hand-kept-in-sync copies; only the per-line state read off fileLines
-// differs (PyBraceDepthBefore instead of OpenStateBefore). Python-only: returns
-// nil for every other language, since pyBraceDepth is never consulted there.
+// two hand-kept-in-sync copies. Python-only: returns nil for every other
+// language, since pyBraceDepth is never consulted there.
 func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	if lang != guard.LangPython {
-		return nil
-	}
-	return hookBraceDepthByLineFromIndices(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines)
-}
-
-// hookBraceDepthByLineFromIndices is hookBraceDepthByLine's core — see
-// hookSeedByLineFromIndices' doc for why this split exists.
-func hookBraceDepthByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine) map[int]int {
-	if len(indices) == 0 {
-		return nil
-	}
-	seeds := make(map[int]int)
-	for start, idx := range indices {
-		if depth := guard.PyBraceDepthBefore(fileLines, idx); depth != 0 {
-			seeds[start] = depth
-		}
-	}
-	if len(seeds) == 0 {
-		return nil
-	}
-	return seeds
-}
-
-// hookBracketDepthByLine is hookBraceDepthByLine's counterpart for the general
-// ()/[]/{}-bracket depth PyDeclaredNames/PyParamNames track (#294): computes,
-// per added-line block, that depth where the block sits in the PRE-EDIT file.
-// Without it, a block that adds a kwarg-style line inside a pre-existing
-// multi-line call/list/dict (opener unchanged context above the block) is
-// scanned starting at depth 0, misreading it as a top-level assignment or
-// fresh signature. Shares hookBlockIndices with hookSeedByLine/
-// hookBraceDepthByLine — same block-position resolution, only the per-line
-// state read off fileLines differs. Python-only.
-func hookBracketDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	if lang != guard.LangPython {
-		return nil
-	}
-	return hookBracketDepthByLineFromIndices(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines)
-}
-
-// hookBracketDepthByLineFromIndices is hookBracketDepthByLine's core — see
-// hookSeedByLineFromIndices' doc for why this split exists.
-func hookBracketDepthByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine) map[int]int {
-	if len(indices) == 0 {
-		return nil
-	}
-	seeds := make(map[int]int)
-	for start, idx := range indices {
-		if depth := guard.PyBracketDepthBefore(fileLines, idx); depth != 0 {
-			seeds[start] = depth
-		}
-	}
-	if len(seeds) == 0 {
-		return nil
-	}
-	return seeds
-}
-
-// hookDefSigDepthByLine is hookBraceDepthByLine's counterpart for the
-// def-signature-specific PAREN-ONLY depth LocallyBoundNames tracks (#294):
-// computes, per added-line block, that depth where the block sits in the
-// PRE-EDIT file. Without it, a block beginning partway through a multi-line
-// def signature (opener unchanged context above the block) is scanned as if
-// no signature were open, so a parameter added on the block's own lines is
-// never bound. LocallyBoundNames ONLY — see PyParamSigDepthBefore's doc for
-// why PyParamNames needs hookParamSigDepthByLine below instead, not this
-// one. Python-only.
-func hookDefSigDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	if lang != guard.LangPython {
-		return nil
-	}
-	return hookDefSigDepthByLineFromIndices(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines)
-}
-
-// hookDefSigDepthByLineFromIndices is hookDefSigDepthByLine's core — see
-// hookSeedByLineFromIndices' doc for why this split exists.
-func hookDefSigDepthByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine) map[int]int {
-	if len(indices) == 0 {
-		return nil
-	}
-	seeds := make(map[int]int)
-	for start, idx := range indices {
-		if depth := guard.PyDefSigDepthBefore(fileLines, idx); depth != 0 {
-			seeds[start] = depth
-		}
-	}
-	if len(seeds) == 0 {
-		return nil
-	}
-	return seeds
-}
-
-// hookParamSigDepthByLine is hookDefSigDepthByLine's counterpart for
-// PyParamNames' OWN def-signature depth rule (#294) — ALL of ()/[]/{}, not
-// parens alone (a multi-line default value's own bracket must stay "open"
-// from the signature's point of view too; see PyParamSigDepthBefore's doc
-// for why sharing hookDefSigDepthByLine's seed desyncs the two). Python-only.
-func hookParamSigDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	if lang != guard.LangPython {
-		return nil
-	}
-	return hookParamSigDepthByLineFromIndices(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines)
-}
-
-// hookParamSigDepthByLineFromIndices is hookParamSigDepthByLine's core —
-// see hookSeedByLineFromIndices' doc for why this split exists.
-func hookParamSigDepthByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine) map[int]int {
-	if len(indices) == 0 {
-		return nil
-	}
-	seeds := make(map[int]int)
-	for start, idx := range indices {
-		if depth := guard.PyParamSigDepthBefore(fileLines, idx); depth != 0 {
-			seeds[start] = depth
-		}
-	}
-	if len(seeds) == 0 {
-		return nil
-	}
-	return seeds
+	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).brace
 }
 
 // blockStartLine returns the 0-based index in fileLines where block's lines

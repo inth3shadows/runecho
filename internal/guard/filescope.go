@@ -117,6 +117,7 @@ func FileScopeViolationsWithReason(lang Lang, wholeFile []AddedLine, fd FileDiff
 	// (missing openSeed) and pyFileScope wrongly binds it into scope, suppressing
 	// the exact file-scope violation this check exists to catch (code-review
 	// findings on PR #290, rounds 2 and 3).
+	fd = fd.withSeeds()
 	openSeed := seedFunc(lang, fd)
 	braceSeed := braceDepthSeedFunc(lang, fd)
 	// bracketSeed is PyDeclaredNames' own seed (#294); defSigSeed is

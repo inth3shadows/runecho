@@ -16,6 +16,22 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- guard (#335, #295): the five pre-hunk seeds (open-string state, and for Python
+  the dict, bracket and two def-signature depths) now share one per-line rule
+  (`advanceSeed`) instead of ten hand-kept copies. Each file is walked once:
+  - Pre-commit reads each staged file once for seeding, instead of up to nine
+    times.
+  - The hook computes every block's seed in a single walk: 56–71% faster (a late
+    Edit on a 3,000-line file dropped from 4.0 ms to 1.7 ms).
+  - Verdicts are unchanged; a golden captured from the old code pins all five
+    seeds from both paths.
+
+### Fixed
+- guard: on an unenrolled tree, call-shape now receives the same five seeds as
+  on an enrolled one. With only the open-string seed, a kwarg line inside a call
+  opened above the edit read as a rebinding and hid a misspelled keyword.
+
 ## [0.55.0] — 2026-09-24
 
 ### Fixed

@@ -29,6 +29,14 @@ type FileDiff struct {
 	// carry real new-file line numbers) and left empty by the hook and full-file
 	// callers, whose line numbers are synthetic and can't index into the file.
 	AbsPath string
+	// seeds is AbsPath's seed table, read once by PrepareSeeds and shared by
+	// every seed func consulted for this file (Run's two passes, the file-scope
+	// and call-shape checks). Without it each seed func reads and walks the file
+	// on its own (#295). seedsPrepared distinguishes "prepared, and the read
+	// failed" (nil seeds, stay unseeded) from "never prepared" (read on demand).
+	// Immutable once set, so copies of the FileDiff can share it.
+	seeds         *seedTable
+	seedsPrepared bool
 	// SeedByLine is the hook path's equivalent of AbsPath seeding. The hook's
 	// AddedLines carry SYNTHETIC line numbers (1..N per edit block), so they can't
 	// index into the pre-edit file the way AbsPath seeding does — but the same

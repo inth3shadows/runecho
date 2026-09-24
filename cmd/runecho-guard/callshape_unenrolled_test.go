@@ -162,3 +162,26 @@ func TestCallShape_SchemaNewerKeepsItsAdvisory(t *testing.T) {
 		t.Fatalf("reason = %v, want schema-newer", rec["reason"])
 	}
 }
+
+// TestCallShape_UnenrolledTreeSeedsBracketDepth pins that the unenrolled path
+// builds call-shape's input with every seed, as the enrolled path does. The
+// Edit lands on a kwarg line inside a call whose `(` is above the block. With
+// only the open-string seed, `    fetch=...` at bracket depth 0 read as an
+// assignment rebinding `fetch`, which shadowed the in-file def, so the
+// misspelled keyword on the same line went unreported.
+func TestCallShape_UnenrolledTreeSeedsBracketDepth(t *testing.T) {
+	const file = "def fetch(url, timeout=10):\n    return url\n\nresult = configure(\n    retries=3,\n)\n"
+	enrolled := t.TempDir()
+	gitInit(t, enrolled)
+	enrolledStore(t, enrolled, []string{"KnownFunc"})
+	py := filepath.Join(t.TempDir(), "client.py")
+	if err := os.WriteFile(py, []byte(file), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RUNECHO_GUARD_CALLSHAPE", "1")
+
+	_, raw, d := runHook(t, payloadOld(t, "Edit", py, "    retries=3,", `    fetch=fetch("u", timeuot=5),`, "", nil))
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "timeuot") {
+		t.Fatalf("expected a call-shape ask naming timeuot, got %q\n%s", d.Hook.PermissionDec, raw)
+	}
+}

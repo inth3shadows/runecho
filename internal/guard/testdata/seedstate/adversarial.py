@@ -49,5 +49,9 @@ class K:
                               z)):
         pass
 
+def h(a,
+      b)): pass
+AFTER_H = 1
+
 }{
 MAX_VALUE = 1

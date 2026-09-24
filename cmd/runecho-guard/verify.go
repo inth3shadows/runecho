@@ -271,33 +271,20 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// Shared by the additive check and the dropped-import check below so both see
 	// the same (leak-free) view of a MultiEdit rather than a flat "\n"-join.
 	newLines := hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits)
-	// Computed ONCE and shared by every *ByLine seed builder below (code-review
-	// finding on PR #334): each independently called hookBlockIndices with the
-	// exact same arguments, re-walking blockStartLine's matching logic once per
-	// builder on every hook invocation.
+	// Resolved ONCE and shared by every per-block seed (code-review finding on
+	// PR #334): each builder used to re-walk blockStartLine's matching logic.
 	blockIndices := hookBlockIndices(edit.ToolName, edit.OldString, edit.Edits, fileLines)
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
 		AddedLines: newLines,
-		// Seed each block's open-string state from where it sits in the pre-edit
-		// file, so an Edit landing inside a docstring or string literal is masked
-		// instead of scanned as code. fileLines is the read already done above.
-		SeedByLine: hookSeedByLineFromIndices(blockIndices, fileLines, lang),
 	}}
-	if lang == guard.LangPython {
-		// Same idea for pyBraceDepth (#289): an Edit that adds a dict key without
-		// touching the literal's opening `{` line — the opener is unchanged context
-		// above the block — must not start scanning at depth 0 regardless of the
-		// file's real state there, or the key reads as a definition instead of a
-		// reference. Python-only, matching the wrapped functions' own gate.
-		diffs[0].PyBraceDepthByLine = hookBraceDepthByLineFromIndices(blockIndices, fileLines)
-		// PyDeclaredNames/PyParamNames/LocallyBoundNames' own seeds (#294) — same
-		// rationale as PyBraceDepthByLine, for the general bracket depth and the
-		// two def-signature-specific depths respectively.
-		diffs[0].PyBracketDepthByLine = hookBracketDepthByLineFromIndices(blockIndices, fileLines)
-		diffs[0].PyDefSigDepthByLine = hookDefSigDepthByLineFromIndices(blockIndices, fileLines)
-		diffs[0].PyParamSigDepthByLine = hookParamSigDepthByLineFromIndices(blockIndices, fileLines)
-	}
+	// Seed each block from where it sits in the pre-edit file (fileLines is the
+	// read already done above): its open-string state, so an Edit landing inside
+	// a docstring or string literal is masked instead of scanned as code (#178),
+	// and for Python the dict/bracket/def-signature depths (#289, #294), so a
+	// block editing inside a literal or signature whose opener is unchanged
+	// context above it doesn't start scanning at depth 0.
+	hookSeedMaps(blockIndices, fileLines, lang).applyTo(&diffs[0])
 
 	violations := guard.Run(symbols, ignorePath, diffs)
 	// results accumulates one CheckResult per check (#330's typed epistemic

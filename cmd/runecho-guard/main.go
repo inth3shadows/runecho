@@ -905,6 +905,37 @@ func hookSeedByLineFromIndices(indices map[int]int, fileLines []guard.AddedLine,
 	return seeds
 }
 
+// hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
+// the synthetic LineNo that starts each block (see hookBlockIndices). A block
+// with no entry reads the zero value — "starts outside any string / at depth 0".
+type hookSeeds struct {
+	open                             map[int]string
+	brace, bracket, defSig, paramSig map[int]int
+}
+
+// hookSeedMaps builds all of an edit's per-block seeds from one
+// hookBlockIndices result. The four depths are Python-only, matching the
+// guard's own gates: those trackers are never consulted for other languages.
+func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
+	s := hookSeeds{open: hookSeedByLineFromIndices(indices, fileLines, lang)}
+	if lang == guard.LangPython {
+		s.brace = hookBraceDepthByLineFromIndices(indices, fileLines)
+		s.bracket = hookBracketDepthByLineFromIndices(indices, fileLines)
+		s.defSig = hookDefSigDepthByLineFromIndices(indices, fileLines)
+		s.paramSig = hookParamSigDepthByLineFromIndices(indices, fileLines)
+	}
+	return s
+}
+
+// applyTo sets fd's per-block seed maps.
+func (s hookSeeds) applyTo(fd *guard.FileDiff) {
+	fd.SeedByLine = s.open
+	fd.PyBraceDepthByLine = s.brace
+	fd.PyBracketDepthByLine = s.bracket
+	fd.PyDefSigDepthByLine = s.defSig
+	fd.PyParamSigDepthByLine = s.paramSig
+}
+
 // hookBlockIndices resolves, per added-line block, the 0-based index in
 // fileLines where that block's PRE-EDIT text sits — the position both
 // hookSeedByLine and hookBraceDepthByLine need. Shared here (code-review finding

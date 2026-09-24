@@ -338,7 +338,7 @@ func runPreCommit(dryRun, verbose bool) int {
 	// produced a path that does not exist, which disabled seeding and made a
 	// symbol defined in the staged file itself read as unresolved (issue #371).
 	// A file that still can't be read disables seeding for that entry alone
-	// (fail-open, handled in openSeedFor).
+	// (fail-open, handled in guard.loadSeedTable).
 	for i := range diffs {
 		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}

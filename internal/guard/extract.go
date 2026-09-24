@@ -1115,31 +1115,7 @@ func PyParamNames(lines []AddedLine, paramSigDepthSeed func(lineNo int) int) []s
 // closing the signature early, silently dropping every parameter after it.
 // This function mirrors PyParamNames' own rule exactly instead.
 func PyParamSigDepthBefore(fileLines []AddedLine, idx int) int {
-	if idx <= 0 || len(fileLines) == 0 {
-		return 0
-	}
-	if idx > len(fileLines) {
-		idx = len(fileLines)
-	}
-	open := ""
-	depth := 0
-	for _, l := range fileLines[:idx] {
-		var scan, braceScan string
-		scan, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
-		if depth > 0 {
-			depth += pyBracketDelta(braceScan)
-			if depth <= 0 {
-				depth = 0
-			}
-		} else if loc := rePyDefParamOpen.FindStringSubmatchIndex(scan); loc != nil {
-			rest := braceScan[loc[2]:loc[3]]
-			depth = 1 + pyBracketDelta(rest)
-			if depth <= 0 {
-				depth = 0
-			}
-		}
-	}
-	return depth
+	return seedStateBefore(LangPython, fileLines, idx).ParamSig
 }
 
 // pyParseParamList extracts the bound parameter names from the text of a def
@@ -1795,22 +1771,12 @@ func scanStrippedBraces(lang Lang, lines []AddedLine, fn func(scan, braceScan st
 // file's contiguous lines; idx is clamped into range, so an out-of-range index
 // yields the state at the nearest end rather than a panic.
 //
-// This is the hook path's counterpart to openSeedFor (which reads the file and
-// indexes by real new-file line number). The hook has the file's lines already
-// in hand and needs the state at a MATCHED position rather than at a diff line
-// number, so it threads the same masking here instead. See FileDiff.SeedByLine.
+// This is the hook path's counterpart to the pre-commit seed table (which reads
+// the file and indexes by real new-file line number). The hook has the file's
+// lines already in hand and needs the state at a MATCHED position rather than
+// at a diff line number. A projection of SeedStatesAt; see FileDiff.SeedByLine.
 func OpenStateBefore(lang Lang, fileLines []AddedLine, idx int) string {
-	if idx <= 0 || len(fileLines) == 0 {
-		return ""
-	}
-	if idx > len(fileLines) {
-		idx = len(fileLines)
-	}
-	open := ""
-	for _, l := range fileLines[:idx] {
-		_, open = stripLiteralsStateful(lang, l.Text, open)
-	}
-	return open
+	return seedStateBefore(lang, fileLines, idx).Open
 }
 
 // PyBraceDepthBefore returns the Python {}-brace nesting depth in effect at the
@@ -1826,23 +1792,7 @@ func OpenStateBefore(lang Lang, fileLines []AddedLine, idx int) string {
 // files. fileLines must be a whole file's contiguous lines; idx is clamped into
 // range.
 func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
-	if idx <= 0 || len(fileLines) == 0 {
-		return 0
-	}
-	if idx > len(fileLines) {
-		idx = len(fileLines)
-	}
-	open := ""
-	depth := 0
-	for _, l := range fileLines[:idx] {
-		var braceScan string
-		_, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
-		// Same accounting as extractRefs' own per-line advance, including the
-		// clamp and the f-string neutralization (#291) — a seed computed any other
-		// way would hand the run a depth its own tracking would never produce.
-		depth = pyLineCtx{scan: braceScan, base: depth}.depthAtEnd()
-	}
-	return depth
+	return seedStateBefore(LangPython, fileLines, idx).Brace
 }
 
 // PyBracketDepthBefore returns the Python ()/[]/{}-bracket nesting depth in
@@ -1860,23 +1810,7 @@ func PyBraceDepthBefore(fileLines []AddedLine, idx int) int {
 // Python-only by construction; fileLines must be a whole file's contiguous
 // lines; idx is clamped into range.
 func PyBracketDepthBefore(fileLines []AddedLine, idx int) int {
-	if idx <= 0 || len(fileLines) == 0 {
-		return 0
-	}
-	if idx > len(fileLines) {
-		idx = len(fileLines)
-	}
-	open := ""
-	depth := 0
-	for _, l := range fileLines[:idx] {
-		var braceScan string
-		_, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
-		depth += pyBracketDelta(braceScan)
-		if depth < 0 {
-			depth = 0
-		}
-	}
-	return depth
+	return seedStateBefore(LangPython, fileLines, idx).Bracket
 }
 
 // pyLineCtx is one Python line's brace/statement context: the literal-stripped,

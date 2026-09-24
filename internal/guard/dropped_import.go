@@ -485,25 +485,7 @@ func pyConsumeParens(s string, depth *int) (string, bool) {
 // outside the hunk: seeding fixes the depth at hunk start, not the missing
 // text a hunk-only scanner never saw.
 func PyDefSigDepthBefore(fileLines []AddedLine, idx int) int {
-	if idx <= 0 || len(fileLines) == 0 {
-		return 0
-	}
-	if idx > len(fileLines) {
-		idx = len(fileLines)
-	}
-	open := ""
-	depth := 0
-	for _, l := range fileLines[:idx] {
-		var scan string
-		scan, open = stripLiteralsStateful(LangPython, l.Text, open)
-		if depth > 0 {
-			pyConsumeParens(scan, &depth)
-		} else if loc := rePyDefOpen.FindStringIndex(scan); loc != nil {
-			depth = 1
-			pyConsumeParens(scan[loc[1]:], &depth)
-		}
-	}
-	return depth
+	return seedStateBefore(LangPython, fileLines, idx).DefSig
 }
 
 // assignLHS returns the substring left of the first plain assignment '=' on a

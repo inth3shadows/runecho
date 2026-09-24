@@ -374,11 +374,11 @@ func TestRun_UnknownLang_Skipped(t *testing.T) {
 	}
 }
 
-// TestPyBraceDepthSeedProvidersAgree pins the HIGH finding from code review on
-// the #291/#292 PR: the brace-depth seed had THREE hand-kept copies of one
-// accounting rule, and only two were converted. pyBraceDepthSeedFor — the
-// pre-commit path's provider, used whenever a FileDiff carries an AbsPath — kept
-// counting an f-string interpolation's braces as dict nesting, so a hunk below a
+// TestSeedProvidersAgree (was TestPyBraceDepthSeedProvidersAgree; now all five
+// seeds) pins the HIGH finding from code review on the #291/#292 PR: the
+// brace-depth seed had THREE hand-kept copies of one accounting rule, and only
+// two were converted. The pre-commit path's provider (then pyBraceDepthSeedFor,
+// used whenever a FileDiff carries an AbsPath) kept counting an f-string interpolation's braces as dict nesting, so a hunk below a
 // multi-line interpolation was seeded at depth 1 where the hook's
 // PyBraceDepthBefore seeded 0. The pre-commit path therefore still produced the
 // exact false positive the fix claims to close.
@@ -386,7 +386,7 @@ func TestRun_UnknownLang_Skipped(t *testing.T) {
 // Pinning agreement rather than either provider's absolute numbers is the point:
 // any future edit to one that does not land in the other fails here, which is
 // what a third copy makes possible in the first place.
-func TestPyBraceDepthSeedProvidersAgree(t *testing.T) {
+func TestSeedProvidersAgree(t *testing.T) {
 	for _, tc := range []struct{ name, src string }{
 		{
 			"multi-line f-string interpolation",
@@ -411,16 +411,34 @@ func TestPyBraceDepthSeedProvidersAgree(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.src), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			seed := pyBraceDepthSeedFor(path)
-			if seed == nil {
-				t.Fatal("pyBraceDepthSeedFor returned nil")
+			fd := FileDiff{Path: "mod.py", AbsPath: path}
+			open := seedFunc(LangPython, fd)
+			depths := []struct {
+				name string
+				pre  func(int) int
+				hook func([]AddedLine, int) int
+			}{
+				{"brace", braceDepthSeedFunc(LangPython, fd), PyBraceDepthBefore},
+				{"bracket", bracketDepthSeedFunc(LangPython, fd), PyBracketDepthBefore},
+				{"defSig", defSigDepthSeedFunc(LangPython, fd), PyDefSigDepthBefore},
+				{"paramSig", paramSigDepthSeedFunc(LangPython, fd), PyParamSigDepthBefore},
+			}
+			if open == nil {
+				t.Fatal("seedFunc returned nil for a readable file")
 			}
 			fileLines := TextToAddedLines(tc.src)
 			for lineNo := 1; lineNo <= len(fileLines)+1; lineNo++ {
-				want := PyBraceDepthBefore(fileLines, lineNo-1)
-				if got := seed(lineNo); got != want {
-					t.Errorf("line %d: pre-commit seed = %d, hook seed = %d — the two providers must not drift",
-						lineNo, got, want)
+				if got, want := open(lineNo), OpenStateBefore(LangPython, fileLines, lineNo-1); got != want {
+					t.Errorf("line %d open: pre-commit seed = %q, hook seed = %q", lineNo, got, want)
+				}
+				for _, d := range depths {
+					if d.pre == nil {
+						t.Fatalf("%s seed func returned nil for a readable .py file", d.name)
+					}
+					if got, want := d.pre(lineNo), d.hook(fileLines, lineNo-1); got != want {
+						t.Errorf("line %d %s: pre-commit seed = %d, hook seed = %d — the two providers must not drift",
+							lineNo, d.name, got, want)
+					}
 				}
 			}
 		})

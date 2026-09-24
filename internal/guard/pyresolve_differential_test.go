@@ -598,7 +598,7 @@ func pySetsEqual(a, b map[string]bool) bool {
 // MINUS its largest block (so the block reads as newly added), restores the
 // full file, stages it, and runs guard.Run/guard.FileScopeViolations against
 // the real guard.ParseStagedDiff output — the only posture that exercises the
-// AbsPath seed chain (openSeedFor, pyBraceDepthSeedFor, ...), per plan section
+// AbsPath seed chain (seedFunc and the depth seed funcs over loadSeedTable), per plan section
 // 6. Files with no top-level block report "n/a", not zero (filesNA).
 //
 // This needs an extra "pre" commit (unlike phase 2's per-mutation precommit,

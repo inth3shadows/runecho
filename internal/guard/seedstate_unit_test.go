@@ -109,6 +109,15 @@ func TestSeedStatesAtMatchesSinglePositions(t *testing.T) {
 			t.Errorf("idx %d: SeedStatesAt = %+v, single lookup = %+v", idx, got[idx], want)
 		}
 	}
+	// The clamps against seedTable.at's own, independent clamp: past the end is
+	// the state after the last line, and below 0 is the state before line 1.
+	tb := buildSeedTable(LangPython, strings.Split(string(data), "\n"))
+	if got[n+7] != tb.at(n+1) || got[n] != tb.at(n+1) {
+		t.Errorf("idx past the end = %+v / %+v, want the final state %+v", got[n+7], got[n], tb.at(n+1))
+	}
+	if got[-1] != (SeedState{}) || got[0] != (SeedState{}) {
+		t.Errorf("idx -1/0 = %+v / %+v, want the zero state", got[-1], got[0])
+	}
 	if s := got[22]; s.Bracket == 0 && s.DefSig == 0 && s.ParamSig == 0 && s.Brace == 0 {
 		t.Fatalf("idx 22 is inside a multi-line def in the fixture; a zero state means the fixture moved")
 	}
@@ -182,5 +191,18 @@ func TestUnpreparedCallersReadOncePerCheck(t *testing.T) {
 	}
 	if reads != 1 {
 		t.Fatalf("call-shape read the seed file %d times unprepared, want 1", reads)
+	}
+}
+
+// TestSeedTableNonPythonStoresOnlyOpen pins the memory half of #335's review:
+// outside Python the depths are always 0, so the table keeps only the
+// open-string column, the 16 B/line openSeedFor cost before the merge.
+func TestSeedTableNonPythonStoresOnlyOpen(t *testing.T) {
+	lines := strings.Split("package a\n\nvar s = `raw\n`\n", "\n")
+	if tb := buildSeedTable(LangGo, lines); tb.depth != nil || len(tb.open) != len(lines)+1 {
+		t.Errorf("Go table: depth=%v open=%d, want no depth column and %d open entries", tb.depth != nil, len(tb.open), len(lines)+1)
+	}
+	if tb := buildSeedTable(LangPython, lines); len(tb.depth) != len(lines)+1 {
+		t.Errorf("Python table must keep a depth column per line")
 	}
 }

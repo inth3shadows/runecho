@@ -75,22 +75,36 @@ func advanceSeed(lang Lang, st SeedState, line string) SeedState {
 }
 
 // seedTable holds the seed state at the start of every line of one file:
-// prefix[k] is the state at the start of 1-based line k+1, and the final entry
-// is the state past the last line.
+// entry k is the state at the start of 1-based line k+1, and the final entry
+// is the state past the last line. It is stored column-wise so a non-Python
+// file costs one string per line, as openSeedFor did before #335, rather than
+// a full SeedState whose depths are always 0 there; the depths are int32
+// (a file is capped at 8 MiB, so no depth can exceed that).
 type seedTable struct {
-	lang   Lang
-	prefix []SeedState
+	lang  Lang
+	open  []string
+	depth []seedDepths // Python only; nil otherwise
 }
 
+type seedDepths struct{ brace, bracket, defSig, paramSig int32 }
+
 func buildSeedTable(lang Lang, lines []string) *seedTable {
-	prefix := make([]SeedState, len(lines)+1)
-	var st SeedState
-	for i, ln := range lines {
-		prefix[i] = st
-		st = advanceSeed(lang, st, ln)
+	t := &seedTable{lang: lang, open: make([]string, len(lines)+1)}
+	if lang == LangPython {
+		t.depth = make([]seedDepths, len(lines)+1)
 	}
-	prefix[len(lines)] = st
-	return &seedTable{lang: lang, prefix: prefix}
+	var st SeedState
+	for i := 0; ; i++ {
+		t.open[i] = st.Open
+		if t.depth != nil {
+			t.depth[i] = seedDepths{int32(st.Brace), int32(st.Bracket), int32(st.DefSig), int32(st.ParamSig)}
+		}
+		if i == len(lines) {
+			break
+		}
+		st = advanceSeed(lang, st, lines[i])
+	}
+	return t
 }
 
 // at returns the state at the start of 1-based lineNo, clamped into range so an
@@ -100,10 +114,15 @@ func (t *seedTable) at(lineNo int) SeedState {
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(t.prefix) {
-		idx = len(t.prefix) - 1
+	if idx >= len(t.open) {
+		idx = len(t.open) - 1
 	}
-	return t.prefix[idx]
+	st := SeedState{Open: t.open[idx]}
+	if t.depth != nil {
+		d := t.depth[idx]
+		st.Brace, st.Bracket, st.DefSig, st.ParamSig = int(d.brace), int(d.bracket), int(d.defSig), int(d.paramSig)
+	}
+	return st
 }
 
 // readSeedFile is the seed read, a seam so a test can count reads.

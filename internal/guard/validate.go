@@ -216,6 +216,11 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 // seedstate.go); they differ only in which field they read and in the four
 // depths being Python-only.
 func seedFunc(lang Lang, fd FileDiff) func(int) string {
+	if lang == LangUnknown {
+		// No extractor runs for an unknown language, so a seed would cost a
+		// full read and walk of (say) a staged 7 MiB .json for nothing.
+		return nil
+	}
 	if fd.AbsPath != "" {
 		t := fd.seedTable(lang)
 		if t == nil {

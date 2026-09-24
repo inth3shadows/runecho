@@ -383,9 +383,10 @@ func TestRun_UnknownLang_Skipped(t *testing.T) {
 // PyBraceDepthBefore seeded 0. The pre-commit path therefore still produced the
 // exact false positive the fix claims to close.
 //
-// Pinning agreement rather than either provider's absolute numbers is the point:
-// any future edit to one that does not land in the other fails here, which is
-// what a third copy makes possible in the first place.
+// Since #335 both providers run the same advanceSeed rule, so this can no
+// longer catch a wrong rule (TestSeedStateGolden pins the rules themselves).
+// What it still pins is everything around the rule that differs between the
+// two: line splitting, 1-based vs 0-based positions, and the clamps.
 func TestSeedProvidersAgree(t *testing.T) {
 	for _, tc := range []struct{ name, src string }{
 		{

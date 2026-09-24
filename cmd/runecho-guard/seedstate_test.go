@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/guard"
@@ -369,5 +372,33 @@ inside line
 	g := hookSeedMaps(indices, file, guard.LangGo)
 	if g.brace != nil || g.bracket != nil || g.defSig != nil || g.paramSig != nil {
 		t.Errorf("non-Python depth maps must be nil, got %+v", g)
+	}
+}
+
+// TestHookSeedsReachGuardRun pins the hook path's seed wiring end to end
+// (verify.go's hookSeedMaps(...).applyTo): the unit tests above check what
+// hookSeedMaps computes, but without this nothing failed when its result never
+// reached guard.Run. An Edit inside a module docstring that mentions a
+// call-shaped phrase must defer, and the same phrase edited into code must
+// still ask; that pair rules out a blanket "defer every Python edit".
+func TestHookSeedsReachGuardRun(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	enrolledStore(t, repo, []string{"KnownFunc"})
+	py := filepath.Join(repo, "mod.py")
+	src := "\"\"\"Module doc.\n\nLines of prose here.\n\"\"\"\n\n\ndef go():\n    return 1\n"
+	if err := os.WriteFile(py, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, raw, d := runHook(t, payloadOld(t, "Edit", py, "Lines of prose here.",
+		"Lines of prose here, see compute_widget(x) for detail.", "", nil))
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("an edit inside a docstring must be masked by its open-string seed, got an ask:\n%s", raw)
+	}
+
+	_, raw, d = runHook(t, payloadOld(t, "Edit", py, "    return 1", "    return compute_widget(1)", "", nil))
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "compute_widget") {
+		t.Fatalf("control: the same call in code must ask, got %q:\n%s", d.Hook.PermissionDec, raw)
 	}
 }

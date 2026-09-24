@@ -155,8 +155,12 @@ func storeFreeChecks(res lookupResult, edit hookEdit, filePath string, lang guar
 		fd := guard.FileDiff{
 			Path:       filePath,
 			AddedLines: hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits),
-			SeedByLine: hookSeedByLine(edit.ToolName, edit.OldString, edit.Edits, preLines, lang),
 		}
+		// All five seeds, as the enrolled path sets them: call-shape reads the
+		// bracket-depth seed too (pyNonDefBindings), so an open-string-only seed
+		// here gave a kwarg line inside a wrapped call a different verdict
+		// depending on store health.
+		hookSeedMaps(hookBlockIndices(edit.ToolName, edit.OldString, edit.Edits, preLines), preLines, lang).applyTo(&fd)
 		degradedShapes, shapeReason = callShapeMismatchesWithReason(lang, preLines, fd, edit.ToolName, removedText)
 	}
 	// Lint answers here for exactly the same reason call-shape does (#261): it

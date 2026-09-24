@@ -300,3 +300,74 @@ func TestHookBraceDepthByLine_MultiEditBlockAlignment(t *testing.T) {
 		t.Fatalf("block 1 starts outside any brace, got %d", seeds[1])
 	}
 }
+
+// TestHookSeedMapsProjectEachField pins that hookSeedMaps routes each
+// SeedState field into its own map, at its own block's synthetic start line.
+// The three blocks are chosen so every field differs from every other within
+// a block: swapping any two projections, or crossing blocks, changes a value.
+func TestHookSeedMapsProjectEachField(t *testing.T) {
+	file := guard.TextToAddedLines(`x = foo(
+    {
+        "k": 1,
+    },
+)
+
+def f(a,
+      b=[
+          1,
+      ],
+):
+    pass
+
+"""doc
+inside line
+"""
+`)
+	edits := []editOp{
+		{OldString: `        "k": 1,`, NewString: `        "k": 2,`}, // block A, synthetic line 1
+		{OldString: `          1,`, NewString: `          2,`},       // block B, line 3
+		{OldString: `inside line`, NewString: `inside text`},         // block C, line 5
+	}
+	indices := hookBlockIndices("MultiEdit", "", edits, file)
+	if len(indices) != 3 {
+		t.Fatalf("resolved %d blocks, want 3: %v", len(indices), indices)
+	}
+	s := hookSeedMaps(indices, file, guard.LangPython)
+	for _, c := range []struct {
+		name string
+		got  map[int]int
+		want map[int]int
+	}{
+		{"brace", s.brace, map[int]int{1: 1}},
+		{"bracket", s.bracket, map[int]int{1: 2, 3: 2}},
+		{"defSig", s.defSig, map[int]int{3: 1}},
+		{"paramSig", s.paramSig, map[int]int{3: 2}},
+	} {
+		if len(c.got) != len(c.want) {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+			continue
+		}
+		for k, v := range c.want {
+			if c.got[k] != v {
+				t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+				break
+			}
+		}
+	}
+	if len(s.open) != 1 || s.open[5] != `"""` {
+		t.Errorf("open = %v, want only block C inside the docstring", s.open)
+	}
+
+	var fd guard.FileDiff
+	s.applyTo(&fd)
+	if fd.PyBraceDepthByLine[1] != 1 || fd.PyBracketDepthByLine[3] != 2 || fd.PyDefSigDepthByLine[3] != 1 ||
+		fd.PyParamSigDepthByLine[3] != 2 || fd.SeedByLine[5] != `"""` {
+		t.Errorf("applyTo misrouted a map: %+v", fd)
+	}
+
+	// Outside Python only the open-string seed exists.
+	g := hookSeedMaps(indices, file, guard.LangGo)
+	if g.brace != nil || g.bracket != nil || g.defSig != nil || g.paramSig != nil {
+		t.Errorf("non-Python depth maps must be nil, got %+v", g)
+	}
+}

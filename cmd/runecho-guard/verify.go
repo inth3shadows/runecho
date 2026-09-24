@@ -556,7 +556,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 				// newLines is the same slice diffs[0].AddedLines was built from, so
 				// diffs[0].PyDefSigDepthByLine's synthetic-line-number keys (#294)
 				// apply directly here — reused rather than recomputed via
-				// hookDefSigDepthByLine a second time.
+				// hookSeedMaps a second time.
 				defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
 				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
 				// No check-specific reason: every decline inside

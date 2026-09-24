@@ -53,5 +53,11 @@ def h(a,
       b)): pass
 AFTER_H = 1
 
+def fmt(a,
+        b=f"{a:(^10}",
+        c=1):
+    pass
+AFTER_FMT = 1
+
 }{
 MAX_VALUE = 1

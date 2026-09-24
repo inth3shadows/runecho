@@ -4,6 +4,12 @@ runecho
 /runecho-guard
 /runecho-ir
 /runecho-mcp
+# `go build .` inside cmd/<name>/ drops the binary next to main.go, where
+# `git add -A` picks it up (a 40MB runecho-ir nearly shipped on the #375
+# branch). TestGitignoreCoversCmdBuildOutputs pins that every cmd is covered.
+/cmd/*/runecho-guard
+/cmd/*/runecho-ir
+/cmd/*/runecho-mcp
 phase0_demo
 verify_determinism
 validate_path_determinism

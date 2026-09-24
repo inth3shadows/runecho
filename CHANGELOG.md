@@ -16,6 +16,22 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- guard (#413): the pre-commit staged diff is now plumbing `git diff-index
+  --cached -p -M` instead of porcelain `git diff --cached`. With
+  `diff.noprefix`, `diff.mnemonicPrefix` or `color.ui=always` set, in user or
+  repo config, no file header parsed, so every pre-commit check silently passed
+  on nothing. The switch also means a repo-local `diff.external` or
+  `diff.<driver>.textconv`/`.command` can no longer run a program on the
+  commit path.
+- `.gitignore` now covers `go build .` output inside `cmd/<name>/`.
+
+### Documentation
+- `gitutil.Command` and SECURITY.md now say precisely which config-defined
+  programs git can still run (filter drivers under `archive` and working-tree
+  `diff --name-only`, network config under the self-update fetch), and
+  SECURITY.md no longer claims RunEcho makes no network calls (#375).
+
 ## [0.54.2] — 2026-09-23
 
 ### Changed

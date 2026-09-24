@@ -1230,7 +1230,7 @@ func ignorePathFor(dir, repoRoot string) string {
 }
 
 // worktreeRootFor returns the top of the git worktree containing `dir` — the
-// tree whose index `git diff --cached` reads and whose files the staged paths
+// tree whose index the staged diff reads and whose files the staged paths
 // are relative to. It is the same correction ignorePathFor makes, applied to
 // the rest of the working-tree reads.
 //

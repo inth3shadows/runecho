@@ -82,8 +82,9 @@ type AddedLine struct {
 	Text   string
 }
 
-// ParseStagedDiff runs `git diff --cached --unified=0` and returns per-file
-// added lines. Returns an empty slice (no error) when nothing is staged. partial
+// ParseStagedDiff diffs the index against HEAD (plumbing `git diff-index
+// --cached -p -M --unified=0`, see stagedDiffArgs) and returns per-file added
+// lines. Returns an empty slice (no error) when nothing is staged. partial
 // is true when an oversized diff line forced the parse to stop early — see
 // parseDiffOutput; the caller should treat the result as incomplete coverage.
 //
@@ -95,17 +96,21 @@ func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, pa
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := gitutil.Command(ctx, repoRoot, "diff", "--cached", "--unified=0")
+	base, err := stagedDiffBase(ctx, repoRoot)
+	if err != nil {
+		return nil, false, err
+	}
+	cmd := gitutil.Command(ctx, repoRoot, stagedDiffArgs(base)...)
 	// Capture stderr so a git failure carries its diagnostic (parity with the old
 	// cmd.Output() path and with gitutil.runGit), not a bare "exit status 128".
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, false, fmt.Errorf("git diff --cached: %w", err)
+		return nil, false, fmt.Errorf("git diff-index --cached: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, false, fmt.Errorf("git diff --cached: %w", err)
+		return nil, false, fmt.Errorf("git diff-index --cached: %w", err)
 	}
 
 	// Read one byte past the cap to detect overflow without buffering the rest.
@@ -123,18 +128,59 @@ func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, pa
 	// truncated we intentionally killed git, so its Wait error is expected.
 	if !truncated {
 		if readErr != nil {
-			return nil, false, fmt.Errorf("git diff --cached: %w", readErr)
+			return nil, false, fmt.Errorf("git diff-index --cached: %w", readErr)
 		}
 		if waitErr != nil {
 			if msg := strings.TrimSpace(stderr.String()); msg != "" {
-				return nil, false, fmt.Errorf("git diff --cached: %w: %s", waitErr, msg)
+				return nil, false, fmt.Errorf("git diff-index --cached: %w: %s", waitErr, msg)
 			}
-			return nil, false, fmt.Errorf("git diff --cached: %w", waitErr)
+			return nil, false, fmt.Errorf("git diff-index --cached: %w", waitErr)
 		}
 	}
 
 	diffs, scanPartial, perr := parseDiffOutput(string(out))
 	return diffs, truncated || scanPartial, perr
+}
+
+// stagedDiffArgs is the staged-diff invocation. It is plumbing, not porcelain
+// `git diff --cached`, because porcelain obeys user and repo config that
+// parseDiffOutput cannot survive and that no enrolled repo should control:
+//   - diff.noprefix / diff.mnemonicPrefix rewrite "+++ b/<path>" to "+++ <path>"
+//     or "+++ i/<path>", and color.ui=always wraps every line in escape codes —
+//     either way no file header parses and every pre-commit check passes on
+//     nothing;
+//   - diff.external and diff.<driver>.textconv / .command run a config-defined
+//     program on the commit path (the class core.fsmonitor=false closes in
+//     gitutil.Command), and a textconv filter rewrites the lines checked.
+//
+// Plumbing ignores all of these. --no-ext-diff/--no-textconv restate the
+// plumbing defaults so a future switch back to porcelain cannot silently drop
+// them. -M keeps porcelain's default rename detection (diff.renames), so a
+// moved file still contributes only its changed lines.
+func stagedDiffArgs(base string) []string {
+	return []string{"diff-index", "--cached", "-p", "-M", "--no-ext-diff", "--no-textconv", "--unified=0", base}
+}
+
+// stagedDiffBase returns what the index is compared against: HEAD's tree, or
+// the empty tree on an unborn branch (the first commit), where porcelain
+// `git diff --cached` does the same substitution implicitly. The empty tree is
+// hashed rather than hardcoded so SHA-256 repositories get the right object id.
+func stagedDiffBase(ctx context.Context, repoRoot string) (string, error) {
+	if out, err := gitutil.Command(ctx, repoRoot, "rev-parse", "--verify", "--quiet", "HEAD^{tree}").Output(); err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	cmd := gitutil.Command(ctx, repoRoot, "hash-object", "-t", "tree", "--stdin")
+	cmd.Stdin = strings.NewReader("")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("git hash-object (empty tree): %w: %s", err, msg)
+		}
+		return "", fmt.Errorf("git hash-object (empty tree): %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // parseDiffOutput parses the raw unified-diff text into FileDiff entries.

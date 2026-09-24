@@ -109,7 +109,7 @@ is fully finished.
 | `internal/snapshot/churn.go` | `Churn` over the last N snapshots | — |
 | `internal/mcp/server.go` | Minimal stdio JSON-RPC 2.0 MCP server | — |
 | `internal/mcp/tools_oracle.go` | The six oracle tools, wired to `ir` + `snapshot` | `ir`, `snapshot` |
-| `internal/guard/diff.go` | Parse `git diff --cached --unified=0` into added lines | — |
+| `internal/guard/diff.go` | Parse the staged diff (plumbing `git diff-index --cached -p`, immune to diff/color config) into added lines | — |
 | `internal/guard/extract.go` | Per-language definition/reference/import extraction + builtin sets | — |
 | `internal/guard/validate.go` | Two-pass validation: collect new defs, then flag unresolved refs | — |
 | `internal/guard/suggest.go` | Deterministic "did you mean" via Levenshtein (distance ≤ 2) | — |
@@ -162,7 +162,7 @@ hallucinated API. Three modes share the same validation core (`verifyEdit`,
 `cmd/runecho-guard/verify.go`); each is a renderer over it:
 
 - **Pre-commit mode** (default; installed by `install.sh --hook`). Reads
-  `git diff --cached --unified=0`, validates added lines, and exits 1 with a
+  the staged diff (`git diff-index --cached -p -M --unified=0` against HEAD), validates added lines, and exits 1 with a
   `file:line: symbol (did you mean "X"?)` report if violations are found.
 - **Hook mode** (`--hook-mode`). A Claude Code `PreToolUse` hook for
   `Edit|Write|MultiEdit`. Reads the tool-call JSON on stdin, validates the new

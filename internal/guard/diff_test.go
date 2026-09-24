@@ -269,3 +269,151 @@ index abc..def 100644
 		t.Errorf("line after ++-content = %+v, want CallAfter() at line 3", diffs[0].AddedLines[2])
 	}
 }
+
+// stagedRepoWithMarkerProgram builds a repo with a.py staged, installs
+// `prog` as an executable script that touches a marker file and then runs
+// body, and applies configure (repo-local git config naming that script).
+// It returns the repo and the marker path: the marker existing after
+// ParseStagedDiff means git ran a config-defined program on the pre-commit
+// path.
+func stagedRepoWithMarkerProgram(t *testing.T, body string, configure func(git func(...string), prog, dir string)) (dir, marker string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir = t.TempDir()
+	marker = filepath.Join(t.TempDir(), "ran")
+	prog := filepath.Join(t.TempDir(), "prog.sh")
+	script := "#!/bin/sh\ntouch '" + marker + "'\n" + body + "\n"
+	if err := os.WriteFile(prog, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init")
+	configure(git, prog, dir)
+	if err := os.WriteFile(filepath.Join(dir, "a.py"), []byte("def f():\n    return ghost()\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "a.py")
+	return dir, marker
+}
+
+// assertStagedDiffUntouched checks that ParseStagedDiff saw the real staged
+// content and that the marker program never ran.
+func assertStagedDiffUntouched(t *testing.T, dir, marker string) {
+	t.Helper()
+	diffs, _, err := ParseStagedDiff(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ParseStagedDiff: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("git ran a repo-configured program during the staged diff")
+	}
+	var got []string
+	for _, d := range diffs {
+		for _, l := range d.AddedLines {
+			got = append(got, l.Text)
+		}
+	}
+	if want := "    return ghost()"; len(got) != 2 || got[1] != want {
+		t.Errorf("added lines = %q, want the raw staged content ending in %q", got, want)
+	}
+}
+
+// TestParseStagedDiff_IgnoresExternalDiff: a repo-local diff.external must
+// not run when the guard parses the staged diff. Plumbing diff-index never runs
+// it, so this pins "plumbing, not porcelain" rather than the --no-ext-diff flag
+// (which only restates the plumbing default).
+func TestParseStagedDiff_IgnoresExternalDiff(t *testing.T) {
+	dir, marker := stagedRepoWithMarkerProgram(t, "exit 0", func(git func(...string), prog, _ string) {
+		git("config", "diff.external", prog)
+	})
+	assertStagedDiffUntouched(t, dir, marker)
+}
+
+// TestParseStagedDiff_IgnoresTextconv: a textconv driver must neither run nor
+// rewrite the lines the checks see. Like the external-diff test, this pins the
+// plumbing command, not the --no-textconv flag.
+func TestParseStagedDiff_IgnoresTextconv(t *testing.T) {
+	dir, marker := stagedRepoWithMarkerProgram(t, `tr a-z A-Z < "$1"`, func(git func(...string), prog, dir string) {
+		git("config", "diff.evil.textconv", prog)
+		if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.py diff=evil\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertStagedDiffUntouched(t, dir, marker)
+}
+
+// TestParseStagedDiff_IgnoresDriverCommand pins that an attribute-selected
+// diff.<driver>.command (the per-path form of diff.external) never runs.
+func TestParseStagedDiff_IgnoresDriverCommand(t *testing.T) {
+	dir, marker := stagedRepoWithMarkerProgram(t, "exit 0", func(git func(...string), prog, dir string) {
+		git("config", "diff.evil.command", prog)
+		if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.py diff=evil\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assertStagedDiffUntouched(t, dir, marker)
+}
+
+// TestParseStagedDiff_ImmuneToDiffUIConfig pins the switch to plumbing: each
+// of these settings, on porcelain `git diff --cached`, reshapes the "+++ b/"
+// header (or wraps it in escape codes) so no file parses and every pre-commit
+// check silently passes on nothing.
+func TestParseStagedDiff_ImmuneToDiffUIConfig(t *testing.T) {
+	for _, kv := range [][2]string{
+		{"diff.noprefix", "true"},
+		{"diff.mnemonicPrefix", "true"},
+		{"color.ui", "always"},
+		{"color.diff", "always"},
+	} {
+		t.Run(kv[0], func(t *testing.T) {
+			dir, marker := stagedRepoWithMarkerProgram(t, "exit 0", func(git func(...string), _, _ string) {
+				git("config", kv[0], kv[1])
+			})
+			assertStagedDiffUntouched(t, dir, marker)
+		})
+	}
+}
+
+// TestParseStagedDiff_AgainstHEAD covers the non-unborn base: with a commit
+// present only the newly staged line is reported, at its new line number, and
+// a rename still contributes only its changed line (-M, porcelain's default).
+func TestParseStagedDiff_AgainstHEAD(t *testing.T) {
+	dir, _ := stagedRepoWithMarkerProgram(t, "exit 0", func(func(...string), string, string) {})
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("commit", "-q", "-m", "init")
+	git("mv", "a.py", "b.py")
+	f, err := os.OpenFile(filepath.Join(dir, "b.py"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("    x = phantom()\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	git("add", "-A")
+
+	diffs, partial, err := ParseStagedDiff(context.Background(), dir)
+	if err != nil || partial {
+		t.Fatalf("ParseStagedDiff: err=%v partial=%v", err, partial)
+	}
+	if len(diffs) != 1 || diffs[0].Path != "b.py" {
+		t.Fatalf("diffs = %+v, want exactly b.py", diffs)
+	}
+	if got := diffs[0].AddedLines; len(got) != 1 || got[0].LineNo != 3 || got[0].Text != "    x = phantom()" {
+		t.Errorf("added lines = %+v, want only line 3 %q", got, "    x = phantom()")
+	}
+}

@@ -15,9 +15,12 @@ network attack surface, because it has none.
 
 ### No network surface
 
-RunEcho makes no outbound network calls and requires no API keys — it is
-model-free by design (see README). There is nothing to exfiltrate data to and
-no remote service to compromise.
+RunEcho requires no API keys and calls no remote service — it is model-free
+by design (see README). There is nothing to exfiltrate data to and no remote
+service to compromise. The one network touch is the self-update path (#375):
+`runecho-ir freshen` (its own hourly schedule entry) and an explicit
+`runecho-ir version-check --reinstall` run `git ls-remote`/`git fetch` against
+the `origin` of the RunEcho clone they run in. No hook does this.
 
 ### What's stored, and where
 
@@ -45,6 +48,21 @@ Code `PreToolUse` hook, with the invoking user's OS permissions, on every
 commit or edit. This is inherent to what it is — a local hook, not a sandboxed
 service. Do not enroll or point RunEcho at a repo you don't already trust
 enough to run its hooks against.
+
+Git itself is the other program the hooks run, and git config can name
+programs. The hooks' git subprocesses go through `gitutil.Command`, which
+passes `-c core.fsmonitor=false` and `GIT_CONFIG_NOSYSTEM=1`. The pre-commit
+staged diff uses plumbing `git diff-index`, which never runs a repo-local
+`diff.external` or `diff.<driver>.textconv`/`.command` and ignores diff and
+color settings that would otherwise reshape the output it parses. What stays
+open is off the hook path: gitattributes filter drivers still run under
+`git archive` (the self-update export) and a working-tree
+`git diff --name-only` (`runecho-ir contract`); the self-update's network
+commands still honour `core.sshCommand`, `url.insteadOf` and credential
+helpers; and `runecho-ir fpaudit`'s git oracle
+(`internal/guardstats/gitoracle.go`) calls git directly, reading only
+committed objects (`rev-list`, `ls-tree`, `grep <rev>`), which run no
+config-defined program. Run those commands only in trees you trust.
 
 ### The guard is a hallucination-catcher, not a security control
 

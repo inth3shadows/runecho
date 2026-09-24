@@ -30,10 +30,23 @@ const Timeout = 2 * time.Second
 //   - GIT_CONFIG_NOSYSTEM=1 ignores /etc/gitconfig.
 //   - GIT_TERMINAL_PROMPT=0 prevents an interactive-credential hang.
 //
-// The commands runecho runs don't invoke config-defined programs, so this is a
-// standing guard rather than a fix for a live vector. Most are local (rev-parse,
-// worktree list, diff --cached); RemoteTags and Fetch reach the network, and
-// only from the periodic freshness job or an explicit reinstall (#375).
+// What these overrides do NOT stop, so no caller over-trusts them:
+//   - gitattributes filter drivers (filter.<driver>.clean / .smudge). Git has
+//     no switch that disables them wholesale. Export's `archive` runs smudge,
+//     and a working-tree `diff --name-only` (runecho-ir contract) runs clean on
+//     a modified filtered file. Neither is on a hook path.
+//   - porcelain diff programs (diff.external, diff.<driver>.textconv/.command).
+//     The guard's staged diff avoids them by using plumbing `diff-index`
+//     (guard.stagedDiffArgs); `diff --name-only` produces no patch, so it
+//     never invokes them.
+//   - network-side config for RemoteTags and Fetch: core.sshCommand /
+//     GIT_SSH_COMMAND, url.<base>.insteadOf, remote.<name>.uploadpack (for a
+//     local-path remote), and credential helpers. GIT_TERMINAL_PROMPT=0 stops
+//     prompts, not helpers.
+//
+// Export, RemoteTags and Fetch run only from the periodic freshness job or an
+// explicit reinstall against a RunEcho clone's `origin` (#375), never from a
+// hook, which is why those gaps are accepted.
 func Command(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")

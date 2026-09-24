@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.55.0] — 2026-09-24
+
 ### Fixed
 - guard (#413): the pre-commit staged diff is now plumbing `git diff-index
   --cached -p -M` instead of porcelain `git diff --cached`. With

@@ -202,3 +202,17 @@ func (fd FileDiff) seedTable(lang Lang) *seedTable {
 	}
 	return loadSeedTable(lang, fd.AbsPath)
 }
+
+// withSeeds returns fd with its seed table attached, reading the file now if
+// no caller ran PrepareSeeds. A check that consults several seed funcs calls
+// it first so a caller that skipped PrepareSeeds still costs one read and one
+// walk per check, not one per seed func (each of which now walks all five
+// trackers).
+func (fd FileDiff) withSeeds() FileDiff {
+	if fd.AbsPath == "" || fd.seedsPrepared {
+		return fd
+	}
+	d := []FileDiff{fd}
+	PrepareSeeds(d)
+	return d[0]
+}

@@ -64,6 +64,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	paramSigSeeds := make([]func(lineNo int) int, len(diffs))
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
+		fd = fd.withSeeds()
 		openSeeds[i] = seedFunc(lang, fd)
 		braceSeeds[i] = braceDepthSeedFunc(lang, fd)
 		bracketSeeds[i] = bracketDepthSeedFunc(lang, fd)

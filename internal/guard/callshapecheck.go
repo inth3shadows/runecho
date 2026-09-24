@@ -139,6 +139,7 @@ func PyCallShapeMismatchesWithReason(lang Lang, wholeFile []AddedLine, fd FileDi
 	if len(added) == 0 {
 		return nil, ""
 	}
+	fd = fd.withSeeds() // two seed funcs below share one read
 	// The declaration source. For Write, the added lines are the whole post-edit
 	// file, so they are strictly better than the pre-edit copy: a signature this
 	// very Write changes is already reflected. For Edit/MultiEdit the hunk is

@@ -141,3 +141,46 @@ func TestPrecommitReadsSeedFileOnce(t *testing.T) {
 		t.Fatalf("seed file read %d times, want exactly 1", reads)
 	}
 }
+
+// TestUnpreparedCallersReadOncePerCheck pins withSeeds: a caller that never
+// ran PrepareSeeds (the test harnesses, any future caller) still pays one read
+// per check, not one per seed func — each of which walks all five trackers.
+func TestUnpreparedCallersReadOncePerCheck(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "mod.py")
+	src := "cfg = {\n    \"a\": 1,\n}\n"
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	orig := readSeedFile
+	readSeedFile = func(name string) ([]byte, error) {
+		if name == p {
+			reads++
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { readSeedFile = orig })
+
+	fd := FileDiff{Path: "mod.py", AbsPath: p, AddedLines: []AddedLine{{LineNo: 2, Text: `    "a": helper(1),`}}}
+	Run(map[string]struct{}{}, "", []FileDiff{fd})
+	FileScopeViolationsWithReason(LangPython, TextToAddedLines(src), fd, map[string]struct{}{})
+	if reads != 2 {
+		t.Fatalf("seed file read %d times across Run and file-scope unprepared, want 2", reads)
+	}
+
+	// Call-shape consults its bracket seed only once a kwarg call reaches an
+	// in-file def, so it needs a file and hunk that get that far.
+	cs := filepath.Join(filepath.Dir(p), "cs.py")
+	csSrc := "def helper(y):\n    return y\n\nx = helper(z=1)\n"
+	if err := os.WriteFile(cs, []byte(csSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, reads = cs, 0
+	csFD := FileDiff{Path: "cs.py", AbsPath: cs, AddedLines: []AddedLine{{LineNo: 4, Text: "x = helper(z=1)"}}}
+	if got, _ := PyCallShapeMismatchesWithReason(LangPython, TextToAddedLines(csSrc), csFD, nil, false); len(got) != 1 {
+		t.Fatalf("call-shape found %d mismatches, want 1 (the fixture no longer reaches the seeded path)", len(got))
+	}
+	if reads != 1 {
+		t.Fatalf("call-shape read the seed file %d times unprepared, want 1", reads)
+	}
+}

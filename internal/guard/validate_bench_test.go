@@ -10,8 +10,9 @@ import (
 
 // BenchmarkRunPrecommitSeeded times the pre-commit path's work on one staged
 // Python file: Run plus the file-scope check, both seeded from the file's
-// AbsPath. It is the #295 measurement for pre-commit: each seed provider read
-// and walked the file independently, so one staged .py cost several reads.
+// AbsPath, exactly as runPreCommit drives them. It is the #295 measurement for
+// pre-commit: before PrepareSeeds each seed provider read and walked the file
+// independently, so one staged .py cost nine reads.
 func BenchmarkRunPrecommitSeeded(b *testing.B) {
 	var src strings.Builder
 	for i := 0; src.Len() < 120_000; i++ {
@@ -35,7 +36,9 @@ func BenchmarkRunPrecommitSeeded(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Run(symbols, "", []FileDiff{fd})
-		FileScopeViolationsWithReason(LangPython, wholeFile, fd, symbols)
+		diffs := []FileDiff{fd}
+		PrepareSeeds(diffs) // as runPreCommit does, once per commit
+		Run(symbols, "", diffs)
+		FileScopeViolationsWithReason(LangPython, wholeFile, diffs[0], symbols)
 	}
 }

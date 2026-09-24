@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.56.0] — 2026-09-24
+
 ### Changed
 - guard (#335, #295): the five pre-hunk seeds (open-string state, and for Python
   the dict, bracket and two def-signature depths) now share one per-line rule

@@ -49,21 +49,39 @@ func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []Dropped
 	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil, nil)
 }
 
+// DroppedImportSupportedLang reports whether the dropped-import check has any
+// support for lang at all — the single source of truth for both this
+// function's own early return and the guard hook's lang gate (verify.go),
+// so the two lists can't drift apart (#414/#417 perf work). Go is excluded:
+// Go imports are used package-qualified (pkg.Foo), so a dropped Go import
+// surfaces as a qualified reference, which the guard handles elsewhere (and
+// ExtractImports already excludes Go for the same reason).
+func DroppedImportSupportedLang(lang Lang) bool {
+	return lang == LangPython || lang == LangJS
+}
+
 // DroppedImportRefsLinesWithBound is DroppedImportRefsLines with an extra
-// preBound set of names unioned into the new-text binding set before dropped
-// imports are computed. This lets a caller fold in binding context that isn't
-// visible in newLines at all — e.g. a hunk-only Edit/MultiEdit can't see a
-// name rebound on an untouched line elsewhere in the file, which would
-// otherwise false-positive as a dropped import. Pass nil for no extra context
-// (identical to DroppedImportRefsLines).
+// preBound callback: a func returning the set of names to union into the
+// new-text binding set before dropped imports are computed. This lets a
+// caller fold in binding context that isn't visible in newLines at all —
+// e.g. a hunk-only Edit/MultiEdit can't see a name rebound on an untouched
+// line elsewhere in the file, which would otherwise false-positive as a
+// dropped import. Pass nil for no extra context (identical to
+// DroppedImportRefsLines).
+//
+// preBound is a callback, not a plain map, so a caller whose whole-file bound
+// set is itself expensive to build (the guard hook's wholeFileBoundNames,
+// which re-walks the whole file) only pays for it when this function actually
+// needs it — i.e. below, only once an import has been found missing from the
+// new text. Most edits drop no import at all, so most calls never invoke it.
 //
 // defSigDepthSeed is threaded straight to LocallyBoundNames(lang, newLines) —
 // nil is correct for a self-contained, contiguous-from-line-1 slice; a
 // hunk-only newLines caller (the guard hook) should pass its real seed
 // (#294), or a parameter added mid-signature in a hunk whose opener sits in
 // unchanged context is never recognized as a rebind of the dropped import.
-func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound map[string]struct{}, defSigDepthSeed func(lineNo int) int) []DroppedImport {
-	if lang != LangPython && lang != LangJS {
+func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound func() map[string]struct{}, defSigDepthSeed func(lineNo int) int) []DroppedImport {
+	if !DroppedImportSupportedLang(lang) {
 		return nil
 	}
 	oldImps := nameSet(ExtractImports(lang, oldLines))
@@ -71,6 +89,24 @@ func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, 
 		return nil // nothing was imported in the removed text; no work
 	}
 	newImps := nameSet(ExtractImports(lang, newLines))
+
+	// Names present in oldImps but absent from newImps — candidates for
+	// "dropped". Computed and checked BEFORE bound/preBound are built at all:
+	// an import still present in newImps is simply never added to missing, so
+	// it needs neither, and when nothing is missing the whole binding-context
+	// walk below — LocallyBoundNames/ExtractDefs over newLines, and preBound()
+	// itself — is skipped entirely. Early-return-first, not just
+	// preBound-lazy: most edits drop no import at all, so this is the actual
+	// common-case fast path, not only the whole-file-fold's.
+	var missing []string
+	for name := range oldImps {
+		if _, still := newImps[name]; !still {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
 
 	// bound = every name the new text re-provides locally: top-level definitions
 	// PLUS any binding form (assignment LHS, for/comprehension target, with/except
@@ -84,8 +120,10 @@ func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, 
 	for _, d := range ExtractDefs(lang, newLines) {
 		bound[d] = struct{}{}
 	}
-	for name := range preBound {
-		bound[name] = struct{}{}
+	if preBound != nil {
+		for name := range preBound() {
+			bound[name] = struct{}{}
+		}
 	}
 
 	// Collect the imports that were actually dropped (removed and not rebound)
@@ -93,10 +131,7 @@ func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, 
 	// common case at zero identifier scans — the per-name check used to be lazy,
 	// and we preserve that fast path rather than eagerly indexing every edit.
 	var dropped []string
-	for name := range oldImps {
-		if _, still := newImps[name]; still {
-			continue // the import survived in the new text
-		}
+	for _, name := range missing {
 		if _, b := bound[name]; b {
 			continue // the name is now provided by a local definition or binding
 		}

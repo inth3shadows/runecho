@@ -538,7 +538,12 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		// Dropped-import: does this edit remove an import whose name the new text
 		// still uses unqualified? Complements the additive check, which at edit time
 		// still sees the old import on disk and so stays silent.
-		if droppedImportEnabled() {
+		//
+		// Gated on guard.DroppedImportSupportedLang, the set
+		// DroppedImportRefsLinesWithBound itself supports: without it a Go edit
+		// paid the whole-file fold and logged "dropped-import":"ok" for a check
+		// that can never fire on Go (inflating #415's Ran count).
+		if droppedImportEnabled() && guard.DroppedImportSupportedLang(lang) {
 			if !oldTextDefinitive {
 				droppedResult = CheckResult{Check: "dropped-import", Verdict: VerdictUnknown, Reason: "oversized-pre-edit-file"}
 			} else {
@@ -548,10 +553,30 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 				// addInFileDefs folds whole-file defs into the additive check's known
 				// set above). Fold the on-disk file's whole-file binding context in as
 				// preBound so such a rebind still suppresses the false positive. Not
-				// needed for Write: its newLines already IS the whole file.
-				var preBound map[string]struct{}
+				// needed for Write: its newLines already IS the whole file — pass nil
+				// rather than a closure that would just return nil, since
+				// DroppedImportRefsLinesWithBound's own `preBound != nil` check already
+				// skips a nil callback (and a nil preBound can never set
+				// preBoundInvoked below, matching Write's preEditReason being "" anyway).
+				//
+				// preBound is a callback, not a value: wholeFileBoundNames re-walks the
+				// whole file, and DroppedImportRefsLinesWithBound only ever needs that
+				// walk once an import in oldLines is actually missing from newLines —
+				// true for a small minority of edits. Deferring the call into the
+				// closure means the common case (nothing dropped) never pays for it.
+				var preBound func() map[string]struct{}
+				// preBoundInvoked records whether the callback above actually ran —
+				// i.e. whether this check's answer depends on fileLines at all. Only
+				// then can an unreadable/oversized pre-edit file (preEditReason) have
+				// degraded THIS check's answer; when nothing was missing (or the
+				// candidate was resolved from oldLines/newLines alone), the verdict is
+				// definitive regardless of whether fileLines could be read.
+				preBoundInvoked := false
 				if edit.ToolName != "Write" {
-					preBound = wholeFileBoundNames(fileLines, lang)
+					preBound = func() map[string]struct{} {
+						preBoundInvoked = true
+						return wholeFileBoundNames(fileLines, lang)
+					}
 				}
 				// newLines is the same slice diffs[0].AddedLines was built from, so
 				// diffs[0].PyDefSigDepthByLine's synthetic-line-number keys (#294)
@@ -563,10 +588,16 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 				// DroppedImportRefsLinesWithBound is definitive (the import
 				// survived in the new text, or the name is rebound there), so
 				// this check has no candidate-level abstain to report (#359).
-				// preEditReason still applies: for an Edit/MultiEdit, preBound
-				// above is built from fileLines, so an unreadable pre-edit file
-				// leaves a rebind on an untouched line invisible.
-				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, preEditReason)
+				// preEditReason folds in ONLY when preBound was actually consulted:
+				// that is the one path whose answer depends on fileLines, so it is
+				// the only path an unreadable/oversized pre-edit file can have
+				// degraded. An edit that dropped no import (the common case) never
+				// touches fileLines at all and stays a definitive "ok".
+				degradedReason := ""
+				if preBoundInvoked {
+					degradedReason = preEditReason
+				}
+				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, degradedReason)
 			}
 		}
 		// E5: does this edit introduce a symbol not previously defined anywhere in

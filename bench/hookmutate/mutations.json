@@ -255,24 +255,24 @@
     {
       "id": "dropped-import/lang-gate",
       "file": "internal/guard/dropped_import.go",
-      "find": "\tif lang != LangPython && lang != LangJS {\n\t\treturn nil\n\t}",
+      "find": "\tif !DroppedImportSupportedLang(lang) {\n\t\treturn nil\n\t}",
       "replace": "",
       "known_gap": "no fixture: a dropped Go import surfaces as a qualified reference, which never reads as an unqualified use, so the exclusion is not observable through the corpus. The fixture that claimed to cover it was cut for catching nothing (#248)",
-      "desc": "the Go exclusion is removed"
+      "desc": "the Python/JS-only gate (guard.DroppedImportSupportedLang, shared with the guard hook's own lang gate since #414/#417) is removed"
     },
     {
       "id": "dropped-import/surviving-import",
       "file": "internal/guard/dropped_import.go",
-      "find": "\t\tif _, still := newImps[name]; still {\n\t\t\tcontinue // the import survived in the new text\n\t\t}",
-      "replace": "\t\tif _, still := newImps[name]; still && false {\n\t\t\tcontinue\n\t\t}",
+      "find": "\t\tif _, still := newImps[name]; !still {\n\t\t\tmissing = append(missing, name)\n\t\t}",
+      "replace": "\t\tif _, still := newImps[name]; !still || true {\n\t\t\tmissing = append(missing, name)\n\t\t}",
       "desc": "an import merely MOVED to another line is reported as dropped — the refactor-relocation false positive bench/FINDINGS.md found dominates real transcripts"
     },
     {
       "id": "dropped-import/prebound-fold",
       "file": "internal/guard/dropped_import.go",
-      "find": "\tfor name := range preBound {\n\t\tbound[name] = struct{}{}\n\t}",
-      "replace": "\t_ = preBound\n",
-      "desc": "bindings from the PRE-EDIT file no longer suppress a drop (Edit payloads only — a Write has no prior state to fold)"
+      "find": "\t\tfor name := range preBound() {\n\t\t\tbound[name] = struct{}{}\n\t\t}",
+      "replace": "\t\t_ = preBound()\n",
+      "desc": "bindings from the PRE-EDIT file no longer suppress a drop (Edit payloads only — a Write has no prior state to fold). preBound is a lazy callback since #414/#417; the mutation still calls it once (so a nil-vs-non-nil regression stays covered) but discards the result"
     },
     {
       "id": "dropped-import/newtext-defs-fold",

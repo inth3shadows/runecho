@@ -875,10 +875,17 @@ func TestRunHookMode_DegradedContextOutranksAGateReason(t *testing.T) {
 }
 
 // TestRunHookMode_DroppedImportRecordsDegradedContext pins the one reason that
-// check has. Its own declines are all definitive, but on an Edit its bound-name
-// context comes from the pre-edit file, so an unreadable one really is lost
-// coverage. Passing "" there leaves every other test green (found by
-// adversarial review of #359).
+// check has. Its own declines are all definitive, but on an Edit its
+// whole-file bound-name context (preBound, wholeFileBoundNames) comes from the
+// pre-edit file, so an unreadable one really is lost coverage — but ONLY once
+// the check actually needs that context (#414/#417's laziness fix: preBound is
+// a callback now, invoked only when an import is genuinely missing from the
+// new text). old_string here removes a real `import os` so DroppedImportRefsLinesWithBound
+// finds it missing and consults preBound; os is not used anywhere in
+// new_string, so this is not itself a violation, only a degraded "unknown" —
+// contrast TestDroppedImport_PythonEditUnreadableFileButNothingDroppedIsOK
+// (flagperf_test.go), whose edit drops no import at all and so never touches
+// fileLines, staying a definitive "ok" despite the same unreadable file.
 func TestRunHookMode_DroppedImportRecordsDegradedContext(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)
@@ -886,7 +893,7 @@ func TestRunHookMode_DroppedImportRecordsDegradedContext(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_DROPPED_IMPORT", "1")
 	pyFile := bigPreEditFile(t, repoRoot, "m.py", "import os\n\n")
 
-	code, _, _ := runHook(t, payload(t, "Edit", pyFile, "x = 1\n", "", nil))
+	code, _, _ := runHook(t, payloadOld(t, "Edit", pyFile, "import os\n", "x = 1\n", "", nil))
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}

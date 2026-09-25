@@ -142,7 +142,14 @@ func goFuncSignatureIdents(ctx []AddedLine) map[string]struct{} {
 		scan, newOpen := stripLiteralsStateful(LangGo, l.Text, open)
 		open = newOpen
 		if !inSig {
-			if !reGoFuncLine.MatchString(scan) {
+			// strings.Contains is a cheap necessary condition for reGoFuncLine
+			// (which requires the literal "func" substring): most lines carry
+			// neither, so this skips the regex engine entirely for them.
+			// reGoFuncLine's own MatchString still runs — the substring check
+			// is not sufficient (e.g. a var named "funcArg") — this only
+			// short-circuits lines that can't possibly match. Shared with the
+			// three sites below via findAllIf (util.go).
+			if !findAllIf(strings.Contains(scan, "func"), func() bool { return reGoFuncLine.MatchString(scan) }) {
 				continue
 			}
 			inSig = true
@@ -214,11 +221,22 @@ func goVarTypes(ctx []AddedLine) (map[string]string, map[string]struct{}) {
 		for _, name := range goShortDeclNames(scan) {
 			mark(name, scan)
 		}
-		for _, m := range reGoVarBinding.FindAllStringSubmatch(scan, -1) {
+		// strings.Contains is a cheap necessary condition for each regex below
+		// (all three require the literal substring named), which skips the
+		// regex engine on lines that can't possibly match — most of them. See
+		// reGoFuncLine's twin above and each regex's own doc comment for why
+		// the literal is actually required, not just typical. hasVar is
+		// computed once and shared by both "var"-gated sites (reGoVarBinding
+		// and reGoVarDeclType) rather than re-running the same Contains scan
+		// on the same line twice.
+		hasVar := strings.Contains(scan, "var")
+		hasColonEq := strings.Contains(scan, ":=")
+
+		for _, m := range findAllIf(hasVar, func() [][]string { return reGoVarBinding.FindAllStringSubmatch(scan, -1) }) {
 			mark(m[1], scan)
 		}
 
-		if idx := reGoCompositeLitBind.FindStringSubmatchIndex(scan); idx != nil {
+		if idx := findAllIf(hasColonEq, func() []int { return reGoCompositeLitBind.FindStringSubmatchIndex(scan) }); idx != nil {
 			nameStart, nameEnd := idx[2], idx[3]
 			typStart, typEnd := idx[4], idx[5]
 			// idx[1] is one past the whole match, which ends in the literal
@@ -250,7 +268,7 @@ func goVarTypes(ctx []AddedLine) (map[string]string, map[string]struct{}) {
 				}
 			}
 		}
-		if idx := reGoVarDeclType.FindStringSubmatchIndex(scan); idx != nil {
+		if idx := findAllIf(hasVar, func() []int { return reGoVarDeclType.FindStringSubmatchIndex(scan) }); idx != nil {
 			nameStart, nameEnd := idx[2], idx[3]
 			typStart, typEnd := idx[4], idx[5]
 			if typEnd < len(scan) && (scan[typEnd] == '.' || scan[typEnd] >= utf8.RuneSelf) {

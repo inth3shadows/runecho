@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.57.0] — 2026-09-25
+
+### Changed
+- guard: cut var-type and dropped-import hook cost below the #415 latency gate (#420)
+
 ## [0.56.0] — 2026-09-24
 
 ### Changed

@@ -58,6 +58,30 @@ func AddedLinesWithGap(blocks []string) []AddedLine {
 	return lines
 }
 
+// findAllIf runs match and returns its result, unless ok is false — in which
+// case it returns T's zero value (nil for a slice/index result, false for a
+// MatchString bool) without calling match at all.
+//
+// ok is the caller's own strings.Contains(scan, lit) pre-check: lit is a
+// literal substring every match of the regex behind match is REQUIRED to
+// contain (see each call site's regex doc comment for why the literal is
+// necessary, not just typical), so failing that check first means match
+// could not possibly have found anything — this only ever skips a regex call
+// that was going to return the zero value anyway, at the much cheaper cost of
+// one Contains scan instead of the regex engine's own.
+//
+// ok is a bool, not (re, lit, s), so a caller whose literal gates more than
+// one regex on the same scanned line (goVarTypes' "var" gates both
+// reGoVarBinding and reGoVarDeclType) computes that Contains once and shares
+// it, rather than this helper re-running it once per site.
+func findAllIf[T any](ok bool, match func() T) T {
+	if !ok {
+		var zero T
+		return zero
+	}
+	return match()
+}
+
 // ParseMaxAge reads RUNECHO_GUARD_MAX_AGE and returns the configured staleness
 // threshold (default 24h).
 func ParseMaxAge() (time.Duration, error) {

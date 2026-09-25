@@ -282,7 +282,8 @@ func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T)
 	// With whole-file context folded in as preBound (the untouched line rebinds
 	// `re`), the warning must be suppressed.
 	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"), nil)
-	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBound, nil); len(got) != 0 {
+	preBoundFn := func() map[string]struct{} { return preBound }
+	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBoundFn, nil); len(got) != 0 {
 		t.Errorf("whole-file rebind of re must suppress the dropped-import warning, got %v", droppedNames(got))
 	}
 }

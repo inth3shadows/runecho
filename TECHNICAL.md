@@ -739,7 +739,7 @@ checks](#opt-in-checks) for what each one asks about.
 | Variable | Default | Purpose |
 |---|---|---|
 | `RUNECHO_GUARD_DANGLING` | — | `1` enables E1 dangling-refs |
-| `RUNECHO_GUARD_DROPPED_IMPORT` | — | `1` enables the dropped-import check |
+| `RUNECHO_GUARD_DROPPED_IMPORT` | — | `1` enables the dropped-import check (Python/JS; skipped, not run, for other languages) |
 | `RUNECHO_GUARD_DUPLICATE` | — | `1` enables E5 duplicate-symbol |
 | `RUNECHO_GUARD_QUALIFIED` | **on** | `0` disables same-repo internal-package qualified calls (Go) |
 | `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
@@ -958,6 +958,20 @@ entirely, so an absent field means "nothing reported a reason" — not "this
 record predates the field". Pre-commit records are the case to watch: that path
 runs four checks and still passes no abstain reason but `no-module-path`, so
 read a quiet pre-commit record as unmeasured rather than as clean.
+
+`dropped-import` is the one check whose `skipped` verdict carries NO reason at
+all (#414/#417): a Go edit is gated out by `guard.DroppedImportSupportedLang`
+before the check ever looks at the pre-edit file, so `checks["dropped-import"]`
+reads `skipped` and `check_reasons` has no entry for it, on any Go edit —
+including one whose pre-edit file is oversized or unreadable, which for every
+OTHER check in this class would be `unknown`/`oversized-pre-edit-file` and, in
+`RUNECHO_GUARD_STRICT=1`, the "coverage was incomplete" advisory above. A
+Python/JS edit still reports `unknown`/`oversized-pre-edit-file` there, but
+ONLY when the check actually needed the pre-edit file's whole-file binding
+context to answer (`preBound`, `DroppedImportRefsLinesWithBound`) — an edit
+that drops no import never consults it and stays a definitive `ok` even
+against an unreadable file, since that check's own answer never depended on
+it.
 
 ## Exit Code Contract
 

@@ -1,6 +1,9 @@
 package guard
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Receiver-method check (Go): a method body calling a sibling method that does
 // not exist on its own receiver type.
@@ -111,7 +114,11 @@ func goReceiverTypes(ctx []AddedLine) (map[string]string, map[string]struct{}) {
 		for _, name := range goShortDeclNames(scan) {
 			ambiguous[name] = struct{}{}
 		}
-		for _, m := range reGoVarBinding.FindAllStringSubmatch(scan, -1) {
+		// strings.Contains is a cheap necessary condition for reGoVarBinding
+		// (which requires the literal "var" substring) — see vartype.go's twin
+		// prefilter (goVarTypes) for why the literal is actually required, not
+		// just typical. Shared helper (findAllIf, util.go) with that site.
+		for _, m := range findAllIf(strings.Contains(scan, "var"), func() [][]string { return reGoVarBinding.FindAllStringSubmatch(scan, -1) }) {
 			ambiguous[m[1]] = struct{}{}
 		}
 	}

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.63.0] — 2026-09-26
+
+### Changed
+- guard: don't read JS/TS class and object-literal method definitions as calls (#431) (#434)
+
 ## [0.62.0] — 2026-09-26
 
 ### Changed

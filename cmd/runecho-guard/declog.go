@@ -21,12 +21,13 @@ import (
 // instead of asking, but keeping the same two-value enum lets log consumers
 // correlate ask-rate across surfaces without schema forks.
 // symbols is only populated on ask (the flagged symbol names, across all ask
-// categories: hallucination violations, dangling, dropped-import, duplicate).
+// categories: hallucination violations, dangling, dropped-import, and before
+// #414 duplicate-symbol).
 //
 // learnSymbols is the HALLUCINATION-ORIGIN subset of symbols — the only names an
 // approval may fold into the learned-allow store (recordApprovals). It exists
 // because the learned-allow set feeds guard.Run's hallucination known-set: a name
-// approved from a dangling/dropped/duplicate ask does NOT mean "this reference
+// approved from a dangling/dropped-import ask does NOT mean "this reference
 // legitimately resolves," so training the hallucination check on it would blind
 // the guard to a later genuine hallucination of that same name. Only violations
 // carry that "name resolves" meaning, so only they populate this field.
@@ -83,7 +84,7 @@ type decisionRecord struct {
 	//
 	// NOT `omitempty`, and that is load-bearing: encoding/json omits an EMPTY
 	// map, so with it the "this ask made no rateable claim" state could not be
-	// written down at all — every call-shape/duplicate/dangling ask would read
+	// written down at all — every call-shape/dangling ask would read
 	// back nil and be misfiled as a record written before this field existed.
 	// Measured on the live log before the fix: 207 of 1,120 hook asks (18.5%)
 	// would have landed in that bucket, and it would have GROWN with every new
@@ -356,7 +357,7 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 	}
 
 	// Train learned-allow only on the hallucination-origin subset — see the
-	// LearnSymbols doc on decisionRecord for why dangling/dropped/duplicate
+	// LearnSymbols doc on decisionRecord for why dangling/dropped-import
 	// approvals must not populate the hallucination known-set. Records written
 	// before this field existed have a nil LearnSymbols, so they simply train
 	// nothing (fail-safe: under-trains rather than mis-trains).

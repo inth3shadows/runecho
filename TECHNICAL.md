@@ -132,7 +132,7 @@ is fully finished.
 | `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
-| `cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (default OFF except `qualified`, default ON since #314 — see Configuration) | `guard` |
+| `cmd/runecho-guard/{dangling,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (default OFF except `qualified`, default ON since #314 — see Configuration) | `guard` |
 | `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) | — |
 | `cmd/runecho-guard/learnedallow.go` | C3 learned-allow store with count threshold + TTL decay | `store` |
 | `cmd/runecho-guard/contractonce.go` | Once-per-binding memo for repeat contract asks (#209): written from an approved outcome, read on the would-ask path | `store` |
@@ -229,7 +229,7 @@ change date is only valid for combinations that involve none of them.
 |---|---|---|
 | E1 dangling refs | `RUNECHO_GUARD_DANGLING` | The edit deletes a symbol definition other files still reference |
 | Dropped import | `RUNECHO_GUARD_DROPPED_IMPORT` | The edit removes an import that is still used below it |
-| E5 duplicate symbol | `RUNECHO_GUARD_DUPLICATE` | **Go only.** The edit defines a name already defined by another non-test Go file in the *same directory* (= the same package, so a real compile collision). Cross-directory and non-Go matches are not collisions and are skipped. Suppressed when both files carry a build constraint — `//go:build unix` / `!unix`, or a GOOS/GOARCH filename suffix — since the compiler never sees both (#225) |
+| E5 duplicate symbol | — | **Retired in #414**: 0 true positives in 139 asks, and its only reachable language was Go, where the compiler already rejects a redeclaration. `RUNECHO_GUARD_DUPLICATE` is inert. The protocol still lists `duplicate-symbol` (always `skipped`, reason `retired`) until protocol 2 |
 | Same-repo qualified | `RUNECHO_GUARD_QUALIFIED` (default **ON**; `=0` disables) | (Go) `pkg.Foo()` where `pkg` is an internal package of this module and has no `Foo` |
 | Dependency qualified | `RUNECHO_GUARD_DEPS_GO` (default off) | (Go) `http.Gett()` where the imported external/stdlib package has no such export. Abstains under `go.work`, behind a `replace`, or when the package is not in the module cache |
 | File-scope resolution | `RUNECHO_GUARD_FILESCOPE` | (Python) A name that resolves repo-wide but not inside *this* file — the "real symbol, wrong scope" case |
@@ -244,7 +244,7 @@ being asked about, and the entry decays if not re-approved within
 `RUNECHO_GUARD_LEARN_TTL_DAYS` (default 14) — a sliding window rather than a
 one-way ratchet, so a symbol approved once and later deleted does not stay
 allowed forever. Only *hallucination-origin* approvals train it: approving a
-dangling or duplicate ask says the edit was fine, never that the name resolves.
+dangling ask says the edit was fine, never that the name resolves.
 
 The contract check's **once-per-binding memo** (#209,
 `RUNECHO_GUARD_CONTRACT_ONCE`, default on) is deliberately *not* a learned-allow
@@ -306,7 +306,7 @@ A **panic** is covered by the same rule: because a Go panic exits status 2 and
 Claude Code reads a PreToolUse exit of 2 as *block this tool call*, both stdio
 hook modes run under `deferOnPanic`, which buffers the response, discards it on
 panic, warns on stderr, and exits 0. Repo-derived file paths reaching the agent
-(dangling referrers, duplicate locations, the pre-commit report) pass through
+(dangling referrers, the pre-commit report) pass through
 `sanitizeReasonPath` first — see [SECURITY.md](SECURITY.md) for why.
 
 Residual false positives are intrinsic to shallow static analysis
@@ -740,7 +740,7 @@ checks](#opt-in-checks) for what each one asks about.
 |---|---|---|
 | `RUNECHO_GUARD_DANGLING` | — | `1` enables E1 dangling-refs |
 | `RUNECHO_GUARD_DROPPED_IMPORT` | — | `1` enables the dropped-import check (Python/JS; skipped, not run, for other languages) |
-| `RUNECHO_GUARD_DUPLICATE` | — | `1` enables E5 duplicate-symbol |
+| `RUNECHO_GUARD_DUPLICATE` | — | Inert since #414 (E5 duplicate-symbol retired) |
 | `RUNECHO_GUARD_QUALIFIED` | **on** | `0` disables same-repo internal-package qualified calls (Go) |
 | `RUNECHO_GUARD_DEPS_GO` | — | `1` enables external/stdlib dependency qualified calls (Go) |
 | `RUNECHO_GUARD_FILESCOPE` | — | `1` enables file-scope resolution (Python) |
@@ -800,6 +800,11 @@ per-check verdict can express: every check can run to completion, report `ok`,
 and still be answering about code as it was a week ago. `RUNECHO_GUARD_MAX_AGE`
 is deliberately not exported — a consumer's staleness policy is its own.
 
+**Retired checks** keep their slot in `results` until protocol 2, because
+removing a check forces it. `duplicate-symbol` (#414) is always
+`{"verdict": "skipped", "reason": "retired"}`, on every path and whatever the
+environment says. The hook's `decisions.jsonl` checks map omits it.
+
 **Evidence**, per check. Every object carries `symbol`; `line` is always
 accompanied by `line_space` (`"snippet"` numbers the edit hunk, gap-joined for a
 multi-hunk edit; `"file"` numbers the file as proposed).
@@ -808,7 +813,7 @@ multi-hunk edit; `"file"` numbers the file as proposed).
 |---|---|
 | `violations`, `recv-method`, `var-type`, `qualified`, `deps-go`, `file-scope` | `suggestions` |
 | `dangling` | `referrers` (no line) |
-| `duplicate-symbol` | `locations` (no line) |
+| `duplicate-symbol` | none: retired (#414), always `skipped` with reason `retired` |
 | `dropped-import` | — |
 | `call-shape` | `keyword`, `accepted`, `decl_line`, `decl_line_space`, `suggestions` |
 | `lint` | `rule`, `message`; `line_space` is always `"file"` |
@@ -888,8 +893,9 @@ since the log needs the same directory), `store-degraded`, `check-degraded`,
 `schema-newer`, `unknown-lang`, `bad-path`, `empty-input`, `parse-fail`. Ask
 reasons name the checks that fired, joined with `+` when several do:
 `violations`, `file-scope`, `qualified`, `deps-go`, `dangling`,
-`dropped-import`, `duplicate-symbol`, `call-shape` (and a `contract` prefix for
-an edit-scope ask). That order is the order they appear in a joined string. Keep
+`dropped-import`, `call-shape` (and a `contract` prefix for
+an edit-scope ask; records before #414 can also carry `duplicate-symbol`, between
+`dropped-import` and `call-shape`). That order is the order they appear in a joined string. Keep
 this list complete: `guardstats` and `fpreport` bucket on the exact string, so a
 term missing from here is a term missing from whatever `jq` filter a reader
 writes against it — which under-counts silently rather than erroring. The write happens after the decision is emitted and all
@@ -953,7 +959,9 @@ repo could be promoted from an embedded type, and that is unresolvable without a
 type checker — which is why they are recorded but kept out of the advisory.
 
 Reasons are also recorded for a `skipped` verdict where one exists
-(`no-module-path`). A record with no abstaining check omits `check_reasons`
+(`no-module-path`). The `--protocol` document adds one more, `retired`, which
+only a retired check (`duplicate-symbol`, #414) carries; the hook never logs
+one, because it omits the retired check from `checks` altogether. A record with no abstaining check omits `check_reasons`
 entirely, so an absent field means "nothing reported a reason" — not "this
 record predates the field". Pre-commit records are the case to watch: that path
 runs four checks and still passes no abstain reason but `no-module-path`, so

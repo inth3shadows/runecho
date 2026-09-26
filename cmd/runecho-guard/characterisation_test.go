@@ -143,6 +143,8 @@ func TestRunHookMode_Characterisation(t *testing.T) {
 			t.Setenv("RUNECHO_GUARD_DROPPED_IMPORT", "1")
 			return payload(t, "Write", py, "", "def go():\n    return path.join('a')\n", nil), scrubOf(repo, os.Getenv("RUNECHO_HOME"))
 		}},
+		// duplicate-symbol was retired in #414: the golden pins that the old
+		// gate on the edit it used to ask about is now a silent defer.
 		{"duplicate-symbol", func(t *testing.T) (string, map[string]string) {
 			repo := t.TempDir()
 			gitInit(t, repo)

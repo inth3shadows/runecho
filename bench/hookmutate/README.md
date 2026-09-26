@@ -23,7 +23,7 @@ replays the corpus, and reports which fixtures noticed. Two outputs matter:
   mark the latter `known_gap` in the catalog with the reason, so it is recorded
   rather than implied away
 
-A full run is **71 test runs (69 mutations, a baseline, and a canary), ~9
+A full run is **70 test runs (68 mutations, a baseline, and a canary), ~7
 minutes measured**. Budget for that rather than reaching for a short `timeout`
 — see the signal note below.
 

@@ -14,8 +14,8 @@ import (
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
-// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Nine checks
-// — dangling-refs, dropped-import, duplicate-symbol, file-scope, contract,
+// hookCase is one replayable fixture for a HOOK-LEVEL guard check. Eight checks
+// — dangling-refs, dropped-import, file-scope, contract,
 // call-shape, qualified, deps-go, lint — need old-vs-new edit text PLUS an
 // enrolled snapshot store, an on-disk module, or a third-party binary, and are
 // reachable ONLY through the hook entry point (runHookMode). The published
@@ -178,13 +178,14 @@ type hookCase struct {
 	// checked run — the only trace a silenced repeat leaves, and the number
 	// fpreport's ByCheck[..].Suppressed is built from.
 	ExpectSuppressed []string `json:"expect_suppressed,omitempty"`
-	// EnrolledDefs pins how many snapshot files DefsOfName resolves for a symbol,
-	// via the guard's OWN store-resolution path. It is the anti-vacuous guard for
-	// TRUE-NEGATIVE fixtures: a filter-drop TN must prove its candidate is actually
-	// reachable (count >= 1) so its silence is a real rule drop, not a typo'd path
-	// or Kind that enrolled nothing; the not-defined-elsewhere TN pins count 0 so
-	// its silence is a genuine absence, not a global enrollment failure. Without
-	// this, a TN can pass "for the wrong reason" — exactly the #227 hazard.
+	// EnrolledDefs pins how many snapshot files define a symbol (via DefsOfName).
+	// It is the anti-vacuous guard for TRUE-NEGATIVE fixtures: a count >= 1 proves
+	// the fixture actually enrolled its candidate, so the check's silence is not a
+	// typo'd path or Kind that enrolled nothing; a count of 0 proves a genuine
+	// absence rather than a global enrollment failure. Without this, a TN can pass
+	// "for the wrong reason" — exactly the #227 hazard. No check resolves through
+	// DefsOfName since duplicate-symbol was retired (#414); this probes enrollment,
+	// not a check's own lookup.
 	EnrolledDefs map[string]int `json:"enrolled_defs,omitempty"`
 	// EnrolledRefs is the dangling-refs analog of EnrolledDefs: it pins how many
 	// snapshot files reference a symbol via the guard's own RefsToName path. A
@@ -245,8 +246,8 @@ func runHookCase(t *testing.T, c hookCase) {
 	}
 
 	// Structural anti-vacuous probe: resolve each pinned symbol through the guard's
-	// OWN store path (openLatestSnapshot → DefsOfName), the exact lookup the check
-	// uses. This is what proves a silent true-negative is silent for its INTENDED
+	// OWN store path (openLatestSnapshot → DefsOfName) — the store the checks read,
+	// though since #414 no check calls DefsOfName itself. This is what proves a silent true-negative is silent for its INTENDED
 	// reason (a rule dropped a reachable candidate) rather than because enrollment
 	// quietly resolved nothing.
 	for sym, want := range c.EnrolledDefs {
@@ -474,8 +475,8 @@ func rawHookBody(t *testing.T, c hookCase, editedAbs string) string {
 }
 
 // probeDefsCount resolves how many snapshot files define sym, through the guard's
-// production store path (openLatestSnapshot → DefsOfName) — the same resolution
-// the checks use. A store that won't resolve at all is a hard failure: it means
+// production store path (openLatestSnapshot → DefsOfName). It proves what was
+// enrolled; no check has resolved through DefsOfName since #414. A store that won't resolve at all is a hard failure: it means
 // the fixture enrolled nothing, so any downstream silence would be vacuous.
 func probeDefsCount(t *testing.T, editedAbs, sym string) int {
 	t.Helper()
@@ -568,9 +569,8 @@ var defaultOnFlags = map[string]bool{
 // snapshot whose per-file symbol sets are `files` (repo-relative path -> names)
 // and whose per-file refs index is `refs` (repo-relative path -> referenced
 // names). It generalizes enrolledStore (single hardcoded file) to the multi-file
-// layout the hook-only checks need — duplicate-symbol resolves candidates by
-// DefsOfName (the Symbols side), dangling-refs by RefsToName (the Refs side),
-// both keyed on the enrolled file paths. A file may appear in `files`, in `refs`,
+// layout the hook-only checks need — dangling-refs resolves by RefsToName (the
+// Refs side), keyed on the enrolled file paths. A file may appear in `files`, in `refs`,
 // or in both; the union of their keys is enrolled.
 func enrollSnapshot(t *testing.T, root string, files, refs map[string][]string) string {
 	t.Helper()

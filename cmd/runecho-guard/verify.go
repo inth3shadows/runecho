@@ -83,7 +83,6 @@ type verification struct {
 	DepsGo     []guard.Violation
 	Dangling   []danglingWarning
 	Dropped    []guard.DroppedImport
-	Duplicates []duplicateWarning
 	CallShapes []guard.CallShapeMismatch
 	Lint       []lintFinding
 }
@@ -98,10 +97,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// captured before the empty-input guard so a pure-deletion edit (empty
 	// new_string) still reaches the E1 dangling-refs check below instead of being
 	// dropped here. Empty (and inert) unless E1/dropped-import is enabled. Write
-	// deletions are derived later from the on-disk file, not here. E5 does NOT
-	// gate on this: it reads the whole pre-edit file itself (wholeFileText), so
-	// including duplicateEnabled() here would needlessly keep this fast-path
-	// guard from firing on an E5-only pure-deletion edit.
+	// deletions are derived later from the on-disk file, not here.
 	// The call-shape check needs it too, for a different reason: an edit that
 	// rewrites a declaration's parameter list makes the on-disk signature stale by
 	// exactly this edit, and comparing a call against the stale one is a false
@@ -323,7 +319,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// means the opposite — pkg resolves and Foo does not exist as one of its
 	// exports. Folding it into the additive check's merged slice made the ask's
 	// shared header ("not found in the indexed code") false for this finding.
-	// It gets its own section below, like dangling and duplicate do.
+	// It gets its own section below, like dangling does.
 	var qualifiedV []guard.Violation
 	qualifiedResult := CheckResult{Check: "qualified", Verdict: VerdictSkipped}
 	if qualifiedEnabled() && lang == guard.LangGo {
@@ -406,7 +402,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// Own section below.
 	fsv, fsReason := fileScopeViolationsWithReason(lang, fileLines, diffs[0], repoSymbols, filePath)
 	if fsReason == "oversized-pre-edit-file" {
-		// readFileLines (unlike wholeFileText, duplicate.go) collapses "file
+		// readFileLines (unlike wholeFileText, dangling.go) collapses "file
 		// doesn't exist yet" and "file exists but is oversized/unreadable"
 		// into the same nil, so fileScopeViolationsWithReason can't tell them
 		// apart either. A brand-new file (this edit's Write creates it) is
@@ -428,7 +424,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// — a Violation means "this name does not resolve", and folding a
 	// resolves-but-misused finding into that list would make the ask's first line
 	// ("not found in the indexed code") false. It gets its own section below, like
-	// dangling and duplicate do. Store-free: it resolves against the same file's own
+	// dangling does. Store-free: it resolves against the same file's own
 	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
 	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
 	callShapes, callShapeReason := callShapeMismatchesWithReason(lang, fileLines, diffs[0], edit.ToolName, removedText)
@@ -498,29 +494,22 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// masquerades as a clean pass (silent by default; an advisory under strict).
 	var dangling []danglingWarning
 	var droppedImps []guard.DroppedImport
-	var duplicates []duplicateWarning
 	danglingResult := CheckResult{Check: "dangling", Verdict: VerdictSkipped}
 	droppedResult := CheckResult{Check: "dropped-import", Verdict: VerdictSkipped}
-	duplicateResult := CheckResult{Check: "duplicate-symbol", Verdict: VerdictSkipped}
-	if danglingEnabled() || droppedImportEnabled() || duplicateEnabled() {
-		// ONE definitive read of the pre-edit on-disk file, shared by every check
-		// that needs it: E1/dropped-import's oldText for Write (the old file is
-		// the only record of what a wholesale Write removes) and E5's whole-file
-		// prior-definition set (any tool). The missing-vs-unreadable distinction
+	if danglingEnabled() || droppedImportEnabled() {
+		// ONE definitive read of the pre-edit on-disk file for a Write: the old
+		// file is the only record of what a wholesale Write removes, and both
+		// E1 and dropped-import need it. The missing-vs-unreadable distinction
 		// is wholeFileText's: a missing file means "" IS the pre-edit truth; an
 		// existing file that is unreadable or over the cap means the pre-edit
 		// state is unknown — the checks would run against a fabricated empty old
 		// text and silently find nothing, so they are skipped and classified
 		// Unknown individually below (#330 — previously a single shared
 		// `degraded` counter, which could not say which check was affected).
-		wholeOld, wholeDefinitive := "", true
-		if edit.ToolName == "Write" || duplicateEnabled() {
-			wholeOld, wholeDefinitive = wholeFileText(filePath)
-		}
 		oldText := removedText
 		oldTextDefinitive := true
 		if edit.ToolName == "Write" {
-			oldText, oldTextDefinitive = wholeOld, wholeDefinitive
+			oldText, oldTextDefinitive = wholeFileText(filePath)
 		}
 		// E1: does this edit remove a definition that *other* files still reference?
 		if danglingEnabled() {
@@ -600,26 +589,8 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 				droppedResult = classifyResult("dropped-import", len(droppedImps) > 0, degradedReason)
 			}
 		}
-		// E5: does this edit introduce a symbol not previously defined anywhere in
-		// this file, whose name is already defined in a DIFFERENT file? Uses the
-		// whole pre-edit file (wholeOld), not oldText/removedText — see
-		// wholeFileText's doc comment for why the hunk-scoped variable above is
-		// not reusable here.
-		if duplicateEnabled() {
-			switch {
-			case !wholeDefinitive:
-				duplicateResult = CheckResult{Check: "duplicate-symbol", Verdict: VerdictUnknown, Reason: "oversized-pre-edit-file"}
-			default:
-				var qErrs int
-				if added := addedDefs(lang, wholeOld, text); len(added) > 0 {
-					duplicates, qErrs = checkDuplicateDefs(lang, filepath.Dir(filePath), filePath, added,
-						goBuildConstrained(filePath, wholeOld, text))
-				}
-				duplicateResult = classifyResult("duplicate-symbol", len(duplicates) > 0, storeQueryReason(qErrs))
-			}
-		}
 	}
-	results = append(results, danglingResult, droppedResult, duplicateResult, callShapeResult)
+	results = append(results, danglingResult, droppedResult, callShapeResult)
 	return verification{
 		Edit:     edit,
 		Path:     filePath,
@@ -636,7 +607,6 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		DepsGo:             depsGoV,
 		Dangling:           dangling,
 		Dropped:            droppedImps,
-		Duplicates:         duplicates,
 		CallShapes:         callShapes,
 		Lint:               lintFindingsList,
 	}

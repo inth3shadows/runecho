@@ -16,6 +16,14 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Removed
+- guard (#414): the E5 `duplicate-symbol` check. It produced 0 true positives in
+  139 asks, and after #181 it could only act on Go, where the compiler already
+  rejects a redeclaration. `RUNECHO_GUARD_DUPLICATE` is now inert, and hook
+  records no longer carry a `duplicate-symbol` key. The `--protocol` output
+  keeps the name, always `skipped` with reason `retired`, because removing a
+  check forces protocol 2.
+
 ## [0.58.0] — 2026-09-26
 
 ### Changed

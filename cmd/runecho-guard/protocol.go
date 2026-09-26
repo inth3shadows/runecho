@@ -262,6 +262,11 @@ func renderProtocol(v verification) protocolDoc {
 	doc.Results = make([]protocolResult, 0, len(checkOrder))
 	for _, name := range checkOrder {
 		r, ok := byCheck[name]
+		if retiredChecks[name] {
+			// Every path, including the degraded store's all-unknown sweep
+			// above: a check that no longer exists cannot have lost coverage.
+			r, ok = protocolResult{Check: name, Verdict: VerdictSkipped.String(), Reason: "retired"}, true
+		}
 		if !ok {
 			// Structural guarantee, not a fallback anyone expects to hit: the
 			// "every check, exactly once" promise must hold even if a future
@@ -302,13 +307,6 @@ func protocolResultFor(r CheckResult, v verification, shapes []guard.CallShapeMi
 			out.Evidence = append(out.Evidence, protocolEvidence{
 				Symbol:    d.Symbol,
 				Referrers: sanitizeReasonPaths(d.Referrers),
-			})
-		}
-	case "duplicate-symbol":
-		for _, d := range v.Duplicates {
-			out.Evidence = append(out.Evidence, protocolEvidence{
-				Symbol:    d.Symbol,
-				Locations: sanitizeReasonPaths(d.Locations),
 			})
 		}
 	case "dropped-import":

@@ -8,8 +8,8 @@ import "strings"
 // offering `.runechoguardignore`. That file is consumed by exactly one place —
 // guard.Run (internal/guard/validate.go), the additive unresolved-symbol check —
 // and reaches none of the other ten checks. Every other finding (file-scope,
-// qualified, deps-go, dangling, dropped-import, duplicate-symbol, call-shape,
-// recv-method, var-type, lint) passed straight through it, so a user whose ask
+// qualified, deps-go, dangling, dropped-import, duplicate-symbol (retired in
+// #414), call-shape, recv-method, var-type, lint) passed straight through it, so a user whose ask
 // was raised by one of those was told to edit a file that would not change the
 // answer.
 //
@@ -33,17 +33,17 @@ import "strings"
 // .runechoguardignore, which both builders below name separately. That absence
 // is load-bearing, not an oversight, and TestEveryCheckHasARemedy pins it —
 // see that test for why a twelfth check must land in one bucket or the other.
+// A retired check (retiredChecks) is absent too: it can never fire.
 var guardGates = map[string]string{
-	"file-scope":       "RUNECHO_GUARD_FILESCOPE=0",
-	"qualified":        "RUNECHO_GUARD_QUALIFIED=0",
-	"deps-go":          "RUNECHO_GUARD_DEPS_GO=0",
-	"dangling":         "RUNECHO_GUARD_DANGLING=0",
-	"dropped-import":   "RUNECHO_GUARD_DROPPED_IMPORT=0",
-	"duplicate-symbol": "RUNECHO_GUARD_DUPLICATE=0",
-	"call-shape":       "RUNECHO_GUARD_CALLSHAPE=0",
-	"recv-method":      "RUNECHO_GUARD_RECVMETHOD=0",
-	"var-type":         "RUNECHO_GUARD_VARTYPE=0",
-	"lint":             "RUNECHO_GUARD_LINT=0",
+	"file-scope":     "RUNECHO_GUARD_FILESCOPE=0",
+	"qualified":      "RUNECHO_GUARD_QUALIFIED=0",
+	"deps-go":        "RUNECHO_GUARD_DEPS_GO=0",
+	"dangling":       "RUNECHO_GUARD_DANGLING=0",
+	"dropped-import": "RUNECHO_GUARD_DROPPED_IMPORT=0",
+	"call-shape":     "RUNECHO_GUARD_CALLSHAPE=0",
+	"recv-method":    "RUNECHO_GUARD_RECVMETHOD=0",
+	"var-type":       "RUNECHO_GUARD_VARTYPE=0",
+	"lint":           "RUNECHO_GUARD_LINT=0",
 }
 
 // firedGates returns the settings that silence the checks that actually fired,

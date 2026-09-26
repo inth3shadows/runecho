@@ -24,7 +24,6 @@ func TestFiredChecksFrom_MatchesFieldByField(t *testing.T) {
 		"DepsGo":     "deps-go",
 		"Dangling":   "dangling",
 		"Dropped":    "dropped-import",
-		"Duplicate":  "duplicate-symbol",
 		"CallShape":  "call-shape",
 		"RecvMethod": "recv-method",
 		"VarType":    "var-type",
@@ -89,19 +88,17 @@ func TestAskReason_ViaFiredChecksFrom(t *testing.T) {
 		{[]string{"violations"}, "violations"},
 		{[]string{"dangling"}, "dangling"},
 		{[]string{"dropped-import"}, "dropped-import"},
-		{[]string{"duplicate-symbol"}, "duplicate-symbol"},
 		{[]string{"call-shape"}, "call-shape"},
 		{[]string{"file-scope"}, "file-scope"},
 		{[]string{"qualified"}, "qualified"},
 		{[]string{"deps-go"}, "deps-go"},
 		{[]string{"violations", "dangling"}, "violations+dangling"},
 		{[]string{"violations", "dropped-import"}, "violations+dropped-import"},
-		{[]string{"violations", "duplicate-symbol"}, "violations+duplicate-symbol"},
 		{[]string{"violations", "call-shape"}, "violations+call-shape"},
 		{[]string{"dangling", "dropped-import"}, "dangling+dropped-import"},
 		{
-			[]string{"violations", "dangling", "dropped-import", "duplicate-symbol", "call-shape"},
-			"violations+dangling+dropped-import+duplicate-symbol+call-shape",
+			[]string{"violations", "dangling", "dropped-import", "call-shape"},
+			"violations+dangling+dropped-import+call-shape",
 		},
 		{[]string{"violations", "file-scope", "dangling"}, "violations+file-scope+dangling"},
 		{[]string{"file-scope", "qualified", "deps-go"}, "file-scope+qualified+deps-go"},
@@ -258,7 +255,7 @@ func TestDepsGo_GoWorkAbstain_StrictAdvisory(t *testing.T) {
 // "oversized-pre-edit-file" before this fix. Under RUNECHO_GUARD_STRICT=1
 // that spuriously surfaced "coverage was incomplete" for an ordinary new-file
 // Write, even though a nonexistent file's pre-edit state ("") is fully known,
-// not degraded — the same distinction wholeFileText (duplicate.go) already
+// not degraded — the same distinction wholeFileText (dangling.go) already
 // makes for the deletion-side checks via os.IsNotExist.
 func TestFileScope_NewFileWrite_NotDegraded(t *testing.T) {
 	repoRoot := t.TempDir()
@@ -381,6 +378,19 @@ func TestGateAbstainReasonsAreNotVerdictTokens(t *testing.T) {
 	for reason := range gateAbstainReasons {
 		if _, clash := tokens[reason]; clash {
 			t.Errorf("gate reason %q collides with a verdict token", reason)
+		}
+	}
+}
+
+// TestFiredChecksFrom_DropsRetiredChecks: a result naming a retired check
+// (#414) must project to nothing, even one claiming a violation. Were it to
+// map onto some field, askReason would log a check that no longer exists
+// under another check's name, and fpreport would count it there.
+func TestFiredChecksFrom_DropsRetiredChecks(t *testing.T) {
+	for name := range retiredChecks {
+		got := firedChecksFrom([]CheckResult{{Check: name, Verdict: VerdictViolation}})
+		if got != (firedChecks{}) {
+			t.Errorf("firedChecksFrom([%s: Violation]) = %+v, want nothing fired", name, got)
 		}
 	}
 }

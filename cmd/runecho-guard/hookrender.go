@@ -63,7 +63,7 @@ func renderHookDecision(out io.Writer, v verification) int {
 	repoName, latest := v.Lookup.RepoName, v.Lookup.Latest
 	results, violations, learnEligible := v.Results, v.Violations, v.LearnEligible
 	fsv, qualifiedV, depsGoV := v.FileScope, v.Qualified, v.DepsGo
-	dangling, droppedImps, duplicates := v.Dangling, v.Dropped, v.Duplicates
+	dangling, droppedImps := v.Dangling, v.Dropped
 	callShapes, lintFindingsList := v.CallShapes, v.Lint
 
 	fired := firedChecksFrom(results)
@@ -76,7 +76,7 @@ func renderHookDecision(out io.Writer, v verification) int {
 	// Gated on BOTH len(violations) and fired.anyNonViolation(): violations
 	// covers additive/recv-method/var-type (still merged into that slice), and
 	// anyNonViolation covers everything else — file-scope, qualified, deps-go,
-	// dangling, dropped, duplicate, call-shape all report through their own
+	// dangling, dropped, call-shape all report through their own
 	// slice/flag and were never (or, since #269, are no longer) visible to
 	// len(violations) alone. Dropping either half of this condition would let a
 	// real finding from the half it drops read as clean. See
@@ -208,13 +208,6 @@ func renderHookDecision(out io.Writer, v verification) int {
 		for _, di := range droppedImps {
 			fmt.Fprintf(&sb, "  %s — still used at snippet line %d\n", di.Name, di.LineNo)
 			syms = append(syms, di.Name)
-		}
-	}
-	if len(duplicates) > 0 {
-		fmt.Fprintf(&sb, "[runecho-guard] %d new symbol(s) already exist as definitions elsewhere — possible duplicate/reimplementation:\n", len(duplicates))
-		for _, d := range duplicates {
-			fmt.Fprintf(&sb, "  %s — also defined in %s\n", d.Symbol, strings.Join(sanitizeReasonPaths(d.Locations), ", "))
-			syms = append(syms, d.Symbol)
 		}
 	}
 	syms = append(syms, callShapeSection(&sb, callShapes)...)

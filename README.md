@@ -11,11 +11,27 @@
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#quick-start)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#quick-start)
 
-RunEcho stops an agent from writing a call to a function your repo doesn't have —
-**before the write lands**, not after the build fails. It runs as a `PreToolUse`
-hook inside the agent loop: every `Edit`/`Write` is checked against the symbols
-your code actually declares, and a reference to one that doesn't exist stops the
-write and asks you first. ~12 ms, no build, no language server.
+**Your AI agent calls a function that doesn't exist. RunEcho stops the edit before it's written** —
+not after the build fails. It runs as a `PreToolUse` hook, checks every
+`Edit`/`Write` against the symbols your code actually declares, and asks you
+first when a reference has nothing behind it:
+
+```text
+[runecho-guard] 1 symbol reference(s) not found in the indexed code — possible hallucination:
+  snippet line 2: validateSnapshotChecksum
+Approve if these are legitimate (new/local/dynamic, or an intended removal).
+```
+
+- **Deterministic.** A parse and a lookup, not a model: the same edit gets the
+  same verdict on every run, machine and agent. No LLM, no API keys, no network.
+- **Free in context.** A clean check writes nothing; only an edit it stops costs
+  anything (~100 tokens). ~12 ms, no build, no language server.
+- **Honest about its reach.** It reads bare calls, constants and type
+  references, which caught 4 of 9 real hallucinations in our benchmark; the
+  other 5 need receiver types and are out of scope by design. One layer, like a
+  type checker, not the whole answer.
+
+## How Well It Works
 
 **The same code produces the same answer.** Every check is a parse and a lookup,
 so the verdict is identical on every run, every machine, and every agent — there

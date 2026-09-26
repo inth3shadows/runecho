@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/contract"
+	"github.com/inth3shadows/runecho/internal/gitutil"
 )
 
 // contractRepo builds a git repo containing the given contract files, keyed by
@@ -517,6 +518,163 @@ func TestDisplayPath(t *testing.T) {
 	} {
 		if got := displayPath(in); got != want {
 			t.Errorf("displayPath(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+// TestChangedPaths_RenameListsBothSides pins #427: a rename must list its
+// source too, or moving a file out of an out-of-scope directory into scope
+// reads as an in-scope change. Both listing modes that detect renames.
+//
+// Rename detection is pinned ON through an isolated global config: a
+// developer's own diff.renames=false would otherwise let this pass with the
+// fix removed.
+func TestChangedPaths_RenameListsBothSides(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(cfg, []byte("[diff]\n\trenames = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	root := contractRepo(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "legacy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"legacy/a.go", "legacy/b.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("package x\n\nfunc F() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "commit", "-q", "-m", "base")
+
+	gitRun(t, root, "checkout", "-q", "-b", "work")
+	gitRun(t, root, "mv", "legacy/a.go", "internal/a.go")
+	gitRun(t, root, "commit", "-q", "-m", "move a")
+	got, err := changedPaths(root, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/a.go", "legacy/a.go"}; !slices.Equal(got, want) {
+		t.Errorf("--base: got %q, want %q (the rename's source is missing)", got, want)
+	}
+
+	gitRun(t, root, "mv", "legacy/b.go", "internal/b.go")
+	got, err = changedPaths(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/b.go", "legacy/b.go"}; !slices.Equal(got, want) {
+		t.Errorf("staged: got %q, want %q (the rename's source is missing)", got, want)
+	}
+}
+
+// TestContractCheck_UnloadableHostileContractIsEscaped pins the load-warning
+// half of #427: a contract file that fails to load is named in a warning, and
+// that name is repo content.
+func TestContractCheck_UnloadableHostileContractIsEscaped(t *testing.T) {
+	root := contractRepo(t, map[string]string{"scoped.contract": scopedContract})
+	big := filepath.Join(root, contract.Dir, "big\x1b[2J.contract")
+	if err := os.WriteFile(big, make([]byte, contract.MaxContractBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr := captureOutput(func() {
+		runContractCheck([]string{"--dir", root, "--contract", "scoped"})
+	})
+	if !strings.Contains(stderr, "Warning:") {
+		t.Fatalf("precondition: the oversized contract should warn, stderr = %q", stderr)
+	}
+	if strings.ContainsRune(stderr, 0x1b) {
+		t.Errorf("a raw ESC reached stderr:\n%q", stderr)
+	}
+}
+
+// hostile is the contract text every display test below feeds through: a
+// clear-screen, a terminal-title OSC and a colour sequence, in the three
+// fields list and show print.
+const hostileContract = "name: d\x1b[2J\ndescription: x\x1b]0;pwned\x07\nfoo\x1b[31m/**\n"
+
+// TestContractListAndShow_EscapeContractText: list and show print a
+// contract's name, description, path and globs — all repo content.
+func TestContractListAndShow_EscapeContractText(t *testing.T) {
+	root := contractRepo(t, map[string]string{"evil\x1b[2J.contract": hostileContract})
+	for name, run := range map[string]func() int{
+		"list": func() int { return runContractList([]string{"--dir", root}) },
+		"show": func() int { return runContractShow([]string{"--dir", root, "d\x1b[2J"}) },
+	} {
+		var code int
+		stdout, stderr := captureOutput(func() { code = run() })
+		if code != ExitOK {
+			t.Fatalf("%s: code = %d, stderr = %q", name, code, stderr)
+		}
+		if strings.ContainsAny(stdout+stderr, "\x1b\x07") {
+			t.Errorf("%s: a raw control byte reached the terminal:\n%q", name, stdout+stderr)
+		}
+		if !strings.Contains(stdout, `d\x1b[2J`) {
+			t.Errorf("%s: the name is not shown escaped:\n%q", name, stdout)
+		}
+	}
+}
+
+// TestContractCheck_SessionPathEscapesStoredPath pins the session half of
+// #427: the stored contract path reaches stderr both when the file changed
+// since activation and when it can no longer be loaded.
+func TestContractCheck_SessionPathEscapesStoredPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	root := contractRepo(t, map[string]string{"evil\x1b[2J.contract": scopedContract})
+	top, err := gitutil.TopLevel(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollAt(t, home, "r", top)
+	if _, stderr := captureOutput(func() {
+		if code := runContractActivate([]string{"--dir", root, "--session", "s1", "scoped"}); code != ExitOK {
+			t.Errorf("activate: code %d", code)
+		}
+	}); t.Failed() {
+		t.Fatalf("activate failed: %q", stderr)
+	}
+	file := filepath.Join(root, contract.Dir, "evil\x1b[2J.contract")
+
+	check := func(what string) {
+		t.Helper()
+		_, stderr := captureOutput(func() {
+			runContractCheck([]string{"--dir", root, "--session", "s1"})
+		})
+		if !strings.Contains(stderr, `evil\x1b[2J.contract`) {
+			t.Errorf("%s: stored path not shown escaped:\n%q", what, stderr)
+		}
+		if strings.ContainsRune(stderr, 0x1b) {
+			t.Errorf("%s: a raw ESC reached stderr:\n%q", what, stderr)
+		}
+	}
+	if err := os.WriteFile(file, []byte(scopedContract+"docs/**\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check("changed since activation")
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	check("unloadable")
+}
+
+func TestDisplayText(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain message":         "plain message",
+		`C:\Users\e\a.contract`: `C:\Users\e\a.contract`,
+		`say "hi"`:              `say "hi"`,
+		"café":                  "café",
+		"esc\x1b[2J":            `esc\x1b[2J`,
+		"osc\x1b]0;t\x07":       `osc\x1b]0;t\a`,
+		"nl\nx":                 `nl\nx`,
+		"rlo\u202ex":            `rlo\u202ex`,
+		"bad\xffx":              `bad\xffx`,
+	} {
+		if got := displayText(in); got != want {
+			t.Errorf("displayText(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

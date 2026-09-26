@@ -417,3 +417,85 @@ func TestParseStagedDiff_AgainstHEAD(t *testing.T) {
 		t.Errorf("added lines = %+v, want only line 3 %q", got, "    x = phantom()")
 	}
 }
+
+// TestParseDiffNewPath_TrailingTab pins #417: git terminates a +++ header with
+// a TAB when the path contains a space. Exactly one TAB is stripped, before
+// unquoting, and nothing else — a trailing space is a legal filename byte.
+func TestParseDiffNewPath_TrailingTab(t *testing.T) {
+	for _, tc := range []struct {
+		line, want string
+		ok         bool
+	}{
+		{"+++ b/plain.py", "plain.py", true},
+		{"+++ b/my file.py\t", "my file.py", true},
+		{"+++ \"b/sp ace \\303\\251.py\"\t", "sp ace é.py", true},
+		{"+++ \"b/caf\\303\\251.py\"", "café.py", true},
+		{"+++ b/trailing space.py \t", "trailing space.py ", true},
+		{"+++ /dev/null\t", "", false},
+		{"+++ /dev/null", "", false},
+	} {
+		got, ok := parseDiffNewPath(tc.line)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseDiffNewPath(%q) = (%q, %v), want (%q, %v)", tc.line, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestParseStagedDiff_SpacePaths drives #417 through real git: a path with a
+// space, a quoted non-ASCII path with a space, and a rename-with-edits onto a
+// spaced path must each come back under its real name with its added line.
+func TestParseStagedDiff_SpacePaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q")
+	write("old name.py", "def keep():\n    return 1\n")
+	git("add", ".")
+	git("commit", "-q", "-m", "init")
+
+	write("my file.py", "x = ghost()\n")
+	write("sp ace é.py", "y = phantom()\n")
+	git("mv", "old name.py", "new name.py")
+	write("new name.py", "def keep():\n    return 1\nz = spectre()\n")
+	git("add", ".")
+
+	diffs, partial, err := ParseStagedDiff(context.Background(), dir)
+	if err != nil || partial {
+		t.Fatalf("ParseStagedDiff: err=%v partial=%v", err, partial)
+	}
+	got := map[string]string{}
+	for _, d := range diffs {
+		var lines []string
+		for _, a := range d.AddedLines {
+			lines = append(lines, a.Text)
+		}
+		got[d.Path] = strings.Join(lines, "\n")
+	}
+	want := map[string]string{
+		"my file.py":  "x = ghost()",
+		"sp ace é.py": "y = phantom()",
+		"new name.py": "z = spectre()",
+	}
+	for path, text := range want {
+		if got[path] != text {
+			t.Errorf("%q: added = %q, want %q (all diffs: %q)", path, got[path], text, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d files %q, want exactly %d", len(got), got, len(want))
+	}
+}

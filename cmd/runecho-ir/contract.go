@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/inth3shadows/runecho/internal/contract"
@@ -335,19 +334,21 @@ func runContractCheck(args []string) int {
 }
 
 // displayPath renders a repo path for the terminal. changedPaths reads git with
-// -z (#422), so a name reaches here exactly as on disk — including any control
-// character, which git's own quoting used to neutralise. A hostile filename
-// could then clear the screen or print a line that reads like this command's
-// own summary. A path that could do either is printed Go-quoted instead (the
-// same shape git's quoting had), which is unambiguous and loses nothing; an
-// ordinary path, non-ASCII included, prints as-is. Matching still uses the raw
-// path: only the display changes.
+// -z (#422), so a name reaches here exactly as on disk — including characters
+// git's own quoting used to neutralise. A control character could clear the
+// screen or print a line that reads like this command's own summary; a format
+// character (a bidi override, a zero-width space) could make one path look like
+// another. Any path strconv.Quote would have to escape — an unprintable rune,
+// invalid UTF-8, or a `"` or `\` (so the quoted form of one name can never be
+// read as another name taken literally) — is printed Go-quoted, the shape git's
+// quoting had. An ordinary path, non-ASCII included, prints as-is. Matching
+// still uses the raw path: only the display changes.
 func displayPath(p string) string {
-	if !utf8.ValidString(p) {
+	if !utf8.ValidString(p) || strings.ContainsAny(p, `"\`) {
 		return strconv.Quote(p)
 	}
 	for _, r := range p {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+		if !strconv.IsPrint(r) {
 			return strconv.Quote(p)
 		}
 	}

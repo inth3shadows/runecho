@@ -502,14 +502,18 @@ func TestContractCheck_HostileNamesCannotForgeOutput(t *testing.T) {
 
 func TestDisplayPath(t *testing.T) {
 	for in, want := range map[string]string{
-		"internal/a.go": "internal/a.go",
-		"café é.py":     "café é.py",
-		"trailing sp ":  "trailing sp ",
-		"a\nb":          `"a\nb"`,
-		"esc\x1b[31m":   `"esc\x1b[31m"`,
-		"nel\u0085x":    `"nel\u0085x"`,
-		"ls\u2028x":     `"ls\u2028x"`,
-		"bad\xffutf8":   `"bad\xffutf8"`,
+		"internal/a.go":      "internal/a.go",
+		"café é.py":          "café é.py",
+		"trailing sp ":       "trailing sp ",
+		"a\nb":               `"a\nb"`,
+		"esc\x1b[31m":        `"esc\x1b[31m"`,
+		"nel\u0085x":         `"nel\u0085x"`,
+		"ls\u2028x":          `"ls\u2028x"`,
+		"bad\xffutf8":        `"bad\xffutf8"`,
+		"src\u200b/x.py":     `"src\u200b/x.py"`,     // zero-width space: looks like src/x.py
+		"ci/\u202elmy.dliub": `"ci/\u202elmy.dliub"`, // RLO: renders as ci/build.yml
+		`quote"d.md`:         `"quote\"d.md"`,
+		`back\slash.md`:      `"back\\slash.md"`,
 	} {
 		if got := displayPath(in); got != want {
 			t.Errorf("displayPath(%q) = %s, want %s", in, got, want)

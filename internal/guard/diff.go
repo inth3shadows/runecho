@@ -298,6 +298,10 @@ func parseDiffOutput(raw string) (diffs []FileDiff, partial bool, err error) {
 // (a deletion target) and any header that doesn't carry a b/ path.
 func parseDiffNewPath(line string) (string, bool) {
 	rest := strings.TrimPrefix(line, "+++ ")
+	// git ends a ---/+++ header with one TAB when the path contains a space
+	// (#417), quoted or not. Strip exactly that one: a trailing space is part
+	// of a legal filename, so TrimSpace would rename the file.
+	rest = strings.TrimSuffix(rest, "\t")
 	if strings.HasPrefix(rest, "\"") {
 		// git-quoted path: C-style escapes (octal \nnn, \", \\) — the same
 		// grammar strconv.Unquote understands. On failure, fall through with the

@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.59.0] — 2026-09-26
+
 ### Removed
 - guard (#414): the E5 `duplicate-symbol` check. It produced 0 true positives in
   139 asks, and after #181 it could only act on Go, where the compiler already

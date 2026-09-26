@@ -383,12 +383,17 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 
 // changedPaths returns repo-relative paths that differ from base (or that are
 // modified/untracked in the working tree when base is empty).
+//
+// Every listing uses -z (#422). Without it git C-quotes any path containing a
+// byte >= 0x80, a quote, a backslash or a control character, so a staged
+// café.py came back as the literal `"caf\303\251.py"` and could never match a
+// contract glob. NUL separation also keeps a name's own leading or trailing
+// spaces, which the old per-line TrimSpace removed.
 func changedPaths(root, base string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	add := func(raw []byte) {
-		for _, line := range strings.Split(string(raw), "\n") {
-			p := strings.TrimSpace(line)
+		for _, p := range strings.Split(string(raw), "\x00") {
 			if p == "" || seen[p] {
 				continue
 			}
@@ -402,7 +407,7 @@ func changedPaths(root, base string) ([]string, error) {
 		// this one was cut as though the current work had touched it — on a
 		// branch a day behind master that is pure noise, and it is noise of
 		// exactly the kind that trains a person to ignore the tool.
-		raw, err := gitOutput(root, "diff", "--name-only", base+"...HEAD")
+		raw, err := gitOutput(root, "diff", "--name-only", "-z", base+"...HEAD")
 		if err != nil {
 			return nil, err
 		}
@@ -412,9 +417,9 @@ func changedPaths(root, base string) ([]string, error) {
 	}
 	// Working tree: tracked modifications, staged changes, and untracked files.
 	for _, argv := range [][]string{
-		{"diff", "--name-only"},
-		{"diff", "--name-only", "--cached"},
-		{"ls-files", "--others", "--exclude-standard"},
+		{"diff", "--name-only", "-z"},
+		{"diff", "--name-only", "-z", "--cached"},
+		{"ls-files", "-z", "--others", "--exclude-standard"},
 	} {
 		raw, err := gitOutput(root, argv...)
 		if err != nil {

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -416,5 +417,50 @@ func TestShortHashDisplay(t *testing.T) {
 		if got := shortHashDisplay(in); got != want {
 			t.Errorf("shortHashDisplay(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestChangedPaths_UnquotedNames pins #422: without -z git C-quotes any path
+// with a byte >= 0x80, so café.py came back as `"caf\303\251.py"` and never
+// matched a contract glob; and the old per-line TrimSpace stripped a name's own
+// edge spaces. Both listing modes must return names exactly as on disk.
+func TestChangedPaths_UnquotedNames(t *testing.T) {
+	root := contractRepo(t, nil)
+	write := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("tracked é.py")
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "commit", "-q", "-m", "base")
+
+	gitRun(t, root, "checkout", "-q", "-b", "work")
+	write("branch café.py")
+	write("trailing space.md ")
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "commit", "-q", "-m", "work")
+
+	got, err := changedPaths(root, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"branch café.py", "trailing space.md "}; !slices.Equal(got, want) {
+		t.Errorf("--base: got %q, want %q", got, want)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "tracked é.py"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write("staged ü.go")
+	gitRun(t, root, "add", "staged ü.go")
+	write("untracked ñ.txt")
+	got, err = changedPaths(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"staged ü.go", "tracked é.py", "untracked ñ.txt"}; !slices.Equal(got, want) {
+		t.Errorf("working tree: got %q, want %q", got, want)
 	}
 }

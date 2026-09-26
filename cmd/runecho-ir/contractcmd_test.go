@@ -525,7 +525,16 @@ func TestDisplayPath(t *testing.T) {
 // TestChangedPaths_RenameListsBothSides pins #427: a rename must list its
 // source too, or moving a file out of an out-of-scope directory into scope
 // reads as an in-scope change. Both listing modes that detect renames.
+//
+// Rename detection is pinned ON through an isolated global config: a
+// developer's own diff.renames=false would otherwise let this pass with the
+// fix removed.
 func TestChangedPaths_RenameListsBothSides(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(cfg, []byte("[diff]\n\trenames = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	root := contractRepo(t, nil)
 	if err := os.MkdirAll(filepath.Join(root, "legacy"), 0o755); err != nil {
 		t.Fatal(err)

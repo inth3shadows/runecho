@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.61.0] — 2026-09-26
+
+### Changed
+- guard: contract check lists both sides of a rename and quotes hostile paths on stderr (#427) (#428)
+
 ## [0.60.0] — 2026-09-26
 
 ### Changed

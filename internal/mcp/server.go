@@ -58,6 +58,12 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
+	// Annotations carries MCP tool annotations (readOnlyHint, idempotentHint,
+	// openWorldHint, etc. — see the 2025-03-26+ spec). nil means "not declared":
+	// listTools omits the "annotations" key entirely rather than emitting an
+	// empty object, so a tool that never opts in produces the same frame as
+	// before this field existed.
+	Annotations map[string]any
 	Handler     func(args json.RawMessage) (string, error)
 }
 
@@ -252,11 +258,15 @@ func (s *Server) listTools() map[string]any {
 		if schema == nil {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		tools = append(tools, map[string]any{
+		entry := map[string]any{
 			"name":        t.Name,
 			"description": t.Description,
 			"inputSchema": schema,
-		})
+		}
+		if t.Annotations != nil {
+			entry["annotations"] = t.Annotations
+		}
+		tools = append(tools, entry)
 	}
 	return map[string]any{"tools": tools}
 }

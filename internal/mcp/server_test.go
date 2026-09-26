@@ -114,6 +114,55 @@ func TestToolsList(t *testing.T) {
 	}
 }
 
+// TestToolsListAnnotations: a tool with a non-nil Annotations map emits an
+// "annotations" key in tools/list; a tool that leaves it nil (like the plain
+// echo tool above, and every tool before this field existed) omits the key
+// entirely rather than emitting an empty object.
+func TestToolsListAnnotations(t *testing.T) {
+	s := NewServer("test", "9.9")
+	s.Register(Tool{
+		Name:        "plain",
+		Description: "no annotations",
+		InputSchema: map[string]any{"type": "object"},
+		Handler:     func(json.RawMessage) (string, error) { return "", nil },
+	})
+	s.Register(Tool{
+		Name:        "annotated",
+		Description: "has annotations",
+		InputSchema: map[string]any{"type": "object"},
+		Annotations: map[string]any{"readOnlyHint": true},
+		Handler:     func(json.RawMessage) (string, error) { return "", nil },
+	})
+
+	var out strings.Builder
+	if err := s.Serve(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	tools := resp["result"].(map[string]any)["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("want 2 tools, got %d", len(tools))
+	}
+	byName := map[string]map[string]any{}
+	for _, tl := range tools {
+		m := tl.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+	if _, ok := byName["plain"]["annotations"]; ok {
+		t.Errorf("plain tool should omit annotations key, got %v", byName["plain"]["annotations"])
+	}
+	ann, ok := byName["annotated"]["annotations"].(map[string]any)
+	if !ok {
+		t.Fatalf("annotated tool missing annotations key: %v", byName["annotated"])
+	}
+	if ann["readOnlyHint"] != true {
+		t.Errorf("annotated tool readOnlyHint = %v, want true", ann["readOnlyHint"])
+	}
+}
+
 func TestToolCallSuccessAndError(t *testing.T) {
 	r := drive(t,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}`,

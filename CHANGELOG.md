@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.58.0] — 2026-09-26
+
+### Changed
+- guard: check staged files whose path contains a space (#417) (#424)
+
 ## [0.57.0] — 2026-09-25
 
 ### Changed

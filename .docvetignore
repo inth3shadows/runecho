@@ -6,7 +6,7 @@
 # Brace-expansion shorthand for a set of sibling files. Every expansion exists;
 # docvet resolves the literal string, which never will.
 internal/parser/{go,js,python,shell,rust,ruby}.go
-cmd/runecho-guard/{dangling,duplicate,filescope,qualified,depqualified,contract}.go
+cmd/runecho-guard/{dangling,filescope,qualified,depqualified,contract}.go
 
 # Placeholder paths in copy-paste examples. Deliberately not real.
 /path/to/your/repo

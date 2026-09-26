@@ -344,7 +344,17 @@ func TestCheckStore_EnrolledZeroActivityIsWarn(t *testing.T) {
 	}
 }
 
+// clearRetiredGates keeps a developer's own exported retired flag from adding
+// a Warn row to tests that assert a single OK result.
+func clearRetiredGates(t *testing.T) {
+	t.Helper()
+	for f := range retiredGateFlags {
+		t.Setenv("RUNECHO_GUARD_"+f, "")
+	}
+}
+
 func TestCheckGates_ReportsSetFlags(t *testing.T) {
+	clearRetiredGates(t)
 	t.Setenv("RUNECHO_GUARD_LINT", "1")
 	for _, f := range knownGateFlags {
 		if f != "LINT" {
@@ -361,6 +371,7 @@ func TestCheckGates_ReportsSetFlags(t *testing.T) {
 }
 
 func TestCheckGates_NoneSetReportsDefaultPosture(t *testing.T) {
+	clearRetiredGates(t)
 	for _, f := range knownGateFlags {
 		t.Setenv("RUNECHO_GUARD_"+f, "")
 	}
@@ -370,6 +381,26 @@ func TestCheckGates_NoneSetReportsDefaultPosture(t *testing.T) {
 	}
 	if results[0].Detail == "" {
 		t.Error("checkGates with nothing set returned an empty detail instead of naming the default posture")
+	}
+}
+
+// A retired flag still exported (#414) is a Warn naming it, not part of the
+// posture line: the user thinks a check is on that no longer exists.
+func TestCheckGates_RetiredFlagWarns(t *testing.T) {
+	for _, f := range knownGateFlags {
+		t.Setenv("RUNECHO_GUARD_"+f, "")
+	}
+	clearRetiredGates(t)
+	t.Setenv("RUNECHO_GUARD_DUPLICATE", "1")
+	results := checkGates()
+	if len(results) != 2 || results[0].Status != OK || results[1].Status != Warn {
+		t.Fatalf("checkGates = %+v, want the OK posture line then one Warn", results)
+	}
+	if strings.Contains(results[0].Detail, "DUPLICATE") {
+		t.Errorf("posture line %q reports the retired flag as if it gated something", results[0].Detail)
+	}
+	if !strings.Contains(results[1].Detail, "RUNECHO_GUARD_DUPLICATE=1") || !strings.Contains(results[1].Detail, "#414") {
+		t.Errorf("warn detail = %q, want the flag and the retiring issue named", results[1].Detail)
 	}
 }
 

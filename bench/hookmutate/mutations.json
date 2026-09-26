@@ -174,49 +174,6 @@
       "desc": "#209: re-activating EDITED contract text keeps the old answers"
     },
     {
-      "id": "duplicate/flag-gate",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "func duplicateEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DUPLICATE\") == \"1\" }",
-      "replace": "func duplicateEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DUPLICATE\") != \"0\" }",
-      "desc": "default-off gate inverted"
-    },
-    {
-      "id": "duplicate/lang-gate",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "\tif lang != guard.LangGo {",
-      "replace": "\tif false {",
-      "known_gap": "no fixture; a non-Go edit finds no same-directory Go candidate anyway, so the gate is not observable through the corpus",
-      "desc": "Go-only restriction removed"
-    },
-    {
-      "id": "duplicate/edited-test-file-skip",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "\tif isTestFile(filePath) {",
-      "replace": "\tif false {",
-      "desc": "edits TO a test file are checked for duplicates"
-    },
-    {
-      "id": "duplicate/same-dir-candidates",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
-      "replace": "\t\tif path.Dir(o) == selfDir || guard.LangFor(o) == guard.LangGo {",
-      "desc": "a definition in another directory counts as a duplicate"
-    },
-    {
-      "id": "duplicate/test-file-candidates",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
-      "replace": "\t\tif path.Dir(o) == selfDir && guard.LangFor(o) == guard.LangGo {",
-      "desc": "a definition in a _test.go counts as a duplicate location"
-    },
-    {
-      "id": "duplicate/cross-language-candidates",
-      "file": "cmd/runecho-guard/duplicate.go",
-      "find": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) && guard.LangFor(o) == guard.LangGo {",
-      "replace": "\t\tif path.Dir(o) == selfDir && !isTestFile(o) {",
-      "desc": "a same-named symbol in another language counts as a duplicate"
-    },
-    {
       "id": "dangling/flag-gate",
       "file": "cmd/runecho-guard/dangling.go",
       "find": "func danglingEnabled() bool { return os.Getenv(\"RUNECHO_GUARD_DANGLING\") == \"1\" }",

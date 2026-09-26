@@ -24,10 +24,10 @@ const (
 // checkOrder's eleven names — the same vocabulary askReason already speaks.
 //
 // Deliberately does NOT carry the check's own findings (contrast the sketch in
-// #330's issue body, which shows a `Violations []guard.Violation` field). Four
-// of the eleven checks — dangling, dropped-import, duplicate, call-shape — already
-// carry richer, non-guard.Violation-shaped finding types (danglingWarning,
-// guard.DroppedImport, duplicateWarning, guard.CallShapeMismatch) into the
+// #330's issue body, which shows a `Violations []guard.Violation` field). Three
+// of the checks — dangling, dropped-import, call-shape — already carry richer,
+// non-guard.Violation-shaped finding types (danglingWarning,
+// guard.DroppedImport, guard.CallShapeMismatch) into the
 // existing ask-rendering code in runHookMode/runArgs, and forcing them into a
 // shared field would either lose data or widen guard.Violation itself.
 // CheckResult answers "could this check answer", not "what did it find" —
@@ -50,6 +50,17 @@ var checkOrder = []string{
 	"dropped-import", "duplicate-symbol", "call-shape", "recv-method", "var-type",
 	"lint",
 }
+
+// retiredChecks are checkOrder names whose check no longer exists.
+// duplicate-symbol was retired in #414 (0 true positives in 139 asks; its only
+// reachable language was Go, where the compiler already rejects a
+// redeclaration). The name stays in checkOrder because protocol 1 promises
+// every check exactly once, and removing one forces protocol 2 (TECHNICAL.md,
+// "Forces protocol 2"). renderProtocol reports a retired check as skipped with
+// reason "retired" on every path. The hook never produces a result for one, so
+// decisions.jsonl's checks map omits it. Drop the entry, and the name from
+// checkOrder, at the next protocol bump.
+var retiredChecks = map[string]bool{"duplicate-symbol": true}
 
 // firedChecksFrom projects a fully-populated (one entry per checkOrder name)
 // results slice onto the existing firedChecks type, so callers can keep using
@@ -87,8 +98,6 @@ func firedChecksFrom(results []CheckResult) firedChecks {
 			f.Dangling = true
 		case "dropped-import":
 			f.Dropped = true
-		case "duplicate-symbol":
-			f.Duplicate = true
 		case "call-shape":
 			f.CallShape = true
 		case "recv-method":
@@ -166,7 +175,7 @@ func checkStatusMap(results []CheckResult) map[string]string {
 }
 
 // storeQueryReason names the Unknown reason for a check whose store lookup
-// failed (qErrs, the existing dangling/duplicate query-error count), or "" if
+// failed (qErrs, the dangling check's query-error count), or "" if
 // it didn't.
 func storeQueryReason(queryErrs int) string {
 	if queryErrs > 0 {

@@ -310,13 +310,6 @@ func TestProtocolMode_Evidence(t *testing.T) {
 				t.Errorf("got %+v", e)
 			}
 		}},
-		{"duplicate carries locations", "duplicate-symbol", func(v *verification) {
-			v.Duplicates = []duplicateWarning{{Symbol: "Dup", Locations: []string{"x/y.go"}}}
-		}, func(t *testing.T, e protocolEvidence) {
-			if e.Symbol != "Dup" || len(e.Locations) != 1 {
-				t.Errorf("got %+v", e)
-			}
-		}},
 		{"dropped-import carries a snippet line", "dropped-import", func(v *verification) {
 			v.Dropped = []guard.DroppedImport{{Name: "path", LineNo: 4}}
 		}, func(t *testing.T, e protocolEvidence) {
@@ -424,12 +417,10 @@ func TestProtocolMode_PanicYieldsErrorDoc(t *testing.T) {
 
 // protocolCheckName maps a fixture's `check` field onto the checkOrder name the
 // protocol reports under. The two vocabularies were never the same — the corpus
-// says "callshape" and "duplicate" where the results array says "call-shape" and
-// "duplicate-symbol" — and a parity test that silently failed to find its check
+// says "callshape" where the results array says "call-shape" — and a parity test that silently failed to find its check
 // would pass by looking at nothing.
 var protocolCheckName = map[string]string{
 	"callshape":      "call-shape",
-	"duplicate":      "duplicate-symbol",
 	"dropped-import": "dropped-import",
 	"dangling":       "dangling",
 	"file-scope":     "file-scope",

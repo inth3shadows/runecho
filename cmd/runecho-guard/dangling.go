@@ -96,7 +96,7 @@ func defSet(lang guard.Lang, text string) map[string]struct{} {
 // openLatestSnapshot opens the central store, resolves the repo containing
 // dir, and returns its latest snapshot ID plus the edited file's self-path
 // (for self-exclusion) — the shared preamble for every deletion/definition-
-// side check (checkDanglingRefs, checkDuplicateDefs). ok=false on any failure;
+// side check (checkDanglingRefs). ok=false on any failure;
 // the caller returns no warnings (fail-open, never a false block).
 //
 // degraded distinguishes the two flavors of ok=false so a store-level failure is
@@ -106,7 +106,7 @@ func defSet(lang guard.Lang, text string) map[string]struct{} {
 // known gap), or db.List failed — and false for the legitimate "nothing to check"
 // states (runecho not installed, store never created, repo unenrolled, no snapshot
 // yet). The callers fold a true degraded into their queryErrs count, so a transient
-// sqlite/disk error — or a schema-newer store — during an E1/E5 check surfaces as a
+// sqlite/disk error — or a schema-newer store — during an E1 check surfaces as a
 // degraded advisory under strict mode instead of reading as a clean pass.
 func openLatestSnapshot(dir, filePath string) (db *snapshot.DB, snapID int64, self string, ok, degraded bool) {
 	storeDir, err := runechoDir()
@@ -250,7 +250,6 @@ type firedChecks struct {
 	DepsGo     bool
 	Dangling   bool
 	Dropped    bool
-	Duplicate  bool
 	CallShape  bool
 	RecvMethod bool
 	VarType    bool
@@ -275,7 +274,7 @@ type firedChecks struct {
 // qualified/provenance, deps-go/provenance, filescope/flag-gate entries) pin
 // the flag assignments directly rather than trusting a slice length.
 //
-// The other four fields here (dangling, dropped, duplicate, call-shape) were
+// The other three fields here (dangling, dropped, call-shape) were
 // never merged into `violations` at all — this has always been their only
 // record.
 //
@@ -284,7 +283,7 @@ type firedChecks struct {
 // assigned from that same length one line above where firedChecks is built.
 func (f firedChecks) anyNonViolation() bool {
 	return f.FileScope || f.Qualified || f.DepsGo ||
-		f.Dangling || f.Dropped || f.Duplicate || f.CallShape || f.RecvMethod || f.VarType || f.Lint
+		f.Dangling || f.Dropped || f.CallShape || f.RecvMethod || f.VarType || f.Lint
 }
 
 // askReason names the decision-log reason for an ask so the dogfood stream is
@@ -306,7 +305,7 @@ func askReason(f firedChecks) string {
 
 // firedNames returns the names of the checks that fired, in checkOrder's
 // canonical order. Extracted from askReason (#267) so that askReason's log
-// reason and firedGates' user-facing remedy list read ONE list of eleven rather
+// reason and firedGates' user-facing remedy list read ONE list rather
 // than two hand-kept-in-sync copies: a twelfth check added to only one of them
 // would be logged but left with no remedy named, or the reverse, and neither
 // failure is visible in any single test.
@@ -326,7 +325,6 @@ func (f firedChecks) firedNames() []string {
 		{f.DepsGo, "deps-go"},
 		{f.Dangling, "dangling"},
 		{f.Dropped, "dropped-import"},
-		{f.Duplicate, "duplicate-symbol"},
 		{f.CallShape, "call-shape"},
 		{f.RecvMethod, "recv-method"},
 		{f.VarType, "var-type"},
@@ -337,4 +335,26 @@ func (f firedChecks) firedNames() []string {
 		}
 	}
 	return parts
+}
+
+// wholeFileText reads filePath's current on-disk (pre-edit) content, capped at
+// maxInFileBytes — the pre-edit side of a Write, the only record of what a
+// wholesale Write removes.
+//
+// definitive distinguishes WHY the text came back empty, because the two
+// causes need opposite treatment downstream. A missing file (new file being
+// created) means "nothing was there before", so "" is the complete answer
+// (definitive=true). An existing file that is unreadable or exceeds the cap
+// means the pre-edit state is unknown: treating that "" as ground truth would
+// run the checks against a fabricated empty old text and silently find
+// nothing, so the caller classifies them Unknown instead (definitive=false).
+func wholeFileText(filePath string) (text string, definitive bool) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", os.IsNotExist(err)
+	}
+	if len(data) > maxInFileBytes {
+		return "", false
+	}
+	return string(data), true
 }

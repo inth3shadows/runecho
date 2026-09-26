@@ -15,9 +15,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,10 +55,16 @@ type Result struct {
 // limitation rather than refactoring 11 files into a registry for this issue.
 var knownGateFlags = []string{
 	"CALLSHAPE", "CONTRACT", "DANGLING", "DEPS_GO", "DROPPED_IMPORT",
-	"DUPLICATE", "ENROLL_NOTICE", "FILESCOPE", "LEARN", "LEARN_N",
+	"ENROLL_NOTICE", "FILESCOPE", "LEARN", "LEARN_N",
 	"LEARN_TTL_DAYS", "LINT", "MAX_AGE", "QUALIFIED", "RECVMETHOD", "SKIP",
 	"STRICT", "VARTYPE",
 }
+
+// retiredGateFlags are RUNECHO_GUARD_* flags whose check was removed, mapped
+// to the issue that removed it. They gate nothing, so checkGates warns rather
+// than reporting one as part of the posture: a user who still exports one
+// believes a check is running that no longer exists.
+var retiredGateFlags = map[string]string{"DUPLICATE": "#414"}
 
 // hookFiles maps each installed git hook to the binary installHooks (cmd/
 // runecho-ir/install.go) wrote its body to invoke.
@@ -514,7 +522,17 @@ func checkGates() []Result {
 	if len(set) > 0 {
 		detail = strings.Join(set, " ")
 	}
-	return []Result{{Check: "gates", Status: OK, Detail: detail}}
+	out := []Result{{Check: "gates", Status: OK, Detail: detail}}
+	for _, name := range slices.Sorted(maps.Keys(retiredGateFlags)) {
+		if v := os.Getenv("RUNECHO_GUARD_" + name); v != "" {
+			out = append(out, Result{
+				Check: "gates", Status: Warn,
+				Detail: fmt.Sprintf("RUNECHO_GUARD_%s=%s is set, but its check was retired in %s; the flag does nothing", name, v, retiredGateFlags[name]),
+				Remedy: "unset RUNECHO_GUARD_" + name,
+			})
+		}
+	}
+	return out
 }
 
 // countRecentDecisions scans path (decisions.jsonl) and counts "ask" and

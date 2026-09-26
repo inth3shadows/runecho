@@ -68,7 +68,6 @@ func TestAskReason(t *testing.T) {
 		{firedChecks{Violations: true}, "violations"},
 		{firedChecks{Dangling: true}, "dangling"},
 		{firedChecks{Dropped: true}, "dropped-import"},
-		{firedChecks{Duplicate: true}, "duplicate-symbol"},
 		{firedChecks{CallShape: true}, "call-shape"},
 		{firedChecks{Lint: true}, "lint"},
 		// #268: these three used to be indistinguishable from Violations, which
@@ -78,14 +77,13 @@ func TestAskReason(t *testing.T) {
 		{firedChecks{DepsGo: true}, "deps-go"},
 		{firedChecks{Violations: true, Dangling: true}, "violations+dangling"},
 		{firedChecks{Violations: true, Dropped: true}, "violations+dropped-import"},
-		{firedChecks{Violations: true, Duplicate: true}, "violations+duplicate-symbol"},
 		{firedChecks{Violations: true, CallShape: true}, "violations+call-shape"},
 		{firedChecks{Dangling: true, Dropped: true}, "dangling+dropped-import"},
 		// The pre-#268 ordering must be preserved for combinations that predate
 		// it, or every historical bucket becomes incomparable rather than just
 		// the ones that involve a new term.
-		{firedChecks{Violations: true, Dangling: true, Dropped: true, Duplicate: true, CallShape: true},
-			"violations+dangling+dropped-import+duplicate-symbol+call-shape"},
+		{firedChecks{Violations: true, Dangling: true, Dropped: true, CallShape: true},
+			"violations+dangling+dropped-import+call-shape"},
 		// Lint is appended last (it postdates every combination above) — a
 		// combined case proves it joins onto the tail rather than disturbing
 		// any pre-existing ordering.
@@ -144,8 +142,8 @@ func TestFiredChecksAnyNonViolation(t *testing.T) {
 	if (firedChecks{}).anyNonViolation() {
 		t.Error("zero firedChecks must report nothing fired — it half-gates the clean-path return")
 	}
-	// Every field except Violations must count. Four of them (dangling, dropped,
-	// duplicate, call-shape) are the ONLY record that their check fired, so a
+	// Every field except Violations must count. Three of them (dangling, dropped,
+	// call-shape) are the ONLY record that their check fired, so a
 	// field omitted here makes the hook take the clean path with a real finding
 	// in hand and silently drop the ask. The other three also merge into
 	// `violations`, where len() catches them — their presence here is deliberate
@@ -570,9 +568,8 @@ func TestDangling_RefsQueryError_StrictAdvisory(t *testing.T) {
 
 // TestOpenLatestSnapshot_StoreError_CountsDegraded pins #138: a STORE-LEVEL failure
 // in openLatestSnapshot — here db.List failing because the snapshots table is gone —
-// must be reported as degraded so checkDanglingRefs/checkDuplicateDefs return
-// queryErrs>0, not the silent (nil, 0) that used to make a broken store read as a
-// clean E1/E5 pass. This is the layer above the per-symbol query the F21 test covers.
+// must be reported as degraded so checkDanglingRefs returns queryErrs>0, not the
+// silent (nil, 0) that used to make a broken store read as a clean E1 pass. This is the layer above the per-symbol query the F21 test covers.
 func TestOpenLatestSnapshot_StoreError_CountsDegraded(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitInit(t, repoRoot)
@@ -594,8 +591,5 @@ func TestOpenLatestSnapshot_StoreError_CountsDegraded(t *testing.T) {
 	file := filepath.Join(top, "known.go")
 	if warns, qErrs := checkDanglingRefs(filepath.Dir(file), file, []string{"DoThing"}); qErrs != 1 || warns != nil {
 		t.Errorf("checkDanglingRefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
-	}
-	if warns, qErrs := checkDuplicateDefs(guard.LangGo, filepath.Dir(file), file, []string{"DoThing"}, false); qErrs != 1 || warns != nil {
-		t.Errorf("checkDuplicateDefs on store-level failure: want (nil, 1), got (%v, %d)", warns, qErrs)
 	}
 }

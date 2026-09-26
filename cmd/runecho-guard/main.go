@@ -57,11 +57,6 @@
 //	                            session, so this costs one getenv unless opted in.
 //	                            Hook mode only (pre-commit has no session);
 //	                            language-agnostic; ask-posture, fail-open.
-//	RUNECHO_GUARD_DUPLICATE=1  enable E5 duplicate-symbol guard: ask when an edit
-//	                            introduces a symbol definition whose name is
-//	                            already defined in a different file (per the
-//	                            latest snapshot's symbol index). Default OFF
-//	                            (dogfood gate); ask-posture, fail-open.
 //	RUNECHO_GUARD_RECVMETHOD=1 enable the Go receiver-method check: ask when a
 //	                            method body calls a sibling method that its own
 //	                            receiver type does not have. The receiver is the

@@ -16,11 +16,19 @@ import (
 // the user nothing but RUNECHO_GUARD_SKIP=1 — which is the whole guard, not that
 // check. A check in BOTH would be offered the ignore file it does not consume,
 // which is the defect this file exists to fix.
+//
+// A retired check (retiredChecks) is the one exemption: it can never fire, so
+// it needs no remedy — and offering its dead env var would be a remedy that
+// cannot work, the defect #267 removed.
 func TestEveryCheckHasARemedy(t *testing.T) {
 	for _, name := range checkOrder {
 		_, gated := guardGates[name]
 		additive := name == "violations"
 		switch {
+		case retiredChecks[name]:
+			if gated || additive {
+				t.Errorf("retired check %q still has a remedy — it can never fire", name)
+			}
 		case gated && additive:
 			t.Errorf("check %q is both gated and the additive check — pick one remedy", name)
 		case !gated && !additive:
@@ -117,16 +125,15 @@ func TestNoIgnoreRemedyWithoutTheAdditiveCheck(t *testing.T) {
 // second opinion. Deriving both from one table would restate the claim instead
 // of checking it.
 var gateFuncs = map[string]func() bool{
-	"file-scope":       fileScopeEnabled,
-	"qualified":        qualifiedEnabled,
-	"deps-go":          depQualifiedGoEnabled,
-	"dangling":         danglingEnabled,
-	"dropped-import":   droppedImportEnabled,
-	"duplicate-symbol": duplicateEnabled,
-	"call-shape":       callShapeEnabled,
-	"recv-method":      recvMethodEnabled,
-	"var-type":         varTypeEnabled,
-	"lint":             lintEnabled,
+	"file-scope":     fileScopeEnabled,
+	"qualified":      qualifiedEnabled,
+	"deps-go":        depQualifiedGoEnabled,
+	"dangling":       danglingEnabled,
+	"dropped-import": droppedImportEnabled,
+	"call-shape":     callShapeEnabled,
+	"recv-method":    recvMethodEnabled,
+	"var-type":       varTypeEnabled,
+	"lint":           lintEnabled,
 }
 
 // TestGuardGatesActuallyDisableTheirCheck runs each advertised remedy and watches
@@ -214,17 +221,23 @@ func TestFiredGates_FollowsCheckOrder(t *testing.T) {
 // TestFiredNames_StillBuildsAskReason guards the extraction that made one list
 // serve both callers: #330 freezes decisionRecord.Reason's byte format, so
 // askReason must remain exactly the "+"-join of firedNames, including the
-// all-eleven case and the empty-input fallback.
+// every-live-check case and the empty-input fallback.
 func TestFiredNames_StillBuildsAskReason(t *testing.T) {
 	all := firedChecks{
 		Violations: true, FileScope: true, Qualified: true, DepsGo: true,
-		Dangling: true, Dropped: true, Duplicate: true, CallShape: true,
+		Dangling: true, Dropped: true, CallShape: true,
 		RecvMethod: true, VarType: true, Lint: true,
 	}
-	if got, want := askReason(all), strings.Join(checkOrder, "+"); got != want {
+	var live []string
+	for _, name := range checkOrder {
+		if !retiredChecks[name] {
+			live = append(live, name)
+		}
+	}
+	if got, want := askReason(all), strings.Join(live, "+"); got != want {
 		t.Errorf("askReason(all fired):\n got %q\nwant %q", got, want)
 	}
-	if got, want := strings.Join(all.firedNames(), "+"), strings.Join(checkOrder, "+"); got != want {
+	if got, want := strings.Join(all.firedNames(), "+"), strings.Join(live, "+"); got != want {
 		t.Errorf("firedNames is not checkOrder when everything fires:\n got %q\nwant %q", got, want)
 	}
 	if got := askReason(firedChecks{}); got != "violations" {

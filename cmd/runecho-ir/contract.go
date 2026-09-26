@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/inth3shadows/runecho/internal/contract"
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -324,11 +326,33 @@ func runContractCheck(args []string) int {
 		return ExitOK
 	}
 	for _, p := range out {
-		fmt.Printf("  ! %s\n", p)
+		fmt.Printf("  ! %s\n", displayPath(p))
 	}
 	// Out-of-scope is a finding, not an error: the edit may well be correct.
 	// The non-zero exit exists so this can gate a hook, not to assert a defect.
 	return ExitError
+}
+
+// displayPath renders a repo path for the terminal. changedPaths reads git with
+// -z (#422), so a name reaches here exactly as on disk — including characters
+// git's own quoting used to neutralise. A control character could clear the
+// screen or print a line that reads like this command's own summary; a format
+// character (a bidi override, a zero-width space) could make one path look like
+// another. Any path strconv.Quote would have to escape — an unprintable rune,
+// invalid UTF-8, or a `"` or `\` (so the quoted form of one name can never be
+// read as another name taken literally) — is printed Go-quoted, the shape git's
+// quoting had. An ordinary path, non-ASCII included, prints as-is. Matching
+// still uses the raw path: only the display changes.
+func displayPath(p string) string {
+	if !utf8.ValidString(p) || strings.ContainsAny(p, `"\`) {
+		return strconv.Quote(p)
+	}
+	for _, r := range p {
+		if !strconv.IsPrint(r) {
+			return strconv.Quote(p)
+		}
+	}
+	return p
 }
 
 // resolveCheckContract picks the contract to check against: an explicit --contract
@@ -383,12 +407,17 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 
 // changedPaths returns repo-relative paths that differ from base (or that are
 // modified/untracked in the working tree when base is empty).
+//
+// Every listing uses -z (#422). Without it git C-quotes any path containing a
+// byte >= 0x80, a quote, a backslash or a control character, so a staged
+// café.py came back as the literal `"caf\303\251.py"` and could never match a
+// contract glob. NUL separation also keeps a name's own leading or trailing
+// spaces, which the old per-line TrimSpace removed.
 func changedPaths(root, base string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	add := func(raw []byte) {
-		for _, line := range strings.Split(string(raw), "\n") {
-			p := strings.TrimSpace(line)
+		for _, p := range strings.Split(string(raw), "\x00") {
 			if p == "" || seen[p] {
 				continue
 			}
@@ -402,7 +431,7 @@ func changedPaths(root, base string) ([]string, error) {
 		// this one was cut as though the current work had touched it — on a
 		// branch a day behind master that is pure noise, and it is noise of
 		// exactly the kind that trains a person to ignore the tool.
-		raw, err := gitOutput(root, "diff", "--name-only", base+"...HEAD")
+		raw, err := gitOutput(root, "diff", "--name-only", "-z", base+"...HEAD")
 		if err != nil {
 			return nil, err
 		}
@@ -412,9 +441,9 @@ func changedPaths(root, base string) ([]string, error) {
 	}
 	// Working tree: tracked modifications, staged changes, and untracked files.
 	for _, argv := range [][]string{
-		{"diff", "--name-only"},
-		{"diff", "--name-only", "--cached"},
-		{"ls-files", "--others", "--exclude-standard"},
+		{"diff", "--name-only", "-z"},
+		{"diff", "--name-only", "-z", "--cached"},
+		{"ls-files", "-z", "--others", "--exclude-standard"},
 	} {
 		raw, err := gitOutput(root, argv...)
 		if err != nil {

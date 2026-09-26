@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.60.0] — 2026-09-26
+
+### Changed
+- guard: list contract changed files with -z so non-ASCII names match (#422) (#426)
+
 ## [0.59.0] — 2026-09-26
 
 ### Removed

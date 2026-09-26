@@ -302,6 +302,21 @@ func lintCorpusFiles(t *testing.T, root string) []string {
 	return all
 }
 
+// guardIsolationEnv is every RUNECHO_GUARD_* knob, other than lint and the
+// default-on qualified gate, that changes what one hook invocation runs or
+// decides. Cleared by lintDiffEnv and flagcostNeutralize (flagcost_test.go)
+// so neither harness measures the developer's shell. RUNECHO_GUARD_MAX_AGE is
+// here because a stale-IR advisory changes the output of the run being timed.
+// Sub-knobs (CONTRACT_ONCE, LEARN_N, LEARN_TTL_DAYS) are inert once their
+// parent gate is cleared.
+var guardIsolationEnv = []string{
+	"RUNECHO_GUARD_SKIP", "RUNECHO_GUARD_STRICT", "RUNECHO_GUARD_DANGLING",
+	"RUNECHO_GUARD_DROPPED_IMPORT", "RUNECHO_GUARD_DUPLICATE",
+	"RUNECHO_GUARD_CALLSHAPE", "RUNECHO_GUARD_RECVMETHOD", "RUNECHO_GUARD_VARTYPE",
+	"RUNECHO_GUARD_FILESCOPE", "RUNECHO_GUARD_DEPS_GO",
+	"RUNECHO_GUARD_CONTRACT", "RUNECHO_GUARD_LEARN", "RUNECHO_GUARD_MAX_AGE",
+}
+
 // lintDiffEnv stands up the one git repo + enrolled store every corpus file is
 // driven through, and neutralises every gated check EXCEPT lint. Without that
 // neutralisation an ambient RUNECHO_GUARD_* in the developer's shell (this
@@ -314,13 +329,7 @@ func lintCorpusFiles(t *testing.T, root string) []string {
 // constant across the corpus and only the payload varies.
 func lintDiffEnv(t *testing.T) string {
 	t.Helper()
-	for _, k := range []string{
-		"RUNECHO_GUARD_SKIP", "RUNECHO_GUARD_STRICT", "RUNECHO_GUARD_DANGLING",
-		"RUNECHO_GUARD_DROPPED_IMPORT", "RUNECHO_GUARD_DUPLICATE",
-		"RUNECHO_GUARD_CALLSHAPE", "RUNECHO_GUARD_RECVMETHOD", "RUNECHO_GUARD_VARTYPE",
-		"RUNECHO_GUARD_FILESCOPE", "RUNECHO_GUARD_DEPS_GO",
-		"RUNECHO_GUARD_CONTRACT", "RUNECHO_GUARD_LEARN",
-	} {
+	for _, k := range guardIsolationEnv {
 		t.Setenv(k, "")
 	}
 	// RUNECHO_GUARD_QUALIFIED is the ONE default-on gate: qualifiedEnabled() is

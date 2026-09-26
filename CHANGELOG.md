@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-09-26
+
+### Changed
+- guard: resolve brace-constrained generic function defs and TS lib types (#419) (#433)
+
 ## [0.61.0] — 2026-09-26
 
 ### Changed

@@ -251,10 +251,28 @@ func TestExtractRefs_JS_GenericFuncDefSelfSkipped(t *testing.T) {
 	ls := lines(
 		`function transform<T>(items) {`,
 		`export async function load<A, B>(url) {`,
+		// #419: an object-type constraint the call-side type-arg body can't hold.
+		`function queueOrder<T extends { callsToday: number; total: number }>(`,
+		`  group: (row: T) => number,`,
+		`) {}`,
 	)
 	refs := ExtractRefs(LangJS, ls)
-	if !containsNone(refs, "transform", "load") {
+	if !containsNone(refs, "transform", "load", "queueOrder") {
 		t.Errorf("generic function decls must self-skip, not flag their own name, got %v", refNames(refs))
+	}
+	// ...and must be DEFINITIONS, so a later `queueOrder<Deal>(…)` call resolves.
+	defs := map[string]bool{}
+	for _, d := range ExtractDefs(LangJS, ls) {
+		defs[d] = true
+	}
+	for _, want := range []string{"transform", "load", "queueOrder"} {
+		if !defs[want] {
+			t.Errorf("ExtractDefs missed generic decl %q; got %v", want, defs)
+		}
+	}
+	// A line that merely STARTS with a `function…` identifier defines nothing.
+	for _, d := range ExtractDefs(LangJS, lines(`  functionCount < MAX_FUNCS &&`, `functional(x);`)) {
+		t.Errorf("ExtractDefs admitted %q from a non-declaration line", d)
 	}
 }
 
@@ -647,6 +665,27 @@ func TestExtractRefs_JS_KeywordsSkipped(t *testing.T) {
 	refs := ExtractRefs(LangJS, ls)
 	if !containsNone(refs, "of", "return", "in", "switch", "Date") {
 		t.Errorf("JS keywords/globals should be excluded, got %v", refNames(refs))
+	}
+}
+
+// #419: a class constructor definition reads as a bare call, and lib.es2015
+// types like ReadonlySet sit in annotation position; neither is a reference.
+// A genuinely unknown PascalCase annotation must still be reported.
+func TestExtractRefs_TS_ConstructorAndLibTypesSkipped(t *testing.T) {
+	ls := lines(
+		`class Box {`,
+		`  constructor(private v: number) {}`,
+		`}`,
+		`const seen: ReadonlySet<string> = new Set();`,
+		`const m: ReadonlyMap<string, number> = new Map();`,
+		`const ghost: NotARealType = make();`,
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsNone(refs, "constructor", "ReadonlySet", "ReadonlyMap") {
+		t.Errorf("constructor / TS lib types should be excluded, got %v", refNames(refs))
+	}
+	if !containsAll(refs, "make") {
+		t.Errorf("expected make in refs, got %v", refNames(refs))
 	}
 }
 

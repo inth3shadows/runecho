@@ -585,3 +585,35 @@ func equalStringSlices(a, b []string) bool {
 	}
 	return true
 }
+
+// #419: the regex fallback (used when the subset grammar errors on a file) must
+// see TS generic declarations — a constraint with braces included — or every
+// same-file generic function is reported unresolved by the guard. The mustNot
+// cases pin that the relaxed `[(<]` did not start matching inside identifiers.
+func TestExtractFunctions_GenericFallback(t *testing.T) {
+	src := "function queueOrder<T extends { a: number; b: number }>(\n  x: T,\n): T { return x; }\n" +
+		"export async function load<K>(k: K) {}\n" +
+		"function* gen() {}\n" +
+		"const f = function<T>(x: T) { return x; };\n" +
+		"const g = <T,>(x: T): T => x;\n" +
+		"const d = <T = string>(x: T) => x;\n" +
+		"const msg = \"a function or <null> here\";\n" +
+		"const p = \"call this function before <b>saving</b>\";\n" +
+		"const s2 = \"const q = function noop <\";\nconst a = 1;\nr = a>(b);\n" +
+		"const s = functionality(1);\n" +
+		"const h = functionx(2);\n"
+	got := map[string]bool{}
+	for _, n := range extractFunctions(src) {
+		got[n] = true
+	}
+	for _, want := range []string{"queueOrder", "load", "gen", "f", "g", "d"} {
+		if !got[want] {
+			t.Errorf("fallback missed %q; got %v", want, got)
+		}
+	}
+	for _, not := range []string{"ality", "x", "s", "h", "or", "before", "q", "noop"} {
+		if got[not] {
+			t.Errorf("fallback wrongly matched %q; got %v", not, got)
+		}
+	}
+}

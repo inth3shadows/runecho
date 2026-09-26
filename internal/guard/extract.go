@@ -66,6 +66,8 @@ var jsBuiltins = setOf(
 	"new", "typeof", "instanceof", "in", "of", "void", "delete", "await",
 	"async", "yield", "var", "let", "const", "class", "extends", "super", "import",
 	"export", "from", "as", "with", "debugger", "this",
+	// class member names that read as a bare call at their definition (#419)
+	"constructor",
 	// globals / standard library callables (bare, unqualified)
 	"console", "require", "Object", "Array", "String", "Number", "Boolean",
 	"JSON", "Math", "Promise", "Symbol", "Map", "Set", "WeakMap", "WeakSet",
@@ -238,12 +240,16 @@ func setOf(ss ...string) map[string]struct{} {
 var (
 	reGoDef = regexp.MustCompile(`^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)\s*[(\[]`)
 	rePyDef = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)
-	// The optional `<...>` mirrors reJSCallIdent: a generic function decl
-	// `function transform<T>(x) {` must be captured as a definition, else the
-	// call-side regex (which now bridges the type-arg list) reads the function's
-	// own name as an unresolved call — a self-referential false positive on
-	// ordinary generic TS. Kept in sync with reJSCallIdent's type-arg body.
-	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*(?:<[\w$,.\[\]<>\s]+>)?\s*\(`)
+	// A generic function decl `function transform<T>(x) {` must be captured as a
+	// definition, else the call-side regex (which bridges the type-arg list) reads
+	// the function's own name as an unresolved call — a self-referential false
+	// positive on ordinary generic TS. The type-parameter list is deliberately NOT
+	// matched (do not re-sync it with reJSCallIdent), only its opening `<`: a declaration's constraints can hold `{ a: X; b: Y }`, `|`,
+	// `=` defaults and more that reJSCallIdent's type-arg body rejects, and the
+	// `function` keyword already makes this a definition (#419: a same-file
+	// `function queueOrder<T extends { … }>(` was flagged at every call site).
+	// `\b` after `function` keeps `functionCount < MAX` from defining `Count`.
+	reJSFuncDef = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b\s*\*?\s*([A-Za-z_$][\w$]*)\s*[(<]`)
 	reJSVarDef  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`)
 	// reJSVarDefCont mirrors reJSVarDef but for a SECOND (or later) function/arrow
 	// declarator on the same `const`/`let`/`var` statement (`const a = () => {},
@@ -1280,6 +1286,10 @@ var tsTypeBuiltins = setOf(
 	"Extract", "NonNullable", "ReturnType", "Parameters", "InstanceType",
 	"Awaited", "ReadonlyArray", "ThisType", "Uppercase", "Lowercase",
 	"Capitalize", "Uncapitalize", "Iterable", "Iterator", "AsyncIterable",
+	// lib.es2015+ types missing above (#419)
+	"ReadonlySet", "ReadonlyMap", "ArrayLike", "PromiseLike", "PropertyKey",
+	"ConstructorParameters", "IterableIterator", "AsyncIterator",
+	"AsyncIterableIterator", "Generator", "AsyncGenerator", "NoInfer",
 )
 
 // rePyTupleAssignTargets matches a Python tuple/multiple-assignment LHS list

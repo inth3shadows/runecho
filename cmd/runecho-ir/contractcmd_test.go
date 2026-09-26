@@ -520,3 +520,69 @@ func TestDisplayPath(t *testing.T) {
 		}
 	}
 }
+
+// TestChangedPaths_RenameListsBothSides pins #427: a rename must list its
+// source too, or moving a file out of an out-of-scope directory into scope
+// reads as an in-scope change. Both listing modes, and with a global
+// diff.renames=copies that must not bring detection back.
+func TestChangedPaths_RenameListsBothSides(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(cfg, []byte("[diff]\n\trenames = copies\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	root := contractRepo(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "legacy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"legacy/a.go", "legacy/b.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("package x\n\nfunc F() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "commit", "-q", "-m", "base")
+
+	gitRun(t, root, "checkout", "-q", "-b", "work")
+	gitRun(t, root, "mv", "legacy/a.go", "internal/a.go")
+	gitRun(t, root, "commit", "-q", "-m", "move a")
+	got, err := changedPaths(root, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/a.go", "legacy/a.go"}; !slices.Equal(got, want) {
+		t.Errorf("--base: got %q, want %q (the rename's source is missing)", got, want)
+	}
+
+	gitRun(t, root, "mv", "legacy/b.go", "internal/b.go")
+	got, err = changedPaths(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/b.go", "legacy/b.go"}; !slices.Equal(got, want) {
+		t.Errorf("staged: got %q, want %q (the rename's source is missing)", got, want)
+	}
+}
+
+// TestContractList_HostileContractFileNameIsQuoted pins the stderr half of
+// #427: a contract file that fails to load is named in a warning, and that
+// name is repo content.
+func TestContractList_HostileContractFileNameIsQuoted(t *testing.T) {
+	root := contractRepo(t, map[string]string{"scoped.contract": scopedContract})
+	big := filepath.Join(root, contract.Dir, "big\x1b[2J.contract")
+	if err := os.WriteFile(big, make([]byte, contract.MaxContractBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr := captureOutput(func() {
+		runContractCheck([]string{"--dir", root, "--contract", "scoped"})
+	})
+	if !strings.Contains(stderr, "Warning:") {
+		t.Fatalf("precondition: the oversized contract should warn, stderr = %q", stderr)
+	}
+	if strings.ContainsRune(stderr, 0x1b) {
+		t.Errorf("a raw ESC reached stderr:\n%q", stderr)
+	}
+}

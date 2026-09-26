@@ -72,7 +72,10 @@ func listContracts(contractsDir string) ([]contract.Contract, error) {
 		}
 		c, err := contract.Load(filepath.Join(contractsDir, e.Name()))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			// The error carries the contract file's path, which is repo
+			// content: displayPath keeps a hostile name from driving the
+			// terminal (#427).
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", displayPath(err.Error()))
 			continue
 		}
 		out = append(out, c)
@@ -400,7 +403,7 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	if c.Hash != active.ContentHash {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s changed since activation (%s → %s); checking against the CURRENT file.\n",
-			active.Path, shortHashDisplay(active.ContentHash), shortHashDisplay(c.Hash))
+			displayPath(active.Path), shortHashDisplay(active.ContentHash), shortHashDisplay(c.Hash))
 	}
 	return c, ExitOK
 }
@@ -413,6 +416,11 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 // café.py came back as the literal `"caf\303\251.py"` and could never match a
 // contract glob. NUL separation also keeps a name's own leading or trailing
 // spaces, which the old per-line TrimSpace removed.
+//
+// --no-renames lists both sides of a rename (#427). With detection on, git
+// reports only the destination, so moving a file OUT of an out-of-scope
+// directory into scope read as an in-scope change and the directory it left
+// was never checked.
 func changedPaths(root, base string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
@@ -431,7 +439,7 @@ func changedPaths(root, base string) ([]string, error) {
 		// this one was cut as though the current work had touched it — on a
 		// branch a day behind master that is pure noise, and it is noise of
 		// exactly the kind that trains a person to ignore the tool.
-		raw, err := gitOutput(root, "diff", "--name-only", "-z", base+"...HEAD")
+		raw, err := gitOutput(root, "diff", "--name-only", "-z", "--no-renames", base+"...HEAD")
 		if err != nil {
 			return nil, err
 		}
@@ -441,8 +449,8 @@ func changedPaths(root, base string) ([]string, error) {
 	}
 	// Working tree: tracked modifications, staged changes, and untracked files.
 	for _, argv := range [][]string{
-		{"diff", "--name-only", "-z"},
-		{"diff", "--name-only", "-z", "--cached"},
+		{"diff", "--name-only", "-z", "--no-renames"},
+		{"diff", "--name-only", "-z", "--no-renames", "--cached"},
 		{"ls-files", "-z", "--others", "--exclude-standard"},
 	} {
 		raw, err := gitOutput(root, argv...)

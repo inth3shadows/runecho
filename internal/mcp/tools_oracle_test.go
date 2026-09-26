@@ -509,6 +509,43 @@ func TestOracleStatusAndHealth(t *testing.T) {
 	if h["repo_count"].(float64) != 1 {
 		t.Errorf("repo_count = %v, want 1", h["repo_count"])
 	}
+	repos, ok := h["repos"].([]any)
+	if !ok {
+		t.Fatalf("health repos = %v, want a list", h["repos"])
+	}
+	if len(repos) != 1 || repos[0] != name {
+		t.Errorf("health repos = %v, want [%q]", repos, name)
+	}
+}
+
+// TestOracleRegisterAnnotations pins the Glama-TDQS fix (#429): all six oracle
+// tools are read-only, idempotent, and never touch the network, so every one
+// must advertise the same MCP tool annotations.
+func TestOracleRegisterAnnotations(t *testing.T) {
+	_, _, db := newOracleRepo(t)
+	o := NewOracle(db, "")
+	s := NewServer("test", "0.0")
+	o.Register(s)
+
+	want := []string{"structure", "diff", "hash", "status", "health", "locate"}
+	for _, name := range want {
+		tool, ok := s.tools[name]
+		if !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+		if tool.Annotations == nil {
+			t.Fatalf("tool %q has no annotations", name)
+		}
+		if tool.Annotations["readOnlyHint"] != true {
+			t.Errorf("tool %q readOnlyHint = %v, want true", name, tool.Annotations["readOnlyHint"])
+		}
+		if tool.Annotations["idempotentHint"] != true {
+			t.Errorf("tool %q idempotentHint = %v, want true", name, tool.Annotations["idempotentHint"])
+		}
+		if tool.Annotations["openWorldHint"] != false {
+			t.Errorf("tool %q openWorldHint = %v, want false", name, tool.Annotations["openWorldHint"])
+		}
+	}
 }
 
 func TestOracleDiffDetectsDrift(t *testing.T) {

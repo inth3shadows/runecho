@@ -148,7 +148,7 @@ speaks newline-delimited JSON-RPC 2.0 (`initialize`, `tools/list`, `tools/call`)
 | `diff` | `repo`, optional `a`+`b` (snapshot ids) or `since` (label) + `session` | Structural drift; default is latest snapshot vs live |
 | `hash` | `repo` | Deterministic root hash + file count |
 | `status` | `repo` | last-indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap |
-| `health` | — | Schema version, live integrity check, repo count, db path |
+| `health` | — | Schema version, live integrity check, repo count + names, db path |
 | `locate` | `repo`, optional `symbol` + `kind` + `offset` | Symbol → `file:line` (+ short body hash). A named lookup matches by exact name, prefix, or last dotted segment and searches every kind, so zero matches is definitive; omitting `symbol` lists all (functions+classes by default, capped — page with `offset`/`next_offset`) |
 
 A `diff` with explicit `a`/`b` rejects snapshot ids that belong to a different

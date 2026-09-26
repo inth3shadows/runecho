@@ -27,3 +27,4 @@
 TestFileScopeFPSmoke: opt-in FP smoke harness; runs only with RUNECHO_FPSMOKE=<dir> pointed at a real corpus (internal/guard/filescope_fpsmoke_test.go)
 TestSpikeGoplsOracleVarType: opt-in #323 oracle spike; needs RUNECHO_SPIKE_GOPLS=1 and an executable GOPLS_BIN (internal/guard/oracle_spike_test.go)
 TestSpikePrematureLatency: opt-in #329 spike; needs RUNECHO_SPIKE_PREMATURE_LATENCY=1 and a real decision log (internal/guardstats/premature_latency_spike_test.go)
+TestFlagCost: opt-in PR-L latency harness; runs only with RUNECHO_FLAGCOST_CORPUS=<repo[:repo]> pointed at real repos (cmd/runecho-guard/flagcost_test.go)

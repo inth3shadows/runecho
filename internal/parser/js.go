@@ -48,15 +48,24 @@ var (
 	importCJSRegex = regexp.MustCompile(`require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 
 	// Function declarations
-	// Matches: function name(...) or async function name(...)
-	funcDeclRegex = regexp.MustCompile(`(?:^|\s)(?:async\s+)?function\s+(\w+)\s*\(`)
-	// Matches: const/let/var name = function(...) or name = async function(...)
-	funcExprRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\s*\(`)
+	// Matches: function name(...) or async function name(...), and the TS generic
+	// form function name<T extends { a: X }>(...) (#419: every generic declaration
+	// vanished whenever the file hit this fallback). The type list must be followed
+	// by `(`: this input still holds strings and JSX text, where a bare `<` after
+	// `function word` (`"a function or <null>"`) would index a fake symbol. The
+	// list may not hold a quote or newline, so it can't run out of a string to a
+	// later unrelated `>(`; a multi-line type list is missed (a false positive,
+	// the safe direction) rather than risking a phantom definition.
+	funcDeclRegex = regexp.MustCompile(`(?:^|\s)(?:async\s+)?function\b\s*\*?\s*(\w+)\s*(?:<[^()"'\x60\n]*?>\s*)?\(`)
+	// Matches: const/let/var name = function(...) or name = async function<T>(...)
+	funcExprRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\b\s*\*?\s*(?:\w+\s*)?(?:<[^()"'\x60\n]*?>\s*)?\(`)
 	// Matches: const/let/var name = (...) => or name = async (...) =>
 	// The optional `(?:\s*:\s*[^=]+)?` tolerates a TS return-type annotation
 	// between the parameter list and `=>` (`(x: T): R => ...`) — `[^=]` can
 	// never consume into the arrow's own `=`, so it can't overrun into `=>`.
-	arrowFuncRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*(?:\s*:\s*[^=]+)?\s*=>`)
+	// The optional `<…>` admits a generic arrow (`<T,>(x: T) =>`, `<T = X>(…) =>`);
+	// it may hold `=` but never `=>`, so it can't run into the arrow itself.
+	arrowFuncRegex = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:<(?:[^=]|=[^>])*?>\s*)?(?:\([^)]*\)|[\w]+)\s*(?:\s*:\s*[^=]+)?\s*=>`)
 
 	// Class declarations
 	// Matches: class Name or export class Name or export default class Name

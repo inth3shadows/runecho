@@ -30,42 +30,57 @@ func NewOracle(db *snapshot.DB, dbPath string) *Oracle {
 	return &Oracle{db: db, dbPath: dbPath}
 }
 
+// oracleAnnotations is applied to every oracle tool: all six only ever read the
+// local store or the live repo on disk, never write, and never touch the
+// network, so the same MCP tool-annotation hints hold for all of them.
+var oracleAnnotations = map[string]any{
+	"readOnlyHint":   true,
+	"idempotentHint": true,
+	"openWorldHint":  false,
+}
+
 // Register wires the oracle's tools onto the server.
 func (o *Oracle) Register(s *Server) {
 	s.Register(Tool{
 		Name:        "structure",
 		Description: "Deterministic structure (files + symbols) of an enrolled repo's current code. Use to ground claims about what functions/types/exports exist. Scope with `paths` globs and pick a `detail` level to keep responses small.",
 		InputSchema: structureSchema(),
+		Annotations: oracleAnnotations,
 		Handler:     o.structure,
 	})
 	s.Register(Tool{
 		Name:        "diff",
-		Description: "Structural drift for an enrolled repo. With a+b (snapshot ids) diffs those snapshots; with `since`=label diffs that snapshot vs live code; default diffs the latest snapshot vs live code.",
+		Description: "Structural drift for an enrolled repo: files and symbols added, removed, or whose body hash changed. With a+b (snapshot ids) diffs those snapshots; with `since`=label diffs that snapshot vs live code; default diffs the latest snapshot vs live code. Errors if the repo is not enrolled.",
 		InputSchema: diffSchema(),
+		Annotations: oracleAnnotations,
 		Handler:     o.diff,
 	})
 	s.Register(Tool{
 		Name:        "hash",
-		Description: "Deterministic root hash + file count of an enrolled repo's current code. Same code → identical hash across machines.",
+		Description: "Deterministic root hash + file count of an enrolled repo's current code. Same code → identical hash across machines. Use to confirm two machines/checkouts hold identical code, or that code changed since a stored hash (compare with `status`'s latest stored hash). Errors if the repo is not enrolled.",
 		InputSchema: repoSchema("name of an enrolled repo"),
+		Annotations: oracleAnnotations,
 		Handler:     o.hash,
 	})
 	s.Register(Tool{
 		Name:        "status",
-		Description: "Per-repo health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap.",
+		Description: "Per-repo health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap. Use to decide whether `structure`/`locate` answers for this repo are fresh (staleness, parse errors, coverage) before relying on them; for the store as a whole use `health`. Errors if the repo is not enrolled.",
 		InputSchema: repoSchema("name of an enrolled repo"),
+		Annotations: oracleAnnotations,
 		Handler:     o.status,
 	})
 	s.Register(Tool{
 		Name:        "health",
-		Description: "Store-wide health: schema version, integrity check, number of enrolled repos, db path.",
+		Description: "Store-wide health: schema version, integrity check, number of enrolled repos, db path. Use once to check the store itself is sound (integrity, schema) or to list what is enrolled; for one repo's freshness use `status`. Takes no arguments.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		Annotations: oracleAnnotations,
 		Handler:     o.health,
 	})
 	s.Register(Tool{
 		Name:        "locate",
 		Description: "Deterministically locate symbols in an enrolled repo: name → file:line (+ short body hash). Pass `symbol` to find a specific definition without grepping (a named lookup searches every kind); omit it to list all (capped, paginate with `offset`) — the unfiltered list defaults to functions+classes. Use this to verify a symbol exists before claiming it does: a zero-match result is definitive (parsed from the live AST), unlike grep, which can miss real symbols (formatting/whitespace variance, multi-line signatures) or hit false positives (comments, strings).",
 		InputSchema: locateSchema(),
+		Annotations: oracleAnnotations,
 		Handler:     o.locate,
 	})
 }
@@ -737,11 +752,22 @@ func (o *Oracle) health(_ json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// ListRepos already orders by name, so repos is sorted with no extra work
+	// here — see internal/snapshot/registry.go.
+	all, err := o.db.ListRepos()
+	if err != nil {
+		return "", err
+	}
+	repos := make([]string, len(all))
+	for i, r := range all {
+		repos[i] = r.Name
+	}
 	return jsonText(map[string]any{
 		"server":         "runecho",
 		"db_path":        o.dbPath,
 		"schema_version": h.SchemaVersion,
 		"integrity":      h.Integrity,
 		"repo_count":     h.RepoCount,
+		"repos":          repos,
 	})
 }

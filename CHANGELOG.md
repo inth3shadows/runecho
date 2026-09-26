@@ -16,6 +16,16 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- mcp: tool annotations (`readOnlyHint`, `idempotentHint`, `openWorldHint`) on all
+  six oracle tools, and `health` now lists enrolled repo names alongside the
+  count (#429).
+
+### Changed
+- mcp: tightened `status`/`health`/`hash`/`diff` tool descriptions with explicit
+  when-to-use guidance so agents pick the right tool without trial and error
+  (#429).
+
 ## [0.61.0] — 2026-09-26
 
 ### Changed

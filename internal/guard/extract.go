@@ -1479,9 +1479,23 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// inIface, because dict literals nest arbitrarily (#289). Reset (seeded, like
 	// open) on a diff-hunk gap, since brace continuity can't be assumed across one.
 	pyBraceDepth := 0
+	// pendingMethod tracks a JS ref whose line opened like a method definition
+	// (`render(` at line start) but whose parameter list did not close on that
+	// line (#431). The ref is emitted normally, in line order and through every
+	// usual filter; pendingMethod only remembers where, and retracts it if the
+	// list turns out to close into a method body (`) {`). A gap, the end of
+	// input, or jsMethodPendingMax lines simply forget it, leaving the ref in
+	// place — a verdict it can't reach never costs a finding.
+	var pendingMethod *jsPendingMethod
+	// prevEndsTernary: the previous code line ended in `?`, so this one may open
+	// a ternary branch — `compute(x) : {}` there is a call followed by the
+	// alternative, not a method with a return type, and must not be read as one.
+	prevEndsTernary := false
 	for i, l := range lines {
 		text := l.Text
 		if i == 0 || l.LineNo != prevNo+1 {
+			pendingMethod = nil
+			prevEndsTernary = false
 			// Start of a contiguous run (the first line, or after a hunk gap):
 			// reset carried state. Seed the string state from the file context
 			// above the run when a seed is available, so a run that opens inside a
@@ -1513,6 +1527,56 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		// stay correct. open threads multi-line string state across lines.
 		scan, braceScan, newOpen := stripLiteralsBraces(lang, text, open)
 		open = newOpen
+		// #431: a class or object-literal method definition (`render(x) {`) is not
+		// a call. methodSkip is the offset of such a definition's name on this
+		// line (-1 for none); methodHead is the offset of a head whose parameter
+		// list runs on past this line, so the verdict waits for the closing `)`.
+		methodSkip, methodHead := -1, -1
+		afterTernary := prevEndsTernary
+		if trimmed := strings.TrimSpace(scan); trimmed != "" {
+			prevEndsTernary = strings.HasSuffix(trimmed, "?")
+		}
+		if lang == LangJS {
+			if pendingMethod != nil {
+				pendingMethod.lines++
+				end, closed := jsParenClose(scan, 0, &pendingMethod.depth)
+				pendingMethod.noteMention(scan[:end], l.LineNo)
+				if !jsParamsPlain(text[:end]) {
+					pendingMethod.tainted = true
+				}
+				if closed {
+					// A wrapped signature closes on a line of its own (`) {`,
+					// `): T {`, or prettier's hugged `}: Props): T {`). A `)` that
+					// closes the count mid-line is more likely a stray one than a
+					// hand-wrapped signature, so it never earns a retract.
+					closeLine := strings.TrimSpace(scan)
+					if !pendingMethod.tainted && (strings.HasPrefix(closeLine, ")") || strings.HasPrefix(closeLine, "}")) &&
+						jsMethodTailOK(scan[end:]) &&
+						jsParamsPlain(text[end:end+strings.IndexByte(scan[end:], '{')]) {
+						refs = pendingMethod.retract(refs, seen)
+					}
+					pendingMethod = nil
+				} else if pendingMethod.lines >= jsMethodPendingMax {
+					pendingMethod = nil
+				}
+			} else if m := reJSMethodHead.FindStringSubmatchIndex(scan); m != nil && !afterTernary {
+				depth := 1
+				if end, closed := jsParenClose(scan, m[1], &depth); !closed {
+					methodHead = m[2]
+					name := scan[m[2]:m[3]]
+					pendingMethod = &jsPendingMethod{
+						name:  name,
+						idx:   -1,
+						depth: depth,
+						word:  regexp.MustCompile(`(?:^|[^\w$])` + regexp.QuoteMeta(name) + `(?:[^\w$]|$)`),
+					}
+					pendingMethod.noteMention(scan[m[3]:], l.LineNo)
+					pendingMethod.tainted = !jsParamsPlain(text[m[1]:])
+				} else if jsMethodTailOK(scan[end:]) && jsParamsPlain(text[m[1]:end+strings.IndexByte(scan[end:], '{')]) {
+					methodSkip = m[2]
+				}
+			}
+		}
 		// pyCtx carries the depth at the START of this line, so every consumer
 		// resolves brace state at the offset of the name it is judging rather than
 		// from one line-start snapshot (#292). braceScan, not scan: an f-string
@@ -1568,6 +1632,9 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			nameStart, nameEnd := idx[2], idx[3]
 			name := scan[nameStart:nameEnd]
 
+			if nameStart == methodSkip {
+				continue // a method definition's own name (#431)
+			}
 			// Skip if preceded by '.' (qualified call), or by an identifier byte
 			// (the match is mid-identifier — this emulates the left `\b` the regex
 			// no longer carries, while still allowing a leading `$` in the name).
@@ -1596,7 +1663,16 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 				continue
 			}
 			seen[name] = struct{}{}
+			if nameStart == methodHead {
+				pendingMethod.idx = len(refs)
+			}
 			refs = append(refs, Ref{Name: name, LineNo: l.LineNo})
+		}
+		if methodHead >= 0 && pendingMethod != nil && pendingMethod.idx < 0 {
+			// The head produced no ref of its own (a builtin such as a wrapped
+			// `if (`, an already-seen name, a head the call regex reads
+			// differently): there is nothing to retract.
+			pendingMethod = nil
 		}
 
 		// High-signal non-call references, kept narrow to protect precision. Import
@@ -1615,6 +1691,203 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		}
 	}
 	return refs
+}
+
+// jsPendingMethod is a possible method-definition head whose parameter list is
+// still open: its name, the index of the ref it produced, the paren depth
+// reached so far, how many lines the list has run on for, and the first later
+// mention of the same name inside the list. seen deduplicates any call OR type
+// reference to that name while the head's ref stands in for it, so on retract
+// the mention has to take the head's place or it is lost.
+type jsPendingMethod struct {
+	name  string
+	idx   int
+	depth int
+	lines int
+	word  *regexp.Regexp
+	later *Ref
+	// tainted: some raw text in the list was not jsParamsPlain, so a paren the
+	// literal stripping hid (behind a quote or `//` inside a regex or JSX
+	// text) may have thrown the depth count off; such a head is never retracted.
+	tainted bool
+}
+
+// noteMention records lineNo as the first later mention of the pending name if
+// s (the part of a line inside the parameter list) contains it as a whole word.
+// Any mention counts, not only a call or type reference: keeping a ref the
+// retract could have dropped costs at most master's behaviour for that name.
+func (p *jsPendingMethod) noteMention(s string, lineNo int) {
+	if p.later == nil && p.word.MatchString(s) {
+		p.later = &Ref{Name: p.name, LineNo: lineNo}
+	}
+}
+
+// retract removes the pending head's ref now that its list has closed into a
+// method body. A later real call to the same name takes its slot instead; with
+// none, the name is forgotten by seen so a call further down is still reported.
+func (p *jsPendingMethod) retract(refs []Ref, seen map[string]struct{}) []Ref {
+	if p.later != nil {
+		refs[p.idx] = *p.later
+		return refs
+	}
+	delete(seen, p.name)
+	return append(refs[:p.idx], refs[p.idx+1:]...)
+}
+
+// jsMethodPendingMax bounds how long a pending head may wait for its parameter
+// list to close. A real signature is rarely longer; past this the head is
+// forgotten and its ref stands, and head detection (off while one is pending)
+// resumes, so a long multi-line call argument can't mask methods below it.
+const jsMethodPendingMax = 40
+
+// reJSMethodHead matches the head of a class or object-literal method definition
+// at the start of a line: optional modifiers, an optional generator `*` or
+// private `#`, the name (group 1), optional type parameters, and the `(` opening
+// the parameter list (the match ends just past it). On its own this is also the
+// head of an ordinary call statement; jsMethodTailOK after the matching `)` is
+// what tells them apart.
+var reJSMethodHead = regexp.MustCompile(`^\s*(?:(?:public|private|protected|static|async|override|readonly|abstract|declare|accessor|get|set)\s+)*\*?\s*#?([A-Za-z_$][\w$]*)\s*(?:<[^()]*>)?\s*\(`)
+
+// jsMethodTailOK reports whether rest, the text after a method head's closing
+// `)`, opens a method body: `{` directly, or a return-type annotation then `{`.
+// `name(args) {` cannot be a call statement, so this shape is a definition
+// whether or not the enclosing `class` line is in the diff.
+//
+// The annotation is checked structurally, not just "anything up to `{`",
+// because a ternary branch opening a line (`compute(x) : fallback({`, where the
+// `?` may sit on a line outside the hunk) has the same `) :` shape, and an
+// expression can end right before a `{` operand in many ways (`x as {`,
+// `show && <p>{`, `yield {`, `a > {`, `function () {`). So the annotation must
+// look like a type, not merely end like one: balanced (), [] and <> (a `<` only
+// directly after a name, so JSX and comparisons fail), no `&&`/`||`/`??`, no
+// `=` outside `=>`, no function/class keyword, not starting with `{` (an object
+// return type, or one nested in generics like `Promise<{ ok: 1 }>`, stays a
+// known false positive) or `<`, not ending in `=>` or an operator keyword.
+// Accepted residuals, each needing absurd code as the ternary alternative:
+// `void {` (`: void` is the commonest return type; `c ? f(x) : void {…}`) and
+// `a<b> {` (`c ? f(x) : a<b>{…}`, a comparison against an object literal).
+func jsMethodTailOK(rest string) bool {
+	t := strings.TrimLeft(rest, " \t")
+	if !strings.HasPrefix(t, ":") {
+		return strings.HasPrefix(t, "{")
+	}
+	brace := strings.IndexByte(t, '{')
+	if brace < 0 {
+		return false
+	}
+	ann := strings.TrimSpace(t[1:brace])
+	if ann == "" || ann[0] == '<' || strings.ContainsAny(ann, ";}") ||
+		strings.HasSuffix(ann, "=>") || reJSExprKeyword.MatchString(ann) ||
+		reJSExprTailKeyword.MatchString(ann) ||
+		strings.Contains(ann, "&&") || strings.Contains(ann, "||") || strings.Contains(ann, "??") {
+		return false
+	}
+	paren, bracket, angle := 0, 0, 0
+	for i := 0; i < len(ann); i++ {
+		switch ann[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '<':
+			if i == 0 || !isWordByte(ann[i-1]) {
+				return false
+			}
+			angle++
+		case '>':
+			if i > 0 && ann[i-1] == '=' {
+				continue // the `=>` of a function type
+			}
+			angle--
+		case '=':
+			if i+1 >= len(ann) || ann[i+1] != '>' {
+				return false
+			}
+		}
+		if paren < 0 || bracket < 0 || angle < 0 {
+			return false
+		}
+	}
+	if paren != 0 || bracket != 0 || angle != 0 {
+		return false
+	}
+	last := ann[len(ann)-1]
+	return isWordByte(last) || last == ')' || last == ']' || last == '>'
+}
+
+// jsParamsPlain reports whether params, RAW text of (part of) a signature, is
+// free of everything the literal stripping can misread: a regex literal (any
+// `/`), JSX (a `<` not directly after a name, where a type argument's sits), a
+// template literal (a backtick: nesting and escapes are not tracked), and any
+// backslash (an escape or a string line continuation). Inside any of them a
+// `)` can close the list early (`row(x, <b>1) {y}</b>)` reads as `row(x, <b>1)
+// {`), or a quote or `//` can make the stripper blank the rest of the line and
+// hide a `(`. Checked on raw text, not the scan, so nothing the stripper
+// blanked can hide one. A real signature holds none of these; a method with a
+// template or regex default parameter just stays a false positive.
+func jsParamsPlain(params string) bool {
+	if strings.ContainsAny(params, "/`\\") {
+		return false
+	}
+	for i := 0; i < len(params); i++ {
+		if params[i] != '<' {
+			continue
+		}
+		if i == 0 || !isWordByte(params[i-1]) {
+			return false
+		}
+		// `return<p>`: JSX glued to a keyword is still JSX, not a type argument.
+		j := i
+		for j > 0 && isWordByte(params[j-1]) {
+			j--
+		}
+		if _, kw := jsKeywordsBeforeJSX[params[j:i]]; kw {
+			return false
+		}
+	}
+	return true
+}
+
+// jsKeywordsBeforeJSX are keywords an expression can follow, so a `<` glued to
+// one (`return<p>`, `class extends<p>` under Babel) opens JSX rather than a type
+// argument list.
+var jsKeywordsBeforeJSX = setOf("return", "yield", "await", "typeof", "void",
+	"case", "in", "of", "delete", "new", "throw", "else", "do", "instanceof", "extends")
+
+// reJSExprKeyword matches the keywords that start an expression able to end
+// right before a `{` (`function () {`, `class {`) — never part of a type.
+var reJSExprKeyword = regexp.MustCompile(`(?:^|[^\w$])(?:function|class)(?:[^\w$]|$)`)
+
+// reJSExprTailKeyword matches an annotation whose last word is an operator
+// keyword awaiting an operand (`x as {`, `yield {`, `'a' in {`): a type never
+// ends that way, an expression whose operand is an object literal does.
+var reJSExprTailKeyword = regexp.MustCompile(`(?:^|[^\w$])(?:as|satisfies|yield|await|typeof|keyof|in|instanceof|new|delete|extends|infer)$`)
+
+// jsParenClose scans s from offset from, carrying the paren depth in *depth
+// (depth counts unclosed `(`), and returns the offset just past the `)` that
+// brings it to zero, with true. It returns false when s ends first, leaving the
+// running depth in *depth for the next line. s is a literal-stripped scan, so
+// parens inside strings and comments are already blanked; regex literals are
+// not, so an escaped character (`/\)/`) is skipped rather than counted.
+func jsParenClose(s string, from int, depth *int) (int, bool) {
+	for i := from; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '(':
+			*depth++
+		case ')':
+			*depth--
+			if *depth == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return len(s), false
 }
 
 // pyCallShapeRedeclarable are builtins a project realistically redeclares, and

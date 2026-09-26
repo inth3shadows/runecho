@@ -2200,3 +2200,167 @@ func TestExtractDefs_PythonOrderIsDeterministic(t *testing.T) {
 		t.Errorf("ExtractDefs = %v, want %v", first, want)
 	}
 }
+
+// #431: a class or object-literal method definition is not a call, whether or
+// not its `class` line is part of the diff — a method added to an existing class
+// arrives without one. The mustFlag half pins that recognising the shape did not
+// start swallowing real calls: a call statement, a multi-line call, a callback
+// block, a call inside the method body, and a later bare call to the method's
+// own name (a method is not a free function; `render()` without `this.` is the
+// hallucination this guard exists for).
+func TestExtractRefs_JS_MethodDefinitionsSkipped(t *testing.T) {
+	ls := lines(
+		`  render(x: number) { return helper(x); }`,
+		`  static make<T>(y: T): T {`,
+		`  async load(): Promise<void> {`,
+		`  pick(): Map<string, Array<number>> | null {`,
+		`  isOk(v: unknown): v is Ok {`,
+		`  kids(): readonly Node[] {`,
+		`  get size() {`,
+		`  #secret(a) {`,
+		`  *items() {`,
+		`  hugged({`,
+		`    a,`,
+		`    b,`,
+		`  }: Props): Result<T> {`,
+		`  queueRender(`,
+		`    group: (row: T) => number,`,
+		`    id: (row: T) => string,`,
+		`  ): (a: T) => number {`,
+		`doThing(x);`,
+		`runLater(`,
+		`  a,`,
+		`);`,
+		`useWidget(() => {`,
+		`  return 1;`,
+		`});`,
+		`render();`,
+		// A ternary branch opening a line is a call, not a method with a
+		// return type — single-line, with a call in the alternative, and deferred.
+		`const v = ok ?`,
+		`  compute(x) : {};`,
+		`const w = ok ?`,
+		`  derive(x) : fallback({`,
+		`  a: 1 });`,
+		`const u = ok ?`,
+		`  settle(`,
+		`    x) : { a: 1 };`,
+		// The `?` above can be outside the hunk: the branch's own shape must
+		// rule it out (a call, an arrow, a function, JSX, an unbalanced paren).
+		`  probe(x) : fallback2({`,
+		`  probe2(x) : (y) => {`,
+		`  probe3(x) : function () {`,
+		`  probe4(x) : <div>{`,
+		`  probe5(x) : y) {`,
+		`  probe6(x) : defaults as {`,
+		`  probe7(x) : defaults satisfies {`,
+		`  probe8(x) : show && <p>{`,
+		`  probe9(x) : yield {`,
+		`  probe10(x) : a > {`,
+		`  probe11(x) : k in {`,
+		// A regex literal's escaped `)` must not close the parameter list.
+		`doWork(/\){/);`,
+	)
+	refs := ExtractRefs(LangJS, ls)
+	if !containsNone(refs, "make", "load", "size", "secret", "items", "queueRender",
+		"pick", "isOk", "kids", "hugged") {
+		t.Errorf("method definitions must not be refs, got %v", refNames(refs))
+	}
+	if !containsAll(refs, "helper", "doThing", "runLater", "useWidget", "render",
+		"compute", "derive", "fallback", "settle", "doWork",
+		"probe", "fallback2", "probe2", "probe3", "probe4", "probe5",
+		"probe6", "probe7", "probe8", "probe9", "probe10", "probe11") {
+		t.Errorf("real calls must still be refs, got %v", refNames(refs))
+	}
+}
+
+// A method head whose parameter list is still open when the hunk ends (or hits a
+// gap) is flushed as a ref, not dropped: without seeing `) {` there is no proof
+// it was a definition.
+func TestExtractRefs_JS_PendingMethodFlushedOnGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: `openCall(`},
+		{LineNo: 2, Text: `  a,`},
+		{LineNo: 9, Text: `const z = 1;`},
+		{LineNo: 20, Text: `tailCall(`},
+	}
+	refs := ExtractRefs(LangJS, ls)
+	if !containsAll(refs, "openCall", "tailCall") {
+		t.Errorf("an unresolved pending head must be flushed as a ref, got %v", refNames(refs))
+	}
+}
+
+// The pending-head path must not change WHAT is reported or WHERE: refs stay in
+// line order with the line of first use, a wrapped keyword head (`if (`,
+// `return (`) never becomes a ref, a head the call regex does not read as a call
+// stays silent however it is wrapped, and a real call to a method's own name
+// inside its parameter list survives the retraction.
+func TestExtractRefs_JS_PendingMethodKeepsOrderAndFilters(t *testing.T) {
+	got := func(src ...string) string {
+		var parts []string
+		for _, r := range ExtractRefs(LangJS, lines(src...)) {
+			parts = append(parts, fmt.Sprintf("%s@%d", r.Name, r.LineNo))
+		}
+		return strings.Join(parts, " ")
+	}
+	cases := []struct {
+		name string
+		src  []string
+		want string
+	}{
+		{"order", []string{`first(`, `  second(),`, `);`}, "first@1 second@2"},
+		{"first line wins", []string{`retry(`, `  () => retry(x),`, `);`}, "retry@1"},
+		{"wrapped if", []string{`  if (`, `    a &&`, `    b`, `  )`, `  {`, `  go1();`, `  }`}, "go1@6"},
+		{"wrapped return", []string{`  return (`, `    <div/>`, `  );`}, ""},
+		// The call regex does not read `fooBar<A | B>(` as a call on one line
+		// either; wrapping it must not make it one.
+		{"union generic wrap", []string{`fooBar<A | B>(`, `  x,`, `);`}, ""},
+		{"self call in params", []string{`  render(`, `    a = render(1),`, `  ) {`}, "render@2"},
+		{"retracted name reported below", []string{`  render(`, `    a,`, `  ) {`, `  }`, `render();`}, "render@5"},
+		// A same-named TYPE in the list is deduplicated by seen while the head
+		// stands in for it; retracting the head must not lose it.
+		{"same-name type in params", []string{`  Config(`, `    c: Config,`, `  ) {`}, "Config@2"},
+		{"same-name type on head line", []string{`  Widget(w: Widget,`, `  ) {`}, "Widget@1"},
+		// A `)` in a regex character class or JSX text inside a multi-line
+		// call's callback must not end the call as if it were a signature.
+		{"regex paren in callback", []string{`handleIt(input, (s) => {`, `  if (/[^)]+$/.test(s)) {`, `    go2();`, `  }`, `});`}, "handleIt@1 go2@3"},
+		// A quote or `//` inside a regex or JSX text makes the stripper blank the
+		// rest of the line, hiding a `(`; the count must not then retract.
+		{"regex quote hides paren", []string{`fooQuote(/'/, function (`, `  x`, `) {`, `  return x;`, `});`}, "fooQuote@1"},
+		{"regex slashes hide paren", []string{`fooSlash(/\/\//g, function (`, `  x`, `) {`, `});`}, "fooSlash@1"},
+		{"jsx apostrophe hides paren", []string{`renderIt(<p>Don't panic</p>, function (`, `  el`, `) {`, `});`}, "renderIt@1"},
+		{"jsx text line starting with paren", []string{`showIt(`, `  <p>`, `    ) {count} left`, `  </p>`, `);`}, "showIt@1"},
+		// Template literals (nested, escaped) and string line continuations are
+		// also misread by the stripper, exposing a `) {` that is really text.
+		{"nested template", []string{"foo(`${`) {`}`);"}, "foo@1"},
+		{"escaped backtick", []string{"note(`\\`) {\\``);"}, "note@1"},
+		{"wrapped template", []string{"codegen(", "  `class X {", "  method(\\`", ") {", "}`,", ");"}, "codegen@1"},
+		{"string continuation", []string{`report(`, `  "abc\`, `) {",`, `);`}, "report@1"},
+		{"string continuation annotated", []string{`report2(`, `  'it is\`, `): Foo {',`, `);`}, "report2@1"},
+		{"jsx glued to return", []string{`foo(x, () => { return<p>`, `) {n}`, `</p> })`}, "foo@1"},
+		{"jsx glued to yield", []string{`gen1(function* () { yield<p>`, `): Foo {n}`, `</p> })`}, "gen1@1"},
+		{"jsx glued to extends", []string{`bar(class extends<p>) {x}</p> {})`}, "bar@1"},
+		{"jsx glued to extends, wrapped", []string{`baz(class extends<p>{`, `}) {x}</p> {})`}, "baz@1"},
+		{"jsx paren on one line", []string{`renderRow(x, <b>1) {y}</b>);`}, "renderRow@1"},
+		{"jsx paren in callback", []string{`renderList(items, (it) =>`, `  <li>1) {it.name}</li>`, `);`}, "renderList@1"},
+	}
+	for _, c := range cases {
+		if g := got(c.src...); g != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, g, c.want)
+		}
+	}
+}
+
+// jsMethodPendingMax: a head whose list never closes is forgotten after the cap,
+// its ref standing, and method detection resumes for the lines below it.
+func TestExtractRefs_JS_PendingMethodCap(t *testing.T) {
+	src := []string{`longCall(`}
+	for i := 0; i < jsMethodPendingMax+2; i++ {
+		src = append(src, `  x,`)
+	}
+	src = append(src, `  later(y) {`)
+	refs := ExtractRefs(LangJS, lines(src...))
+	if !containsAll(refs, "longCall") || !containsNone(refs, "later") {
+		t.Errorf("want longCall kept and later skipped after the cap, got %v", refNames(refs))
+	}
+}

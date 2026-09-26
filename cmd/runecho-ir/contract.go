@@ -73,9 +73,8 @@ func listContracts(contractsDir string) ([]contract.Contract, error) {
 		c, err := contract.Load(filepath.Join(contractsDir, e.Name()))
 		if err != nil {
 			// The error carries the contract file's path, which is repo
-			// content: displayPath keeps a hostile name from driving the
-			// terminal (#427).
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", displayPath(err.Error()))
+			// content (#427).
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", displayText(err.Error()))
 			continue
 		}
 		out = append(out, c)
@@ -107,7 +106,7 @@ func runContractList(args []string) int {
 		if c.Description != "" {
 			line += " — " + c.Description
 		}
-		fmt.Printf("%s  (%d pattern(s))\n", line, len(c.Patterns))
+		fmt.Printf("%s  (%d pattern(s))\n", displayText(line), len(c.Patterns))
 	}
 	return ExitOK
 }
@@ -126,11 +125,11 @@ func runContractShow(args []string) int {
 	if code != ExitOK {
 		return code
 	}
-	fmt.Printf("name:        %s\n", c.Name)
+	fmt.Printf("name:        %s\n", displayText(c.Name))
 	if c.Description != "" {
-		fmt.Printf("description: %s\n", c.Description)
+		fmt.Printf("description: %s\n", displayText(c.Description))
 	}
-	fmt.Printf("path:        %s\n", c.Path)
+	fmt.Printf("path:        %s\n", displayText(c.Path))
 	fmt.Printf("hash:        %s\n", shortHashDisplay(c.Hash))
 	fmt.Println("patterns:")
 	for _, p := range c.Patterns {
@@ -138,7 +137,7 @@ func runContractShow(args []string) int {
 		if p.Negated {
 			prefix = "  - "
 		}
-		fmt.Printf("%s%s\n", prefix, p.Glob)
+		fmt.Printf("%s%s\n", prefix, displayText(p.Glob))
 	}
 	return ExitOK
 }
@@ -358,6 +357,30 @@ func displayPath(p string) string {
 	return p
 }
 
+// displayText is displayPath for text that is not a single path — a message, a
+// contract's name, description or glob, a path inside a sentence. It escapes
+// only what could drive the terminal or disguise the text (an unprintable rune,
+// invalid UTF-8) in place, using strconv.Quote's escapes, and leaves quotes,
+// backslashes and everything printable alone, so an ordinary message — a
+// Windows path included — prints unchanged (#427).
+func displayText(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case !strconv.IsPrint(r):
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
 // resolveCheckContract picks the contract to check against: an explicit --contract
 // name, else the session's active binding.
 func resolveCheckContract(root, dir, name, session string) (contract.Contract, int) {
@@ -395,7 +418,8 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	}
 	c, err := contract.Load(active.Path)
 	if err != nil {
-		return contract.Contract{}, printErr(err)
+		// Carries the stored contract path, which is repo content (#427).
+		return contract.Contract{}, printErr(errors.New(displayText(err.Error())))
 	}
 	// The activation hash is what makes a finding reproducible. If the file has
 	// been edited since, say so rather than silently checking against different
@@ -403,7 +427,7 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 	if c.Hash != active.ContentHash {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s changed since activation (%s → %s); checking against the CURRENT file.\n",
-			displayPath(active.Path), shortHashDisplay(active.ContentHash), shortHashDisplay(c.Hash))
+			displayText(active.Path), shortHashDisplay(active.ContentHash), shortHashDisplay(c.Hash))
 	}
 	return c, ExitOK
 }
@@ -420,7 +444,9 @@ func resolveCheckContract(root, dir, name, session string) (contract.Contract, i
 // --no-renames lists both sides of a rename (#427). With detection on, git
 // reports only the destination, so moving a file OUT of an out-of-scope
 // directory into scope read as an in-scope change and the directory it left
-// was never checked.
+// was never checked. It matters for the --base and --cached listings; the
+// unstaged one only detects renames onto an intent-to-add path (git add -N),
+// and carries the flag so that case lists both sides too.
 func changedPaths(root, base string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}

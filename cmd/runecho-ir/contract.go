@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/inth3shadows/runecho/internal/contract"
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -324,11 +327,31 @@ func runContractCheck(args []string) int {
 		return ExitOK
 	}
 	for _, p := range out {
-		fmt.Printf("  ! %s\n", p)
+		fmt.Printf("  ! %s\n", displayPath(p))
 	}
 	// Out-of-scope is a finding, not an error: the edit may well be correct.
 	// The non-zero exit exists so this can gate a hook, not to assert a defect.
 	return ExitError
+}
+
+// displayPath renders a repo path for the terminal. changedPaths reads git with
+// -z (#422), so a name reaches here exactly as on disk — including any control
+// character, which git's own quoting used to neutralise. A hostile filename
+// could then clear the screen or print a line that reads like this command's
+// own summary. A path that could do either is printed Go-quoted instead (the
+// same shape git's quoting had), which is unambiguous and loses nothing; an
+// ordinary path, non-ASCII included, prints as-is. Matching still uses the raw
+// path: only the display changes.
+func displayPath(p string) string {
+	if !utf8.ValidString(p) {
+		return strconv.Quote(p)
+	}
+	for _, r := range p {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return strconv.Quote(p)
+		}
+	}
+	return p
 }
 
 // resolveCheckContract picks the contract to check against: an explicit --contract

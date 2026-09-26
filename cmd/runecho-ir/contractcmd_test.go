@@ -439,6 +439,7 @@ func TestChangedPaths_UnquotedNames(t *testing.T) {
 	gitRun(t, root, "checkout", "-q", "-b", "work")
 	write("branch café.py")
 	write("trailing space.md ")
+	write(`quote"and\\backslash.md`) // git C-quotes these even with core.quotepath=false
 	gitRun(t, root, "add", "-A")
 	gitRun(t, root, "commit", "-q", "-m", "work")
 
@@ -446,7 +447,7 @@ func TestChangedPaths_UnquotedNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"branch café.py", "trailing space.md "}; !slices.Equal(got, want) {
+	if want := []string{"branch café.py", `quote"and\\backslash.md`, "trailing space.md "}; !slices.Equal(got, want) {
 		t.Errorf("--base: got %q, want %q", got, want)
 	}
 
@@ -462,5 +463,56 @@ func TestChangedPaths_UnquotedNames(t *testing.T) {
 	}
 	if want := []string{"staged ü.go", "tracked é.py", "untracked ñ.txt"}; !slices.Equal(got, want) {
 		t.Errorf("working tree: got %q, want %q", got, want)
+	}
+}
+
+// TestContractCheck_HostileNamesCannotForgeOutput pins the display half of
+// #422. Reading git with -z hands changedPaths raw bytes, so a filename can
+// carry an escape sequence or a newline that git's quoting used to neutralise.
+// Printed raw, one would drive the terminal and the other would add a line
+// that reads exactly like this command's own summary.
+func TestContractCheck_HostileNamesCannotForgeOutput(t *testing.T) {
+	root := contractRepo(t, map[string]string{"scoped.contract": scopedContract})
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "commit", "-q", "-m", "base")
+	forged := "x.py\n  Contract \"scoped\" — 0 out of scope"
+	for _, name := range []string{"evil\x1b[2J.py", forged} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var code int
+	stdout, _ := captureOutput(func() {
+		code = runContractCheck([]string{"--dir", root, "--contract", "scoped"})
+	})
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError (both files are out of scope)", code)
+	}
+	if strings.ContainsRune(stdout, 0x1b) {
+		t.Errorf("a raw ESC reached stdout:\n%q", stdout)
+	}
+	if n := strings.Count(stdout, "\n"); n != 3 {
+		t.Errorf("stdout has %d lines, want 3 (summary + one per file) — a filename broke its line:\n%q", n, stdout)
+	}
+	if !strings.Contains(stdout, `  ! "evil\x1b[2J.py"`) {
+		t.Errorf("hostile name not shown quoted:\n%q", stdout)
+	}
+}
+
+func TestDisplayPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"internal/a.go": "internal/a.go",
+		"café é.py":     "café é.py",
+		"trailing sp ":  "trailing sp ",
+		"a\nb":          `"a\nb"`,
+		"esc\x1b[31m":   `"esc\x1b[31m"`,
+		"nel\u0085x":    `"nel\u0085x"`,
+		"ls\u2028x":     `"ls\u2028x"`,
+		"bad\xffutf8":   `"bad\xffutf8"`,
+	} {
+		if got := displayPath(in); got != want {
+			t.Errorf("displayPath(%q) = %s, want %s", in, got, want)
+		}
 	}
 }

@@ -717,7 +717,9 @@ refuses a vanished root via `requireExistingDir` before any snapshot is written.
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
 concurrency test). `Open` runs `PRAGMA quick_check` and refuses a corrupt or
-newer-than-supported database.
+newer-than-supported database. The read-only paths (`runecho-mcp`, the guard hook,
+`doctor`) use `OpenFast`, which skips that whole-file scan; the `health` tool and
+the writer's next `Open` are where corruption surfaces.
 
 ## Configuration
 

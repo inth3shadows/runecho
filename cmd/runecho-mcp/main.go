@@ -73,8 +73,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// OpenFast, not Open: Open's PRAGMA quick_check reads the whole store before
 	// Serve can answer `initialize`, which cost ~3.2s of CPU on a 1.3 GiB store and
-	// delayed every MCP host's first call (#438). This server only reads, and the
-	// health tool still runs a live quick_check on demand — the guard's precedent.
+	// delayed every MCP host's first call (#438). No tool writes the store (startup
+	// still migrates and chmods, as Open did); the health tool runs a live
+	// quick_check on demand, and runecho-ir's reindex still opens with the full
+	// check, so a corrupt store fails loudly on the writer path within the hour.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "runecho-mcp: open store: %v\n", err)

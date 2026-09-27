@@ -170,7 +170,7 @@ func runArgsWithHome(t *testing.T, home string, args ...string) (int, string) {
 // TestVersionShortCircuitsBeforeOpeningStore is the load-bearing test for the
 // #351 hang fix. RUNECHO_HOME points at a store that CANNOT be opened — the
 // same not-a-dir fixture TestUnopenableStoreExitsNonZero uses to prove a
-// non-zero exit. So if the version check ever moves below snapshot.Open, this
+// non-zero exit. So if the version check ever moves below the store open, this
 // flips from 0 to 1 immediately: the fixture guarantees Open fails if reached.
 func TestVersionShortCircuitsBeforeOpeningStore(t *testing.T) {
 	home := t.TempDir()
@@ -182,7 +182,7 @@ func TestVersionShortCircuitsBeforeOpeningStore(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			code, stdout := runArgsWithHome(t, blocked+"/nested", "runecho-mcp", flag)
 			if code != 0 {
-				t.Errorf("%s against an unopenable store: exit %d, want 0 — the version check reached snapshot.Open", flag, code)
+				t.Errorf("%s against an unopenable store: exit %d, want 0 — the version check reached the store open", flag, code)
 			}
 			if !strings.Contains(stdout, "runecho-mcp ") {
 				t.Errorf("%s: stdout = %q, want it to name the binary and version", flag, stdout)

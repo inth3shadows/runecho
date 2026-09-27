@@ -1,10 +1,13 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // Retention tests for #351. The invariant that matters most is not "N rows
@@ -437,5 +440,39 @@ func TestPruneReindexSnapshots_ChunkSizeIsBounded(t *testing.T) {
 	// near the 5s busy_timeout with no margin.
 	if pruneChunkSize > 100 {
 		t.Errorf("pruneChunkSize = %d; at roughly 30ms per snapshot on a heavy repo that approaches the 5s busy_timeout, which is the lock starvation chunking exists to prevent", pruneChunkSize)
+	}
+}
+
+// TestDiff_DeletedSnapshotErrors: churn and the MCP diff-by-id path read metas,
+// then Diff them in separate statements. If a prune (or an auto-snapshot roll)
+// deletes one in between, the loaders return empty maps for the missing id and
+// the diff would report the whole repo as added — a silently wrong answer. Diff
+// must fail with ErrSnapshotGone instead (#441).
+func TestDiff_DeletedSnapshotErrors(t *testing.T) {
+	db, _ := openTemp(t)
+	repo := enrollForPrune(t, db, "diff-gone")
+	ids := seedReindex(t, db, repo, 3)
+
+	oldest, err := db.GetByID(ids[0])
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	newest, err := db.GetByID(ids[2])
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if _, err := db.Diff(*oldest, *newest); err != nil {
+		t.Fatalf("precondition: Diff of two live snapshots: %v", err)
+	}
+
+	// The meta was read; now the row goes away, as it would mid-churn.
+	if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := db.Diff(*oldest, *newest); !errors.Is(err, ErrSnapshotGone) {
+		t.Errorf("Diff against a pruned snapshot: err = %v, want ErrSnapshotGone", err)
+	}
+	if _, err := db.DiffLive(*oldest, &ir.IR{}); !errors.Is(err, ErrSnapshotGone) {
+		t.Errorf("DiffLive against a pruned snapshot: err = %v, want ErrSnapshotGone", err)
 	}
 }

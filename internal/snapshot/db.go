@@ -127,7 +127,8 @@ func (db *DB) BackupTo(path string) error {
 //
 // Deliberately opt-in and never automatic. A full VACUUM rewrites every live
 // page — order of minutes on a multi-gigabyte store — and needs free disk
-// roughly equal to the file. Putting it in the hourly job would add that spike
+// roughly twice the file: a temporary rebuild plus, in WAL mode, a full copy in
+// the -wal until TruncateWAL runs. Putting it in the hourly job would add that spike
 // to every tick, including the ticks that pruned nothing, which is a worse
 // operational property than the growth it cleans up.
 //

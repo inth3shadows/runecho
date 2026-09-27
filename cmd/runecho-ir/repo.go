@@ -376,18 +376,18 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 // Derived from snapshot.DefaultChurnWindow, the default depth of the only readers
 // that walk history by count: `runecho-ir churn` and truth-trail's churn section
 // (db.List, all labels). Prune deletes a row only when keep newer reindex rows
-// exist, so nothing in the newest N of any label is touched. The +2 is headroom
-// for a churn run that overlaps the hourly `reindex --all --prune`: a new
-// snapshot landing between churn's List and its last Diff must not push a row
-// it already listed out of retention, because Diff reads a deleted id as an
-// empty snapshot, which is a silently wrong answer rather than an error. diff --since=<label>, map --since=, truth-trail's baseline, the
-// guard and MCP status resolve only the newest snapshot. `diff <id-a> <id-b>`
-// (CLI and MCP) accepts any id, so an id older than the retained window fails
-// with "snapshot N not found" — loudly, never a wrong answer.
+// exist, so at rest nothing in the newest N of any label is touched.
 //
-// It was 30 (churn's old n=20 plus headroom) until #441: every reindex snapshot
-// is a full copy of the repo's symbols and refs, so keep multiplies the store
-// size, and 30 had grown it past 1.3 GB.
+// The +2 is headroom, not a guarantee. Reindex rows come from the hourly job and
+// from the post-commit/merge/checkout hooks, so a burst of commits can turn the
+// window over in minutes, and a churn run that overlaps a prune (or an auto
+// snapshot roll) can lose a row it already listed. Diff then fails with
+// ErrSnapshotGone rather than reading the missing id as empty; the headroom just
+// makes that rarer.
+//
+// diff --since=<label>, map --since=, truth-trail's baseline, the guard and MCP
+// status resolve only the newest snapshot. `diff <id-a> <id-b>` (CLI and MCP)
+// accepts any id; one older than the retained window fails with "not found".
 //
 // Count-based rather than age-based on purpose: churn counts snapshots, so an
 // age rule would silently shrink a quiet repo's usable window for a reason
@@ -462,9 +462,9 @@ func runRepoPrune(args []string) int {
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "Warning: vacuum complete, but the WAL checkpoint failed: %v\n", err)
 		case !ok:
-			fmt.Fprintln(os.Stderr, "Warning: vacuum complete, but another runecho process was using the store, so the")
-			fmt.Fprintln(os.Stderr, "WAL was not truncated yet. The space comes back on its own once that process is")
-			fmt.Fprintln(os.Stderr, "done and the store is written again (the next reindex); there is no need to re-run.")
+			fmt.Fprintln(os.Stderr, "Warning: vacuum complete, but another process was using the store, so the WAL was")
+			fmt.Fprintln(os.Stderr, "not truncated yet. It is reclaimed after the next couple of store writes (a reindex")
+			fmt.Fprintln(os.Stderr, "or commit hook); with no scheduled job and no commits it stays until then.")
 		default:
 			fmt.Println("Vacuum complete.")
 		}

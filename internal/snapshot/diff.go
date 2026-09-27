@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +10,30 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/ir"
 )
+
+// ErrSnapshotGone reports that a snapshot was deleted (pruned, or an auto
+// snapshot rolled) after its meta was read. Without it the loaders below return
+// empty maps for a missing id, and the diff reports the whole repo as added or
+// removed — a silently wrong answer rather than an error (#441).
+var ErrSnapshotGone = errors.New("snapshot no longer exists")
+
+// requireSnapshots is checked AFTER the loads, not before: every delete path
+// removes a snapshot's files, symbols, refs and row in one transaction
+// (deleteSnapshotsTx), so a row that still exists once the loads are done
+// proves no delete committed before or between them.
+func (db *DB) requireSnapshots(ids ...int64) error {
+	for _, id := range ids {
+		var one int
+		err := db.conn.QueryRow("SELECT 1 FROM snapshots WHERE id = ?", id).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("snapshot %d: %w", id, ErrSnapshotGone)
+		}
+		if err != nil {
+			return fmt.Errorf("check snapshot %d: %w", id, err)
+		}
+	}
+	return nil
+}
 
 // Diff computes the structural diff between two stored snapshots.
 func (db *DB) Diff(a, b SnapshotMeta) (DiffResult, error) {
@@ -26,6 +52,9 @@ func (db *DB) Diff(a, b SnapshotMeta) (DiffResult, error) {
 	bSymbols, err := db.loadSymbolsBySnapshot(b.ID)
 	if err != nil {
 		return DiffResult{}, fmt.Errorf("load symbols for snapshot %d: %w", b.ID, err)
+	}
+	if err := db.requireSnapshots(a.ID, b.ID); err != nil {
+		return DiffResult{}, err
 	}
 	return computeDiff(a, b, aFiles, bFiles, aSymbols, bSymbols), nil
 }
@@ -47,6 +76,9 @@ func (db *DB) DiffLive(a SnapshotMeta, liveIR *ir.IR) (DiffResult, error) {
 	aSymbols, err := db.loadSymbolsBySnapshot(a.ID)
 	if err != nil {
 		return DiffResult{}, fmt.Errorf("load symbols for snapshot %d: %w", a.ID, err)
+	}
+	if err := db.requireSnapshots(a.ID); err != nil {
+		return DiffResult{}, err
 	}
 
 	bFiles, bSymbols := irToMaps(liveIR)

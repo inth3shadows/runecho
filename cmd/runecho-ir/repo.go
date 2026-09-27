@@ -382,8 +382,9 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 // from the post-commit/merge/checkout hooks, so a burst of commits can turn the
 // window over in minutes, and a churn run that overlaps a prune (or an auto
 // snapshot roll) can lose a row it already listed. Diff then fails with
-// ErrSnapshotGone rather than reading the missing id as empty, and Churn
-// re-lists once. The headroom only makes the prune case rarer.
+// ErrSnapshotGone rather than reading the missing id as empty (an error, not a
+// wrong answer), and Churn re-lists once; diff/map --since do not retry. The
+// headroom only makes the prune case rarer. A consistent read view is #445.
 //
 // diff --since=<label>, map --since=, truth-trail's baseline, the guard and MCP
 // status resolve only the newest snapshot. `diff <id-a> <id-b>` (CLI and MCP)

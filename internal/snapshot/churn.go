@@ -18,7 +18,10 @@ const DefaultChurnWindow = 10
 // The newest listed row is usually the rolling auto snapshot, which every
 // PostToolUse edit deletes and replaces, and the hourly prune can remove the
 // oldest. If one vanishes mid-run, Diff fails with ErrSnapshotGone; re-listing
-// once picks up the replacement, so a concurrent edit costs a retry, not an error.
+// once picks up the replacement, so a single concurrent edit costs a retry. A
+// burst that hits both passes still surfaces the error. Other multi-query
+// readers (diff/map --since, TruthTrail's callers) do not retry; a consistent
+// read view for all of them is #445.
 func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 	report, err := db.churnOnce(repoID, n)
 	if errors.Is(err, ErrSnapshotGone) {
@@ -28,7 +31,8 @@ func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 }
 
 // churnBeforeDiffHook lets a test delete a listed snapshot between List and the
-// diffs, the window a concurrent roll or prune lands in. Always nil in production.
+// diffs, the window a concurrent roll or prune lands in. Always nil in production;
+// a test that sets it must not run in parallel with other Churn callers.
 var churnBeforeDiffHook func()
 
 func (db *DB) churnOnce(repoID int64, n int) (ChurnReport, error) {

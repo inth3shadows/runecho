@@ -31,7 +31,7 @@ type TrailResult struct {
 }
 
 // TruthTrail builds a fused change receipt for repoID using baseline meta and
-// live IR. churnN controls the lookback window (0 → 20). text is prose to
+// live IR. churnN controls the lookback window (0 → 10, matching churn's default). text is prose to
 // check for stale symbol refs; empty string skips that section.
 //
 // stats must come from the same walk that produced liveIR, so the receipt can
@@ -66,7 +66,7 @@ func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, stats ir
 	// 3. Churn context.
 	n := churnN
 	if n <= 0 {
-		n = 20
+		n = 10
 	}
 	churn, err := db.Churn(repoID, n)
 	if err != nil {

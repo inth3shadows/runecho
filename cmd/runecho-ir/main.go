@@ -26,7 +26,7 @@ const (
 //	runecho-ir diff [--since=label | id-a id-b] [--compact] [root]
 //	runecho-ir log [--n=10] [root]
 //	runecho-ir verify [--session=""] [root]
-//	runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]
+//	runecho-ir churn [--n=10] [--min-changes=2] [--compact] [--json] [root]
 //	runecho-ir guard-stats [--days=30] [--top=10] [--json]
 //	runecho-ir fpreport [--days=30] [--top=15] [--gv=V] [--json] [--max-rate=F]
 //	runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]
@@ -121,13 +121,13 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir map [--by-file] [--kind=func|class|export|import] [--dir=<p>] [--since=<label>] [--compact] [--json] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir log [--n=10] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir verify [--session=<id>] [root]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=20] [--min-changes=2] [--compact] [--json] [root]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir churn [--n=10] [--min-changes=2] [--compact] [--json] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir guard-stats [--days=30] [--top=10] [--json]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir fpreport [--days=30] [--top=15] [--gv=V] [--json] [--max-rate=F]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir repo prune [--keep=30] [--repo=<name>] [--dry-run] [--vacuum]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo prune [--keep=10] [--repo=<name>] [--dry-run] [--vacuum]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic [--source=<checkout>]] [--force] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir version-check [--reinstall] [--quiet] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir freshen <git-common-dir>   (scheduled by install --periodic)")

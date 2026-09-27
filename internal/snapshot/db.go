@@ -135,9 +135,18 @@ func (db *DB) BackupTo(path string) error {
 // inserts, so once the write-side dedup and a periodic prune hold the row count
 // flat, the file stops growing on its own. VACUUM is only how you shrink it
 // back down, once, after a backlog has already accumulated.
+//
+// In WAL mode VACUUM writes the rebuilt database into the -wal file, so the
+// space it frees only reaches the filesystem after a checkpoint. On the live
+// store that was an 845 MB WAL beside an 837 MB file (#441). TRUNCATE resets
+// the WAL to zero bytes; if another process is reading, it may not complete,
+// and a later checkpoint finishes the job — so a busy result is not an error.
 func (db *DB) Vacuum() error {
 	if _, err := db.conn.Exec("VACUUM"); err != nil {
 		return fmt.Errorf("vacuum: %w", err)
+	}
+	if _, err := db.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("checkpoint after vacuum: %w", err)
 	}
 	return nil
 }

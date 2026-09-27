@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -273,6 +274,29 @@ func TestVacuum_PreservesData(t *testing.T) {
 	assertNoOrphans(t, db, "Vacuum")
 	if err := db.integrityCheck(); err != nil {
 		t.Errorf("integrity check after VACUUM: %v", err)
+	}
+}
+
+// TestVacuum_TruncatesWAL: in WAL mode VACUUM writes the rebuilt database into
+// the -wal file, so without a checkpoint the "reclaimed" space just moves there —
+// on the live store a vacuum left an 845 MB WAL next to an 837 MB file (#441).
+func TestVacuum_TruncatesWAL(t *testing.T) {
+	db, path := openTemp(t)
+	repo := enrollForPrune(t, db, "vacuum-wal")
+	seedReindex(t, db, repo, 6)
+	if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	if err := db.Vacuum(); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
+	fi, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if fi.Size() != 0 {
+		t.Errorf("WAL is %d bytes after Vacuum, want 0 (checkpoint(TRUNCATE) missing)", fi.Size())
 	}
 }
 

@@ -373,17 +373,21 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 
 // defaultPruneKeep is how many "reindex" snapshots per repo `repo prune` keeps.
 //
-// Chosen against the only consumer that reads snapshot history by depth:
-// `runecho-ir churn` defaults to --n=20 (see runChurn) and walks the last N
-// snapshots by count via db.List. 30 clears that with headroom. The other
-// history readers — diff --since=<label>, truth-trail, map --since= — resolve
-// only the single newest snapshot for a label, so any keep >= 1 is safe for
-// them.
+// Chosen against the only consumers that read snapshot history by depth:
+// `runecho-ir churn` (--n, default 10; see runChurn) and truth-trail's churn
+// section (also 10), which walk the last N snapshots by count via db.List. keep
+// matches that window. The other history readers — diff --since=<label>,
+// truth-trail's baseline, map --since=, the guard and every MCP tool — resolve
+// only the single newest snapshot for a label, so any keep >= 1 is safe for them.
+//
+// It was 30 (churn's old n=20 plus headroom) until #441: every reindex snapshot
+// is a full copy of the repo's symbols and refs, so keep multiplies the store
+// size, and 30 had grown it past 1.3 GB.
 //
 // Count-based rather than age-based on purpose: churn counts snapshots, so an
 // age rule would silently shrink a quiet repo's usable window for a reason
 // unrelated to what anything actually reads.
-const defaultPruneKeep = 30
+const defaultPruneKeep = 10
 
 // runRepoPrune trims "reindex" snapshot history to the newest --keep per repo.
 // Other labels are never touched — see pruneReindexWhere for why.

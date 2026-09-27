@@ -373,12 +373,14 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 
 // defaultPruneKeep is how many "reindex" snapshots per repo `repo prune` keeps.
 //
-// Chosen against the only consumers that read snapshot history by depth:
-// `runecho-ir churn` (--n, default 10; see runChurn) and truth-trail's churn
-// section (also 10), which walk the last N snapshots by count via db.List. keep
-// matches that window. The other history readers — diff --since=<label>,
-// truth-trail's baseline, map --since=, the guard and every MCP tool — resolve
-// only the single newest snapshot for a label, so any keep >= 1 is safe for them.
+// Defined as snapshot.DefaultChurnWindow, the default depth of the only readers
+// that walk history by count: `runecho-ir churn` and truth-trail's churn section
+// (db.List, all labels). keep >= that window is enough: prune deletes a row only
+// when keep newer reindex rows exist, so nothing in the newest N of any label is
+// ever touched. diff --since=<label>, map --since=, truth-trail's baseline, the
+// guard and MCP status resolve only the newest snapshot. `diff <id-a> <id-b>`
+// (CLI and MCP) accepts any id, so an id older than the retained window fails
+// with "snapshot N not found" — loudly, never a wrong answer.
 //
 // It was 30 (churn's old n=20 plus headroom) until #441: every reindex snapshot
 // is a full copy of the repo's symbols and refs, so keep multiplies the store
@@ -387,7 +389,7 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 // Count-based rather than age-based on purpose: churn counts snapshots, so an
 // age rule would silently shrink a quiet repo's usable window for a reason
 // unrelated to what anything actually reads.
-const defaultPruneKeep = 10
+const defaultPruneKeep = snapshot.DefaultChurnWindow
 
 // runRepoPrune trims "reindex" snapshot history to the newest --keep per repo.
 // Other labels are never touched — see pruneReindexWhere for why.
@@ -450,7 +452,19 @@ func runRepoPrune(args []string) int {
 		if err := db.Vacuum(); err != nil {
 			return printErr(err)
 		}
-		fmt.Println("Vacuum complete.")
+		// VACUUM's output sits in the WAL until checkpointed; a reader in another
+		// process can block that, and then the disk space has not come back yet.
+		ok, err := db.TruncateWAL()
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "Warning: vacuum complete, but the WAL checkpoint failed: %v\n", err)
+		case !ok:
+			fmt.Fprintln(os.Stderr, "Warning: vacuum complete, but another process is reading the store, so the WAL")
+			fmt.Fprintln(os.Stderr, "was not truncated and the space is not back yet. Close runecho-mcp sessions and")
+			fmt.Fprintln(os.Stderr, "re-run `runecho-ir repo prune --vacuum`.")
+		default:
+			fmt.Println("Vacuum complete.")
+		}
 	}
 	return ExitOK
 }

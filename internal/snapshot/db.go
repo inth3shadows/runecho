@@ -137,18 +137,32 @@ func (db *DB) BackupTo(path string) error {
 // back down, once, after a backlog has already accumulated.
 //
 // In WAL mode VACUUM writes the rebuilt database into the -wal file, so the
-// space it frees only reaches the filesystem after a checkpoint. On the live
-// store that was an 845 MB WAL beside an 837 MB file (#441). TRUNCATE resets
-// the WAL to zero bytes; if another process is reading, it may not complete,
-// and a later checkpoint finishes the job — so a busy result is not an error.
+// space it frees only reaches the filesystem after TruncateWAL. Kept separate so
+// a checkpoint that cannot finish is reported without calling the (completed)
+// rewrite a failure.
 func (db *DB) Vacuum() error {
 	if _, err := db.conn.Exec("VACUUM"); err != nil {
 		return fmt.Errorf("vacuum: %w", err)
 	}
-	if _, err := db.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return fmt.Errorf("checkpoint after vacuum: %w", err)
-	}
 	return nil
+}
+
+// TruncateWAL checkpoints the whole WAL into the database and resets the -wal
+// file to zero bytes. After a VACUUM the WAL holds a full copy of the store: on
+// the live store `repo prune --vacuum` left an 845 MB WAL beside an 837 MB file
+// (#441).
+//
+// It reports false, with a nil error, when another process holds a read
+// transaction past busy_timeout: SQLite returns busy=1 as a result row, not an
+// error. That is not self-healing: automatic checkpoints are PASSIVE and never
+// truncate, and journal_size_limit only trims the WAL to its cap on a later
+// reset. So the caller must tell the user rather than claim success.
+func (db *DB) TruncateWAL() (bool, error) {
+	var busy, logFrames, checkpointed int
+	if err := db.conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return false, fmt.Errorf("wal checkpoint: %w", err)
+	}
+	return busy == 0, nil
 }
 
 func (db *DB) setPragmas() error {
@@ -167,6 +181,12 @@ func (db *DB) setPragmas() error {
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=NORMAL",
+		// Cap the -wal file's resting size. Without it the WAL never shrinks
+		// below its high-water mark while any connection is open (runecho-mcp
+		// holds one for a whole session), so one large prune or reindex leaves
+		// that much disk behind indefinitely. SQLite trims the WAL to this limit
+		// whenever it resets it after a checkpoint (#441).
+		"PRAGMA journal_size_limit=67108864",
 	} {
 		if _, err := db.conn.Exec(p); err != nil {
 			return fmt.Errorf("pragma %q: %w", p, err)

@@ -644,11 +644,18 @@ the single child-first delete path (issue #13 — never add a second one). Only
 `reindex` is a candidate: `auto` is already capped at one row per repo by
 `RollAutoSnapshot`, and `session-start` / `probe` / manual labels are the
 reference points `diff --since=<label>` and `truth-trail` resolve against, so
-they are exempt. 10 matches `churn`'s default `--n=10` window (and truth-trail's
-churn section); it was 30 until #441, since each reindex snapshot is a full copy
-of the repo's symbols and keep multiplies the store size. The other history readers resolve only the newest snapshot for a label, so any keep
-≥ 1 is safe for them. `--dry-run` and the delete are built from the same
-predicate, so the preview cannot drift from the action.
+they are exempt. The default is `snapshot.DefaultChurnWindow` (10), the depth
+`churn` and truth-trail's churn section read by default; prune never touches a
+row inside the newest N of any label, so the window is always intact. It was 30
+until #441: each reindex snapshot is a full copy of the repo's symbols, so keep
+multiplies the store size. The other history readers resolve only the newest
+snapshot for a label; `diff <id-a> <id-b>` accepts any id, and one older than
+the retained window fails with "not found". `--dry-run` and the delete are built from the same
+predicate, so the preview cannot drift from the action. `--vacuum` rewrites the
+file and then truncates the WAL (VACUUM's output lands there first); if another
+process is reading, it warns that the space is not back yet instead of
+reporting success. `journal_size_limit` (64 MiB) caps the WAL's resting size on
+every path.
 
 The delete is **chunked** — many short transactions rather than one long one.
 Measured on a real 1.3GB store, a single-transaction prune held the write lock

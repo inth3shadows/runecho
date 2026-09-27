@@ -30,8 +30,13 @@ type TrailResult struct {
 	StaleClaims []StaleClaim
 }
 
+// DefaultChurnWindow is how many snapshots `runecho-ir churn` and truth-trail's
+// churn section look back by default. Reindex retention (runecho-ir's
+// defaultPruneKeep) is defined as this value, so the two cannot drift apart.
+const DefaultChurnWindow = 10
+
 // TruthTrail builds a fused change receipt for repoID using baseline meta and
-// live IR. churnN controls the lookback window (0 → 10, matching churn's default). text is prose to
+// live IR. churnN controls the lookback window (0 → DefaultChurnWindow). text is prose to
 // check for stale symbol refs; empty string skips that section.
 //
 // stats must come from the same walk that produced liveIR, so the receipt can
@@ -66,7 +71,7 @@ func TruthTrail(db *DB, repoID int64, meta SnapshotMeta, liveIR *ir.IR, stats ir
 	// 3. Churn context.
 	n := churnN
 	if n <= 0 {
-		n = 10
+		n = DefaultChurnWindow
 	}
 	churn, err := db.Churn(repoID, n)
 	if err != nil {

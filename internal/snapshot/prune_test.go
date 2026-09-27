@@ -3,6 +3,7 @@ package snapshot
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -279,7 +280,7 @@ func TestVacuum_PreservesData(t *testing.T) {
 
 // TestVacuum_TruncatesWAL: in WAL mode VACUUM writes the rebuilt database into
 // the -wal file, so without a checkpoint the "reclaimed" space just moves there —
-// on the live store a vacuum left an 845 MB WAL next to an 837 MB file (#441).
+// on the live store a vacuum left an 845 MB WAL beside an 837 MB file (#441).
 func TestVacuum_TruncatesWAL(t *testing.T) {
 	db, path := openTemp(t)
 	repo := enrollForPrune(t, db, "vacuum-wal")
@@ -291,12 +292,82 @@ func TestVacuum_TruncatesWAL(t *testing.T) {
 	if err := db.Vacuum(); err != nil {
 		t.Fatalf("Vacuum: %v", err)
 	}
+	if fi, err := os.Stat(path + "-wal"); err != nil || fi.Size() == 0 {
+		t.Fatalf("precondition: VACUUM should leave its output in a non-empty WAL (stat err %v)", err)
+	}
+	ok, err := db.TruncateWAL()
+	if err != nil || !ok {
+		t.Fatalf("TruncateWAL = %v, %v; want true, nil with no other readers", ok, err)
+	}
 	fi, err := os.Stat(path + "-wal")
 	if err != nil {
 		t.Fatalf("stat wal: %v", err)
 	}
 	if fi.Size() != 0 {
-		t.Errorf("WAL is %d bytes after Vacuum, want 0 (checkpoint(TRUNCATE) missing)", fi.Size())
+		t.Errorf("WAL is %d bytes after TruncateWAL, want 0", fi.Size())
+	}
+}
+
+// TestTruncateWAL_ReportsBusyReader: SQLite returns a blocked TRUNCATE
+// checkpoint as a busy=1 result row, not an error. If TruncateWAL dropped that
+// row, `repo prune --vacuum` would print "Vacuum complete." while the WAL still
+// held a full copy of the store — which is what happens whenever a runecho-mcp
+// session is reading at the time.
+func TestTruncateWAL_ReportsBusyReader(t *testing.T) {
+	db, path := openTemp(t)
+	repo := enrollForPrune(t, db, "busy-wal")
+	seedReindex(t, db, repo, 1)
+
+	reader, err := OpenFast(path)
+	if err != nil {
+		t.Fatalf("OpenFast reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	// Hold a read transaction open: a result set that has not been fully read
+	// keeps the reader's WAL snapshot pinned.
+	rows, err := reader.conn.Query("SELECT id FROM snapshots")
+	if err != nil {
+		t.Fatalf("reader query: %v", err)
+	}
+	t.Cleanup(func() { rows.Close() })
+	if !rows.Next() {
+		t.Fatal("reader saw no snapshots")
+	}
+
+	// A write after the reader's snapshot leaves frames the checkpoint cannot
+	// reset past while that reader is open.
+	if _, err := db.conn.Exec("UPDATE repos SET last_indexed = 'after-reader' WHERE id = ?", repo); err != nil {
+		t.Fatalf("write after reader: %v", err)
+	}
+	if _, err := db.conn.Exec("PRAGMA busy_timeout=50"); err != nil {
+		t.Fatalf("shorten busy_timeout: %v", err)
+	}
+	ok, err := db.TruncateWAL()
+	if err != nil {
+		t.Fatalf("TruncateWAL: %v (a busy checkpoint must not surface as an error)", err)
+	}
+	if ok {
+		t.Error("TruncateWAL reported success while another connection held a read transaction")
+	}
+}
+
+// TestSetPragmas_CapsWAL: journal_size_limit is per-connection, so it must be in
+// setPragmas for every opener; without it one large prune leaves the WAL at its
+// high-water mark for as long as any runecho process keeps the store open.
+func TestSetPragmas_CapsWAL(t *testing.T) {
+	for name, open := range map[string]func(string) (*DB, error){"Open": Open, "OpenFast": OpenFast} {
+		db, err := open(filepath.Join(t.TempDir(), "history.db"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var limit int64
+		if err := db.conn.QueryRow("PRAGMA journal_size_limit").Scan(&limit); err != nil {
+			t.Fatalf("%s: read journal_size_limit: %v", name, err)
+		}
+		db.Close()
+		if limit != 64<<20 {
+			t.Errorf("%s: journal_size_limit = %d, want %d", name, limit, 64<<20)
+		}
 	}
 }
 

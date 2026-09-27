@@ -196,7 +196,7 @@ func pyFileScope(lines []AddedLine, openSeed func(lineNo int) string, braceDepth
 	for _, n := range ExtractImports(LangPython, lines) {
 		scope[n] = struct{}{}
 	}
-	for _, n := range extractDefsSeeded(LangPython, lines, openSeed, braceDepthSeed) {
+	for _, n := range knownDefs(LangPython, lines, openSeed, braceDepthSeed) {
 		scope[n] = struct{}{}
 	}
 	for n := range LocallyBoundNames(LangPython, lines, defSigDepthSeed) {

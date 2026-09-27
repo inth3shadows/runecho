@@ -87,7 +87,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// unchanged, outside the diff) is not added to known as a definition here
 		// — which would silently suppress Pass 2's now-correct read of it as a
 		// reference. See extractDefsSeeded.
-		for _, def := range extractDefsSeeded(lang, fd.AddedLines, openSeeds[i], braceSeeds[i]) {
+		for _, def := range knownDefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i]) {
 			known[def] = struct{}{}
 		}
 		for _, imp := range ExtractImports(lang, fd.AddedLines) {
@@ -107,7 +107,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// This sees only the added lines here; the hook path additionally folds
 		// whole-file bindings via addInFileDefs for pre-existing binding lines.
 		if lang == LangJS {
-			for _, name := range JSDeclaredNames(fd.AddedLines) {
+			for _, name := range jsDeclaredNamesSeeded(fd.AddedLines, openSeeds[i]) {
 				known[name] = struct{}{}
 			}
 			// Parameters, the JS sibling of the PyParamNames fold below and the
@@ -115,7 +115,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 			// since they shipped. Without this a destructured callback prop
 			// (`function C({onChange}) { … onChange(v) }`) resolves nowhere and
 			// its bare call is reported as a hallucination (#302).
-			for _, name := range JSParamNames(fd.AddedLines) {
+			for _, name := range jsParamNamesSeeded(fd.AddedLines, openSeeds[i]) {
 				known[name] = struct{}{}
 			}
 		}

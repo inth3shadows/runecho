@@ -16,7 +16,9 @@ package guard
 // callers: cmd/runecho-guard's hook path and the compiler-oracle differential in
 // resolve_differential_test.go.
 func FoldInFileDefs(symbols map[string]struct{}, fileLines []AddedLine, lang Lang) {
-	for _, def := range ExtractDefs(lang, fileLines) {
+	// knownDefs, not ExtractDefs: this builds the KNOWN set, so a definition
+	// that is only template-literal text must stay out of it (#430).
+	for _, def := range knownDefs(lang, fileLines, nil, nil) {
 		symbols[def] = struct{}{}
 	}
 	// Imported names (`from pathlib import Path`, `import {readFileSync} …`) are

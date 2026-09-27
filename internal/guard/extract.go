@@ -288,8 +288,52 @@ var (
 // caller folds the result into a set and so could not see it, but ExtractDefs is
 // exported: a golden-output test or any order-sensitive consumer would have
 // flaked about half the time (#296).
+//
+// For JS, ExtractDefs matches the def regexes on the RAW line: its callers
+// (dangling-reference and dropped-import checks, whole-file bound names) want
+// an over-inclusive set, and read fragments that may start inside a literal
+// with no seed to say so. The known-set builders use knownDefs instead (#430).
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
-	return extractDefsSeeded(lang, lines, nil, nil)
+	return extractDefsSeeded(lang, lines, nil, nil, false)
+}
+
+// knownDefs is ExtractDefs for a caller building the KNOWN set, where a
+// definition that is really text inside a JS template literal (`function
+// ghost(` in a code-generation string) would mask a real call to that name —
+// the worst error class. For JS it reads the literal-stripped scan, seeded by
+// openSeed at each contiguous run exactly as extractRefs is (#430). The cost is
+// the stripper's own blind spot: it does not recognise regex literals, so an
+// odd backtick in one (`/[\`*_]/`) opens a phantom template and hides the
+// definitions after it — a false positive, and one JSDeclaredNames already had.
+//
+// The masked read is intersected with the raw one, so masking can only REMOVE
+// names. The same blind spot can also flip template text into "code" (a wrong
+// seed, a phantom backtick), and a name admitted that way would hide a real
+// call in any file of the diff; the intersection keeps every JS known-set read
+// a subset of what the unmasked read produced.
+func knownDefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []string {
+	masked := extractDefsSeeded(lang, lines, openSeed, braceDepthSeed, true)
+	if lang != LangJS {
+		return masked
+	}
+	return intersectNames(masked, extractDefsSeeded(lang, lines, nil, nil, false))
+}
+
+// intersectNames returns the names in a that also occur in b, in a's order —
+// how a seeded or masked JS read is kept from binding anything the plain read
+// did not (#430).
+func intersectNames(a, b []string) []string {
+	inB := make(map[string]struct{}, len(b))
+	for _, n := range b {
+		inB[n] = struct{}{}
+	}
+	var out []string
+	for _, n := range a {
+		if _, ok := inB[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // extractDefsSeeded is ExtractDefs with optional openSeed/braceDepthSeed — Pass
@@ -303,8 +347,9 @@ func ExtractDefs(lang Lang, lines []AddedLine) []string {
 // branch now delegates to defNamesInContext (the same brace-context-aware logic
 // appendConstRefs/extractRefs use) instead of re-matching rePyConstDef on its
 // own; this is a strict superset of the old set (it also picks up chained-
-// assignment targets ExtractDefs never captured), which only ever narrows Pass
-// 2's violation surface, never widens it.
+// assignment targets ExtractDefs never captured). The JS masking (maskJS, see
+// knownDefs) is the deliberate exception: it REMOVES template-text definitions,
+// which can widen Pass 2's violation surface where the stripper misreads.
 //
 // openSeed matters here too, not just braceDepthSeed: without it, a hunk that
 // begins inside a pre-existing docstring has its own local pyOpen tracker start
@@ -313,18 +358,23 @@ func ExtractDefs(lang Lang, lines []AddedLine) []string {
 // extractRefs' correctly-masked one for the exact same hunk (round-3 review
 // finding: Pass 1 and Pass 2 disagreeing on whether a name sits inside an open
 // dict literal). Callers must pass the SAME openSeed they give extractRefs.
-func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []string {
+func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, maskJS bool) []string {
 	var defs []string
 	pyBraceDepth := 0
-	pyOpen := ""
+	// open threads an unterminated multi-line literal across lines — Python's
+	// docstrings for the brace tracker, and (maskJS) JS template literals, so the
+	// def regexes read the stripped scan the way extractRefs does (#430).
+	open := ""
 	prevNo := 0
 	for i, l := range lines {
-		if lang == LangPython && (i == 0 || l.LineNo != prevNo+1) {
+		if i == 0 || l.LineNo != prevNo+1 {
 			if openSeed != nil {
-				pyOpen = openSeed(l.LineNo)
+				open = openSeed(l.LineNo)
 			} else {
-				pyOpen = ""
+				open = ""
 			}
+		}
+		if lang == LangPython && (i == 0 || l.LineNo != prevNo+1) {
 			if braceDepthSeed != nil {
 				pyBraceDepth = braceDepthSeed(l.LineNo)
 			} else {
@@ -345,7 +395,7 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 			// ref-vs-definition; pyBraceDepth advances only afterwards, so the ctx
 			// carries the depth at the START of the line.
 			var braceScan string
-			_, braceScan, pyOpen = stripLiteralsBraces(LangPython, l.Text, pyOpen)
+			_, braceScan, open = stripLiteralsBraces(LangPython, l.Text, open)
 			ctx := pyLineCtx{scan: braceScan, base: pyBraceDepth}
 			// Sorted, not raw map order — see ExtractDefs' contract (#296). Sorting
 			// per line rather than over the whole result keeps line order intact,
@@ -353,11 +403,15 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 			defs = append(defs, slices.Sorted(maps.Keys(defNamesInContext(lang, l.Text, ctx)))...)
 			pyBraceDepth = ctx.depthAtEnd()
 		case LangJS:
-			if m := reJSFuncDef.FindStringSubmatch(l.Text); m != nil {
+			scan := l.Text
+			if maskJS {
+				scan, open = stripLiteralsStateful(LangJS, l.Text, open)
+			}
+			if m := reJSFuncDef.FindStringSubmatch(scan); m != nil {
 				defs = append(defs, m[1])
-			} else if m := reJSVarDef.FindStringSubmatch(l.Text); m != nil {
+			} else if m := reJSVarDef.FindStringSubmatch(scan); m != nil {
 				defs = append(defs, m[1])
-			} else if m := reJSTypeDef.FindStringSubmatch(l.Text); m != nil {
+			} else if m := reJSTypeDef.FindStringSubmatch(scan); m != nil {
 				defs = append(defs, m[1])
 			}
 		}
@@ -604,8 +658,23 @@ func parseJSBindingTarget(s string) []string {
 // EXCLUDED: a parameter's TS type annotation (`ctx: RouteContext`) would leak the
 // type name as a bound symbol and mask a real undefined-type reference.
 func JSDeclaredNames(lines []AddedLine) []string {
+	return jsDeclaredNamesSeeded(lines, nil)
+}
+
+// jsDeclaredNamesSeeded is JSDeclaredNames with the openSeed validate.go's
+// Pass 1 has for a hunk, so a declarator that is only text inside a template
+// literal opened above the hunk is not bound (#430). Intersected with the
+// unseeded read so a seed can only remove names (see knownDefs).
+func jsDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) []string {
+	if openSeed == nil {
+		return jsDeclaredNamesScan(lines, nil)
+	}
+	return intersectNames(jsDeclaredNamesScan(lines, openSeed), jsDeclaredNamesScan(lines, nil))
+}
+
+func jsDeclaredNamesScan(lines []AddedLine, openSeed func(lineNo int) string) []string {
 	var out []string
-	scanStripped(LangJS, lines, func(s string, _ AddedLine) {
+	scanStrippedSeeded(LangJS, lines, openSeed, func(s string, _ AddedLine) {
 		mm := reJSDeclList.FindStringSubmatch(s)
 		if mm == nil {
 			return
@@ -2011,11 +2080,22 @@ func stripLiterals(lang Lang, text string) string {
 // their own loops because they inspect state (comment lines / inPyParen) before
 // stripping.
 func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {
+	scanStrippedSeeded(lang, lines, nil, fn)
+}
+
+// scanStrippedSeeded is scanStripped with an optional openSeed: at the start of
+// each contiguous run the string state is taken from the file context above it
+// rather than assumed closed, so a hunk that begins inside a template literal
+// is read as literal text (#430).
+func scanStrippedSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, fn func(scan string, l AddedLine)) {
 	open := ""
 	prevNo := 0
 	for i, l := range lines {
-		if i > 0 && l.LineNo != prevNo+1 {
+		if i == 0 || l.LineNo != prevNo+1 {
 			open = ""
+			if openSeed != nil {
+				open = openSeed(l.LineNo)
+			}
 		}
 		prevNo = l.LineNo
 		var scan string
@@ -2952,6 +3032,19 @@ var jsFunctionOpen = regexp.MustCompile(`\bfunction\b[^(]*\(`)
 // the additive known set means a genuine hallucination of that name stops being
 // caught, so every ambiguous construct binds nothing rather than guessing.
 func JSParamNames(lines []AddedLine) []string {
+	return jsParamNamesSeeded(lines, nil)
+}
+
+// jsParamNamesSeeded is JSParamNames with a hunk's openSeed, intersected with
+// the unseeded read so a seed can only remove names (see jsDeclaredNamesSeeded).
+func jsParamNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) []string {
+	if openSeed == nil {
+		return jsParamNamesScan(lines, nil)
+	}
+	return intersectNames(jsParamNamesScan(lines, openSeed), jsParamNamesScan(lines, nil))
+}
+
+func jsParamNamesScan(lines []AddedLine, openSeed func(lineNo int) string) []string {
 	var out []string
 	// sigDepth > 0 means a parameter list's parens are open across lines; sig
 	// accumulates the stripped text, exactly as PyParamNames does for a def.
@@ -2964,7 +3057,7 @@ func JSParamNames(lines []AddedLine) []string {
 	typeOpenedBrackets := false // the type head opened a bracket nesting
 	prevNo := 0
 	first := true
-	scanStripped(LangJS, lines, func(s string, l AddedLine) {
+	scanStrippedSeeded(LangJS, lines, openSeed, func(s string, l AddedLine) {
 		// A diff hunk's added lines may be non-contiguous, so no cross-line
 		// state may be assumed to survive a gap. Unlike PyParamNames there is
 		// no seed callback here: this extractor's callers pass whole,

@@ -2364,3 +2364,111 @@ func TestExtractRefs_JS_PendingMethodCap(t *testing.T) {
 		t.Errorf("want longCall kept and later skipped after the cap, got %v", refNames(refs))
 	}
 }
+
+// #430: a declaration that is only TEXT inside a template literal must not
+// enter the known set — it would mask a real call to that name. Defs are read
+// from the same literal-stripped scan extractRefs uses, threading the open
+// template across lines, and seeded when a hunk starts inside one.
+func TestExtractDefs_JS_IgnoresDeclarationsInTemplateLiterals(t *testing.T) {
+	has := func(defs []string, name string) bool {
+		for _, d := range defs {
+			if d == name {
+				return true
+			}
+		}
+		return false
+	}
+	defs := knownDefs(LangJS, lines(
+		"const tpl = `",
+		"function ghost<T extends { a: 1 }>(x: T) {}",
+		"function ghost2(x) {}",
+		"const ghost3 = (x) => x;",
+		"class Ghost4 {}",
+		"`;",
+		"function real(x) {}",
+		"const realArrow = (x) => x;",
+	), nil, nil)
+	for _, n := range []string{"ghost", "ghost2", "ghost3", "Ghost4"} {
+		if has(defs, n) {
+			t.Errorf("%s is template text, not a definition; got %v", n, defs)
+		}
+	}
+	for _, n := range []string{"real", "realArrow"} {
+		if !has(defs, n) {
+			t.Errorf("real definition %s lost; got %v", n, defs)
+		}
+	}
+
+	// A hunk that begins inside a template opened above it: the seed says so.
+	hunk := []AddedLine{{LineNo: 20, Text: "function seeded(x) {}"}, {LineNo: 21, Text: "`;"}, {LineNo: 22, Text: "function after(x) {}"}}
+	seeded := knownDefs(LangJS, hunk, func(int) string { return "`" }, nil)
+	if has(seeded, "seeded") || !has(seeded, "after") {
+		t.Errorf("seeded template: want only after, got %v", seeded)
+	}
+}
+
+// #430 end to end through Run: a hunk that begins inside a template literal
+// opened above it (the seed says so) defines nothing — not by `function`, not by
+// a `const` arrow (JSDeclaredNames), not by a parameter — so the real calls
+// below the closing backtick are reported.
+func TestRun_JS_TemplateTextDefinesNothing(t *testing.T) {
+	fd := FileDiff{
+		Path: "x.ts",
+		AddedLines: []AddedLine{
+			{LineNo: 20, Text: "const ghostv = (x) => x;"},
+			{LineNo: 21, Text: "function ghostf(cbp) {}"},
+			{LineNo: 22, Text: "`;"},
+			{LineNo: 23, Text: "ghostv(); ghostf(); cbp();"},
+		},
+		SeedByLine: map[int]string{20: "`"},
+	}
+	got := map[string]bool{}
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{fd}) {
+		got[v.Symbol] = true
+	}
+	for _, want := range []string{"ghostv", "ghostf", "cbp"} {
+		if !got[want] {
+			t.Errorf("%s is template text above; its call must be reported, got %v", want, got)
+		}
+	}
+}
+
+// ExtractDefs itself stays RAW for JS: the dangling-reference check reads Edit
+// fragments that may start inside a template with no seed, and a masked read
+// would take the fragment's closing backtick for an opening one and hide every
+// definition after it — so a deleted `foo` would go unreported.
+func TestExtractDefs_JS_StaysRawForFragments(t *testing.T) {
+	defs := ExtractDefs(LangJS, TextToAddedLines("  </div>`;\nfunction foo() {}"))
+	if len(defs) != 1 || defs[0] != "foo" {
+		t.Errorf("want [foo] from a fragment that starts mid-template, got %v", defs)
+	}
+}
+
+// A seed can only REMOVE names from the known set, never add them. Here the
+// seed is wrong — the stripper took a backtick inside a regex literal above the
+// hunk (`const re = /[\`]/;`) for an open template — so the hunk's own opening
+// backtick reads as a CLOSE and the template body as code. The seeded read would
+// bind `ghost` (a parameter) and `ghost2` (a destructure) from template text and
+// mask the real calls in b.ts; intersecting with the unseeded read prevents it.
+func TestRun_JS_WrongSeedCannotAddNames(t *testing.T) {
+	a := FileDiff{
+		Path: "a.ts",
+		AddedLines: []AddedLine{
+			{LineNo: 2, Text: "const tpl = `"},
+			{LineNo: 3, Text: "function render(ghost) { return 1; }"},
+			{LineNo: 4, Text: "const [ghost2, setG] = useState();"},
+			{LineNo: 5, Text: "`;"},
+		},
+		SeedByLine: map[int]string{2: "`"},
+	}
+	b := FileDiff{Path: "b.ts", AddedLines: []AddedLine{{LineNo: 1, Text: "ghost(); ghost2();"}}}
+	got := map[string]bool{}
+	for _, v := range Run(map[string]struct{}{"useState": {}}, "", []FileDiff{a, b}) {
+		if v.File == "b.ts" {
+			got[v.Symbol] = true
+		}
+	}
+	if !got["ghost"] || !got["ghost2"] {
+		t.Errorf("a wrong seed bound template text; want ghost and ghost2 reported in b.ts, got %v", got)
+	}
+}

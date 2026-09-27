@@ -289,10 +289,11 @@ var (
 // exported: a golden-output test or any order-sensitive consumer would have
 // flaked about half the time (#296).
 //
-// For JS, ExtractDefs matches the def regexes on the RAW line: its callers
+// For JS and Go, ExtractDefs matches the def regexes on the RAW line: its callers
 // (dangling-reference and dropped-import checks, whole-file bound names) want
 // an over-inclusive set, and read fragments that may start inside a literal
-// with no seed to say so. The known-set builders use knownDefs instead (#430).
+// with no seed to say so. The known-set builders use knownDefs instead (#430,
+// #436); a Go known-set path must not call ExtractDefs directly.
 func ExtractDefs(lang Lang, lines []AddedLine) []string {
 	return extractDefsSeeded(lang, lines, nil, nil, false)
 }
@@ -300,8 +301,13 @@ func ExtractDefs(lang Lang, lines []AddedLine) []string {
 // knownDefs is ExtractDefs for a caller building the KNOWN set, where a
 // definition that is really text inside a JS template literal (`function
 // ghost(` in a code-generation string) would mask a real call to that name —
-// the worst error class. For JS it reads the literal-stripped scan, seeded by
-// openSeed at each contiguous run exactly as extractRefs is (#430). The cost is
+// the worst error class. For JS and Go (a `func Ghost(` inside a raw-string
+// template, #436) it reads the literal-stripped scan, seeded by openSeed at each
+// contiguous run exactly as extractRefs is (#430). Without a seed a hunk is read
+// from a closed state, so one that starts inside a raw string or template takes
+// its closing backtick for an opener and loses the definitions after it — a
+// false positive, never a masked call. For Go the mask also hides a `func` in a
+// multi-line /* */ comment. The JS cost is
 // the stripper's own blind spot: it does not recognise regex literals, so an
 // odd backtick in one (`/[\`*_]/`) opens a phantom template and hides the
 // definitions after it — a false positive, and one JSDeclaredNames already had.
@@ -309,19 +315,19 @@ func ExtractDefs(lang Lang, lines []AddedLine) []string {
 // The masked read is intersected with the raw one, so masking can only REMOVE
 // names. The same blind spot can also flip template text into "code" (a wrong
 // seed, a phantom backtick), and a name admitted that way would hide a real
-// call in any file of the diff; the intersection keeps every JS known-set read
-// a subset of what the unmasked read produced.
+// call in any file of the diff; the intersection keeps every JS and Go
+// known-set read a subset of what the unmasked read produced.
 func knownDefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []string {
 	masked := extractDefsSeeded(lang, lines, openSeed, braceDepthSeed, true)
-	if lang != LangJS {
+	if lang != LangJS && lang != LangGo {
 		return masked
 	}
 	return intersectNames(masked, extractDefsSeeded(lang, lines, nil, nil, false))
 }
 
 // intersectNames returns the names in a that also occur in b, in a's order —
-// how a seeded or masked JS read is kept from binding anything the plain read
-// did not (#430).
+// how a seeded or masked JS/Go read is kept from binding anything the plain read
+// did not (#430, #436).
 func intersectNames(a, b []string) []string {
 	inB := make(map[string]struct{}, len(b))
 	for _, n := range b {
@@ -347,7 +353,7 @@ func intersectNames(a, b []string) []string {
 // branch now delegates to defNamesInContext (the same brace-context-aware logic
 // appendConstRefs/extractRefs use) instead of re-matching rePyConstDef on its
 // own; this is a strict superset of the old set (it also picks up chained-
-// assignment targets ExtractDefs never captured). The JS masking (maskJS, see
+// assignment targets ExtractDefs never captured). The JS/Go masking (mask, see
 // knownDefs) is the deliberate exception: it REMOVES template-text definitions,
 // which can widen Pass 2's violation surface where the stripper misreads.
 //
@@ -358,11 +364,12 @@ func intersectNames(a, b []string) []string {
 // extractRefs' correctly-masked one for the exact same hunk (round-3 review
 // finding: Pass 1 and Pass 2 disagreeing on whether a name sits inside an open
 // dict literal). Callers must pass the SAME openSeed they give extractRefs.
-func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, maskJS bool) []string {
+func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, mask bool) []string {
 	var defs []string
 	pyBraceDepth := 0
 	// open threads an unterminated multi-line literal across lines — Python's
-	// docstrings for the brace tracker, and (maskJS) JS template literals, so the
+	// docstrings for the brace tracker, and (mask) JS template literals and Go raw
+	// strings, so the
 	// def regexes read the stripped scan the way extractRefs does (#430).
 	open := ""
 	prevNo := 0
@@ -384,7 +391,16 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 		prevNo = l.LineNo
 		switch lang {
 		case LangGo:
-			if m := reGoDef.FindStringSubmatch(l.Text); m != nil {
+			scan := l.Text
+			// GoDeclaredNames' fast path: a line with no quote character and no
+			// block-comment opener cannot open, close or contain a literal, so when
+			// none is already open its text is its own scan. This runs on the hook's
+			// whole file for every Go edit (FoldInFileDefs), where a per-line strip
+			// was measured as most of the extractor's budget.
+			if mask && (open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*")) {
+				scan, open = stripLiteralsStateful(LangGo, l.Text, open)
+			}
+			if m := reGoDef.FindStringSubmatch(scan); m != nil {
 				defs = append(defs, m[1])
 			}
 		case LangPython:
@@ -404,7 +420,7 @@ func extractDefsSeeded(lang Lang, lines []AddedLine, openSeed func(lineNo int) s
 			pyBraceDepth = ctx.depthAtEnd()
 		case LangJS:
 			scan := l.Text
-			if maskJS {
+			if mask {
 				scan, open = stripLiteralsStateful(LangJS, l.Text, open)
 			}
 			if m := reJSFuncDef.FindStringSubmatch(scan); m != nil {

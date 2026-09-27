@@ -75,8 +75,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Serve can answer `initialize`, which cost ~3.2s of CPU on a 1.3 GiB store and
 	// delayed every MCP host's first call (#438). No tool writes the store (startup
 	// still migrates and chmods, as Open did); the health tool runs a live
-	// quick_check on demand, and runecho-ir's reindex still opens with the full
-	// check, so a corrupt store fails loudly on the writer path within the hour.
+	// quick_check on demand, as does `runecho-ir doctor`; runecho-ir's CLI and
+	// reindex (hooks, hourly job if installed) and the pre-commit guard still open
+	// with the full check.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "runecho-mcp: open store: %v\n", err)

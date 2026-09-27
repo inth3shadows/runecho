@@ -171,7 +171,7 @@ func runArgsWithHome(t *testing.T, home string, args ...string) (int, string) {
 // #351 hang fix. RUNECHO_HOME points at a store that CANNOT be opened — the
 // same not-a-dir fixture TestUnopenableStoreExitsNonZero uses to prove a
 // non-zero exit. So if the version check ever moves below the store open, this
-// flips from 0 to 1 immediately: the fixture guarantees Open fails if reached.
+// flips from 0 to 1 immediately: the fixture guarantees startup fails if reached.
 func TestVersionShortCircuitsBeforeOpeningStore(t *testing.T) {
 	home := t.TempDir()
 	blocked := home + "/not-a-dir"

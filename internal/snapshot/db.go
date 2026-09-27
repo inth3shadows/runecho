@@ -72,12 +72,13 @@ func Open(path string) (*DB, error) {
 // on-open PRAGMA quick_check integrity scan that Open performs. That scan reads
 // the whole file (~137ms on a 48 MiB store, ~3.2s on a 1.3 GiB one) — acceptable
 // for the writer/CLI, but far too costly for the PreToolUse guard hook, which fires
-// on every edit, and for runecho-mcp, whose `initialize` waits on it (#438). Both
-// only read. Integrity is the generator's responsibility on write. A read over a
-// corrupt page usually yields a query error (the guard degrades to defer), but
-// damage quick_check would catch can also make a read silently skip rows — the
-// accepted cost, bounded by the writer's next full Open. Pragmas and migration
-// (both cheap when the schema is current) are still applied.
+// on every edit, for runecho-mcp, whose `initialize` waits on it (#438), and for
+// the PostToolUse refresh, which writes auto-snapshots without the scan. A read
+// over a corrupt page usually yields a query error (the guard degrades to defer),
+// but damage quick_check would catch can also make a read silently skip rows —
+// the accepted cost. The scan still runs in runecho-ir's CLI and reindex and the
+// pre-commit guard (all via Open), and on demand in Health (doctor, MCP health).
+// Pragmas and migration (both cheap when the schema is current) are still applied.
 func OpenFast(path string) (*DB, error) {
 	conn, err := sql.Open("sqlite", storeDSN(path))
 	if err != nil {

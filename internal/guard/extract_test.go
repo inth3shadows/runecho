@@ -2472,3 +2472,96 @@ func TestRun_JS_WrongSeedCannotAddNames(t *testing.T) {
 		t.Errorf("a wrong seed bound template text; want ghost and ghost2 reported in b.ts, got %v", got)
 	}
 }
+
+// #436: the Go sibling of #430. A `func Ghost(` that is only text inside a raw
+// string (a code-generation template) must not enter the known set.
+func TestKnownDefs_Go_IgnoresDeclarationsInRawStrings(t *testing.T) {
+	defs := knownDefs(LangGo, lines(
+		"var tpl = `",
+		"func Ghost() {}",
+		"`",
+		"func Real() {}",
+	), nil, nil)
+	if len(defs) != 1 || defs[0] != "Real" {
+		t.Errorf("want only Real, got %v", defs)
+	}
+	// ExtractDefs stays raw for its over-inclusive callers.
+	if raw := ExtractDefs(LangGo, lines("var tpl = `", "func Ghost() {}", "`")); len(raw) != 1 || raw[0] != "Ghost" {
+		t.Errorf("ExtractDefs must stay raw for Go, got %v", raw)
+	}
+}
+
+// A Go hunk that begins inside a raw string opened above it binds nothing from
+// the string body — not a func, not a short declaration, not a parameter.
+func TestRun_Go_RawStringTextDefinesNothing(t *testing.T) {
+	fd := FileDiff{
+		Path: "x.go",
+		AddedLines: []AddedLine{
+			{LineNo: 20, Text: "func Ghost(cbp func()) {}"},
+			{LineNo: 21, Text: "ghostv := func() {}"},
+			{LineNo: 22, Text: "`"},
+			{LineNo: 23, Text: "func use() { Ghost(nil); ghostv(); cbp() }"},
+		},
+		SeedByLine: map[int]string{20: "`"},
+	}
+	got := map[string]bool{}
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{fd}) {
+		got[v.Symbol] = true
+	}
+	for _, want := range []string{"Ghost", "ghostv", "cbp"} {
+		if !got[want] {
+			t.Errorf("%s is raw-string text above; its call must be reported, got %v", want, got)
+		}
+	}
+}
+
+// The Go stripper is exact (no regex literals, runes and comments handled), so
+// a wrong seed is not expected in practice; the guarantee pinned here is the
+// structural one: whatever the seed, a seeded Go known-set read is a subset of
+// the unseeded read, i.e. of what the guard produced before #436.
+func TestKnownSet_Go_SeedCanOnlyRemoveNames(t *testing.T) {
+	hunk := []AddedLine{
+		{LineNo: 2, Text: "var tpl = `"},
+		{LineNo: 3, Text: "func Ghost(ghostp int) {}"},
+		{LineNo: 4, Text: "ghostv := 1"},
+		{LineNo: 5, Text: "`"},
+		{LineNo: 6, Text: "func Real() { realv := 2 }"},
+	}
+	subset := func(what string, a, b []string) {
+		inB := map[string]bool{}
+		for _, n := range b {
+			inB[n] = true
+		}
+		for _, n := range a {
+			if !inB[n] {
+				t.Errorf("%s: seeded read added %q not in the unseeded read %v", what, n, b)
+			}
+		}
+	}
+	// The states the Go seed table can actually produce: closed, inside a raw
+	// string, inside a block comment (the stripper tracks its closer, "*/").
+	for _, seed := range []string{"", "`", "*/"} {
+		fn := func(int) string { return seed }
+		subset("knownDefs/"+seed, knownDefs(LangGo, hunk, fn, nil), ExtractDefs(LangGo, hunk))
+		subset("goDeclaredNames/"+seed, goDeclaredNamesSeeded(hunk, fn), GoDeclaredNames(hunk))
+	}
+}
+
+// The hook folds the whole pre-edit file through FoldInFileDefs, read from line
+// 1 with no seed: a func that is only raw-string or block-comment text stays out
+// of the known set, a real one stays in.
+func TestFoldInFileDefs_Go_MasksRawStringsAndComments(t *testing.T) {
+	known := map[string]struct{}{}
+	FoldInFileDefs(known, TextToAddedLines("package p\n"+
+		"var tpl = `\nfunc GhostTpl() {}\n`\n"+
+		"/*\nfunc GhostComment() {}\n*/\n"+
+		"func Real() {}\n"), LangGo)
+	for _, ghost := range []string{"GhostTpl", "GhostComment"} {
+		if _, ok := known[ghost]; ok {
+			t.Errorf("%s is literal/comment text, must not be known", ghost)
+		}
+	}
+	if _, ok := known["Real"]; !ok {
+		t.Errorf("real func lost from the whole-file fold: %v", known)
+	}
+}

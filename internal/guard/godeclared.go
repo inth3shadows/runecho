@@ -71,11 +71,34 @@ var (
 // any package-level declaration existing, which is why FoldInFileDefs folds them
 // into the known set before the additive check runs.
 func GoDeclaredNames(fileLines []AddedLine) []string {
+	return goDeclaredNamesScan(fileLines, nil)
+}
+
+// goDeclaredNamesSeeded is GoDeclaredNames for a diff hunk with validate.go's
+// openSeed, so a declaration that is only text inside a raw string opened above
+// the hunk is not bound (#436). Intersected with the unseeded read so a seed
+// can only remove names, never add them (see knownDefs).
+func goDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) []string {
+	if openSeed == nil {
+		return goDeclaredNamesScan(lines, nil)
+	}
+	return intersectNames(goDeclaredNamesScan(lines, openSeed), goDeclaredNamesScan(lines, nil))
+}
+
+// goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed it is
+// exactly the historical whole-file scan (no reset at line gaps); with one, the
+// literal state is taken from the seed at the start of every contiguous run.
+func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string) []string {
 	seen := make(map[string]struct{})
 	open := ""
 	inVarBlock := false
 	blockDepth := 0
-	for _, l := range fileLines {
+	prevNo := 0
+	for i, l := range fileLines {
+		if openSeed != nil && (i == 0 || l.LineNo != prevNo+1) {
+			open = openSeed(l.LineNo)
+		}
+		prevNo = l.LineNo
 		// Literal stripping allocates a fresh byte slice per line, and it is the
 		// single largest cost in this pass. A line with no quote character cannot
 		// open, close or contain a literal, so when no multi-line literal is

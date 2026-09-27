@@ -132,7 +132,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// were affected: every Edit hunk, and every Write creating a new Go file
 		// (where readFileLines returns nil and nothing is folded at all).
 		if lang == LangGo {
-			for _, name := range GoDeclaredNames(fd.AddedLines) {
+			for _, name := range goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i]) {
 				known[name] = struct{}{}
 			}
 		}

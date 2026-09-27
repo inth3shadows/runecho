@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.65.0] — 2026-09-27
+
+### Changed
+- guard: a Go declaration inside a raw string no longer masks a real call (#436) (#439)
+
 ## [0.64.0] — 2026-09-27
 
 ### Changed

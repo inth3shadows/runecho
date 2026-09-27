@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-09-27
+
+### Changed
+- guard: a JS declaration that is only template-literal text no longer masks a real call (#430) (#435)
+
 ## [0.63.0] — 2026-09-26
 
 ### Changed

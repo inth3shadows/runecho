@@ -71,7 +71,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	dbPath := filepath.Join(dir, "history.db")
 
-	db, err := snapshot.Open(dbPath)
+	// OpenFast, not Open: Open's PRAGMA quick_check reads the whole store before
+	// Serve can answer `initialize`, which cost ~3.2s of CPU on a 1.3 GiB store and
+	// delayed every MCP host's first call (#438). This server only reads, and the
+	// health tool still runs a live quick_check on demand — the guard's precedent.
+	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "runecho-mcp: open store: %v\n", err)
 		return 1

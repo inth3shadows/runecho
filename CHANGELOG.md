@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-09-27
+
+### Changed
+- guard: recognise JS regex literals in the literal stripper (#437) (#440)
+
 ## [0.65.0] — 2026-09-27
 
 ### Changed

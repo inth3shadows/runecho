@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.1] — 2026-09-27
+
+### Changed
+- runecho-mcp: open the store without the full-file quick_check (#438) (#442)
+
 ## [0.66.0] — 2026-09-27
 
 ### Changed

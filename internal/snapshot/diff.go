@@ -17,10 +17,12 @@ import (
 // removed — a silently wrong answer rather than an error (#441).
 var ErrSnapshotGone = errors.New("snapshot no longer exists")
 
-// requireSnapshots is checked AFTER the loads, not before: every delete path
-// removes a snapshot's files, symbols, refs and row in one transaction
-// (deleteSnapshotsTx), so a row that still exists once the loads are done
-// proves no delete committed before or between them.
+// requireSnapshots is checked AFTER the loads, not before. Two premises make a
+// surviving row proof that no delete committed before or between them: every
+// delete path removes a snapshot's files, symbols, refs and row in one
+// transaction (deleteSnapshotsTx), and snapshots.id is AUTOINCREMENT, so a
+// rolled auto snapshot's replacement never reuses the deleted id. A table
+// rebuild that dropped AUTOINCREMENT would break this silently.
 func (db *DB) requireSnapshots(ids ...int64) error {
 	for _, id := range ids {
 		var one int

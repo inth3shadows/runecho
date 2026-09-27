@@ -476,3 +476,35 @@ func TestDiff_DeletedSnapshotErrors(t *testing.T) {
 		t.Errorf("DiffLive against a pruned snapshot: err = %v, want ErrSnapshotGone", err)
 	}
 }
+
+// TestChurn_RetriesOnSnapshotGone: Churn's first pass hits a vanished id (the
+// hook fires between List and Diff, as a concurrent edit's auto-snapshot roll
+// would), and the re-list must succeed instead of surfacing the error.
+func TestChurn_RetriesOnSnapshotGone(t *testing.T) {
+	db, _ := openTemp(t)
+	repo := enrollForPrune(t, db, "churn-retry")
+	ids := seedReindex(t, db, repo, 4)
+
+	fired := false
+	churnBeforeDiffHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+			t.Errorf("prune in hook: %v", err)
+		}
+	}
+	t.Cleanup(func() { churnBeforeDiffHook = nil })
+
+	report, err := db.Churn(repo, 10)
+	if err != nil {
+		t.Fatalf("Churn: %v (want a successful retry after the listed row %d was pruned)", err, ids[0])
+	}
+	if !fired {
+		t.Fatal("hook never fired; the test did not exercise the race")
+	}
+	if report.SnapshotCount != 2 {
+		t.Errorf("SnapshotCount = %d after retry, want 2 (the survivors)", report.SnapshotCount)
+	}
+}

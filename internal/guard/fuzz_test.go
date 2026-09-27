@@ -34,6 +34,19 @@ func FuzzStripLiteralsStateful(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(uint8(0), s)
 	}
+	// #437 regex-literal and JSX-slash shapes, seeded under every language index
+	// so the JS branch (whatever its slot in fuzzLangs) is exercised.
+	for i := range fuzzLangs {
+		for _, s := range []string{
+			"const re = /[`'\"]/g; go()\nnext()",
+			`if (/^https?:\/\//.test(u)) x = a / b / c`,
+			`return /[/\]]+$/i.test(s) ? <p>/api/users</p> : <Foo x={y} />`,
+			`x = i++ / 2 / j; y = /\(/; z = /unterminated`,
+			"/'/.test(s) && `t${/`/}`",
+		} {
+			f.Add(uint8(i), s)
+		}
+	}
 	f.Fuzz(func(t *testing.T, langIdx uint8, text string) {
 		lang := fuzzLangs[int(langIdx)%len(fuzzLangs)]
 		open := ""

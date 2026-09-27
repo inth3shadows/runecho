@@ -1375,6 +1375,9 @@ var tsTypeBuiltins = setOf(
 	"ReadonlySet", "ReadonlyMap", "ArrayLike", "PromiseLike", "PropertyKey",
 	"ConstructorParameters", "IterableIterator", "AsyncIterator",
 	"AsyncIterableIterator", "Generator", "AsyncGenerator", "NoInfer",
+	// surfaced by #437: `let m: RegExpExecArray | null` sat behind a phantom
+	// template (a backtick in a regex) until regex literals were stripped
+	"RegExpExecArray", "RegExpMatchArray",
 )
 
 // rePyTupleAssignTargets matches a Python tuple/multiple-assignment LHS list
@@ -2406,6 +2409,195 @@ func pyChainedTargetNames(ctx pyLineCtx) []string {
 	return names
 }
 
+// jsRegexStrip gates the regex-literal branch of stripLiteralsBraces (#437).
+// It is a package variable, not a user setting: the rollback lever if the
+// division/regex heuristic ever misfires in the field, and the switch the
+// before/after differential flips to compare the two readings in one binary.
+var jsRegexStrip = true
+
+// jsRegexKeywords are the RESERVED words after which a `/` begins a regex, not a
+// division (`return /re/`, `typeof /re/`). Only reserved words: `of`, `await`
+// and `yield` are legal variable names in some code (`of / f(x) / 2`), so a
+// `/` after them could be a division; `for (x of /re/)` and `await /re/` are
+// too rare to be worth that risk.
+var jsRegexKeywords = setOf("return", "typeof", "instanceof", "in", "new",
+	"delete", "void", "throw", "case", "do", "else", "default")
+
+// jsRegexAllowed reports whether the `/` at i can start a regex literal, from
+// the previous significant byte of the already-masked line (string interiors
+// are blanks there, their closing quotes are not). It accepts only positions
+// where the JS grammar requires a regex — after an operator, an opening
+// bracket or a reserved keyword — so the first unescaped `/` outside a class
+// that follows really is the literal's end. The start of a line is NOT one: a
+// line-start `/` may continue a division from the line above (`total` /
+// `/count(xs) + route("/:id")`), which one line cannot rule out, so a
+// line-start regex statement keeps the pre-#437 reading. A division follows
+// an operand (a name, a number, `)`, `]`, a closing quote, postfix `++`/`--`,
+// TS's postfix non-null `x!`). `}` is never a regex start: after a block it
+// could be, but after a JSX expression (`{m}/{d}/{y}`) or an object it is text
+// or division, and blanking there would hide the calls between two slashes.
+// A `<` directly against the `/` is a JSX closing tag (`</div>`). Where this
+// says "division", the result is exactly the pre-#437 behaviour.
+func jsRegexAllowed(out []byte, i int) bool {
+	j := i - 1
+	for j >= 0 && (out[j] == ' ' || out[j] == '\t') {
+		j--
+	}
+	if j < 0 {
+		return false // start of line: may continue a division (see above)
+	}
+	switch prev := out[j]; {
+	case isWordByte(prev):
+		k := j
+		for k > 0 && isWordByte(out[k-1]) {
+			k--
+		}
+		if k > 0 && (out[k-1] == '.' || out[k-1] == '#' || out[k-1] >= 0x80 || out[k-1] == '}') {
+			// A member named like a keyword (`x.return / 2`, `this.#default / 2`),
+			// or the tail of a longer identifier (a non-ASCII or `\u{…}` start).
+			return false
+		}
+		if i+1 < len(out) && out[i+1] == '>' {
+			return false // `<Fade in />`: a JSX attribute named with a reserved word
+		}
+		_, kw := jsRegexKeywords[string(out[k:j+1])]
+		return kw
+	case prev == ')' || prev == ']' || prev == '"' || prev == '\'' || prev == '`':
+		return false
+	case prev == '<':
+		return j != i-1 // `</div>` is a JSX closing tag; `a < /re/` is a comparison
+	case prev == '+' || prev == '-':
+		return !(j > 0 && out[j-1] == prev) // postfix `i++ / 2` is a division
+	case prev == '!':
+		// Prefix negation `!/re/.test(s)` starts a regex; TS's postfix non-null
+		// `total! / n` (the `!` glued to an operand) is a division.
+		return !(j > 0 && (isWordByte(out[j-1]) || out[j-1] == ')' || out[j-1] == ']'))
+	case prev == '>':
+		// Only as an arrow, `=> /re/`. After a JSX tag's `>` a slash is text
+		// (`<div>{a}</div>/<div>`), and `a > /re/` is too rare to risk it.
+		return j > 0 && out[j-1] == '='
+	case strings.IndexByte("=(,:[&|?{;~^%*", prev) >= 0:
+		return true
+	}
+	return false
+}
+
+// jsRegexFollowOK is jsRegexEnd's post-validator: a WHITELIST of what may
+// follow a regex literal, at offset m of b. A regex is an operand, so it is
+// followed by a member access or call (`.test(`), a separator or closer
+// (`, ; ) ] } :`), `?`/`?.`, a logical or equality operator (`&& || == !=`), or
+// `in`/`instanceof`, or the end of the line — never by an arithmetic
+// operator, a name, a number, an opening bracket, a quote or another slash,
+// which is what a misread division (`a / f(x) / -1`, `/ f(x) /* c */`) leaves
+// after its "closing" slash.
+func jsRegexFollowOK(b []byte, m int) bool {
+	n := len(b)
+	if m >= n {
+		return true
+	}
+	next := byte(0)
+	if m+1 < n {
+		next = b[m+1]
+	}
+	switch c := b[m]; {
+	case c == '.':
+		return !(next >= '0' && next <= '9') // `.test(`, not the number `.5`
+	case strings.IndexByte(",;)]}:?", c) >= 0:
+		return true
+	case c == '&' || c == '|':
+		return next == c
+	case c == '=' || c == '!':
+		return next == '='
+	case isWordByte(c):
+		w := m
+		for w < n && isWordByte(b[w]) {
+			w++
+		}
+		word := string(b[m:w])
+		return word == "in" || word == "instanceof"
+	}
+	return false
+}
+
+// jsRegexQuantifierAt reports whether b[j] (a `{`) opens a well-formed regex
+// quantifier: `{n}`, `{n,}` or `{n,m}` with decimal n and m.
+func jsRegexQuantifierAt(b []byte, j int) bool {
+	k, n := j+1, len(b)
+	digits := func() int {
+		s := k
+		for k < n && b[k] >= '0' && b[k] <= '9' {
+			k++
+		}
+		return k - s
+	}
+	if digits() == 0 {
+		return false
+	}
+	if k < n && b[k] == ',' {
+		k++
+		digits()
+	}
+	return k < n && b[k] == '}'
+}
+
+// jsRegexEnd scans the regex literal whose opening `/` is at i. It returns the
+// offset just past its flags (end), the offset of its closing `/` (bodyEnd),
+// and ok. A `\` escapes the next byte; inside a `[…]` class a `/` does not
+// close. ok is false when the literal does not close on this line, or when what
+// follows it is not on jsRegexFollowOK's whitelist, or when the body ends in
+// `<` (the `</tag` of JSX). That turns a misread `a / b / c`, `x! / f(y) / [n]`,
+// JSX like `<p>/api/users</p>` or `{a}</div>`, a `//` comment taken for the
+// closing slash, or `/=` back into division.
+func jsRegexEnd(b []byte, i int) (end, bodyEnd int, ok bool) {
+	n := len(b)
+	inClass := false
+	for j := i + 1; j < n; j++ {
+		switch c := b[j]; {
+		case c == '\\' && j+1 < n && b[j+1] == '{':
+			// `\{` is text in JSX (`C:/Users\{userName(x)}/`); a real regex rarely
+			// needs an escaped brace, so rejecting it only costs the pre-#437 read.
+			return 0, 0, false
+		case c == '\\':
+			j++
+		case c == '{' && !jsRegexQuantifierAt(b, j):
+			// Inside or outside a class, an unescaped `{` must be a well-formed
+			// quantifier (`{2}`, `{2,}`, `{2,3}`). Anything else is far likelier
+			// JSX text (`Files: /{dir(x)}/`, `Page: /{1 + page(x)}/.`), and JSX
+			// text can only hold a call inside `{…}` — so this one rule is what
+			// keeps a misread JSX slash from ever blanking a call.
+			return 0, 0, false
+		case inClass:
+			if c == ']' {
+				inClass = false
+			}
+		case c == '[':
+			inClass = true
+		case c == '/':
+			k := j + 1
+			for k < n && strings.IndexByte("dgimsuyv", b[k]) >= 0 {
+				k++
+			}
+			m := k
+			for m < n && (b[m] == ' ' || b[m] == '\t') {
+				m++
+			}
+			if j > i+1 && b[j-1] == '<' {
+				return 0, 0, false // `…</div>`: a JSX closing tag, not a regex end
+			}
+			if strings.Contains(string(b[i+1:j]), "</") {
+				// An unescaped `</` can only sit in a regex inside a class (rare);
+				// in JSX text (`a: /[</p>`) it is a closing tag the class hid.
+				return 0, 0, false
+			}
+			if !jsRegexFollowOK(b, m) {
+				return 0, 0, false
+			}
+			return k, j, true
+		}
+	}
+	return 0, 0, false
+}
+
 // stripLiteralsStateful blanks string-literal and trailing-comment content on one
 // line, replacing interior characters with spaces so length (and therefore match
 // indices and LineNo) is preserved. This stops identifiers inside strings/comments
@@ -2568,6 +2760,23 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 				return finishStrip(out, fstrSpans, delim)
 			}
 			continue
+		}
+		// JS regex literal (#437). Without this a quote, backtick or `//` inside
+		// `/…/` opened a phantom string, template or comment and blanked real code
+		// after it — for a backtick, every following line. Only the body is
+		// blanked; the delimiters and flags stay, so offsets are unchanged. A regex
+		// never spans lines, so this never opens multi-line state. `//` and `/*`
+		// are matched above and are never a regex. When the `/` is not a regex
+		// start, or the literal does not end cleanly on this line, it is read as
+		// division — exactly the behaviour before #437.
+		if lang == LangJS && c == '/' && jsRegexStrip && jsRegexAllowed(out, i) {
+			if end, bodyEnd, ok := jsRegexEnd(b, i); ok {
+				for k := i + 1; k < bodyEnd; k++ {
+					out[k] = ' '
+				}
+				i = end
+				continue
+			}
 		}
 		// JS template literal / Go raw string (both span lines).
 		if (lang == LangJS || lang == LangGo) && c == '`' {

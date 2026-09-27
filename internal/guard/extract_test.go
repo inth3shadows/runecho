@@ -678,10 +678,11 @@ func TestExtractRefs_TS_ConstructorAndLibTypesSkipped(t *testing.T) {
 		`}`,
 		`const seen: ReadonlySet<string> = new Set();`,
 		`const m: ReadonlyMap<string, number> = new Map();`,
+		`let hit: RegExpExecArray | null = null;`,
 		`const ghost: NotARealType = make();`,
 	)
 	refs := ExtractRefs(LangJS, ls)
-	if !containsNone(refs, "constructor", "ReadonlySet", "ReadonlyMap") {
+	if !containsNone(refs, "constructor", "ReadonlySet", "ReadonlyMap", "RegExpExecArray") {
 		t.Errorf("constructor / TS lib types should be excluded, got %v", refNames(refs))
 	}
 	if !containsAll(refs, "make") {
@@ -2563,5 +2564,162 @@ func TestFoldInFileDefs_Go_MasksRawStringsAndComments(t *testing.T) {
 	}
 	if _, ok := known["Real"]; !ok {
 		t.Errorf("real func lost from the whole-file fold: %v", known)
+	}
+}
+
+// #437: a JS regex literal's body is blanked (delimiters and flags kept), so a
+// quote, backtick or `//` inside it no longer opens a phantom string, template
+// or comment that hides the code after it.
+func TestStripLiterals_JSRegex(t *testing.T) {
+	cases := []struct{ in, mustKeep, mustBlank string }{
+		{`x = /'/.test(s) && go1()`, "go1()", "'"},
+		{"const MD = /[`*_]/g; go2()", "go2()", "`"},
+		{`if (/^https?:\/\//.test(u)) go3()`, "go3()", "https"},
+		{`m = s.match(/[/]/); go4()`, "go4()", "[/]"},
+		{`p = /\(/; go5()`, "go5()", `\(`},
+		{`return /"x/.test(s) || go6()`, "go6()", `"x`},
+		{`t = typeof /a/; go7()`, "go7()", "a"},
+		{`f = x => /'/.test(x) && go8()`, "go8()", "'"},
+		{`ok = /'{2,3}/.test(s) && go14()`, "go14()", "'"},
+		{`ok = /'{2,}x{3}/.test(s) && go15()`, "go15()", "'"},
+		{`if (!/'/.test(s)) go10()`, "go10()", "'"},
+		{`export default /'/; go11()`, "go11()", "'"},
+		{`ok = /'/ instanceof RegExp && go12()`, "go12()", "'"},
+		{`ok = a < /'/.exec(s).length && go13()`, "go13()", "'"},
+	}
+	for _, c := range cases {
+		scan, open := stripLiteralsStateful(LangJS, c.in, "")
+		if open != "" {
+			t.Errorf("%q: a regex must not open multi-line state, got open=%q", c.in, open)
+		}
+		if !strings.Contains(scan, c.mustKeep) {
+			t.Errorf("%q: code after the regex was blanked: %q", c.in, scan)
+		}
+		if c.mustBlank != "" && strings.Contains(scan, c.mustBlank) {
+			t.Errorf("%q: regex body %q not blanked: %q", c.in, c.mustBlank, scan)
+		}
+		if len(scan) != len(c.in) {
+			t.Errorf("%q: length changed", c.in)
+		}
+	}
+	// A backtick in a regex must not blank the NEXT line either.
+	_, open := stripLiteralsStateful(LangJS, "const re = /[`]/;", "")
+	if next, _ := stripLiteralsStateful(LangJS, "ghost()", open); next != "ghost()" {
+		t.Errorf("line after a backtick regex was blanked: %q (open %q)", next, open)
+	}
+}
+
+// Division must stay division: nothing between two slashes is blanked, and a
+// real string later on the line is still stripped.
+func TestStripLiterals_JSDivisionNotRegex(t *testing.T) {
+	for _, in := range []string{
+		`r = a / b / c`,
+		`x = y / 2 // c`,
+		`z = (a+b) / 2 / n`,
+		`w = arr[i] / 2 / k`,
+		`v = i++ / 2 / j`,
+		`u = a < b > / c`,
+		`q = x.return / 2 / y`,
+		`const r = total! / getCount(x) * 100 / [n][0]`,
+		`el = <span>{m}/{fmtDay(d)}/{y}</span>`,
+		`el = <span>{page} / {pages(n)} / {z}</span>`,
+		`el = <div>{used} / {ghostTotal(x)}</div>`,
+		`el = <div>{a}</div>/<div>{ghostB(x)}</div>`,
+		`el = <i>{a} / {go(b)}</i>`,
+		`const r = el! / ghostC(x) // halve`,
+		`  / ghostD(x) // per item`,
+		`v = el! / go(x); w /= 2;`,
+		`  / count(xs) / -1`,
+		`  / count(xs) / +z`,
+		`  / count(xs) /.5`,
+		`  / count(xs) /`,
+		`r = of / count(xs) / -1`,
+		`el = <p>50% / {pct(x)} / -</p>`,
+		`el = <span>{a}&nbsp;/&nbsp;{crumb(x)}&nbsp;/&nbsp;{b}</span>`,
+		`    {root(x)}&nbsp;/&nbsp;{crumb(x)}&nbsp;/`,
+		`    Files: /{dir(x)}/`,
+		`  <code>(/{route(x)}/)</code>`,
+		`  <p>URL: /{base(x)}/.</p>`,
+		`  / size(o) + route(o)`,
+		`/count(xs) + route(o).length;`,
+		`  /count(xs)/i;`,
+		`    Page: /{1 + page(x)}/.`,
+		`    Args: /[{opts(x)}]/.`,
+	} {
+		scan, _ := stripLiteralsStateful(LangJS, in, "")
+		if strings.Contains(in, "//") {
+			in = in[:strings.Index(in, "//")]
+			scan = scan[:len(in)]
+		}
+		if scan != in {
+			t.Errorf("division misread as a regex: %q -> %q", in, scan)
+		}
+	}
+	// A line-start division continuation must not swallow the call; the genuine
+	// regex inside it is still blanked.
+	for _, in := range []string{`  / count(s.split(/\s+/))`, `  / size(o) + route("/:id")`, `  / count(rows) + s.split(/,/).length`,
+		`/count(xs) + route("/:id").length;`, `/count(xs) + s.split(/,/).length;`, `this.#default / count(x) + load('/.env').length`} {
+		scan, _ := stripLiteralsStateful(LangJS, in, "")
+		if !strings.Contains(scan, "(o)") && !strings.Contains(scan, "count(") {
+			t.Errorf("line-start division hid the call: %q", scan)
+		}
+	}
+	// JSX attributes named with reserved words (`<Fade in />`) and a JSX class
+	// hiding `</p>` must not start a regex that swallows the code after them.
+	for in, call := range map[string]string{
+		`const a = <Fade in />, b = go("/:id");`:                     "go(",
+		`render(<Collapse in />); expect(getText(x)).toMatch(/.+/);`: "getText(",
+		`const r = <NotFound default />, parts = split(s, /,/);`:     "split(",
+		`const el = <p>a: /[</p>, v = arr[f(x)], s = "/,";`:          "f(x)",
+		`    Stored at: C:/Users\{userName(x)}/`:                     "userName(",
+		`    Toggle: /[\{toggleKey(x)}]/;`:                           "toggleKey(",
+	} {
+		if scan, _ := stripLiteralsStateful(LangJS, in, ""); !strings.Contains(scan, call) {
+			t.Errorf("JSX slash swallowed %s: %q -> %q", call, in, scan)
+		}
+	}
+	scan, _ := stripLiteralsStateful(LangJS, `const r = w / h; call('x/y')`, "")
+	if !strings.Contains(scan, "call(") || strings.Contains(scan, "x/y") {
+		t.Errorf("string after a division not handled: %q", scan)
+	}
+}
+
+// JSX slashes are neither regexes nor divisions to blank.
+func TestStripLiterals_JSXSlash(t *testing.T) {
+	for _, in := range []string{
+		`return <div>{x}</div>; go1()`,
+		`el = <Foo x={y} />; go2()`,
+		`el = <p>a/b</p>; go3()`,
+		`el = <p>/api/users</p>; go4()`,
+	} {
+		scan, _ := stripLiteralsStateful(LangJS, in, "")
+		if scan != in {
+			t.Errorf("JSX slash altered the scan: %q -> %q", in, scan)
+		}
+	}
+}
+
+// End to end: a hallucinated call after a backtick regex — on the same line and
+// on the next one — is reported. Before #437 the regex's backtick opened a
+// phantom template that swallowed both.
+func TestRun_JSRefAfterRegexChecked(t *testing.T) {
+	fd := FileDiff{Path: "x.ts", AddedLines: TextToAddedLines(
+		"const re = /[`]/; ghostSame();\nghostNext();\n")}
+	got := map[string]bool{}
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{fd}) {
+		got[v.Symbol] = true
+	}
+	if !got["ghostSame"] || !got["ghostNext"] {
+		t.Errorf("calls after a regex literal must be checked, got %v", got)
+	}
+}
+
+// jsRegexStrip is the rollback lever: off, the stripper reads a regex exactly
+// as it did before #437 (the quote inside opens a phantom string).
+func TestStripLiterals_JSRegexToggle(t *testing.T) {
+	defer func(v bool) { jsRegexStrip = v }(jsRegexStrip)
+	jsRegexStrip = false
+	if scan, _ := stripLiteralsStateful(LangJS, `x = /'/.test(s) && go()`, ""); strings.Contains(scan, "go()") {
+		t.Errorf("with jsRegexStrip off the pre-#437 reading must return, got %q", scan)
 	}
 }

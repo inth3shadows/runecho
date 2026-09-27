@@ -360,11 +360,11 @@ func TestSetPragmas_CapsWAL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+		t.Cleanup(func() { db.Close() })
 		var limit int64
 		if err := db.conn.QueryRow("PRAGMA journal_size_limit").Scan(&limit); err != nil {
 			t.Fatalf("%s: read journal_size_limit: %v", name, err)
 		}
-		db.Close()
 		if limit != 64<<20 {
 			t.Errorf("%s: journal_size_limit = %d, want %d", name, limit, 64<<20)
 		}

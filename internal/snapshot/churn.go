@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// DefaultChurnWindow is how many snapshots `runecho-ir churn` and truth-trail's
+// churn section look back by default. Reindex retention (runecho-ir's
+// defaultPruneKeep) is derived from it, so the two cannot drift apart.
+const DefaultChurnWindow = 10
+
 // Churn computes file and symbol churn across the last n snapshots for repoID.
 // Returns an empty ChurnReport (no error) when fewer than 2 snapshots exist.
 func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {

@@ -30,11 +30,6 @@ type TrailResult struct {
 	StaleClaims []StaleClaim
 }
 
-// DefaultChurnWindow is how many snapshots `runecho-ir churn` and truth-trail's
-// churn section look back by default. Reindex retention (runecho-ir's
-// defaultPruneKeep) is defined as this value, so the two cannot drift apart.
-const DefaultChurnWindow = 10
-
 // TruthTrail builds a fused change receipt for repoID using baseline meta and
 // live IR. churnN controls the lookback window (0 → DefaultChurnWindow). text is prose to
 // check for stale symbol refs; empty string skips that section.

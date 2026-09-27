@@ -127,7 +127,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       runecho-ir fpaudit [--days=30] [--gv=V] [--json] [--git-timeout=30s]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo add <path> [--name=<n>] [--cap=<N>] [--source-root=<path>] [--no-hooks]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir repo list | rm <name> | reindex <name|.> [--all]")
-	fmt.Fprintln(os.Stderr, "       runecho-ir repo prune [--keep=10] [--repo=<name>] [--dry-run] [--vacuum]")
+	fmt.Fprintln(os.Stderr, "       runecho-ir repo prune [--keep=12] [--repo=<name>] [--dry-run] [--vacuum]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir install [--periodic [--source=<checkout>]] [--force] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir version-check [--reinstall] [--quiet] [root]")
 	fmt.Fprintln(os.Stderr, "       runecho-ir freshen <git-common-dir>   (scheduled by install --periodic)")

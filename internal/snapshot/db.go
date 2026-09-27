@@ -152,11 +152,11 @@ func (db *DB) Vacuum() error {
 // the live store `repo prune --vacuum` left an 845 MB WAL beside an 837 MB file
 // (#441).
 //
-// It reports false, with a nil error, when another process holds a read
-// transaction past busy_timeout: SQLite returns busy=1 as a result row, not an
-// error. That is not self-healing: automatic checkpoints are PASSIVE and never
-// truncate, and journal_size_limit only trims the WAL to its cap on a later
-// reset. So the caller must tell the user rather than claim success.
+// It reports false, with a nil error, when another process is reading or writing
+// the store past busy_timeout: SQLite returns busy=1 as a result row, not an
+// error. The space then comes back later rather than now: once nothing pins the
+// WAL, an automatic checkpoint copies it back and the next commit trims it to
+// journal_size_limit. The caller says so rather than claiming success.
 func (db *DB) TruncateWAL() (bool, error) {
 	var busy, logFrames, checkpointed int
 	if err := db.conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {

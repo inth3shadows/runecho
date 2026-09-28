@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.2] — 2026-09-28
+
+### Changed
+- store: keep 12 reindex snapshots (was 30), churn window 10 (was 20); truncate and cap the WAL; Diff errors on a deleted snapshot (#441) (#444)
+
 ## [0.66.1] — 2026-09-27
 
 ### Changed

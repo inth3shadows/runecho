@@ -127,7 +127,8 @@ func (db *DB) BackupTo(path string) error {
 //
 // Deliberately opt-in and never automatic. A full VACUUM rewrites every live
 // page — order of minutes on a multi-gigabyte store — and needs free disk
-// roughly equal to the file. Putting it in the hourly job would add that spike
+// roughly twice the file: a temporary rebuild plus, in WAL mode, a full copy in
+// the -wal until TruncateWAL runs. Putting it in the hourly job would add that spike
 // to every tick, including the ticks that pruned nothing, which is a worse
 // operational property than the growth it cleans up.
 //
@@ -135,11 +136,34 @@ func (db *DB) BackupTo(path string) error {
 // inserts, so once the write-side dedup and a periodic prune hold the row count
 // flat, the file stops growing on its own. VACUUM is only how you shrink it
 // back down, once, after a backlog has already accumulated.
+//
+// In WAL mode VACUUM writes the rebuilt database into the -wal file, so the
+// space it frees only reaches the filesystem after TruncateWAL. Kept separate so
+// a checkpoint that cannot finish is reported without calling the (completed)
+// rewrite a failure.
 func (db *DB) Vacuum() error {
 	if _, err := db.conn.Exec("VACUUM"); err != nil {
 		return fmt.Errorf("vacuum: %w", err)
 	}
 	return nil
+}
+
+// TruncateWAL checkpoints the whole WAL into the database and resets the -wal
+// file to zero bytes. After a VACUUM the WAL holds a full copy of the store: on
+// the live store `repo prune --vacuum` left an 845 MB WAL beside an 837 MB file
+// (#441).
+//
+// It reports false, with a nil error, when another process is reading or writing
+// the store past busy_timeout: SQLite returns busy=1 as a result row, not an
+// error. The space then comes back later rather than now: once nothing pins the
+// WAL, an automatic checkpoint copies it back and the next commit trims it to
+// journal_size_limit. The caller says so rather than claiming success.
+func (db *DB) TruncateWAL() (bool, error) {
+	var busy, logFrames, checkpointed int
+	if err := db.conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return false, fmt.Errorf("wal checkpoint: %w", err)
+	}
+	return busy == 0, nil
 }
 
 func (db *DB) setPragmas() error {
@@ -158,6 +182,12 @@ func (db *DB) setPragmas() error {
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=NORMAL",
+		// Cap the -wal file's resting size. Without it the WAL never shrinks
+		// below its high-water mark while any connection is open (runecho-mcp
+		// holds one for a whole session), so one large prune or reindex leaves
+		// that much disk behind indefinitely. SQLite trims the WAL to this limit
+		// whenever it resets it after a checkpoint (#441).
+		"PRAGMA journal_size_limit=67108864",
 	} {
 		if _, err := db.conn.Exec(p); err != nil {
 			return fmt.Errorf("pragma %q: %w", p, err)

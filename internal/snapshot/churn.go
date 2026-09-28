@@ -1,14 +1,41 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
 
+// DefaultChurnWindow is how many snapshots `runecho-ir churn` and truth-trail's
+// churn section look back by default. Reindex retention (runecho-ir's
+// defaultPruneKeep) is derived from it, so the two cannot drift apart.
+const DefaultChurnWindow = 10
+
 // Churn computes file and symbol churn across the last n snapshots for repoID.
 // Returns an empty ChurnReport (no error) when fewer than 2 snapshots exist.
+//
+// The newest listed row is usually the rolling auto snapshot, which every
+// PostToolUse edit deletes and replaces, and the hourly prune can remove the
+// oldest. If one vanishes mid-run, Diff fails with ErrSnapshotGone; re-listing
+// once picks up the replacement, so a single concurrent edit costs a retry. A
+// burst that hits both passes still surfaces the error. Other multi-query
+// readers (diff/map --since, TruthTrail's callers) do not retry; a consistent
+// read view for all of them is #445.
 func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
+	report, err := db.churnOnce(repoID, n)
+	if errors.Is(err, ErrSnapshotGone) {
+		report, err = db.churnOnce(repoID, n)
+	}
+	return report, err
+}
+
+// churnBeforeDiffHook lets a test delete a listed snapshot between List and the
+// diffs, the window a concurrent roll or prune lands in. Always nil in production;
+// a test that sets it must not run in parallel with other Churn callers.
+var churnBeforeDiffHook func()
+
+func (db *DB) churnOnce(repoID int64, n int) (ChurnReport, error) {
 	metas, err := db.List(repoID, n)
 	if err != nil {
 		return ChurnReport{}, fmt.Errorf("list snapshots: %w", err)
@@ -31,6 +58,9 @@ func (db *DB) Churn(repoID int64, n int) (ChurnReport, error) {
 	fileChanges := make(map[string]int)
 	symbolChanges := make(map[string]int) // key: "path\x00kind\x00name"
 
+	if churnBeforeDiffHook != nil {
+		churnBeforeDiffHook()
+	}
 	for i := 0; i < diffCount; i++ {
 		diff, err := db.Diff(metas[i], metas[i+1])
 		if err != nil {

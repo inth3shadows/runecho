@@ -1,8 +1,13 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/ir"
 )
 
 // Retention tests for #351. The invariant that matters most is not "N rows
@@ -276,6 +281,99 @@ func TestVacuum_PreservesData(t *testing.T) {
 	}
 }
 
+// TestVacuum_TruncatesWAL: in WAL mode VACUUM writes the rebuilt database into
+// the -wal file, so without a checkpoint the "reclaimed" space just moves there —
+// on the live store a vacuum left an 845 MB WAL beside an 837 MB file (#441).
+func TestVacuum_TruncatesWAL(t *testing.T) {
+	db, path := openTemp(t)
+	repo := enrollForPrune(t, db, "vacuum-wal")
+	seedReindex(t, db, repo, 6)
+	if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	if err := db.Vacuum(); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
+	if fi, err := os.Stat(path + "-wal"); err != nil || fi.Size() == 0 {
+		t.Fatalf("precondition: VACUUM should leave its output in a non-empty WAL (stat err %v)", err)
+	}
+	ok, err := db.TruncateWAL()
+	if err != nil || !ok {
+		t.Fatalf("TruncateWAL = %v, %v; want true, nil with no other readers", ok, err)
+	}
+	fi, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if fi.Size() != 0 {
+		t.Errorf("WAL is %d bytes after TruncateWAL, want 0", fi.Size())
+	}
+}
+
+// TestTruncateWAL_ReportsBusyReader: SQLite returns a blocked TRUNCATE
+// checkpoint as a busy=1 result row, not an error. If TruncateWAL dropped that
+// row, `repo prune --vacuum` would print "Vacuum complete." while the WAL still
+// held a full copy of the store — which is what happens whenever a runecho-mcp
+// session is reading at the time.
+func TestTruncateWAL_ReportsBusyReader(t *testing.T) {
+	db, path := openTemp(t)
+	repo := enrollForPrune(t, db, "busy-wal")
+	seedReindex(t, db, repo, 1)
+
+	reader, err := OpenFast(path)
+	if err != nil {
+		t.Fatalf("OpenFast reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	// Hold a read transaction open: a result set that has not been fully read
+	// keeps the reader's WAL snapshot pinned.
+	rows, err := reader.conn.Query("SELECT id FROM snapshots")
+	if err != nil {
+		t.Fatalf("reader query: %v", err)
+	}
+	t.Cleanup(func() { rows.Close() })
+	if !rows.Next() {
+		t.Fatal("reader saw no snapshots")
+	}
+
+	// A write after the reader's snapshot leaves frames the checkpoint cannot
+	// reset past while that reader is open.
+	if _, err := db.conn.Exec("UPDATE repos SET last_indexed = 'after-reader' WHERE id = ?", repo); err != nil {
+		t.Fatalf("write after reader: %v", err)
+	}
+	if _, err := db.conn.Exec("PRAGMA busy_timeout=50"); err != nil {
+		t.Fatalf("shorten busy_timeout: %v", err)
+	}
+	ok, err := db.TruncateWAL()
+	if err != nil {
+		t.Fatalf("TruncateWAL: %v (a busy checkpoint must not surface as an error)", err)
+	}
+	if ok {
+		t.Error("TruncateWAL reported success while another connection held a read transaction")
+	}
+}
+
+// TestSetPragmas_CapsWAL: journal_size_limit is per-connection, so it must be in
+// setPragmas for every opener; without it one large prune leaves the WAL at its
+// high-water mark for as long as any runecho process keeps the store open.
+func TestSetPragmas_CapsWAL(t *testing.T) {
+	for name, open := range map[string]func(string) (*DB, error){"Open": Open, "OpenFast": OpenFast} {
+		db, err := open(filepath.Join(t.TempDir(), "history.db"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		t.Cleanup(func() { db.Close() })
+		var limit int64
+		if err := db.conn.QueryRow("PRAGMA journal_size_limit").Scan(&limit); err != nil {
+			t.Fatalf("%s: read journal_size_limit: %v", name, err)
+		}
+		if limit != 64<<20 {
+			t.Errorf("%s: journal_size_limit = %d, want %d", name, limit, 64<<20)
+		}
+	}
+}
+
 // TestPruneReindexSnapshots_CrossesChunkBoundary exercises the multi-transaction
 // path. Every other prune test here seeds fewer than pruneChunkSize prunable
 // snapshots, so they all complete in ONE chunk and would stay green if chunking
@@ -342,5 +440,71 @@ func TestPruneReindexSnapshots_ChunkSizeIsBounded(t *testing.T) {
 	// near the 5s busy_timeout with no margin.
 	if pruneChunkSize > 100 {
 		t.Errorf("pruneChunkSize = %d; at roughly 30ms per snapshot on a heavy repo that approaches the 5s busy_timeout, which is the lock starvation chunking exists to prevent", pruneChunkSize)
+	}
+}
+
+// TestDiff_DeletedSnapshotErrors: churn and the MCP diff-by-id path read metas,
+// then Diff them in separate statements. If a prune (or an auto-snapshot roll)
+// deletes one in between, the loaders return empty maps for the missing id and
+// the diff would report the whole repo as added — a silently wrong answer. Diff
+// must fail with ErrSnapshotGone instead (#441).
+func TestDiff_DeletedSnapshotErrors(t *testing.T) {
+	db, _ := openTemp(t)
+	repo := enrollForPrune(t, db, "diff-gone")
+	ids := seedReindex(t, db, repo, 3)
+
+	oldest, err := db.GetByID(ids[0])
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	newest, err := db.GetByID(ids[2])
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if _, err := db.Diff(*oldest, *newest); err != nil {
+		t.Fatalf("precondition: Diff of two live snapshots: %v", err)
+	}
+
+	// The meta was read; now the row goes away, as it would mid-churn.
+	if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := db.Diff(*oldest, *newest); !errors.Is(err, ErrSnapshotGone) {
+		t.Errorf("Diff against a pruned snapshot: err = %v, want ErrSnapshotGone", err)
+	}
+	if _, err := db.DiffLive(*oldest, &ir.IR{}); !errors.Is(err, ErrSnapshotGone) {
+		t.Errorf("DiffLive against a pruned snapshot: err = %v, want ErrSnapshotGone", err)
+	}
+}
+
+// TestChurn_RetriesOnSnapshotGone: Churn's first pass hits a vanished id (the
+// hook fires between List and Diff, as a concurrent edit's auto-snapshot roll
+// would), and the re-list must succeed instead of surfacing the error.
+func TestChurn_RetriesOnSnapshotGone(t *testing.T) {
+	db, _ := openTemp(t)
+	repo := enrollForPrune(t, db, "churn-retry")
+	ids := seedReindex(t, db, repo, 4)
+
+	fired := false
+	churnBeforeDiffHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := db.PruneReindexSnapshots(repo, 2); err != nil {
+			t.Errorf("prune in hook: %v", err)
+		}
+	}
+	t.Cleanup(func() { churnBeforeDiffHook = nil })
+
+	report, err := db.Churn(repo, 10)
+	if err != nil {
+		t.Fatalf("Churn: %v (want a successful retry after the listed row %d was pruned)", err, ids[0])
+	}
+	if !fired {
+		t.Fatal("hook never fired; the test did not exercise the race")
+	}
+	if report.SnapshotCount != 2 {
+		t.Errorf("SnapshotCount = %d after retry, want 2 (the survivors)", report.SnapshotCount)
 	}
 }

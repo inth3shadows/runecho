@@ -346,7 +346,7 @@ func resolveRoot(args []string) (string, int) {
 // runChurn reports file and symbol churn rate across recent snapshots.
 func runChurn(args []string) int {
 	fs := flag.NewFlagSet("churn", flag.ContinueOnError)
-	n := fs.Int("n", 20, "number of snapshots to analyze")
+	n := fs.Int("n", snapshot.DefaultChurnWindow, "number of snapshots to analyze")
 	minChanges := fs.Int("min-changes", 2, "minimum diffs a file/symbol must appear in to be considered hot")
 	compact := fs.Bool("compact", false, "single-line compact output")
 	asJSON := fs.Bool("json", false, "machine-readable JSON (parity with diff --json)")

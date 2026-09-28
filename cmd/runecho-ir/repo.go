@@ -373,17 +373,27 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 
 // defaultPruneKeep is how many "reindex" snapshots per repo `repo prune` keeps.
 //
-// Chosen against the only consumer that reads snapshot history by depth:
-// `runecho-ir churn` defaults to --n=20 (see runChurn) and walks the last N
-// snapshots by count via db.List. 30 clears that with headroom. The other
-// history readers — diff --since=<label>, truth-trail, map --since= — resolve
-// only the single newest snapshot for a label, so any keep >= 1 is safe for
-// them.
+// Derived from snapshot.DefaultChurnWindow, the default depth of the only readers
+// that walk history by count: `runecho-ir churn` and truth-trail's churn section
+// (db.List, all labels). Prune deletes a row only when keep newer reindex rows
+// exist, so at rest nothing in the newest N of any label is touched.
+//
+// The +2 is headroom, not a guarantee. Reindex rows come from the hourly job and
+// from the post-commit/merge/checkout hooks, so a burst of commits can turn the
+// window over in minutes, and a churn run that overlaps a prune (or an auto
+// snapshot roll) can lose a row it already listed. Diff then fails with
+// ErrSnapshotGone rather than reading the missing id as empty (an error, not a
+// wrong answer), and Churn re-lists once; diff/map --since do not retry. The
+// headroom only makes the prune case rarer. A consistent read view is #445.
+//
+// diff --since=<label>, map --since=, truth-trail's baseline, the guard and MCP
+// status resolve only the newest snapshot. `diff <id-a> <id-b>` (CLI and MCP)
+// accepts any id; one older than the retained window fails with "not found".
 //
 // Count-based rather than age-based on purpose: churn counts snapshots, so an
 // age rule would silently shrink a quiet repo's usable window for a reason
 // unrelated to what anything actually reads.
-const defaultPruneKeep = 30
+const defaultPruneKeep = snapshot.DefaultChurnWindow + 2
 
 // runRepoPrune trims "reindex" snapshot history to the newest --keep per repo.
 // Other labels are never touched — see pruneReindexWhere for why.
@@ -446,7 +456,19 @@ func runRepoPrune(args []string) int {
 		if err := db.Vacuum(); err != nil {
 			return printErr(err)
 		}
-		fmt.Println("Vacuum complete.")
+		// VACUUM's output sits in the WAL until checkpointed; a reader in another
+		// process can block that, and then the disk space has not come back yet.
+		ok, err := db.TruncateWAL()
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "Warning: vacuum complete, but the WAL checkpoint failed: %v\n", err)
+		case !ok:
+			fmt.Fprintln(os.Stderr, "Warning: vacuum complete, but another process was using the store, so the WAL was")
+			fmt.Fprintln(os.Stderr, "not truncated yet. It is reclaimed after the next couple of store writes (a reindex")
+			fmt.Fprintln(os.Stderr, "or commit hook); with no scheduled job and no commits it stays until then.")
+		default:
+			fmt.Println("Vacuum complete.")
+		}
 	}
 	return ExitOK
 }

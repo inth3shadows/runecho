@@ -527,12 +527,13 @@ func TestOracleRegisterAnnotations(t *testing.T) {
 	s := NewServer("test", "0.0")
 	o.Register(s)
 
-	want := []string{"structure", "diff", "hash", "status", "health", "locate"}
-	for _, name := range want {
-		tool, ok := s.tools[name]
-		if !ok {
-			t.Fatalf("tool %q not registered", name)
-		}
+	// Iterate everything registered, not a fixed list, so a newly added tool
+	// that forgets its annotations fails here.
+	if len(s.order) != 6 {
+		t.Fatalf("registered %d tools, want 6: %v", len(s.order), s.order)
+	}
+	for _, name := range s.order {
+		tool := s.tools[name]
 		if tool.Annotations == nil {
 			t.Fatalf("tool %q has no annotations", name)
 		}

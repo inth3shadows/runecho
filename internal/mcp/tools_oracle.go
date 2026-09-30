@@ -64,14 +64,14 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "status",
-		Description: "Per-repo health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap. Use to decide whether `structure`/`locate` answers for this repo are fresh (staleness, parse errors, coverage) before relying on them; for the store as a whole use `health`. Errors if the repo is not enrolled.",
+		Description: "Per-repo index health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap. Use to judge the stored index that `diff`'s default baseline and the commit guard read from (a stale index means a stale baseline), or to see how much of the repo the walker covers. `structure`/`locate` parse live code on every call, so staleness does not affect them. For the store as a whole use `health`. Errors if the repo is not enrolled.",
 		InputSchema: repoSchema("name of an enrolled repo"),
 		Annotations: oracleAnnotations,
 		Handler:     o.status,
 	})
 	s.Register(Tool{
 		Name:        "health",
-		Description: "Store-wide health: schema version, integrity check, number of enrolled repos, db path. Use once to check the store itself is sound (integrity, schema) or to list what is enrolled; for one repo's freshness use `status`. Takes no arguments.",
+		Description: "Store-wide health: schema version, integrity check, enrolled repo names and count, db path. Use once to check the store itself is sound (integrity, schema) or to list what is enrolled; for one repo's freshness use `status`. Takes no arguments.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Annotations: oracleAnnotations,
 		Handler:     o.health,
@@ -752,22 +752,25 @@ func (o *Oracle) health(_ json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// ListRepos already orders by name, so repos is sorted with no extra work
-	// here — see internal/snapshot/registry.go.
-	all, err := o.db.ListRepos()
-	if err != nil {
-		return "", err
-	}
-	repos := make([]string, len(all))
-	for i, r := range all {
-		repos[i] = r.Name
-	}
-	return jsonText(map[string]any{
+	out := map[string]any{
 		"server":         "runecho",
 		"db_path":        o.dbPath,
 		"schema_version": h.SchemaVersion,
 		"integrity":      h.Integrity,
 		"repo_count":     h.RepoCount,
-		"repos":          repos,
-	})
+	}
+	// A failed repo listing must not hide the integrity result already in hand
+	// (a damaged repos table is exactly when it fails), so repos is best-effort
+	// like doctor's. When it succeeds, repo_count is taken from the same read so
+	// the two fields cannot disagree across a concurrent enroll/remove.
+	// ListRepos orders by name — see internal/snapshot/registry.go.
+	if all, err := o.db.ListRepos(); err == nil {
+		repos := make([]string, len(all))
+		for i, r := range all {
+			repos[i] = r.Name
+		}
+		out["repos"] = repos
+		out["repo_count"] = len(repos)
+	}
+	return jsonText(out)
 }

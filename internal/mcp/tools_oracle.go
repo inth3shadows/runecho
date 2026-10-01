@@ -64,7 +64,7 @@ func (o *Oracle) Register(s *Server) {
 	})
 	s.Register(Tool{
 		Name:        "status",
-		Description: "Per-repo index health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap. Use to judge the stored index that `diff`'s default baseline and the commit guard read from (a stale index means a stale baseline), or to see how much of the repo the walker covers. `structure`/`locate` parse live code on every call, so staleness does not affect them. For the store as a whole use `health`. Errors if the repo is not enrolled.",
+		Description: "Per-repo index health: last indexed, staleness, parse errors, coverage %, snapshot count, latest stored hash, file cap. Use to judge the stored index that `diff`'s default baseline and the guard read from (a stale index means a stale baseline), and to check coverage before trusting a `structure`/`locate` miss: those parse live code on every call, so staleness does not affect them, but the file cap does, and coverage below 100% means files they never see. For the store as a whole use `health`. Errors if the repo is not enrolled.",
 		InputSchema: repoSchema("name of an enrolled repo"),
 		Annotations: oracleAnnotations,
 		Handler:     o.status,
@@ -759,18 +759,23 @@ func (o *Oracle) health(_ json.RawMessage) (string, error) {
 		"integrity":      h.Integrity,
 		"repo_count":     h.RepoCount,
 	}
-	// A failed repo listing must not hide the integrity result already in hand
-	// (a damaged repos table is exactly when it fails), so repos is best-effort
-	// like doctor's. When it succeeds, repo_count is taken from the same read so
-	// the two fields cannot disagree across a concurrent enroll/remove.
+	// A row that fails to scan must not hide the integrity result already in
+	// hand, so the listing is best-effort like doctor's and its failure is
+	// reported as repos_error rather than a silently missing field. When it
+	// succeeds, repo_count is taken from the same read so the two fields cannot
+	// disagree across a concurrent enroll/remove. (A failure of Health()'s own
+	// repo count above still returns the error.)
 	// ListRepos orders by name — see internal/snapshot/registry.go.
-	if all, err := o.db.ListRepos(); err == nil {
-		repos := make([]string, len(all))
-		for i, r := range all {
-			repos[i] = r.Name
-		}
-		out["repos"] = repos
-		out["repo_count"] = len(repos)
+	all, err := o.db.ListRepos()
+	if err != nil {
+		out["repos_error"] = err.Error()
+		return jsonText(out)
 	}
+	repos := make([]string, len(all))
+	for i, r := range all {
+		repos[i] = r.Name
+	}
+	out["repos"] = repos
+	out["repo_count"] = len(repos)
 	return jsonText(out)
 }

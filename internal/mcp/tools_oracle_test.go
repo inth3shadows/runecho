@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/inth3shadows/runecho/internal/ir"
 	"github.com/inth3shadows/runecho/internal/snapshot"
+
+	_ "modernc.org/sqlite"
 )
 
 // newOracleRepo creates a temp central store + a temp repo dir with one Go file,
@@ -508,6 +511,81 @@ func TestOracleStatusAndHealth(t *testing.T) {
 	}
 	if h["repo_count"].(float64) != 1 {
 		t.Errorf("repo_count = %v, want 1", h["repo_count"])
+	}
+	repos, ok := h["repos"].([]any)
+	if !ok {
+		t.Fatalf("health repos = %v, want a list", h["repos"])
+	}
+	if len(repos) != 1 || repos[0] != name {
+		t.Errorf("health repos = %v, want [%q]", repos, name)
+	}
+}
+
+// TestOracleHealthReposErrorKeepsIntegrity: a repos row that fails to scan
+// (here a non-integer file_cap) must not turn health into a bare error — the
+// integrity result still comes back, and repos_error says why repos is absent.
+func TestOracleHealthReposErrorKeepsIntegrity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	db, err := snapshot.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.EnrollRepo("demo", t.TempDir(), "", 0); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE repos SET file_cap = 'abc'`); err != nil {
+		t.Fatalf("corrupt row: %v", err)
+	}
+
+	h := call(t, NewOracle(db, dbPath).health, `{}`)
+	if h["integrity"] != "ok" {
+		t.Errorf("integrity = %v, want ok", h["integrity"])
+	}
+	if h["repo_count"].(float64) != 1 {
+		t.Errorf("repo_count = %v, want 1 (from Health's count)", h["repo_count"])
+	}
+	if _, ok := h["repos"]; ok {
+		t.Errorf("repos = %v, want absent when listing fails", h["repos"])
+	}
+	if e, _ := h["repos_error"].(string); e == "" {
+		t.Errorf("repos_error missing; health = %v", h)
+	}
+}
+
+// TestOracleRegisterAnnotations pins the Glama-TDQS fix (#429): all six oracle
+// tools are read-only, idempotent, and never touch the network, so every one
+// must advertise the same MCP tool annotations.
+func TestOracleRegisterAnnotations(t *testing.T) {
+	_, _, db := newOracleRepo(t)
+	o := NewOracle(db, "")
+	s := NewServer("test", "0.0")
+	o.Register(s)
+
+	// Iterate everything registered, not a fixed list, so a newly added tool
+	// that forgets its annotations fails here.
+	if len(s.order) != 6 {
+		t.Fatalf("registered %d tools, want 6: %v", len(s.order), s.order)
+	}
+	for _, name := range s.order {
+		tool := s.tools[name]
+		if tool.Annotations == nil {
+			t.Fatalf("tool %q has no annotations", name)
+		}
+		if tool.Annotations["readOnlyHint"] != true {
+			t.Errorf("tool %q readOnlyHint = %v, want true", name, tool.Annotations["readOnlyHint"])
+		}
+		if tool.Annotations["idempotentHint"] != true {
+			t.Errorf("tool %q idempotentHint = %v, want true", name, tool.Annotations["idempotentHint"])
+		}
+		if tool.Annotations["openWorldHint"] != false {
+			t.Errorf("tool %q openWorldHint = %v, want false", name, tool.Annotations["openWorldHint"])
+		}
 	}
 }
 

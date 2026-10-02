@@ -16,6 +16,15 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- install: runecho now owns a marked `# >>> runecho >>>` block in each git hook
+  instead of the whole file, so another tool's content in the same hook (e.g.
+  kb-mcp's `kb-drift`) survives `runecho-ir install` / `repo add`. Legacy hooks
+  migrate once, a `.runecho.bak` keeps the previous version, the guard no
+  longer `exec`s and post-checkout no longer exits early, and malformed markers
+  are refused without touching the file. `--force` now only adds the block
+  where runecho is already wired in by hand (#443).
+
 ## [0.66.3] — 2026-10-01
 
 ### Added

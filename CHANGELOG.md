@@ -22,8 +22,11 @@ install time from `git describe --tags` (see `install.sh`).
   kb-mcp's `kb-drift`) survives `runecho-ir install` / `repo add`. Legacy hooks
   migrate once, a `.runecho.bak` keeps the previous version, the guard no
   longer `exec`s and post-checkout no longer exits early, and malformed markers
-  are refused without touching the file. `--force` now only adds the block
-  where runecho is already wired in by hand (#443).
+  are refused without touching the file. A symlinked hook is refused (its
+  target is often a tracked or shared file). `install` warns loudly when the
+  commit guard ends up inactive. `install.sh --hook` no longer rewrites a
+  pre-commit holding runecho's block or other content. `--force` now only adds
+  the block where runecho is already wired in by hand (#443).
 
 ## [0.66.3] — 2026-10-01
 

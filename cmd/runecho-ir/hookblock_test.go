@@ -86,6 +86,15 @@ func TestMergeHookBlock(t *testing.T) {
 		{name: "legacy + kb-drift fragment keeps fragment",
 			existing: legacyBodies(shellQuote)["post-merge (advisory)"] + foreignFragment,
 			want:     newHookShebang + "\n" + block + foreignFragment, action: hookMigrated, keep: foreignFragment},
+		{name: "wrapped runecho line is not legacy: refused",
+			existing: "#!/usr/bin/env bash\n'/usr/bin/flock' '/tmp/lk' '/x/runecho-ir' repo reindex . >/dev/null 2>&1 &\n",
+			action:   hookRefused, wantErr: "already invokes runecho"},
+		{name: "runecho line left below foreign content: refused",
+			existing: "#!/usr/bin/env bash\n'/x/runecho-ir' version-check --quiet || true\necho FOREIGN\n'/x/runecho-ir' repo reindex . >/dev/null 2>&1 &\n",
+			action:   hookRefused, wantErr: "line 4 still invokes runecho"},
+		{name: "legacy Windows .exe path",
+			existing: "#!/usr/bin/env bash\nexec \"C:/Users/x/bin/runecho-guard.exe\" \"$@\"\n",
+			want:     newHookShebang + "\n" + block, action: hookMigrated},
 		{name: "legacy pre-commit + appended line",
 			existing: legacyBodies(shellQuote)["pre-commit (exec)"] + "echo after\n",
 			want:     newHookShebang + "\n" + block + "echo after\n", action: hookMigrated},
@@ -134,8 +143,13 @@ func TestMergeHookBlock_NotesNewlyLiveContent(t *testing.T) {
 	block := hookBlocks("/b/runecho-ir", "/b/runecho-guard")["post-checkout"]
 	legacy := legacyBodies(shellQuote)["post-checkout (advisory, |exit)"]
 	_, _, notes, err := mergeHookBlock(legacy+"echo foreign\n", block, false)
-	if err != nil || len(notes) != 1 || !strings.Contains(notes[0], "runs now") {
-		t.Fatalf("notes = %v, err = %v; want one 'runs now' note", notes, err)
+	if err != nil || len(notes) != 1 || !strings.Contains(notes[0], "every checkout") {
+		t.Fatalf("notes = %v, err = %v; want one 'every checkout' note", notes, err)
+	}
+	pre := legacyBodies(shellQuote)["pre-commit (exec)"]
+	_, _, notes, _ = mergeHookBlock(pre+"echo foreign\n", block, false)
+	if len(notes) != 1 || !strings.Contains(notes[0], "never ran before") {
+		t.Errorf("exec migration notes = %v, want one 'never ran before' note", notes)
 	}
 	_, _, notes, _ = mergeHookBlock(legacy, block, false)
 	if len(notes) != 0 {
@@ -211,20 +225,54 @@ func TestInstallHookFile(t *testing.T) {
 		}
 	})
 
-	t.Run("symlink target updated, link kept", func(t *testing.T) {
+	// A symlinked hook usually points at a tracked repo file or a dotfiles hook
+	// shared by many repos: refuse, touching neither link nor target. A dangling
+	// link is refused the same way rather than aborting the whole install.
+	t.Run("symlink refused, link and target untouched", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "real-hook")
-		os.WriteFile(target, []byte("#!/bin/sh\necho mine\n"), 0755)
-		link := filepath.Join(dir, "post-commit")
-		if err := os.Symlink(target, link); err != nil {
-			t.Skip("symlinks unsupported")
+		orig := "#!/bin/sh\necho mine\n"
+		os.WriteFile(target, []byte(orig), 0755)
+		for _, dest := range []string{target, filepath.Join(dir, "missing")} {
+			link := filepath.Join(dir, "post-commit")
+			os.Remove(link)
+			if err := os.Symlink(dest, link); err != nil {
+				t.Skip("symlinks unsupported")
+			}
+			var action hookAction
+			var err error
+			quiet(func() { action, err = installHookFile(dir, "post-commit", block, false) })
+			if err != nil || action != hookRefused {
+				t.Errorf("-> %s: action=%s err=%v, want refused", dest, action, err)
+			}
+			if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("symlink replaced by a regular file")
+			}
 		}
+		if got, _ := os.ReadFile(target); string(got) != orig {
+			t.Errorf("target changed: %q", got)
+		}
+		if _, err := os.Stat(target + hookBakSuffix); !os.IsNotExist(err) {
+			t.Errorf("a .bak was written next to the target")
+		}
+	})
+
+	// The .bak keeps the original foreign/legacy content: an in-block update
+	// (new binary path) must not overwrite it with an already-merged file.
+	t.Run("bak survives a later in-block update", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "post-commit")
+		orig := "#!/bin/sh\necho mine\n"
+		os.WriteFile(path, []byte(orig), 0755)
+		newer := hookBlocks("/other/runecho-ir", "/other/runecho-guard")["post-commit"]
+		var action hookAction
 		quiet(func() { installHookFile(dir, "post-commit", block, false) })
-		if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
-			t.Errorf("symlink replaced by a regular file")
+		quiet(func() { action, _ = installHookFile(dir, "post-commit", newer, false) })
+		if action != hookUpdated {
+			t.Fatalf("second install action = %s, want updated", action)
 		}
-		if got, _ := os.ReadFile(target); !strings.Contains(string(got), hookOpenMarker) || !strings.Contains(string(got), "echo mine") {
-			t.Errorf("target not merged: %q", got)
+		if bak, _ := os.ReadFile(path + hookBakSuffix); string(bak) != orig {
+			t.Errorf(".bak = %q, want the original %q", bak, orig)
 		}
 	})
 }
@@ -310,6 +358,32 @@ func TestHookBlocks_ExecuteAlongsideForeignContent(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// When pre-commit is refused the guard is off even if the other hooks
+// installed, and install must say so rather than only counting "1 refused".
+func TestInstallHooks_WarnsWhenGuardInactive(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	pc := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	os.MkdirAll(filepath.Dir(pc), 0755)
+	os.WriteFile(pc, []byte("#!/usr/bin/env python3\nprint(1)\n"), 0755)
+	var installed int
+	_, stderr := captureOutput(func() { installed, _ = installHooks(repo, false) })
+	if installed != 3 {
+		t.Errorf("installed = %d, want 3", installed)
+	}
+	if !strings.Contains(stderr, "commit guard is NOT active") {
+		t.Errorf("no guard-inactive warning: %q", stderr)
+	}
+	if guardHookActive(pc) {
+		t.Errorf("python pre-commit reported as an active guard")
 	}
 }
 

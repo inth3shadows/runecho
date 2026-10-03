@@ -357,7 +357,7 @@ func checkGitHooks(root string) []Result {
 			out = append(out, Result{
 				Check: "git hook " + name, Status: Fail,
 				Detail: fmt.Sprintf("does not invoke %s — points at a different (likely stale) binary", wantBin),
-				Remedy: "run 'runecho-ir install --force'",
+				Remedy: "run 'runecho-ir install' (it updates runecho's marked block in place)",
 			})
 			continue
 		}

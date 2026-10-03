@@ -190,25 +190,42 @@ if [ "$INSTALL_HOOK" -eq 1 ]; then
   HOOK_FILE="$HOOK_DIR/pre-commit"
   mkdir -p "$HOOK_DIR"
 
-  if [ -f "$HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ]; then
-    # Allow overwrite only if this is already a runecho-guard hook
-    if ! grep -q "runecho-guard" "$HOOK_FILE" 2>/dev/null; then
-      echo "install.sh: ERROR: $HOOK_FILE already exists and is not a runecho-guard hook." >&2
-      echo "  Use --force to overwrite, or inspect and integrate manually." >&2
-      exit 1
+  # A pre-commit holding runecho's marked block (#443) is owned by
+  # `runecho-ir install`, and may share the file with other tools' content —
+  # rewriting it here would delete that content. Skip, even with --force.
+  if [ -f "$HOOK_FILE" ] && grep -qxF '# >>> runecho >>>' "$HOOK_FILE" 2>/dev/null; then
+    echo "Git pre-commit hook already managed by runecho-ir: $HOOK_FILE"
+    echo "  Left untouched (it may hold other tools' hooks too). To update runecho's"
+    echo "  block, run from that repo: runecho-ir install"
+  else
+    if [ -f "$HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ]; then
+      # Allow overwrite only if this is already a runecho-guard hook — and
+      # nothing else: a hook with lines beyond the shebang + exec may carry
+      # another tool's content that the rewrite below would delete (#443).
+      if ! grep -q "runecho-guard" "$HOOK_FILE" 2>/dev/null; then
+        echo "install.sh: ERROR: $HOOK_FILE already exists and is not a runecho-guard hook." >&2
+        echo "  Use --force to overwrite, or inspect and integrate manually." >&2
+        exit 1
+      fi
+      if [ "$(grep -cv '^[[:space:]]*$' "$HOOK_FILE")" -gt 2 ]; then
+        echo "install.sh: ERROR: $HOOK_FILE holds more than runecho's guard line." >&2
+        echo "  Run 'runecho-ir install' from that repo instead: it updates runecho's" >&2
+        echo "  part in place and keeps the rest. (--force overwrites the whole file.)" >&2
+        exit 1
+      fi
     fi
-  fi
 
-  cat > "$HOOK_FILE" <<HOOK
+    cat > "$HOOK_FILE" <<HOOK
 #!/usr/bin/env bash
 exec "$BIN_DIR/runecho-guard$EXE" "\$@"
 HOOK
-  chmod +x "$HOOK_FILE"
-  echo "Git pre-commit hook installed: $HOOK_FILE"
-  echo "  NOTE: this is the GIT-COMMIT-TIME variant — it vets the staged diff at"
-  echo "  'git commit'. For edit-time vetting inside Claude Code (the primary"
-  echo "  integration), install the plugin: /plugin install runecho-guard@runecho"
-  echo "  Bypass any commit with: RUNECHO_GUARD_SKIP=1 git commit ..."
+    chmod +x "$HOOK_FILE"
+    echo "Git pre-commit hook installed: $HOOK_FILE"
+    echo "  NOTE: this is the GIT-COMMIT-TIME variant — it vets the staged diff at"
+    echo "  'git commit'. For edit-time vetting inside Claude Code (the primary"
+    echo "  integration), install the plugin: /plugin install runecho-guard@runecho"
+    echo "  Bypass any commit with: RUNECHO_GUARD_SKIP=1 git commit ..."
+  fi
 fi
 
 # --hook-pre-push: install THIS repo's own release-safety hook into the repo the

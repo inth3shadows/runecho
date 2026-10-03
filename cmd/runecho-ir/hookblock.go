@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // runecho owns a marked block inside each git hook it installs, never the whole
@@ -66,9 +67,12 @@ func wrapHookBlock(body string) string {
 }
 
 // legacyHookLine matches every line a pre-#443 runecho ever wrote into a hook,
-// with the binary quoted by %q (early releases) or shellQuote, at any path. Frozen: every hook written since #443 carries markers instead.
+// with the binary quoted by %q (early releases) or shellQuote, at any path
+// (`.exe` on Windows). The quoted path admits no further quote, so a line a
+// person wrapped (`flock '/l' '/x/runecho-ir' …`) does not match and is never
+// silently rewritten. Frozen: every hook written since #443 carries markers.
 var legacyHookLine = func() *regexp.Regexp {
-	bin := `(?:'.*runecho-(?:guard|ir)'|".*runecho-(?:guard|ir)")`
+	bin := `(?:'[^']*runecho-(?:guard|ir)(?:\.exe)?'|"[^"]*runecho-(?:guard|ir)(?:\.exe)?")`
 	return regexp.MustCompile(`^(?:` +
 		`exec ` + bin + ` "\$@"` +
 		`|` + bin + ` repo reindex \. >/dev/null 2>&1 &` +
@@ -139,24 +143,29 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 	// runecho lines right after the shebang becomes the block; everything after
 	// it — e.g. a kb-drift fragment appended later — is kept byte for byte.
 	if bare[0] == newHookShebang {
-		end, invokes, deadAfter := 1, false, ""
+		end, invokes, widened := 1, false, ""
 		for end < len(bare) && legacyHookLine.MatchString(bare[end]) {
 			l := bare[end]
 			if strings.Contains(l, "runecho-") {
 				invokes = true
 			}
 			if strings.HasPrefix(l, "exec ") {
-				deadAfter = "the old hook ended in `exec`"
+				widened = "never ran before (the old hook ended in `exec`); it now runs on every commit"
 			} else if strings.HasSuffix(l, "|| exit 0") {
-				deadAfter = "the old hook exited early on a file checkout"
+				widened = "ran only on branch switches before (the old `|| exit 0` gate); it now runs on every checkout"
 			}
 			end++
 		}
 		if invokes {
+			// A runecho line left below foreign content would survive outside
+			// the block, ungated and pinned to a stale path: refuse, don't guess.
+			if n := runechoInvocationLine(bare[end:]); n > 0 {
+				return "", hookRefused, nil, fmt.Errorf(
+					"line %d still invokes runecho below other content; remove the old runecho lines, then re-run", end+n)
+			}
 			rest := strings.Join(lines[end:], "")
-			if deadAfter != "" && strings.TrimSpace(rest) != "" {
-				notes = append(notes, fmt.Sprintf(
-					"content below runecho's lines did not run before (%s); it runs now", deadAfter))
+			if widened != "" && strings.TrimSpace(rest) != "" {
+				notes = append(notes, "content below runecho's old lines "+widened)
 			}
 			out = lines[0] + block + rest
 			return out, hookMigrated, notes, verifyHookMarkers(out)
@@ -164,14 +173,9 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 	}
 
 	// Someone wired runecho in by hand: adding the block would run it twice.
-	if !force {
-		for i, l := range bare {
-			t := strings.TrimSpace(l)
-			if !strings.HasPrefix(t, "#") && (strings.Contains(t, "runecho-guard") || strings.Contains(t, "runecho-ir")) {
-				return "", hookRefused, nil, fmt.Errorf(
-					"line %d already invokes runecho outside runecho's markers; adding the block would run it twice (use --force to add it anyway)", i+1)
-			}
-		}
+	if n := runechoInvocationLine(bare); n > 0 && !force {
+		return "", hookRefused, nil, fmt.Errorf(
+			"line %d already invokes runecho outside runecho's markers; adding the block would run it twice (use --force to add it anyway)", n)
 	}
 
 	// Insert right after the shebang (or at the top), not at the end: a foreign
@@ -186,6 +190,29 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 		out = block + existing
 	}
 	return out, hookCreated, nil, verifyHookMarkers(out)
+}
+
+// guardHookActive reports whether git would run runecho's guard from this
+// pre-commit: a regular executable file holding runecho's marked block.
+func guardHookActive(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	return err == nil && verifyHookMarkers(string(b)) == nil
+}
+
+// runechoInvocationLine returns the 1-based index of the first non-comment
+// line naming a runecho binary, or 0.
+func runechoInvocationLine(lines []string) int {
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if !strings.HasPrefix(t, "#") && (strings.Contains(t, "runecho-guard") || strings.Contains(t, "runecho-ir")) {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // verifyHookMarkers re-checks a merge result: exactly one marker pair. The scan
@@ -227,18 +254,25 @@ func shebangInterpreter(line string) string {
 }
 
 // installHookFile installs runecho's block into one hook. It refuses (leaving
-// the file untouched) rather than guess when the merge is unsafe, writes a .bak
-// of the previous content, and replaces the file by rename: hooks are shared by
-// every worktree, bash reads a script incrementally, and rewriting a hook in
-// place while another worktree runs it would hand that bash shifted bytes.
+// the file untouched) rather than guess when the merge is unsafe, and replaces
+// the file by rename: hooks are shared by every worktree, bash reads a script
+// incrementally, and rewriting a hook in place while another worktree runs it
+// would hand that bash shifted bytes.
+//
+// A symlinked hook is refused: its target lives outside the hooks dir — often
+// a tracked file in the repo or a dotfiles hook shared by many repos — and
+// editing it would commit runecho's machine-local paths or wire the guard into
+// every repo that links it.
+//
+// <hook>.runecho.bak is written only when content outside the markers is first
+// touched (created in a foreign hook, or migrated), so a later in-block update
+// never overwrites the original it exists to protect.
 func installHookFile(hooksDir, name, block string, force bool) (hookAction, error) {
 	path := filepath.Join(hooksDir, name)
-	if _, err := os.Lstat(path); err == nil {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return "", fmt.Errorf("resolve %s hook: %w", name, err)
-		}
-		path = resolved
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, _ := os.Readlink(path)
+		fmt.Fprintf(os.Stderr, "  Refusing %s: it is a symlink (to %s); runecho does not edit files outside the hooks dir. Add the block there yourself, or replace the link with a file. File left untouched.\n", name, target)
+		return hookRefused, nil
 	}
 
 	var existing []byte
@@ -287,10 +321,10 @@ func installHookFile(hooksDir, name, block string, force bool) (hookAction, erro
 		return "", fmt.Errorf("write %s hook: %w", name, werr)
 	}
 	if err := bashSyntaxCheck(tmpPath, out); err != nil {
-		fmt.Fprintf(os.Stderr, "  Refusing %s: the merged hook fails `bash -n` (%v). File left untouched.\n", name, err)
+		fmt.Fprintf(os.Stderr, "  Refusing %s: the merged hook fails `bash -n` (%s). File left untouched.\n", name, printableSnippet(err.Error()))
 		return hookRefused, nil
 	}
-	if existing != nil {
+	if existing != nil && action != hookUpdated {
 		if err := os.WriteFile(path+hookBakSuffix, existing, mode&^0111); err != nil {
 			return "", fmt.Errorf("back up %s hook: %w", name, err)
 		}
@@ -300,6 +334,22 @@ func installHookFile(hooksDir, name, block string, force bool) (hookAction, erro
 	}
 	fmt.Printf("  %s %s\n", strings.ToUpper(string(action[:1]))+string(action[1:]), name)
 	return action, nil
+}
+
+// printableSnippet keeps an error about arbitrary file content safe to print
+// on a shared terminal: one line, printable characters only, capped.
+func printableSnippet(s string) string {
+	s, _, _ = strings.Cut(s, "\n")
+	s = strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
 }
 
 // bashSyntaxCheck runs `bash -n` on a merged hook whose interpreter bash can

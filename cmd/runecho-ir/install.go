@@ -102,6 +102,11 @@ func installHooks(root string, force bool) (installed int, err error) {
 			installed++
 		}
 	}
+	// The guard is the hook that matters most; say so loudly when it is off,
+	// even if the other three installed fine.
+	if !guardHookActive(filepath.Join(hooksDir, "pre-commit")) {
+		fmt.Fprintf(os.Stderr, "  WARNING: the commit guard is NOT active: pre-commit is missing runecho's block or is not executable (see above).\n")
+	}
 	if installed == 0 {
 		fmt.Printf("No hooks installed in %s (all %d refused; see the reasons above)\n", hooksDir, len(hooks))
 		return 0, nil

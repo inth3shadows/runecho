@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -506,5 +507,83 @@ func TestCheckPeriodic_ReportsFreshen(t *testing.T) {
 		if !strings.Contains(r.Detail, tc.want) {
 			t.Errorf("detail %q should contain %q", r.Detail, tc.want)
 		}
+	}
+}
+
+// A user's own hooks under the same events are theirs: only the guard's
+// entries are judged, so an unrelated Bash hook, or a flag that merely
+// contains the mode as a substring, must not turn the check into a Fail
+// (audit, 2026-10-03).
+func TestCheckWiring_UnrelatedUserHooksIgnored(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".claude"), 0o755)
+	cfg := `{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "my-lint --no-hook-mode"}]},
+      {"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": "guard.sh --hook-mode", "timeout": 5}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": "guard.sh --outcome-mode", "timeout": 5}]},
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "notify-me"}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(root, ".claude", "settings.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := find(checkWiring(root), ".claude/settings.json")
+	if r == nil || r.Status != OK {
+		t.Fatalf("settings with unrelated user hooks = %+v, want OK", r)
+	}
+}
+
+// A live pass with an old corruption record still on disk is a Warn, not
+// "integrity ok": the guard and runecho-mcp keep warning until it is cleared.
+func TestCheckStore_RecordedCorruptionWithLivePassIsWarn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	db, err := snapshot.Open(filepath.Join(home, "history.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	db.Close()
+	if err := os.WriteFile(filepath.Join(home, "history.db.corrupt"), []byte("2026-10-03T00:00:00Z integrity check failed: page 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := find(checkStore(t.TempDir()), "store health")
+	if r == nil || r.Status != Warn || !strings.Contains(r.Detail, "recorded damage") {
+		t.Fatalf("store health with a stale corruption record = %+v, want a Warn naming it", r)
+	}
+}
+
+// Every branch of the store-health verdict, including the ones a test store
+// can't produce on demand (an I/O row, damage hidden behind one).
+func TestStoreHealthResult(t *testing.T) {
+	const io = "*** in database main ***\nTree 4 page 4: unable to get the page. error code=266"
+	cases := []struct {
+		name, integrity string
+		recorded        bool
+		want            Status
+		detail, remedy  string
+	}{
+		{"ok", "ok", false, OK, "integrity ok", ""},
+		{"damage", "row 3 missing from index idx_x", false, Fail, "missing from index", "repo reindex --all"},
+		{"io only", io, false, Warn, "could not run", "check the disk"},
+		{"io hides later damage row", io + "\nPage 7 is never used", false, Fail, "never used", "repo reindex --all"},
+		{"io with recorded damage", io, true, Fail, "earlier check recorded damage", "restore"},
+		{"live pass, stale record", "ok", true, Warn, "earlier check recorded damage", "repo reindex --all"},
+	}
+	// Health itself erroring is "could not run", and a recorded finding still shows.
+	if r := storeHealthResult(snapshot.HealthInfo{}, errors.New("quick_check: disk I/O error"), "/h/history.db", "page 9", true); r.Status != Fail || !strings.Contains(r.Detail, "recorded damage") {
+		t.Errorf("Health error + recorded finding = %+v, want a Fail naming the finding", r)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := storeHealthResult(snapshot.HealthInfo{Integrity: c.integrity}, nil, "/h/history.db", "page 9", c.recorded)
+			if r.Status != c.want || !strings.Contains(r.Detail, c.detail) || !strings.Contains(r.Remedy, c.remedy) {
+				t.Errorf("= %+v, want status %v, detail ~%q, remedy ~%q", r, c.want, c.detail, c.remedy)
+			}
+		})
 	}
 }

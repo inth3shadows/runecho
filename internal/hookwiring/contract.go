@@ -27,6 +27,8 @@ package hookwiring
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -66,32 +68,38 @@ type ClaudeHookFile struct {
 }
 
 // CheckChannel validates raw (the JSON content of one hook-config channel)
-// against Contract: every event must have a hook using Matcher, invoking its
-// required mode, with WantHookTimeout set. Returns one violation string per
-// problem found (nil if none), or an error if raw is not valid JSON.
+// against Contract: every event must have a hook invoking its required mode,
+// in an entry using Matcher, with WantHookTimeout set. Only entries that invoke
+// the guard are judged — a user's own hooks under the same event (a Bash
+// matcher, another tool) are theirs, and flagging them taught people to ignore
+// doctor (audit, 2026-10-03). Returns one violation string per problem, in a
+// fixed order (nil if none), or an error if raw is not valid JSON.
 func CheckChannel(raw []byte) (violations []string, err error) {
 	var cfg ClaudeHookFile
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
-	for event, mode := range Contract {
-		entries, ok := cfg.Hooks[event]
-		if !ok || len(entries) == 0 {
+	for _, event := range slices.Sorted(maps.Keys(Contract)) {
+		mode := Contract[event]
+		entries := cfg.Hooks[event]
+		if len(entries) == 0 {
 			violations = append(violations, fmt.Sprintf(
 				"no %s hook — the guard degrades silently without it (stops measuring, stops learning)", event))
 			continue
 		}
 		var found bool
 		for _, entry := range entries {
-			if entry.Matcher != Matcher {
-				violations = append(violations, fmt.Sprintf(
-					"%s matcher is %q, want %q", event, entry.Matcher, Matcher))
-			}
+			matcherFlagged := false
 			for _, h := range entry.Hooks {
-				if !strings.Contains(h.Command, mode) {
+				if !invokesMode(h.Command, mode) {
 					continue
 				}
 				found = true
+				if entry.Matcher != Matcher && !matcherFlagged {
+					matcherFlagged = true
+					violations = append(violations, fmt.Sprintf(
+						"%s matcher is %q, want %q", event, entry.Matcher, Matcher))
+				}
 				if h.Timeout == nil {
 					violations = append(violations, fmt.Sprintf(
 						"%s hook has no \"timeout\" — a hang blocks the edit indefinitely instead of failing open", event))
@@ -106,4 +114,31 @@ func CheckChannel(raw []byte) (violations []string, err error) {
 		}
 	}
 	return violations, nil
+}
+
+// invokesMode reports whether command contains mode as a whole flag: not
+// preceded or followed by a character that could continue a flag name
+// (letter, digit, '-', '_') and not the value of an assignment ('=' before
+// it). Shell punctuation and quotes around it are fine —
+// `--hook-mode||true`, `"…" --hook-mode;`, `--hook-mode=1` all count — while a
+// different flag that merely contains the text (`--hook-mode-x`) does not.
+func invokesMode(command, mode string) bool {
+	flagChar := func(b byte) bool {
+		return b == '-' || b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+	}
+	for i := 0; ; {
+		j := strings.Index(command[i:], mode)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(mode)
+		// '=' before it, directly or before an opening quote, makes it an
+		// assignment's value (VAR=--hook-mode, VAR="--hook-mode"), not a flag.
+		assigned := start > 0 && command[start-1] == '=' ||
+			start > 1 && (command[start-1] == '"' || command[start-1] == '\'') && command[start-2] == '='
+		if (start == 0 || !flagChar(command[start-1])) && !assigned && (end == len(command) || !flagChar(command[end])) {
+			return true
+		}
+		i = start + 1
+	}
 }

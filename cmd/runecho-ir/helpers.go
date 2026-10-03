@@ -38,7 +38,7 @@ func mustOpenDB() (*snapshot.DB, int) {
 		db, err := snapshot.Open(path)
 		if errors.Is(err, snapshot.ErrIntegrityFailed) {
 			return nil, fmt.Errorf("%w — restore %s from a backup (default: %s), then re-run; the first passing command clears this",
-				err, path, filepath.Join(filepath.Dir(path), "backups", "history-backup.db"))
+				err, path, snapshot.DefaultBackupPath(path))
 		}
 		if _, recorded := snapshot.CorruptFinding(path); err != nil && !recorded && !errors.Is(err, snapshot.ErrSchemaNewer) {
 			// The check could not run (a lock, an I/O hiccup) on a store with

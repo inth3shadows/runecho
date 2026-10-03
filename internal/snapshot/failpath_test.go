@@ -209,3 +209,49 @@ func TestNeedsCheck_FutureStampIsStale(t *testing.T) {
 		t.Error("a stamp dated in the future was trusted")
 	}
 }
+
+type codedErr int
+
+func (c codedErr) Error() string { return fmt.Sprintf("sqlite error (%d)", int(c)) }
+func (c codedErr) Code() int     { return int(c) }
+
+// How quick_check's rows and an early-ending error combine (#456 review): a
+// corruption code is itself damage; damage rows read before any other error
+// still stand; only with none does the check count as not run.
+func TestFoldQuickCheck(t *testing.T) {
+	io := "Tree 4 page 4: unable to get the page. error code=266"
+	cases := []struct {
+		name    string
+		rows    []string
+		err     error
+		damaged bool
+		ranOK   bool // classify as "ok"
+		notRun  bool // returned as an error
+	}{
+		{"clean", []string{"ok"}, nil, false, true, false},
+		{"io row then damage row", []string{io, "Page 7 is never used"}, nil, true, false, false},
+		{"corrupt on first step", nil, codedErr(11), true, false, false},
+		{"notadb after rows", []string{io}, codedErr(26), true, false, false},
+		{"damage then io error", []string{"row 3 missing from index idx_x"}, codedErr(10), true, false, false},
+		{"io error, nothing read", nil, codedErr(10), false, false, true},
+		{"busy after ok row", []string{"ok"}, codedErr(5), false, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := foldQuickCheck(c.rows, c.err)
+			if c.notRun {
+				if err == nil {
+					t.Fatalf("= %q, nil; want the check reported as not run", res)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error %v", err)
+			}
+			cerr := classifyQuickCheck(res)
+			if c.ranOK != (cerr == nil) || c.damaged != errors.Is(cerr, ErrIntegrityFailed) {
+				t.Errorf("%q classified as %v; want ok=%v damaged=%v", res, cerr, c.ranOK, c.damaged)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/ir"
+	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
 // generateTimeoutEnv is the env var that overrides the IR-generation wall-clock
@@ -48,7 +49,7 @@ func runBackup(args []string) int {
 		if err != nil {
 			return printErr(err)
 		}
-		dest = filepath.Join(dir, "backups", "history-backup.db")
+		dest = snapshot.DefaultBackupPath(filepath.Join(dir, "history.db"))
 		// 0700: the backup is a full copy of history.db (same repo paths and symbol
 		// names); keep it owner-only, consistent with the central store dir.
 		if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {

@@ -167,14 +167,77 @@ func OpenFast(path string) (*DB, error) {
 // from, or sweep past a corrupt DB; reads fail on corrupt pages they touch, and a
 // failed check is recorded for every later open (corruptMarkerPath).
 func (db *DB) integrityCheck() error {
-	var result string
-	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
-		return fmt.Errorf("quick_check: %w", err)
+	result, err := db.quickCheck()
+	if err != nil {
+		return err
 	}
 	return classifyQuickCheck(result)
 }
 
+// quickCheck runs PRAGMA quick_check and returns ALL its result rows joined by
+// newlines. It can return one row per problem; reading only the first let an
+// I/O row there hide real damage reported in a later row, which
+// classifyQuickCheck's "damage wins" rule must see. Stepping past the first
+// row can itself fail with SQLITE_CORRUPT/NOTADB — that is a finding, so it is
+// appended as a result line (classified as damage); any other error means the
+// check did not finish and is returned as an error.
+func (db *DB) quickCheck() (string, error) {
+	var out []string
+	// The driver runs the first step inside Query, so its error is handled
+	// exactly like rows.Err() — see foldQuickCheck.
+	finish := func(err error) (string, error) { return foldQuickCheck(out, err) }
+	rows, err := db.conn.Query("PRAGMA quick_check")
+	if err != nil {
+		return finish(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return finish(err)
+		}
+		out = append(out, r)
+	}
+	return finish(rows.Err())
+}
+
+// sqliteCoder is what *sqlite.Error (modernc) exposes: the SQLite result code.
+type sqliteCoder interface {
+	Code() int
+}
+
+// foldQuickCheck turns the rows a quick_check produced, and the error that
+// ended it early (nil if it finished), into its result. SQLITE_CORRUPT/NOTADB
+// is itself a finding, appended as a damage line; any other error ends the
+// check early, but damage rows already read still stand ("damage wins"); with
+// none, the check did not run and the error is returned. Pure for testing.
+func foldQuickCheck(rows []string, err error) (string, error) {
+	if err == nil {
+		return strings.Join(rows, "\n"), nil
+	}
+	var c sqliteCoder
+	if errors.As(err, &c) && (c.Code()&0xff == 11 || c.Code()&0xff == 26) { // SQLITE_CORRUPT, SQLITE_NOTADB
+		return strings.Join(append(rows, err.Error()), "\n"), nil
+	}
+	if len(rows) > 0 && !(len(rows) == 1 && rows[0] == "ok") {
+		return strings.Join(rows, "\n"), nil
+	}
+	return "", fmt.Errorf("quick_check: %w", err)
+}
+
 var quickCheckErrCode = regexp.MustCompile(`error code=(\d+)`)
+
+// ClassifyIntegrity interprets a raw PRAGMA quick_check result the way Open
+// does: nil for "ok", an error wrapping ErrIntegrityFailed for damage, and a
+// plain error when the check could not read the store (I/O, out of memory).
+// For callers like doctor that run quick_check themselves (Health).
+func ClassifyIntegrity(result string) error { return classifyQuickCheck(result) }
+
+// DefaultBackupPath is where `runecho-ir backup` writes by default and where
+// every restore hint points: backups/history-backup.db beside the store.
+func DefaultBackupPath(storePath string) string {
+	return filepath.Join(filepath.Dir(storePath), "backups", "history-backup.db")
+}
 
 // classifyQuickCheck turns a quick_check result into an error. quick_check
 // reports a page it could not READ as a result row ("unable to get the page.
@@ -554,9 +617,9 @@ func (db *DB) Health() (HealthInfo, error) {
 	if err := db.conn.QueryRow("PRAGMA user_version").Scan(&h.SchemaVersion); err != nil {
 		return h, fmt.Errorf("read user_version: %w", err)
 	}
-	var qc string
-	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&qc); err != nil {
-		return h, fmt.Errorf("quick_check: %w", err)
+	qc, err := db.quickCheck()
+	if err != nil {
+		return h, err
 	}
 	h.Integrity = qc
 	if err := db.conn.QueryRow("SELECT COUNT(*) FROM repos").Scan(&h.RepoCount); err != nil {

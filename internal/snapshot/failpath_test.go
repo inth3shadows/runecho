@@ -1,12 +1,14 @@
 package snapshot
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -89,5 +91,121 @@ func TestOpenRefusesCorruptDB(t *testing.T) {
 
 	if _, err := Open(path); err == nil {
 		t.Fatal("Open accepted a corrupt DB; want integrity refusal")
+	}
+}
+
+// A checked Open records its outcome for opens that skip the scan (#441): a
+// failure leaves a marker that CorruptFinding reports and NeedsCheck acts on,
+// without making OpenFast refuse (that would lock out doctor, runecho-mcp and a
+// restore); a pass — here after the store is replaced, as a restore would —
+// clears the marker and stamps the pass, and a stale stamp asks for a re-check.
+func TestCheckedOpenRecordsItsOutcome(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck right after a passing Open")
+	}
+	if _, err := db.conn.Exec("CREATE TABLE filler (x TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	row := strings.Repeat("a", 256)
+	for i := 0; i < 300; i++ {
+		if _, err := db.conn.Exec("INSERT INTO filler VALUES (?)", row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.OpenFile(path, os.O_WRONLY, 0)
+	f.WriteAt(bytes.Repeat([]byte{0xBD}, 16*1024), 4096)
+	f.Close()
+
+	if _, err := Open(path); !errors.Is(err, ErrIntegrityFailed) {
+		t.Fatalf("Open on a corrupt DB: err = %v, want ErrIntegrityFailed", err)
+	}
+	if detail, bad := CorruptFinding(path); !bad || !strings.Contains(detail, "integrity check failed") {
+		t.Fatalf("CorruptFinding = %q, %v; want the recorded failure", detail, bad)
+	}
+	if !NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck false while a failure is recorded")
+	}
+	if db, err := OpenFast(path); err != nil {
+		t.Fatalf("OpenFast must not refuse on a recorded failure: %v", err)
+	} else {
+		db.Close()
+	}
+
+	// Restore a good copy; the next checked Open passes, clears and stamps.
+	os.Remove(path + "-wal")
+	os.Remove(path + "-shm")
+	if err := os.WriteFile(path, good, 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open on the restored store: %v", err)
+	}
+	db.Close()
+	if _, bad := CorruptFinding(path); bad {
+		t.Fatal("passing check left the marker")
+	}
+	if NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck right after the restore passed")
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(checkedStampPath(path), old, old)
+	if !NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck false with a stale stamp")
+	}
+
+	// A marker that exists but cannot be read still counts.
+	if err := os.Mkdir(corruptMarkerPath(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, bad := CorruptFinding(path); !bad {
+		t.Fatal("an unreadable marker read as all-clear")
+	}
+}
+
+// Only a quick_check that found damage counts as corruption: a page it could
+// not read (I/O, out of memory) means the check did not run (#441 review).
+func TestClassifyQuickCheck(t *testing.T) {
+	cases := []struct {
+		result  string
+		damaged bool
+		ok      bool
+	}{
+		{"ok", false, true},
+		{"*** in database main ***\nTree 4 page 4: unable to get the page. error code=266", false, false}, // IOERR_READ
+		{"*** in database main ***\nPage 9: unable to get the page. error code=7", false, false},          // NOMEM
+		{"*** in database main ***\nTree 23 page 43: btreeInitPage() returns error code 11", true, false},
+		{"row 3 missing from index idx_symbols_name", true, false},
+		{"*** in database main ***\nTree 4 page 4: unable to get the page. error code=266\nTree 23 page 43: btreeInitPage() returns error code 11", true, false}, // damage wins over I/O
+	}
+	for _, c := range cases {
+		err := classifyQuickCheck(c.result)
+		if (err == nil) != c.ok || errors.Is(err, ErrIntegrityFailed) != c.damaged {
+			t.Errorf("classifyQuickCheck(%q) = %v; want ok=%v damaged=%v", c.result, err, c.ok, c.damaged)
+		}
+	}
+}
+
+func TestNeedsCheck_FutureStampIsStale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.db")
+	os.WriteFile(checkedStampPath(path), []byte("x\n"), 0600)
+	future := time.Now().Add(24 * time.Hour)
+	os.Chtimes(checkedStampPath(path), future, future)
+	if !NeedsCheck(path, time.Hour) {
+		t.Error("a stamp dated in the future was trusted")
 	}
 }

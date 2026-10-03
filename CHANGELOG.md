@@ -16,6 +16,18 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Changed
+- store: the commit-time guard and runecho-ir's read and small-write commands
+  (including the per-commit background `repo reindex`) open the store without
+  the whole-file `PRAGMA quick_check` — ~3 s each on a ~0.9 GiB store, now
+  ~0.1 s for `repo list`. The check always runs on backup, `repo prune`,
+  `prune-missing`, `repo rm` and the hourly `reindex --all`, and on any other
+  `runecho-ir` command once the last pass is over 24 h old, so every install
+  gets periodic detection. A failed check is recorded in `history.db.corrupt`:
+  the pre-commit guard and `runecho-mcp` warn, and the next `runecho-ir` command
+  re-checks — failing until the store is repaired or restored, then clearing it
+  (#441).
+
 ## [0.66.4] — 2026-10-03
 
 ### Fixed

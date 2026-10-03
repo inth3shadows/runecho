@@ -216,7 +216,11 @@ func runPreCommit(dryRun, verbose bool) int {
 		return 0
 	}
 
-	db, err := snapshot.Open(dbPath)
+	// OpenFast: Open's whole-file quick_check cost ~3 s on every commit at
+	// ~0.9 GiB (#441). This path only reads; corrupt pages it touches still
+	// error. A failed check recorded by runecho-ir is reported below, and the
+	// guard keeps checking: undamaged pages still answer correctly.
+	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		if errors.Is(err, snapshot.ErrSchemaNewer) {
 			warnf("this runecho-guard binary is older than the store — symbol validation is DISABLED until it is rebuilt (bash install.sh): %v", err)
@@ -226,6 +230,9 @@ func runPreCommit(dryRun, verbose bool) int {
 		return degradedExit(strict)
 	}
 	defer db.Close()
+	if detail, bad := snapshot.CorruptFinding(dbPath); bad {
+		warnf("the store failed its last integrity check (%s) — symbol answers may be incomplete; restore history.db from a backup (default: backups/history-backup.db in the store dir) if needed; the next runecho-ir command re-checks it", detail)
+	}
 
 	// Resolve the enrolled repo for the current working tree. ResolveRepo keys
 	// on git-common-dir (stable across all worktrees), so bare-repo claudew
@@ -574,6 +581,11 @@ func refreshIRForFile(filePath string) (outcome string) {
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return "no-db"
+	}
+	// Don't keep writing into a store a checked open found damaged (#441):
+	// writes over a bad freelist can spread it. Reads elsewhere carry on.
+	if _, bad := snapshot.CorruptFinding(dbPath); bad {
+		return "store-corrupt"
 	}
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {

@@ -102,7 +102,7 @@ is fully finished.
 | `internal/ir/generator.go` | Walk a tree, parse files, build IR; `Generate` (full) and `Update` (incremental, hash-gated) | `parser` |
 | `internal/ir/hasher.go` | `HashFile`, `HashBytes`, `ComputeRootHash` (sorted `path:hash` pairs → SHA-256) | — |
 | `internal/ir/storage.go` | Canonical JSON marshal (sorted) + `Save`/`Load` of `.ai/ir.json` | — |
-| `internal/snapshot/db.go` | `Open` (pragmas, `quick_check`, migrations), versioned `migrate`, `Health`, `BackupTo` | `ir` |
+| `internal/snapshot/db.go` | `Open` (pragmas, `quick_check`, migrations; records the check outcome), `OpenFast`, `CorruptFinding`/`NeedsCheck`, versioned `migrate`, `Health`, `BackupTo` | `ir` |
 | `internal/snapshot/registry.go` | `repos` table CRUD: `EnrollRepo`, `GetRepoBy*`, `ListRepos`, `TouchRepo`, `PurgeRepo` | — |
 | `internal/snapshot/snapshot.go` | `SaveSnapshot`, `List`, `GetByID`, `GetLatestByLabel` (all repo-scoped) | `ir` |
 | `internal/snapshot/diff.go` | `Diff`, `DiffLive`, formatters | — |
@@ -728,10 +728,27 @@ refuses a vanished root via `requireExistingDir` before any snapshot is written.
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`
 concurrency test). `Open` runs `PRAGMA quick_check` and refuses a corrupt or
-newer-than-supported database. `runecho-mcp`, `doctor` and the guard's editor hooks
-(PreToolUse, and the PostToolUse refresh, which writes) use `OpenFast`, which skips
-that scan. Corruption surfaces in `runecho-ir` commands and reindex, the pre-commit
-guard, and the `Health` check that `doctor` and the MCP `health` tool run.
+newer-than-supported database; `OpenFast` skips that whole-file scan (~3 s at
+~0.9 GiB). Since #441:
+
+- **Always checked (`Open`):** `runecho-ir backup`, `repo prune`,
+  `repo prune-missing`, `repo rm`, and the hourly `repo reindex --all` — whatever
+  copies the store, bulk-deletes from it, or sweeps it.
+- **Checked when stale:** every other `runecho-ir` command (including the
+  background `repo reindex .` after commits) re-runs the scan when the last pass
+  is over 24 h old or a failure is recorded; otherwise it opens fast.
+- **Never checked on open (`OpenFast`):** the guard's hooks and pre-commit,
+  `runecho-mcp`, `doctor` (which runs `Health` on demand), and the PostToolUse
+  refresh.
+
+A checked open records its outcome next to the store: `history.db.corrupt`
+(written on a failure, removed on a pass) and `history.db.checked` (the time of
+the last pass). Fast opens never refuse on a recorded failure — that would lock
+out `doctor`, `runecho-mcp` and a restore — but the pre-commit guard and
+`runecho-mcp` warn, and the next `runecho-ir` command re-checks: it fails while
+the store is corrupt and clears the record once a restored store passes.
+Corruption also surfaces in the `Health` check that `doctor` and the MCP
+`health` tool run.
 
 ## Configuration
 

@@ -6,9 +6,61 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrIntegrityFailed marks a PRAGMA quick_check that ran and reported damage —
+// as opposed to the check failing to run (a lock, an I/O error), which says
+// nothing about the store and must not be recorded as corruption.
+var ErrIntegrityFailed = errors.New("integrity check failed")
+
+// The whole-file quick_check is too slow for every open (#441), so its outcome
+// is recorded next to the store instead, where any open can read it for the
+// price of a stat:
+//   - <store>.corrupt: written when a checked Open finds damage, removed when
+//     one passes. Fast opens never refuse on it — that would lock out the
+//     tools needed to diagnose and recover (doctor, runecho-mcp, a restore).
+//     Callers surface it (CorruptFinding) or re-check first (NeedsCheck).
+//   - <store>.checked: touched when a checked Open passes, so NeedsCheck can
+//     re-run the scan once it is stale — periodic detection on every install,
+//     not only those with the opt-in hourly job.
+func corruptMarkerPath(path string) string { return path + ".corrupt" }
+func checkedStampPath(path string) string  { return path + ".checked" }
+
+// CorruptFinding reports whether the store's last checked Open found damage,
+// with that finding's first line. A marker that exists but cannot be read
+// still counts: absence is the only all-clear.
+func CorruptFinding(path string) (string, bool) {
+	if _, err := os.Lstat(corruptMarkerPath(path)); errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	b, err := os.ReadFile(corruptMarkerPath(path))
+	if err != nil {
+		return fmt.Sprintf("marker %s unreadable: %v", corruptMarkerPath(path), err), true
+	}
+	detail, _, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	return detail, true
+}
+
+// NeedsCheck reports whether the next open should run the full quick_check:
+// the last check found damage (so a repaired or restored store gets cleared),
+// no check has ever passed, or the last pass is older than maxAge.
+func NeedsCheck(path string, maxAge time.Duration) bool {
+	if _, bad := CorruptFinding(path); bad {
+		return true
+	}
+	fi, err := os.Stat(checkedStampPath(path))
+	if err != nil {
+		return true
+	}
+	age := time.Since(fi.ModTime())
+	return age < 0 || age > maxAge // a stamp from the future (clock skew) is not trusted
+}
 
 // tightenStorePerms best-effort restricts the store DB (and its WAL/SHM
 // sidecars) to owner-only 0600 and the store dir to 0700. The dir's MkdirAll at
@@ -58,8 +110,17 @@ func Open(path string) (*DB, error) {
 	}
 	if err := db.integrityCheck(); err != nil {
 		conn.Close()
+		if errors.Is(err, ErrIntegrityFailed) {
+			if werr := os.WriteFile(corruptMarkerPath(path),
+				[]byte(time.Now().UTC().Format(time.RFC3339)+" "+err.Error()+"\n"), 0600); werr != nil {
+				err = fmt.Errorf("%w (and recording it failed: %v)", err, werr)
+			}
+		}
 		return nil, err
 	}
+	// Passed: clear any earlier finding and stamp the pass for NeedsCheck.
+	_ = os.Remove(corruptMarkerPath(path))
+	_ = os.WriteFile(checkedStampPath(path), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0600)
 	if err := db.migrate(); err != nil {
 		conn.Close()
 		return nil, err
@@ -68,17 +129,19 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
-// OpenFast opens the snapshot DB for latency-sensitive read paths, skipping the
-// on-open PRAGMA quick_check integrity scan that Open performs. That scan reads
-// the whole file (~137ms on a 48 MiB store, ~3.2s on a 1.3 GiB one) — acceptable
-// for the writer/CLI, but far too costly for the PreToolUse guard hook, which fires
-// on every edit, for runecho-mcp, whose `initialize` waits on it (#438), and for
-// the PostToolUse refresh, which writes auto-snapshots without the scan. A read
-// over a corrupt page usually yields a query error (the guard degrades to defer),
-// but damage quick_check would catch can also make a read silently skip rows —
-// the accepted cost. The scan still runs in runecho-ir's CLI and reindex and the
-// pre-commit guard (all via Open), and on demand in Health (doctor, MCP health).
-// Pragmas and migration (both cheap when the schema is current) are still applied.
+// OpenFast opens the snapshot DB without Open's PRAGMA quick_check, which reads
+// the whole file and so scales with it (~3 s at ~0.9 GiB). It is the open for
+// every hot or incremental path: the guard hooks and pre-commit, runecho-mcp
+// (#438), the PostToolUse refresh, and runecho-ir's read and small-write
+// commands, including the per-commit background reindex (#441). A read over a
+// corrupt page usually yields a query error, but damage quick_check would catch
+// can also make a read silently skip rows until the next checked open finds it.
+// Checked opens (Open) remain for what copies, bulk-deletes from, or sweeps the
+// store — backup, prune, repo rm, the hourly `reindex --all` — and for any
+// runecho-ir command once NeedsCheck says the last pass is stale or found
+// damage. OpenFast itself never refuses on a recorded finding; callers that
+// should say so use CorruptFinding. Health (doctor, MCP health) also scans on
+// demand. Pragmas and migration (cheap when the schema is current) still apply.
 func OpenFast(path string) (*DB, error) {
 	conn, err := sql.Open("sqlite", storeDSN(path))
 	if err != nil {
@@ -100,16 +163,48 @@ func OpenFast(path string) (*DB, error) {
 }
 
 // integrityCheck runs PRAGMA quick_check (cheaper than integrity_check, sufficient
-// for catching corruption on open). Durability guarantee: never serve a corrupt DB.
+// for catching corruption on open). Durability guarantee: never copy, bulk-delete
+// from, or sweep past a corrupt DB; reads fail on corrupt pages they touch, and a
+// failed check is recorded for every later open (corruptMarkerPath).
 func (db *DB) integrityCheck() error {
 	var result string
 	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
 		return fmt.Errorf("quick_check: %w", err)
 	}
-	if result != "ok" {
-		return fmt.Errorf("integrity check failed: %s", result)
+	return classifyQuickCheck(result)
+}
+
+var quickCheckErrCode = regexp.MustCompile(`error code=(\d+)`)
+
+// classifyQuickCheck turns a quick_check result into an error. quick_check
+// reports a page it could not READ as a result row ("unable to get the page.
+// error code=266"), not as an error; an I/O or out-of-memory code there says
+// the check could not run, not that the store is damaged, so it must not be
+// recorded as corruption (ErrIntegrityFailed).
+func classifyQuickCheck(result string) error {
+	if result == "ok" {
+		return nil
 	}
-	return nil
+	// Damage wins: any finding line that is not an unreadable-page I/O/NOMEM
+	// line is a positive finding, whatever else the result also mentions.
+	ioOnly := false
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "*** in database") {
+			continue
+		}
+		if m := quickCheckErrCode.FindStringSubmatch(line); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && (n&0xff == 10 || n&0xff == 7) { // SQLITE_IOERR, SQLITE_NOMEM
+				ioOnly = true
+				continue
+			}
+		}
+		return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
+	}
+	if ioOnly {
+		return fmt.Errorf("quick_check could not read the store: %s", result)
+	}
+	return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
 }
 
 // BackupTo writes an atomic, consistent single-file backup using VACUUM INTO.

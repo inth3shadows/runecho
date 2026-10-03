@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/snapshot"
@@ -14,10 +16,47 @@ import (
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
 
-// mustOpenDB opens the central snapshot store (~/.runecho/history.db) or returns 1.
-// History is centralized so the oracle serves all enrolled repos from one
-// durable, integrity-checked store; the working ir.json stays repo-local.
+// storeCheckMaxAge bounds how long the CLI trusts a passed quick_check before
+// paying for another (~3 s on a ~0.9 GiB store). The background reindex after
+// each commit usually absorbs it, so detection reaches every install about
+// daily even without the hourly job.
+const storeCheckMaxAge = 24 * time.Hour
+
+// mustOpenDB opens the central snapshot store (~/.runecho/history.db) for reads
+// and incremental writes. It skips the whole-file integrity scan (#441) unless
+// snapshot.NeedsCheck says the last pass is stale or found damage — so a
+// corrupt store fails here, loudly, until it is repaired or restored, and the
+// first command after a restore clears the finding. Anything that copies the
+// store, bulk-deletes from it, or is the periodic sweep uses mustOpenDBVerified.
+// History is centralized so the oracle serves all enrolled repos from one store;
+// the working ir.json stays repo-local.
 func mustOpenDB() (*snapshot.DB, int) {
+	return openCentralStore(func(path string) (*snapshot.DB, error) {
+		if !snapshot.NeedsCheck(path, storeCheckMaxAge) {
+			return snapshot.OpenFast(path)
+		}
+		db, err := snapshot.Open(path)
+		if errors.Is(err, snapshot.ErrIntegrityFailed) {
+			return nil, fmt.Errorf("%w — restore %s from a backup (default: %s), then re-run; the first passing command clears this",
+				err, path, filepath.Join(filepath.Dir(path), "backups", "history-backup.db"))
+		}
+		if _, recorded := snapshot.CorruptFinding(path); err != nil && !recorded && !errors.Is(err, snapshot.ErrSchemaNewer) {
+			// The check could not run (a lock, an I/O hiccup) on a store with
+			// no recorded damage: that says nothing about it, so don't fail the
+			// command. With damage recorded, fail rather than write into it.
+			return snapshot.OpenFast(path)
+		}
+		return db, err
+	})
+}
+
+// mustOpenDBVerified opens the store with the full PRAGMA quick_check
+// (snapshot.Open). Rule: checked = destructive, copies the store, or the
+// periodic sweep — backup, prune, prune-missing, repo rm, reindex --all. A failed
+// check is recorded, and every later mustOpenDB re-checks until one passes.
+func mustOpenDBVerified() (*snapshot.DB, int) { return openCentralStore(snapshot.Open) }
+
+func openCentralStore(open func(string) (*snapshot.DB, error)) (*snapshot.DB, int) {
 	dir, err := runechoDir()
 	if err != nil {
 		return nil, printErr(err)
@@ -29,7 +68,7 @@ func mustOpenDB() (*snapshot.DB, int) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, printErr(fmt.Errorf("create %s: %w", dir, err))
 	}
-	db, err := snapshot.Open(filepath.Join(dir, "history.db"))
+	db, err := open(filepath.Join(dir, "history.db"))
 	if err != nil {
 		return nil, printErr(fmt.Errorf("open snapshot DB: %w", err))
 	}

@@ -58,7 +58,7 @@ func runBackup(args []string) int {
 	if _, err := os.Stat(dest); err == nil {
 		return printErr(fmt.Errorf("backup destination already exists: %s (VACUUM INTO requires a new file)", dest))
 	}
-	db, code := mustOpenDB()
+	db, code := mustOpenDBVerified() // copies the store: never back up a corrupt one
 	if code != 0 {
 		return code
 	}

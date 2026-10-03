@@ -183,3 +183,109 @@ func TestDiffLive_NoChange(t *testing.T) {
 		t.Errorf("FormatFull should report no changes:\n%s", FormatFull(res))
 	}
 }
+
+// A snapshot-vs-live diff must compare like with like: the live side drops the
+// internal kinds (unexported helpers, struct fields), so the stored side must
+// too. Before, changing only Exported's body listed helper and T.field as
+// removed although both still existed (audit, 2026-10-03).
+func TestDiffLive_InternalKindsNotReportedAsRemoved(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/repos/r", "", 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	syms := func(exportedHash string) []ir.Symbol {
+		return []ir.Symbol{
+			{Name: "Exported", Kind: "function", Hash: exportedHash},
+			{Name: "helper", Kind: "unexported", Hash: "hH"},
+			{Name: "T.field", Kind: "field", Hash: "hF"},
+		}
+	}
+	base := &ir.IR{Version: ir.IRVersion, RootHash: "r1",
+		Files: map[string]ir.FileIR{"p.go": {Hash: "f1", Symbols: syms("hE1")}}}
+	sid, err := db.SaveSnapshot(id, "s", "base", "/repos/r", base)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	meta, _ := db.GetByID(sid)
+	live := &ir.IR{Version: ir.IRVersion, RootHash: "r2",
+		Files: map[string]ir.FileIR{"p.go": {Hash: "f2", Symbols: syms("hE2")}}}
+
+	res, err := db.DiffLive(*meta, live)
+	if err != nil {
+		t.Fatalf("DiffLive: %v", err)
+	}
+	if res.TotalRemoved != 0 || res.TotalModified != 1 {
+		t.Fatalf("removed=%d modified=%d, want 0 and 1 (only Exported changed): %+v", res.TotalRemoved, res.TotalModified, res.Files)
+	}
+}
+
+// Stored-vs-stored diffs get the same view: a change only to an internal kind
+// is not a symbol change (the file still shows as modified by its hash).
+func TestDiff_StoredSnapshotsIgnoreInternalKinds(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/repos/r", "", 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	mk := func(root, fileHash, helperHash string) *ir.IR {
+		return &ir.IR{Version: ir.IRVersion, RootHash: root, Files: map[string]ir.FileIR{"p.go": {Hash: fileHash, Symbols: []ir.Symbol{
+			{Name: "Exported", Kind: "function", Hash: "hE"},
+			{Name: "helper", Kind: "unexported", Hash: helperHash},
+		}}}}
+	}
+	meta := func(label, root, fh, hh string) SnapshotMeta {
+		t.Helper()
+		sid, err := db.SaveSnapshot(id, "s", label, "/repos/r", mk(root, fh, hh))
+		if err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+		m, err := db.GetByID(sid)
+		if err != nil || m == nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		return *m
+	}
+	res, err := db.Diff(meta("a", "r1", "f1", "h1"), meta("b", "r2", "f2", "h2"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if len(res.Files) != 1 || res.Files[0].Status != FileModified {
+		t.Fatalf("files = %+v, want p.go reported as modified", res.Files)
+	}
+	if res.TotalAdded+res.TotalRemoved+res.TotalModified != 0 {
+		t.Errorf("an internal-only change reported symbol deltas: +%d -%d ~%d", res.TotalAdded, res.TotalRemoved, res.TotalModified)
+	}
+}
+
+// A live diff must not surface an internal kind that was added either — the
+// guarantee the old live-side-only filter gave, now held by symbolSet.
+func TestDiffLive_AddedInternalKindHidden(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/repos/r", "", 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	base := &ir.IR{Version: ir.IRVersion, RootHash: "r1", Files: map[string]ir.FileIR{"p.go": {Hash: "f1",
+		Symbols: []ir.Symbol{{Name: "Exported", Kind: "function", Hash: "hE"}}}}}
+	sid, err := db.SaveSnapshot(id, "s", "base", "/repos/r", base)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	m, err := db.GetByID(sid)
+	if err != nil || m == nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	live := &ir.IR{Version: ir.IRVersion, RootHash: "r2", Files: map[string]ir.FileIR{"p.go": {Hash: "f2", Symbols: []ir.Symbol{
+		{Name: "Exported", Kind: "function", Hash: "hE"},
+		{Name: "helper2", Kind: "unexported", Hash: "hN"},
+		{Name: "T.extra", Kind: "field", Hash: "hX"},
+	}}}}
+	res, err := db.DiffLive(*m, live)
+	if err != nil {
+		t.Fatalf("DiffLive: %v", err)
+	}
+	if res.TotalAdded != 0 {
+		t.Errorf("added = %d, want 0: internal kinds surfaced in a live diff: %+v", res.TotalAdded, res.Files)
+	}
+}

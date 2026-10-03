@@ -124,15 +124,8 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 
 	for path, file := range irData.Files {
 		files[path] = file.Hash
-		// Internal kinds are excluded so a diff reports what a reader would call a
-		// change. Before these kinds existed an unexported helper or a struct field
-		// could not appear here at all; including them now would make every diff
-		// noisier without reporting anything the tool previously promised.
 		deltas := make([]SymbolDelta, 0, len(file.Symbols))
 		for _, s := range file.Symbols {
-			if ir.InternalKinds[s.Kind] {
-				continue
-			}
 			deltas = append(deltas, SymbolDelta{Name: s.Name, Kind: s.Kind, Hash: s.Hash})
 		}
 		symbols[path] = deltas
@@ -245,10 +238,19 @@ func lessSymbolDelta(a, b SymbolDelta) bool {
 	return a.Kind < b.Kind
 }
 
-// symbolSet converts a slice of SymbolDelta to a map keyed by "kind:name".
+// symbolSet keys a file's symbols for the set-diff, dropping the internal kinds
+// (ir.InternalKinds: unexported helpers, struct fields) so a diff reports what
+// a reader would call a change — those kinds are indexed for edit-time
+// resolution only. It is the one place the rule applies, to both sides and
+// only for files that changed: when the live side alone was filtered, a
+// snapshot-vs-live diff listed every internal symbol of a modified file as
+// removed (2026-10-03 audit).
 func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 	m := make(map[string]SymbolDelta, len(syms))
 	for _, s := range syms {
+		if ir.InternalKinds[s.Kind] {
+			continue
+		}
 		m[s.Kind+":"+s.Name] = s
 	}
 	return m

@@ -399,7 +399,8 @@ func (db *DB) loadFilesBySnapshot(snapshotID int64) (map[string]string, error) {
 	return m, rows.Err()
 }
 
-// loadSymbolsBySnapshot returns path→[]SymbolDelta for all symbols in a snapshot.
+// loadSymbolsBySnapshot returns path→[]SymbolDelta for all symbols in a
+// snapshot. computeDiff drops the internal kinds from both sides.
 func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta, error) {
 	rows, err := db.conn.Query(
 		`SELECT f.path, s.name, s.kind, s.sig_hash

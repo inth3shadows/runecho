@@ -19,6 +19,12 @@ install time from `git describe --tags` (see `install.sh`).
 ## [0.66.6] — 2026-10-03
 
 ### Fixed
+- diff: a snapshot-vs-live diff no longer lists the unexported helpers and
+  struct fields of a modified Go file as removed — only the live side dropped
+  these internal kinds. They are now dropped once, in the diff engine, for
+  both sides, so a diff between two stored snapshots (and `churn`) also stops
+  reporting them, matching what `ir.InternalKinds` documents (CLI `diff`, MCP
+  `diff`; 2026-10-03 audit).
 - guardstats: the verdict audit runs git through `gitutil.Command`, gaining
   `core.fsmonitor=false` and `GIT_CONFIG_NOSYSTEM` in repos named by the
   decision log (2026-10-03 audit).

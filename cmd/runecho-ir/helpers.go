@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,10 +32,20 @@ const storeCheckMaxAge = 24 * time.Hour
 // the working ir.json stays repo-local.
 func mustOpenDB() (*snapshot.DB, int) {
 	return openCentralStore(func(path string) (*snapshot.DB, error) {
-		if snapshot.NeedsCheck(path, storeCheckMaxAge) {
-			return snapshot.Open(path)
+		if !snapshot.NeedsCheck(path, storeCheckMaxAge) {
+			return snapshot.OpenFast(path)
 		}
-		return snapshot.OpenFast(path)
+		db, err := snapshot.Open(path)
+		if errors.Is(err, snapshot.ErrIntegrityFailed) {
+			return nil, fmt.Errorf("%w — restore %s from a backup (default: %s), then re-run; the first passing command clears this",
+				err, path, filepath.Join(filepath.Dir(path), "backups", "history-backup.db"))
+		}
+		if err != nil && !errors.Is(err, snapshot.ErrSchemaNewer) {
+			// The check could not run (a lock, an I/O hiccup): that says
+			// nothing about the store, so don't fail the command over it.
+			return snapshot.OpenFast(path)
+		}
+		return db, err
 	})
 }
 

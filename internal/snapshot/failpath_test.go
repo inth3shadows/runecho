@@ -176,3 +176,35 @@ func TestCheckedOpenRecordsItsOutcome(t *testing.T) {
 		t.Fatal("an unreadable marker read as all-clear")
 	}
 }
+
+// Only a quick_check that found damage counts as corruption: a page it could
+// not read (I/O, out of memory) means the check did not run (#441 review).
+func TestClassifyQuickCheck(t *testing.T) {
+	cases := []struct {
+		result  string
+		damaged bool
+		ok      bool
+	}{
+		{"ok", false, true},
+		{"*** in database main ***\nTree 4 page 4: unable to get the page. error code=266", false, false}, // IOERR_READ
+		{"*** in database main ***\nPage 9: unable to get the page. error code=7", false, false},          // NOMEM
+		{"*** in database main ***\nTree 23 page 43: btreeInitPage() returns error code 11", true, false},
+		{"row 3 missing from index idx_symbols_name", true, false},
+	}
+	for _, c := range cases {
+		err := classifyQuickCheck(c.result)
+		if (err == nil) != c.ok || errors.Is(err, ErrIntegrityFailed) != c.damaged {
+			t.Errorf("classifyQuickCheck(%q) = %v; want ok=%v damaged=%v", c.result, err, c.ok, c.damaged)
+		}
+	}
+}
+
+func TestNeedsCheck_FutureStampIsStale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.db")
+	os.WriteFile(checkedStampPath(path), []byte("x\n"), 0600)
+	future := time.Now().Add(24 * time.Hour)
+	os.Chtimes(checkedStampPath(path), future, future)
+	if !NeedsCheck(path, time.Hour) {
+		t.Error("a stamp dated in the future was trusted")
+	}
+}

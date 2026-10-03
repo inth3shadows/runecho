@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,7 +55,11 @@ func NeedsCheck(path string, maxAge time.Duration) bool {
 		return true
 	}
 	fi, err := os.Stat(checkedStampPath(path))
-	return err != nil || time.Since(fi.ModTime()) > maxAge
+	if err != nil {
+		return true
+	}
+	age := time.Since(fi.ModTime())
+	return age < 0 || age > maxAge // a stamp from the future (clock skew) is not trusted
 }
 
 // tightenStorePerms best-effort restricts the store DB (and its WAL/SHM
@@ -165,10 +171,26 @@ func (db *DB) integrityCheck() error {
 	if err := db.conn.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
 		return fmt.Errorf("quick_check: %w", err)
 	}
-	if result != "ok" {
-		return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
+	return classifyQuickCheck(result)
+}
+
+var quickCheckErrCode = regexp.MustCompile(`error code=(\d+)`)
+
+// classifyQuickCheck turns a quick_check result into an error. quick_check
+// reports a page it could not READ as a result row ("unable to get the page.
+// error code=266"), not as an error; an I/O or out-of-memory code there says
+// the check could not run, not that the store is damaged, so it must not be
+// recorded as corruption (ErrIntegrityFailed).
+func classifyQuickCheck(result string) error {
+	if result == "ok" {
+		return nil
 	}
-	return nil
+	for _, m := range quickCheckErrCode.FindAllStringSubmatch(result, -1) {
+		if n, err := strconv.Atoi(m[1]); err == nil && (n&0xff == 10 || n&0xff == 7) { // SQLITE_IOERR, SQLITE_NOMEM
+			return fmt.Errorf("quick_check could not read the store: %s", result)
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
 }
 
 // BackupTo writes an atomic, consistent single-file backup using VACUUM INTO.

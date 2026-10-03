@@ -231,7 +231,7 @@ func runPreCommit(dryRun, verbose bool) int {
 	}
 	defer db.Close()
 	if detail, bad := snapshot.CorruptFinding(dbPath); bad {
-		warnf("the store failed its last integrity check (%s) — symbol answers may be incomplete; restore from a backup (runecho-ir backup) if needed, then run 'runecho-ir repo reindex --all'", detail)
+		warnf("the store failed its last integrity check (%s) — symbol answers may be incomplete; restore history.db from a backup (default: backups/history-backup.db in the store dir) if needed; the next runecho-ir command re-checks it", detail)
 	}
 
 	// Resolve the enrolled repo for the current working tree. ResolveRepo keys
@@ -581,6 +581,11 @@ func refreshIRForFile(filePath string) (outcome string) {
 	dbPath := filepath.Join(storeDir, "history.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return "no-db"
+	}
+	// Don't keep writing into a store a checked open found damaged (#441):
+	// writes over a bad freelist can spread it. Reads elsewhere carry on.
+	if _, bad := snapshot.CorruptFinding(dbPath); bad {
+		return "store-corrupt"
 	}
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {

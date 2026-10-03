@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- guardstats: the verdict audit runs git through `gitutil.Command`, gaining
+  `core.fsmonitor=false` and `GIT_CONFIG_NOSYSTEM` in repos named by the
+  decision log (2026-10-03 audit).
+
 ## [0.66.5] — 2026-10-03
 
 ### Changed

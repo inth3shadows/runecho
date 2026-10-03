@@ -692,6 +692,11 @@ func TestGitOracleScopeFileOnAPathMissingAtRevIsUnknown(t *testing.T) {
 // it built its own command without core.fsmonitor=false or
 // GIT_CONFIG_NOSYSTEM, leaving a repo-local config able to run code.
 func TestGitOracleCmd_Hardened(t *testing.T) {
+	// Clear what the shell may already export, so only gitOracleCmd's own
+	// additions can satisfy the env assertions below.
+	for _, k := range []string{"GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"} {
+		t.Setenv(k, "unset-by-test")
+	}
 	cmd := gitOracleCmd(context.Background(), "/some/repo", "rev-parse", "HEAD")
 	args := strings.Join(cmd.Args, " ")
 	if !strings.Contains(args, "core.fsmonitor=false") || !strings.Contains(args, "-C /some/repo") {

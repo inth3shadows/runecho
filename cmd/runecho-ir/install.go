@@ -22,7 +22,7 @@ import (
 func runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	periodic := fs.Bool("periodic", false, "also install an hourly reindex job (launchd on macOS, cron on Linux)")
-	force := fs.Bool("force", false, "add runecho's hook block even where a hook already invokes runecho by hand (never deletes content)")
+	force := fs.Bool("force", false, "add runecho's hook block even where runecho is already called outside its markers (hand-wired, or left below other content in an old hook); never deletes content")
 	source := fs.String("source", "", "with --periodic: the runecho checkout whose origin the job keeps the binaries fresh from (default: the current directory, #375)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code

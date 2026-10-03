@@ -208,7 +208,11 @@ if [ "$INSTALL_HOOK" -eq 1 ]; then
         exit 1
       fi
       # Every non-blank line must be the shebang or the guard's own exec line.
-      if grep -v -E '^[[:space:]]*$|^#!|^exec .*runecho-guard[^ ]* "\$@"'$'\r''?$' "$HOOK_FILE" | grep -q .; then
+      # One grep, no pipe: under pipefail a `grep -v | grep -q` pipeline on a
+      # large file dies of SIGPIPE, reads as "no match", and overwrites it.
+      # The exec line must be exactly a quoted path ending in runecho-guard.
+      guard_line="^exec (\"[^\"]*runecho-guard(\\.exe)?\"|'[^']*runecho-guard(\\.exe)?') \"\\\$@\"$(printf '\r')?\$"
+      if grep -qv -E "^[[:space:]]*$(printf '\r')?\$|^#!|$guard_line" "$HOOK_FILE"; then
         echo "install.sh: ERROR: $HOOK_FILE holds more than runecho's guard line." >&2
         echo "  Run 'runecho-ir install' from that repo instead: it updates runecho's" >&2
         echo "  part in place and keeps the rest. (--force overwrites the whole file.)" >&2

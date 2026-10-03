@@ -69,9 +69,10 @@ func wrapHookBlock(body string) string {
 
 // legacyHookLine matches every line a pre-#443 runecho ever wrote into a hook,
 // with the binary quoted by %q (early releases) or shellQuote, at any path
-// (`.exe` on Windows). The quoted path admits no quote other than shellQuote's
-// own '\” escape, so a line a person wrapped (`flock '/l' '/x/runecho-ir' …`)
-// does not match and is never silently rewritten. Frozen: every hook written since #443 carries markers.
+// (`.exe` on Windows). Inside the quoted path the only quote admitted is
+// shellQuote's own escape for an apostrophe, so a line a person wrapped
+// (`flock '/l' '/x/runecho-ir' …`) does not match and is never silently
+// rewritten. Frozen: every hook written since #443 carries markers.
 var legacyHookLine = func() *regexp.Regexp {
 	bin := `(?:'(?:[^']|'\\'')*runecho-(?:guard|ir)(?:\.exe)?'|"[^"]*runecho-(?:guard|ir)(?:\.exe)?")`
 	return regexp.MustCompile(`^(?:` +
@@ -160,9 +161,13 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 		if invokes {
 			// A runecho line left below foreign content would survive outside
 			// the block, ungated and pinned to a stale path: refuse, don't guess.
-			if n := runechoInvocationLine(bare[end:]); n > 0 && !force {
-				return "", hookRefused, nil, fmt.Errorf(
-					"line %d still mentions runecho below other content; remove any old runecho lines there and re-run (or use --force to migrate anyway)", end+n)
+			if n := runechoInvocationLine(bare[end:]); n > 0 {
+				if !force {
+					return "", hookRefused, nil, fmt.Errorf(
+						"line %d still mentions runecho below other content; remove any old runecho lines there and re-run (or use --force to migrate anyway)", end+n)
+				}
+				notes = append(notes, fmt.Sprintf(
+					"line %d mentions runecho outside runecho's markers and was kept as is; if it calls an old runecho binary, remove it", end+n))
 			}
 			rest := strings.Join(lines[end:], "")
 			if widened != "" && strings.TrimSpace(rest) != "" {

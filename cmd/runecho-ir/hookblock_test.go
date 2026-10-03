@@ -370,7 +370,7 @@ func TestHookBlocks_ExecuteAlongsideForeignContent(t *testing.T) {
 
 // When pre-commit is refused the guard is off even if the other hooks
 // installed, and install must say so rather than only counting "1 refused".
-func TestInstallHooks_WarnsWhenGuardInactive(t *testing.T) {
+func TestInstallHooks_WarnsWhenPreCommitRefused(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -401,7 +401,7 @@ func TestPrintableSnippet(t *testing.T) {
 	long := strings.Repeat("a", 199) + "é" + strings.Repeat("b", 50)
 	got := printableSnippet(long)
 	if !utf8.ValidString(got) || !strings.HasSuffix(got, "é…") {
-		t.Errorf("cap split a rune or missed the ellipsis: %q", got[len(got)-10:])
+		t.Errorf("cap split a rune or missed the ellipsis: %q", got)
 	}
 	if got := printableSnippet("x\u009b31m\x1b[0mRED\nsecond"); got != "x?31m?[0mRED" {
 		t.Errorf("controls not neutralised: %q", got)

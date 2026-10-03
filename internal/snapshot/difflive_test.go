@@ -219,3 +219,27 @@ func TestDiffLive_InternalKindsNotReportedAsRemoved(t *testing.T) {
 		t.Fatalf("removed=%d modified=%d, want 0 and 1 (only Exported changed): %+v", res.TotalRemoved, res.TotalModified, res.Files)
 	}
 }
+
+// Stored-vs-stored diffs get the same view: a change only to an internal kind
+// is not a symbol change (the file still shows as modified by its hash).
+func TestDiff_StoredSnapshotsIgnoreInternalKinds(t *testing.T) {
+	db, _ := openTemp(t)
+	id, _ := db.EnrollRepo("r", "/repos/r", "", 0)
+	mk := func(root, fileHash, helperHash string) *ir.IR {
+		return &ir.IR{Version: ir.IRVersion, RootHash: root, Files: map[string]ir.FileIR{"p.go": {Hash: fileHash, Symbols: []ir.Symbol{
+			{Name: "Exported", Kind: "function", Hash: "hE"},
+			{Name: "helper", Kind: "unexported", Hash: helperHash},
+		}}}}
+	}
+	a, _ := db.SaveSnapshot(id, "s", "a", "/repos/r", mk("r1", "f1", "h1"))
+	b, _ := db.SaveSnapshot(id, "s", "b", "/repos/r", mk("r2", "f2", "h2"))
+	am, _ := db.GetByID(a)
+	bm, _ := db.GetByID(b)
+	res, err := db.Diff(*am, *bm)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if res.TotalAdded+res.TotalRemoved+res.TotalModified != 0 {
+		t.Errorf("an internal-only change reported symbol deltas: +%d -%d ~%d", res.TotalAdded, res.TotalRemoved, res.TotalModified)
+	}
+}

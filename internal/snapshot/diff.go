@@ -124,20 +124,33 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 
 	for path, file := range irData.Files {
 		files[path] = file.Hash
-		// Internal kinds are excluded so a diff reports what a reader would call a
-		// change. Before these kinds existed an unexported helper or a struct field
-		// could not appear here at all; including them now would make every diff
-		// noisier without reporting anything the tool previously promised.
 		deltas := make([]SymbolDelta, 0, len(file.Symbols))
 		for _, s := range file.Symbols {
-			if ir.InternalKinds[s.Kind] {
-				continue
-			}
 			deltas = append(deltas, SymbolDelta{Name: s.Name, Kind: s.Kind, Hash: s.Hash})
 		}
 		symbols[path] = deltas
 	}
 	return files, symbols
+}
+
+// visibleDeltas drops the internal kinds (ir.InternalKinds: unexported helpers,
+// struct fields) so a diff reports what a reader would call a change — those
+// kinds are indexed for edit-time resolution only. Applied once, in
+// computeDiff, to both sides: when only the live side was filtered, a
+// snapshot-vs-live diff listed every internal symbol of a modified file as
+// removed (2026-10-03 audit), and a new loader can't reintroduce that.
+func visibleDeltas(m map[string][]SymbolDelta) map[string][]SymbolDelta {
+	out := make(map[string][]SymbolDelta, len(m))
+	for path, syms := range m {
+		kept := make([]SymbolDelta, 0, len(syms))
+		for _, s := range syms {
+			if !ir.InternalKinds[s.Kind] {
+				kept = append(kept, s)
+			}
+		}
+		out[path] = kept
+	}
+	return out
 }
 
 // computeDiff is the core diff engine shared by Diff and DiffLive.
@@ -146,6 +159,7 @@ func computeDiff(
 	aFiles, bFiles map[string]string,
 	aSymbols, bSymbols map[string][]SymbolDelta,
 ) DiffResult {
+	aSymbols, bSymbols = visibleDeltas(aSymbols), visibleDeltas(bSymbols)
 	// Union of all paths.
 	allPaths := make(map[string]struct{})
 	for p := range aFiles {

@@ -75,15 +75,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Serve can answer `initialize`, which cost ~3.2s of CPU on a 1.3 GiB store and
 	// delayed every MCP host's first call (#438). No tool writes the store (startup
 	// still migrates and chmods, as Open did); the health tool runs a live
-	// quick_check on demand, as does `runecho-ir doctor`; the checked opens that
-	// remain (backup, prune, repo rm, the hourly reindex --all) leave a marker on
-	// failure that makes this open refuse (snapshot.ErrStoreCorrupt, #441).
+	// quick_check on demand, as does `runecho-ir doctor`. A failure recorded by a
+	// checked open elsewhere (#441) is reported below rather than refused, so the
+	// server — and its health tool — stay available while the store is repaired.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "runecho-mcp: open store: %v\n", err)
 		return 1
 	}
 	defer db.Close()
+	if detail, bad := snapshot.CorruptFinding(dbPath); bad {
+		fmt.Fprintf(stderr, "runecho-mcp: warning: the store failed its last integrity check (%s); answers may be incomplete until it is restored and re-checked\n", detail)
+	}
 
 	// Diagnostics to stderr; stdout is reserved for JSON-RPC frames (stdio
 	// transport — a stray stdout write corrupts the protocol).

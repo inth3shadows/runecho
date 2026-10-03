@@ -218,7 +218,8 @@ func runPreCommit(dryRun, verbose bool) int {
 
 	// OpenFast: Open's whole-file quick_check cost ~3 s on every commit at
 	// ~0.9 GiB (#441). This path only reads; corrupt pages it touches still
-	// error, and a failed check elsewhere refuses here via ErrStoreCorrupt.
+	// error. A failed check recorded by runecho-ir is reported below, and the
+	// guard keeps checking: undamaged pages still answer correctly.
 	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		if errors.Is(err, snapshot.ErrSchemaNewer) {
@@ -229,6 +230,9 @@ func runPreCommit(dryRun, verbose bool) int {
 		return degradedExit(strict)
 	}
 	defer db.Close()
+	if detail, bad := snapshot.CorruptFinding(dbPath); bad {
+		warnf("the store failed its last integrity check (%s) — symbol answers may be incomplete; restore from a backup (runecho-ir backup) if needed, then run 'runecho-ir repo reindex --all'", detail)
+	}
 
 	// Resolve the enrolled repo for the current working tree. ResolveRepo keys
 	// on git-common-dir (stable across all worktrees), so bare-repo claudew

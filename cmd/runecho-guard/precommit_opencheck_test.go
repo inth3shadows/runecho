@@ -61,3 +61,27 @@ func TestRunPreCommit_LatentCorruptionStillChecks(t *testing.T) {
 		t.Fatalf("runPreCommit = %d, want 1 — the guard stopped checking on a store whose damage it never reads", got)
 	}
 }
+
+// With a failure recorded by runecho-ir (#441), the guard must keep checking —
+// undamaged pages still answer — and say the store failed its last check.
+func TestRunPreCommit_RecordedCorruptionWarnsAndStillChecks(t *testing.T) {
+	_, wtA, wtB := bareWorktrees(t)
+	db := storeAt(t)
+	enrollWithSnapshot(t, db, "container-wtA", wtA, "real_helper")
+	db.Close()
+	dbPath := filepath.Join(os.Getenv("RUNECHO_HOME"), "history.db")
+	if err := os.WriteFile(dbPath+".corrupt", []byte("2026-10-03T00:00:00Z integrity check failed: page 9\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	stage(t, wtB, "app.py", "def caller():\n    return missing_helper_xyz()\n")
+	t.Chdir(wtB)
+	var got int
+	stderr := captureStderr(t, func() { got = runPreCommit(false, false) })
+	if got != 1 {
+		t.Fatalf("runPreCommit = %d, want 1 — a recorded failure must not switch the guard off", got)
+	}
+	if !strings.Contains(stderr, "failed its last integrity check") {
+		t.Errorf("no warning about the recorded failure; stderr: %q", stderr)
+	}
+}

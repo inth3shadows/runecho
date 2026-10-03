@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
 	"github.com/inth3shadows/runecho/internal/snapshot"
@@ -14,18 +15,33 @@ import (
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
 
-// mustOpenDB opens the central snapshot store (~/.runecho/history.db) without the
-// whole-file integrity scan (snapshot.OpenFast; ~3 s on a ~0.9 GiB store, #441).
-// For reads and incremental writes only. Anything that copies the store,
-// bulk-deletes from it, or is the periodic sweep uses mustOpenDBVerified.
+// storeCheckMaxAge bounds how long the CLI trusts a passed quick_check before
+// paying for another (~3 s on a ~0.9 GiB store). The background reindex after
+// each commit usually absorbs it, so detection reaches every install about
+// daily even without the hourly job.
+const storeCheckMaxAge = 24 * time.Hour
+
+// mustOpenDB opens the central snapshot store (~/.runecho/history.db) for reads
+// and incremental writes. It skips the whole-file integrity scan (#441) unless
+// snapshot.NeedsCheck says the last pass is stale or found damage — so a
+// corrupt store fails here, loudly, until it is repaired or restored, and the
+// first command after a restore clears the finding. Anything that copies the
+// store, bulk-deletes from it, or is the periodic sweep uses mustOpenDBVerified.
 // History is centralized so the oracle serves all enrolled repos from one store;
 // the working ir.json stays repo-local.
-func mustOpenDB() (*snapshot.DB, int) { return openCentralStore(snapshot.OpenFast) }
+func mustOpenDB() (*snapshot.DB, int) {
+	return openCentralStore(func(path string) (*snapshot.DB, error) {
+		if snapshot.NeedsCheck(path, storeCheckMaxAge) {
+			return snapshot.Open(path)
+		}
+		return snapshot.OpenFast(path)
+	})
+}
 
 // mustOpenDBVerified opens the store with the full PRAGMA quick_check
 // (snapshot.Open). Rule: checked = destructive, copies the store, or the
 // periodic sweep — backup, prune, prune-missing, repo rm, reindex --all. A failed
-// check also blocks every fast open until a checked open passes again.
+// check is recorded, and every later mustOpenDB re-checks until one passes.
 func mustOpenDBVerified() (*snapshot.DB, int) { return openCentralStore(snapshot.Open) }
 
 func openCentralStore(open func(string) (*snapshot.DB, error)) (*snapshot.DB, int) {

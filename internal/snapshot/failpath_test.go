@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -93,15 +94,19 @@ func TestOpenRefusesCorruptDB(t *testing.T) {
 	}
 }
 
-// A failed checked Open must reach every fast open (#441): OpenFast skips the
-// whole-file scan, so the marker Open leaves is the only way it learns. A later
-// checked Open that passes — here after the store is replaced with a good one,
-// as a restore would — clears it.
-func TestCorruptMarkerBlocksOpenFastUntilACheckedOpenPasses(t *testing.T) {
+// A checked Open records its outcome for opens that skip the scan (#441): a
+// failure leaves a marker that CorruptFinding reports and NeedsCheck acts on,
+// without making OpenFast refuse (that would lock out doctor, runecho-mcp and a
+// restore); a pass — here after the store is replaced, as a restore would —
+// clears the marker and stamps the pass, and a stale stamp asks for a re-check.
+func TestCheckedOpenRecordsItsOutcome(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	db, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+	if NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck right after a passing Open")
 	}
 	if _, err := db.conn.Exec("CREATE TABLE filler (x TEXT)"); err != nil {
 		t.Fatal(err)
@@ -124,22 +129,22 @@ func TestCorruptMarkerBlocksOpenFastUntilACheckedOpenPasses(t *testing.T) {
 	f.WriteAt(bytes.Repeat([]byte{0xBD}, 16*1024), 4096)
 	f.Close()
 
+	if _, err := Open(path); !errors.Is(err, ErrIntegrityFailed) {
+		t.Fatalf("Open on a corrupt DB: err = %v, want ErrIntegrityFailed", err)
+	}
+	if detail, bad := CorruptFinding(path); !bad || !strings.Contains(detail, "integrity check failed") {
+		t.Fatalf("CorruptFinding = %q, %v; want the recorded failure", detail, bad)
+	}
+	if !NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck false while a failure is recorded")
+	}
 	if db, err := OpenFast(path); err != nil {
-		t.Fatalf("OpenFast before any checked open: %v (no marker yet, want success)", err)
+		t.Fatalf("OpenFast must not refuse on a recorded failure: %v", err)
 	} else {
 		db.Close()
 	}
-	if _, err := Open(path); err == nil {
-		t.Fatal("Open accepted a corrupt DB")
-	}
-	if _, err := os.Stat(corruptMarkerPath(path)); err != nil {
-		t.Fatalf("failed check left no marker: %v", err)
-	}
-	if _, err := OpenFast(path); !errors.Is(err, ErrStoreCorrupt) {
-		t.Fatalf("OpenFast with a marker: err = %v, want ErrStoreCorrupt", err)
-	}
 
-	// Restore a good copy; the next checked Open passes and clears the marker.
+	// Restore a good copy; the next checked Open passes, clears and stamps.
 	os.Remove(path + "-wal")
 	os.Remove(path + "-shm")
 	if err := os.WriteFile(path, good, 0600); err != nil {
@@ -150,12 +155,24 @@ func TestCorruptMarkerBlocksOpenFastUntilACheckedOpenPasses(t *testing.T) {
 		t.Fatalf("Open on the restored store: %v", err)
 	}
 	db.Close()
-	if _, err := os.Stat(corruptMarkerPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("passing check left the marker: %v", err)
+	if _, bad := CorruptFinding(path); bad {
+		t.Fatal("passing check left the marker")
 	}
-	if db, err := OpenFast(path); err != nil {
-		t.Fatalf("OpenFast after a passing check: %v", err)
-	} else {
-		db.Close()
+	if NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck right after the restore passed")
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(checkedStampPath(path), old, old)
+	if !NeedsCheck(path, time.Hour) {
+		t.Fatal("NeedsCheck false with a stale stamp")
+	}
+
+	// A marker that exists but cannot be read still counts.
+	if err := os.Mkdir(corruptMarkerPath(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, bad := CorruptFinding(path); !bad {
+		t.Fatal("an unreadable marker read as all-clear")
 	}
 }

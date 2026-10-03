@@ -133,33 +133,12 @@ func irToMaps(irData *ir.IR) (map[string]string, map[string][]SymbolDelta) {
 	return files, symbols
 }
 
-// visibleDeltas drops the internal kinds (ir.InternalKinds: unexported helpers,
-// struct fields) so a diff reports what a reader would call a change — those
-// kinds are indexed for edit-time resolution only. Applied once, in
-// computeDiff, to both sides: when only the live side was filtered, a
-// snapshot-vs-live diff listed every internal symbol of a modified file as
-// removed (2026-10-03 audit), and a new loader can't reintroduce that.
-func visibleDeltas(m map[string][]SymbolDelta) map[string][]SymbolDelta {
-	out := make(map[string][]SymbolDelta, len(m))
-	for path, syms := range m {
-		kept := make([]SymbolDelta, 0, len(syms))
-		for _, s := range syms {
-			if !ir.InternalKinds[s.Kind] {
-				kept = append(kept, s)
-			}
-		}
-		out[path] = kept
-	}
-	return out
-}
-
 // computeDiff is the core diff engine shared by Diff and DiffLive.
 func computeDiff(
 	a, b SnapshotMeta,
 	aFiles, bFiles map[string]string,
 	aSymbols, bSymbols map[string][]SymbolDelta,
 ) DiffResult {
-	aSymbols, bSymbols = visibleDeltas(aSymbols), visibleDeltas(bSymbols)
 	// Union of all paths.
 	allPaths := make(map[string]struct{})
 	for p := range aFiles {
@@ -260,9 +239,19 @@ func lessSymbolDelta(a, b SymbolDelta) bool {
 }
 
 // symbolSet converts a slice of SymbolDelta to a map keyed by "kind:name".
+// symbolSet keys a file's symbols for the set-diff, dropping the internal kinds
+// (ir.InternalKinds: unexported helpers, struct fields) so a diff reports what
+// a reader would call a change — those kinds are indexed for edit-time
+// resolution only. It is the one place the rule applies, to both sides and
+// only for files that changed: when the live side alone was filtered, a
+// snapshot-vs-live diff listed every internal symbol of a modified file as
+// removed (2026-10-03 audit).
 func symbolSet(syms []SymbolDelta) map[string]SymbolDelta {
 	m := make(map[string]SymbolDelta, len(syms))
 	for _, s := range syms {
+		if ir.InternalKinds[s.Kind] {
+			continue
+		}
 		m[s.Kind+":"+s.Name] = s
 	}
 	return m

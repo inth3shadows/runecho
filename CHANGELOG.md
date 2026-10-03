@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.5] — 2026-10-03
+
 ### Changed
 - store: the commit-time guard and runecho-ir's read and small-write commands
   (including the per-commit background `repo reindex`) open the store without

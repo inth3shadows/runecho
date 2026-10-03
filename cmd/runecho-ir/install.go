@@ -92,20 +92,25 @@ func installHooks(root string, force bool) (installed int, err error) {
 	// action but refused), so callers' "nothing installed" check still means
 	// the guard is not active.
 	counts := map[hookAction]int{}
+	refusedPreCommit := false
 	for _, name := range []string{"pre-commit", "post-commit", "post-merge", "post-checkout"} {
 		action, hErr := installHookFile(hooksDir, name, hooks[name], force)
 		if hErr != nil {
 			return installed, hErr
 		}
 		counts[action]++
+		if name == "pre-commit" && action == hookRefused {
+			refusedPreCommit = true
+		}
 		if action != hookRefused {
 			installed++
 		}
 	}
-	// The guard is the hook that matters most; say so loudly when it is off,
-	// even if the other three installed fine.
-	if !guardHookActive(filepath.Join(hooksDir, "pre-commit")) {
-		fmt.Fprintf(os.Stderr, "  WARNING: the commit guard is NOT active: pre-commit is missing runecho's block or is not executable (see above).\n")
+	// The guard is the hook that matters most: when pre-commit was refused,
+	// say so even if the other three installed. Phrased as what runecho did,
+	// not as whether the guard runs — a refused hook may still call it by hand.
+	if refusedPreCommit {
+		fmt.Fprintf(os.Stderr, "  WARNING: runecho did not install the commit guard (pre-commit refused above); unless that hook already runs runecho-guard, commits are not checked.\n")
 	}
 	if installed == 0 {
 		fmt.Printf("No hooks installed in %s (all %d refused; see the reasons above)\n", hooksDir, len(hooks))

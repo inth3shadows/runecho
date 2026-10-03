@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // foreignFragment has the shape of kb-mcp's kb-drift block (#443): its own
@@ -91,7 +92,13 @@ func TestMergeHookBlock(t *testing.T) {
 			action:   hookRefused, wantErr: "already invokes runecho"},
 		{name: "runecho line left below foreign content: refused",
 			existing: "#!/usr/bin/env bash\n'/x/runecho-ir' version-check --quiet || true\necho FOREIGN\n'/x/runecho-ir' repo reindex . >/dev/null 2>&1 &\n",
-			action:   hookRefused, wantErr: "line 4 still invokes runecho"},
+			action:   hookRefused, wantErr: "line 4 still mentions runecho"},
+		{name: "legacy path with an apostrophe (shellQuote escape)",
+			existing: "#!/usr/bin/env bash\nexec " + shellQuote("/home/o'brien/bin/runecho-guard") + " \"$@\"\n",
+			want:     newHookShebang + "\n" + block, action: hookMigrated},
+		{name: "leftover runecho line with force migrates",
+			existing: "#!/usr/bin/env bash\n'/x/runecho-ir' version-check --quiet || true\necho see runecho-ir docs\n", force: true,
+			want: newHookShebang + "\n" + block + "echo see runecho-ir docs\n", action: hookMigrated},
 		{name: "legacy Windows .exe path",
 			existing: "#!/usr/bin/env bash\nexec \"C:/Users/x/bin/runecho-guard.exe\" \"$@\"\n",
 			want:     newHookShebang + "\n" + block, action: hookMigrated},
@@ -379,11 +386,25 @@ func TestInstallHooks_WarnsWhenGuardInactive(t *testing.T) {
 	if installed != 3 {
 		t.Errorf("installed = %d, want 3", installed)
 	}
-	if !strings.Contains(stderr, "commit guard is NOT active") {
-		t.Errorf("no guard-inactive warning: %q", stderr)
+	if !strings.Contains(stderr, "did not install the commit guard") {
+		t.Errorf("no guard warning: %q", stderr)
 	}
-	if guardHookActive(pc) {
-		t.Errorf("python pre-commit reported as an active guard")
+	// No warning when pre-commit installed fine.
+	os.Remove(pc)
+	_, stderr = captureOutput(func() { installHooks(repo, false) })
+	if strings.Contains(stderr, "commit guard") {
+		t.Errorf("guard warning on a clean install: %q", stderr)
+	}
+}
+
+func TestPrintableSnippet(t *testing.T) {
+	long := strings.Repeat("a", 199) + "é" + strings.Repeat("b", 50)
+	got := printableSnippet(long)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "é…") {
+		t.Errorf("cap split a rune or missed the ellipsis: %q", got[len(got)-10:])
+	}
+	if got := printableSnippet("x\u009b31m\x1b[0mRED\nsecond"); got != "x?31m?[0mRED" {
+		t.Errorf("controls not neutralised: %q", got)
 	}
 }
 

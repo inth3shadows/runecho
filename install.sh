@@ -200,14 +200,15 @@ if [ "$INSTALL_HOOK" -eq 1 ]; then
   else
     if [ -f "$HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ]; then
       # Allow overwrite only if this is already a runecho-guard hook — and
-      # nothing else: a hook with lines beyond the shebang + exec may carry
+      # nothing else: any line besides the shebang and the guard's exec may be
       # another tool's content that the rewrite below would delete (#443).
       if ! grep -q "runecho-guard" "$HOOK_FILE" 2>/dev/null; then
         echo "install.sh: ERROR: $HOOK_FILE already exists and is not a runecho-guard hook." >&2
         echo "  Use --force to overwrite, or inspect and integrate manually." >&2
         exit 1
       fi
-      if [ "$(grep -cv '^[[:space:]]*$' "$HOOK_FILE")" -gt 2 ]; then
+      # Every non-blank line must be the shebang or the guard's own exec line.
+      if grep -v -E '^[[:space:]]*$|^#!|^exec .*runecho-guard[^ ]* "\$@"'$'\r''?$' "$HOOK_FILE" | grep -q .; then
         echo "install.sh: ERROR: $HOOK_FILE holds more than runecho's guard line." >&2
         echo "  Run 'runecho-ir install' from that repo instead: it updates runecho's" >&2
         echo "  part in place and keeps the rest. (--force overwrites the whole file.)" >&2

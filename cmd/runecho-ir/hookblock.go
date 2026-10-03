@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -68,11 +69,11 @@ func wrapHookBlock(body string) string {
 
 // legacyHookLine matches every line a pre-#443 runecho ever wrote into a hook,
 // with the binary quoted by %q (early releases) or shellQuote, at any path
-// (`.exe` on Windows). The quoted path admits no further quote, so a line a
-// person wrapped (`flock '/l' '/x/runecho-ir' …`) does not match and is never
-// silently rewritten. Frozen: every hook written since #443 carries markers.
+// (`.exe` on Windows). The quoted path admits no quote other than shellQuote's
+// own '\” escape, so a line a person wrapped (`flock '/l' '/x/runecho-ir' …`)
+// does not match and is never silently rewritten. Frozen: every hook written since #443 carries markers.
 var legacyHookLine = func() *regexp.Regexp {
-	bin := `(?:'[^']*runecho-(?:guard|ir)(?:\.exe)?'|"[^"]*runecho-(?:guard|ir)(?:\.exe)?")`
+	bin := `(?:'(?:[^']|'\\'')*runecho-(?:guard|ir)(?:\.exe)?'|"[^"]*runecho-(?:guard|ir)(?:\.exe)?")`
 	return regexp.MustCompile(`^(?:` +
 		`exec ` + bin + ` "\$@"` +
 		`|` + bin + ` repo reindex \. >/dev/null 2>&1 &` +
@@ -159,9 +160,9 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 		if invokes {
 			// A runecho line left below foreign content would survive outside
 			// the block, ungated and pinned to a stale path: refuse, don't guess.
-			if n := runechoInvocationLine(bare[end:]); n > 0 {
+			if n := runechoInvocationLine(bare[end:]); n > 0 && !force {
 				return "", hookRefused, nil, fmt.Errorf(
-					"line %d still invokes runecho below other content; remove the old runecho lines, then re-run", end+n)
+					"line %d still mentions runecho below other content; remove any old runecho lines there and re-run (or use --force to migrate anyway)", end+n)
 			}
 			rest := strings.Join(lines[end:], "")
 			if widened != "" && strings.TrimSpace(rest) != "" {
@@ -190,17 +191,6 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 		out = block + existing
 	}
 	return out, hookCreated, nil, verifyHookMarkers(out)
-}
-
-// guardHookActive reports whether git would run runecho's guard from this
-// pre-commit: a regular executable file holding runecho's marked block.
-func guardHookActive(path string) bool {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0111 == 0 {
-		return false
-	}
-	b, err := os.ReadFile(path)
-	return err == nil && verifyHookMarkers(string(b)) == nil
 }
 
 // runechoInvocationLine returns the 1-based index of the first non-comment
@@ -270,8 +260,11 @@ func shebangInterpreter(line string) string {
 func installHookFile(hooksDir, name, block string, force bool) (hookAction, error) {
 	path := filepath.Join(hooksDir, name)
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		target, _ := os.Readlink(path)
-		fmt.Fprintf(os.Stderr, "  Refusing %s: it is a symlink (to %s); runecho does not edit files outside the hooks dir. Add the block there yourself, or replace the link with a file. File left untouched.\n", name, target)
+		target, err := os.Readlink(path)
+		if err != nil {
+			target = "an unreadable target"
+		}
+		fmt.Fprintf(os.Stderr, "  Refusing %s: it is a symlink (to %s); runecho does not edit files outside the hooks dir. Add the block there yourself, or replace the link with a file. File left untouched.\n", name, printableSnippet(target))
 		return hookRefused, nil
 	}
 
@@ -337,19 +330,24 @@ func installHookFile(hooksDir, name, block string, force bool) (hookAction, erro
 }
 
 // printableSnippet keeps an error about arbitrary file content safe to print
-// on a shared terminal: one line, printable characters only, capped.
+// on a shared terminal: one line, printable runes only (C0/C1 controls and
+// invalid UTF-8 become '?'), capped at 200 runes.
 func printableSnippet(s string) string {
 	s, _, _ = strings.Cut(s, "\n")
-	s = strings.Map(func(r rune) rune {
-		if r == utf8.RuneError || r < 0x20 || r == 0x7f {
-			return '?'
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == 200 {
+			b.WriteString("…")
+			break
 		}
-		return r
-	}, s)
-	if len(s) > 200 {
-		s = s[:200] + "…"
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			r = '?'
+		}
+		b.WriteRune(r)
+		n++
 	}
-	return s
+	return b.String()
 }
 
 // bashSyntaxCheck runs `bash -n` on a merged hook whose interpreter bash can

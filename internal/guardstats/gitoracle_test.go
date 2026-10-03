@@ -692,8 +692,8 @@ func TestGitOracleScopeFileOnAPathMissingAtRevIsUnknown(t *testing.T) {
 // it built its own command without core.fsmonitor=false or
 // GIT_CONFIG_NOSYSTEM, leaving a repo-local config able to run code.
 func TestGitOracleCmd_Hardened(t *testing.T) {
-	// Clear what the shell may already export, so only gitOracleCmd's own
-	// additions can satisfy the env assertions below.
+	// Give the shell's copies a sentinel value, so only gitOracleCmd's own
+	// additions — winning as the last duplicate — can satisfy the asserts.
 	for _, k := range []string{"GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"} {
 		t.Setenv(k, "unset-by-test")
 	}
@@ -702,10 +702,19 @@ func TestGitOracleCmd_Hardened(t *testing.T) {
 	if !strings.Contains(args, "core.fsmonitor=false") || !strings.Contains(args, "-C /some/repo") {
 		t.Errorf("args = %q, want gitutil's hardening and -C dir", args)
 	}
-	env := strings.Join(cmd.Env, "\n")
-	for _, want := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0"} {
-		if !strings.Contains(env, want) {
-			t.Errorf("env lacks %s", want)
+	// exec keeps the LAST value of a duplicated key; Environ() applies that
+	// dedup, so this checks the value git actually receives.
+	got := map[string]string{}
+	for _, kv := range cmd.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
 		}
+	}
+	for k, want := range map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"} {
+		if got[k] != want {
+			t.Errorf("git would see %s=%q, want %q", k, got[k], want)
+		}
+	}
+}
 	}
 }

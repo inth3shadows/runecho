@@ -198,32 +198,21 @@ if [ "$INSTALL_HOOK" -eq 1 ]; then
     echo "  Left untouched (it may hold other tools' hooks too). To update runecho's"
     echo "  block, run from that repo: runecho-ir install"
   else
-    if [ -f "$HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ]; then
-      # Allow overwrite only if this is already a runecho-guard hook — and
-      # nothing else: any line besides the shebang and the guard's exec may be
-      # another tool's content that the rewrite below would delete (#443).
-      if ! grep -q "runecho-guard" "$HOOK_FILE" 2>/dev/null; then
-        echo "install.sh: ERROR: $HOOK_FILE already exists and is not a runecho-guard hook." >&2
-        echo "  Use --force to overwrite, or inspect and integrate manually." >&2
-        exit 1
-      fi
-      # Every non-blank line must be the shebang or the guard's own exec line.
-      # One grep, no pipe: under pipefail a `grep -v | grep -q` pipeline on a
-      # large file dies of SIGPIPE, reads as "no match", and overwrites it.
-      # The exec line must be exactly a quoted path ending in runecho-guard.
-      guard_line="^exec (\"[^\"]*runecho-guard(\\.exe)?\"|'[^']*runecho-guard(\\.exe)?') \"\\\$@\"$(printf '\r')?\$"
-      if grep -qv -E "^[[:space:]]*$(printf '\r')?\$|^#!|$guard_line" "$HOOK_FILE"; then
-        echo "install.sh: ERROR: $HOOK_FILE holds more than runecho's guard line." >&2
-        echo "  Run 'runecho-ir install' from that repo instead: it updates runecho's" >&2
-        echo "  part in place and keeps the rest. (--force overwrites the whole file.)" >&2
-        exit 1
-      fi
+    WANT_HOOK="#!/usr/bin/env bash
+exec \"$BIN_DIR/runecho-guard$EXE\" \"\$@\""
+    # Overwrite only a hook that is already exactly what we would write. Any
+    # other content — another tool's lines, an older runecho path, a wrapper —
+    # is refused (#443): this script cannot tell runecho's lines from someone
+    # else's safely, and `runecho-ir install` can. A failed read compares
+    # unequal, so the check fails closed.
+    if [ -f "$HOOK_FILE" ] && [ "$FORCE_HOOK" -eq 0 ] && [ "$(cat "$HOOK_FILE" 2>/dev/null)" != "$WANT_HOOK" ]; then
+      echo "install.sh: ERROR: $HOOK_FILE already exists with other content." >&2
+      echo "  Run 'runecho-ir install' from that repo instead: it adds or updates" >&2
+      echo "  runecho's part in place and keeps the rest. (--force overwrites the whole file.)" >&2
+      exit 1
     fi
 
-    cat > "$HOOK_FILE" <<HOOK
-#!/usr/bin/env bash
-exec "$BIN_DIR/runecho-guard$EXE" "\$@"
-HOOK
+    printf '%s\n' "$WANT_HOOK" > "$HOOK_FILE"
     chmod +x "$HOOK_FILE"
     echo "Git pre-commit hook installed: $HOOK_FILE"
     echo "  NOTE: this is the GIT-COMMIT-TIME variant — it vets the staged diff at"

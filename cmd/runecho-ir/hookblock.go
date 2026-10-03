@@ -69,10 +69,10 @@ func wrapHookBlock(body string) string {
 
 // legacyHookLine matches every line a pre-#443 runecho ever wrote into a hook,
 // with the binary quoted by %q (early releases) or shellQuote, at any path
-// (`.exe` on Windows). Inside the quoted path the only quote admitted is
-// shellQuote's own escape for an apostrophe, so a line a person wrapped
-// (`flock '/l' '/x/runecho-ir' …`) does not match and is never silently
-// rewritten. Frozen: every hook written since #443 carries markers.
+// (`.exe` on Windows). The line must start with the quoted binary, so a line a
+// person wrapped (`flock '/l' '/x/runecho-ir' …`) does not match and is never
+// silently rewritten; a single-quoted path admits only shellQuote's escape for
+// an apostrophe. Frozen: every hook written since #443 carries markers.
 var legacyHookLine = func() *regexp.Regexp {
 	bin := `(?:'(?:[^']|'\\'')*runecho-(?:guard|ir)(?:\.exe)?'|"[^"]*runecho-(?:guard|ir)(?:\.exe)?")`
 	return regexp.MustCompile(`^(?:` +
@@ -166,8 +166,10 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 					return "", hookRefused, nil, fmt.Errorf(
 						"line %d still mentions runecho below other content; remove any old runecho lines there and re-run (or use --force to migrate anyway)", end+n)
 				}
+				// Numbered in the merged file: shebang + block, then the rest.
 				notes = append(notes, fmt.Sprintf(
-					"line %d mentions runecho outside runecho's markers and was kept as is; if it calls an old runecho binary, remove it", end+n))
+					"line %d mentions runecho outside runecho's markers and was kept as is; if it calls an old runecho binary, remove it",
+					1+strings.Count(block, "\n")+n))
 			}
 			rest := strings.Join(lines[end:], "")
 			if widened != "" && strings.TrimSpace(rest) != "" {
@@ -179,9 +181,12 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 	}
 
 	// Someone wired runecho in by hand: adding the block would run it twice.
-	if n := runechoInvocationLine(bare); n > 0 && !force {
-		return "", hookRefused, nil, fmt.Errorf(
-			"line %d already invokes runecho outside runecho's markers; adding the block would run it twice (use --force to add it anyway)", n)
+	if n := runechoInvocationLine(bare); n > 0 {
+		if !force {
+			return "", hookRefused, nil, fmt.Errorf(
+				"line %d already invokes runecho outside runecho's markers; adding the block would run it twice (use --force to add it anyway)", n)
+		}
+		notes = append(notes, "runecho is also called outside its markers, so it now runs twice; remove the hand-wired call if it is no longer needed")
 	}
 
 	// Insert right after the shebang (or at the top), not at the end: a foreign
@@ -195,7 +200,7 @@ func mergeHookBlock(existing, block string, force bool) (out string, action hook
 	} else {
 		out = block + existing
 	}
-	return out, hookCreated, nil, verifyHookMarkers(out)
+	return out, hookCreated, notes, verifyHookMarkers(out)
 }
 
 // runechoInvocationLine returns the 1-based index of the first non-comment

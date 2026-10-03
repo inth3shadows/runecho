@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,6 +162,32 @@ func TestMergeHookBlock_NotesNewlyLiveContent(t *testing.T) {
 	_, _, notes, _ = mergeHookBlock(legacy, block, false)
 	if len(notes) != 0 {
 		t.Errorf("no foreign content, yet notes = %v", notes)
+	}
+}
+
+// --force notes must point at the right line of the WRITTEN file.
+func TestMergeHookBlock_ForceNotes(t *testing.T) {
+	block := hookBlocks("/b/runecho-ir", "/b/runecho-guard")["pre-commit"]
+	legacy := "#!/usr/bin/env bash\nexec '/x/runecho-guard' \"$@\"\necho foreign\n/x/runecho-ir repo reindex .\n"
+	out, _, notes, err := mergeHookBlock(legacy, block, true)
+	if err != nil || len(notes) == 0 {
+		t.Fatalf("notes=%v err=%v", notes, err)
+	}
+	n := 0
+	for _, note := range notes {
+		if _, err := fmt.Sscanf(note, "line %d", &n); err == nil {
+			break
+		}
+	}
+	if n == 0 {
+		t.Fatalf("no line-numbered note in %q", notes)
+	}
+	if got := strings.Split(out, "\n")[n-1]; got != "/x/runecho-ir repo reindex ." {
+		t.Errorf("note names line %d = %q, want the leftover runecho line", n, got)
+	}
+	_, _, notes, _ = mergeHookBlock("#!/bin/sh\n/usr/bin/runecho-guard\n", block, true)
+	if len(notes) != 1 || !strings.Contains(notes[0], "runs twice") {
+		t.Errorf("forced hand-wired notes = %v", notes)
 	}
 }
 

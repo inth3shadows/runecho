@@ -16,6 +16,20 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- doctor: the hook-wiring check judges only the guard's own entries — the mode
+  must appear as a whole flag, not as an assignment's value — so a user's
+  unrelated hooks no longer read as a Fail, and output order is fixed. Store
+  health classifies its integrity check like the store does (an I/O error is a
+  Warn, not "restore a backup"), shows a recorded failure, and its remedies
+  name `backups/history-backup.db` and `runecho-ir repo reindex --all` (which
+  always re-checks) instead of `runecho-ir backup` (which refuses a corrupt
+  store) (2026-10-03 audit).
+- store: the integrity check reads every `quick_check` result row, not only
+  the first, so an unreadable-page row can no longer hide real damage after
+  it; SQLITE_CORRUPT raised while stepping (including on the first step)
+  counts as damage, and damage rows read before another error still stand.
+
 ## [0.66.7] — 2026-10-03
 
 ### Changed

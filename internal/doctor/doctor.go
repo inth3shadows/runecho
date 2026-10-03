@@ -275,7 +275,8 @@ func checkWiring(root string) []Result {
 
 	var out []Result
 	present := 0
-	for name, path := range channels {
+	for _, name := range slices.Sorted(maps.Keys(channels)) { // fixed output order
+		path := channels[name]
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue // not present — not applicable, not a failure on its own
@@ -427,6 +428,59 @@ func checkEnrollment(root string) []Result {
 	}}
 }
 
+// storeHealthResult turns a live Health result and any recorded check failure
+// into doctor's verdict. Pure, so every branch is unit-testable.
+//
+// Remedies name 'repo reindex --all', which always runs the full check (and so
+// records or clears the finding); 'repo list' would skip it while the last
+// pass is fresh and nothing is recorded — doctor itself only reads.
+func storeHealthResult(h snapshot.HealthInfo, healthErr error, storePath, finding string, recorded bool) Result {
+	const recheck = "'runecho-ir repo reindex --all'"
+	ierr := snapshot.ClassifyIntegrity(h.Integrity)
+	if healthErr != nil {
+		// Health itself failed (the check or a count could not run): no new
+		// verdict on damage, handled like an unreadable check below.
+		h.Integrity, ierr = healthErr.Error(), healthErr
+	}
+	switch {
+	case errors.Is(ierr, snapshot.ErrIntegrityFailed):
+		return Result{
+			Check: "store health", Status: Fail,
+			Detail: "sqlite integrity check reports: " + h.Integrity,
+			// Not 'runecho-ir backup': it runs the same check and refuses a
+			// corrupt store, so the way back is an existing backup.
+			Remedy: "restore " + storePath + " from " + snapshot.DefaultBackupPath(storePath) + " (or another backup), then run " + recheck + " to re-check",
+		}
+	case ierr != nil:
+		// The check could not read the store (I/O, memory) — that says nothing
+		// new about damage, so it must not send anyone to a restore on its own;
+		// but an earlier recorded finding still stands and must be shown.
+		r := Result{
+			Check: "store health", Status: Warn,
+			Detail: "the integrity check could not run: " + h.Integrity,
+			Remedy: "re-run 'runecho-ir doctor'; if it persists, check the disk",
+		}
+		if recorded {
+			r.Status = Fail
+			r.Detail += "; an earlier check recorded damage (" + finding + ")"
+			r.Remedy = "check the disk, then restore " + storePath + " from " + snapshot.DefaultBackupPath(storePath) + " and run " + recheck
+		}
+		return r
+	case recorded:
+		// A live pass with an old finding still on disk: the guard and
+		// runecho-mcp keep warning until a checked open clears it.
+		return Result{
+			Check: "store health", Status: Warn,
+			Detail: "integrity ok now, but an earlier check recorded damage (" + finding + ")",
+			Remedy: "run " + recheck + " — it re-checks the store and clears the record",
+		}
+	}
+	return Result{
+		Check: "store health", Status: OK,
+		Detail: fmt.Sprintf("schema v%d, %d repo(s) enrolled, integrity ok", h.SchemaVersion, h.RepoCount),
+	}
+}
+
 // checkStore reports the central store's health and recent activity. It
 // flags the exact signature of the incident hookwiring_test.go exists to
 // prevent: an enrolled repo with zero asks AND zero outcomes in the last 7
@@ -440,6 +494,7 @@ func checkStore(root string) []Result {
 		return []Result{{Check: "store", Status: Fail, Detail: "cannot resolve RUNECHO_HOME: " + err.Error()}}
 	}
 	out = append(out, Result{Check: "store", Status: OK, Detail: "RUNECHO_HOME = " + dir})
+	storePath := filepath.Join(dir, "history.db")
 
 	db, err := openStore()
 	if err != nil {
@@ -456,20 +511,8 @@ func checkStore(root string) []Result {
 	} else {
 		defer db.Close()
 		h, err := db.Health()
-		if err != nil {
-			out = append(out, Result{Check: "store health", Status: Fail, Detail: err.Error()})
-		} else if h.Integrity != "ok" {
-			out = append(out, Result{
-				Check: "store health", Status: Fail,
-				Detail: "sqlite integrity check reports: " + h.Integrity,
-				Remedy: "restore from ~/.runecho/backups/, or 'runecho-ir backup' before further writes",
-			})
-		} else {
-			out = append(out, Result{
-				Check: "store health", Status: OK,
-				Detail: fmt.Sprintf("schema v%d, %d repo(s) enrolled, integrity ok", h.SchemaVersion, h.RepoCount),
-			})
-		}
+		finding, recorded := snapshot.CorruptFinding(storePath)
+		out = append(out, storeHealthResult(h, err, storePath, finding, recorded))
 		if repos, err := db.ListRepos(); err == nil {
 			out = append(out, checkRefreshLocks(dir, repos))
 		}

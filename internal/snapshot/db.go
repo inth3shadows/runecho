@@ -185,10 +185,24 @@ func classifyQuickCheck(result string) error {
 	if result == "ok" {
 		return nil
 	}
-	for _, m := range quickCheckErrCode.FindAllStringSubmatch(result, -1) {
-		if n, err := strconv.Atoi(m[1]); err == nil && (n&0xff == 10 || n&0xff == 7) { // SQLITE_IOERR, SQLITE_NOMEM
-			return fmt.Errorf("quick_check could not read the store: %s", result)
+	// Damage wins: any finding line that is not an unreadable-page I/O/NOMEM
+	// line is a positive finding, whatever else the result also mentions.
+	ioOnly := false
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "*** in database") {
+			continue
 		}
+		if m := quickCheckErrCode.FindStringSubmatch(line); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && (n&0xff == 10 || n&0xff == 7) { // SQLITE_IOERR, SQLITE_NOMEM
+				ioOnly = true
+				continue
+			}
+		}
+		return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
+	}
+	if ioOnly {
+		return fmt.Errorf("quick_check could not read the store: %s", result)
 	}
 	return fmt.Errorf("%w: %s", ErrIntegrityFailed, result)
 }

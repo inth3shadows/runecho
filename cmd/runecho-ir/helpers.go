@@ -40,9 +40,10 @@ func mustOpenDB() (*snapshot.DB, int) {
 			return nil, fmt.Errorf("%w — restore %s from a backup (default: %s), then re-run; the first passing command clears this",
 				err, path, filepath.Join(filepath.Dir(path), "backups", "history-backup.db"))
 		}
-		if err != nil && !errors.Is(err, snapshot.ErrSchemaNewer) {
-			// The check could not run (a lock, an I/O hiccup): that says
-			// nothing about the store, so don't fail the command over it.
+		if _, recorded := snapshot.CorruptFinding(path); err != nil && !recorded && !errors.Is(err, snapshot.ErrSchemaNewer) {
+			// The check could not run (a lock, an I/O hiccup) on a store with
+			// no recorded damage: that says nothing about it, so don't fail the
+			// command. With damage recorded, fail rather than write into it.
 			return snapshot.OpenFast(path)
 		}
 		return db, err

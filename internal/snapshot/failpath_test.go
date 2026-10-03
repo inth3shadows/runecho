@@ -190,6 +190,7 @@ func TestClassifyQuickCheck(t *testing.T) {
 		{"*** in database main ***\nPage 9: unable to get the page. error code=7", false, false},          // NOMEM
 		{"*** in database main ***\nTree 23 page 43: btreeInitPage() returns error code 11", true, false},
 		{"row 3 missing from index idx_symbols_name", true, false},
+		{"*** in database main ***\nTree 4 page 4: unable to get the page. error code=266\nTree 23 page 43: btreeInitPage() returns error code 11", true, false}, // damage wins over I/O
 	}
 	for _, c := range cases {
 		err := classifyQuickCheck(c.result)

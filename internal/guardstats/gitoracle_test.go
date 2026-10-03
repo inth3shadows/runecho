@@ -716,5 +716,3 @@ func TestGitOracleCmd_Hardened(t *testing.T) {
 		}
 	}
 }
-	}
-}

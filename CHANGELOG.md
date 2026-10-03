@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.4] — 2026-10-03
+
 ### Fixed
 - install: runecho now owns a marked `# >>> runecho >>>` block in each git hook
   instead of the whole file, so another tool's content in the same hook (e.g.

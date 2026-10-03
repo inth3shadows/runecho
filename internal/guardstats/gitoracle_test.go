@@ -1,10 +1,12 @@
 package guardstats
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -682,5 +684,35 @@ func TestGitOracleScopeFileOnAPathMissingAtRevIsUnknown(t *testing.T) {
 	// old.py at the first commit regardless of new.py's absence.
 	if got, err := g.Defined(root, first, "py", "helper", "new.py", ScopeRepo); err != nil || !got {
 		t.Errorf("ScopeRepo Defined = (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+// The audit runs git in repos named by the decision log, so it must carry the
+// same hardening as every other runecho git call (audit, 2026-10-03): before,
+// it built its own command without core.fsmonitor=false or
+// GIT_CONFIG_NOSYSTEM, leaving a repo-local config able to run code.
+func TestGitOracleCmd_Hardened(t *testing.T) {
+	// Give the shell's copies a sentinel value, so only gitOracleCmd's own
+	// additions — winning as the last duplicate — can satisfy the asserts.
+	for _, k := range []string{"GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"} {
+		t.Setenv(k, "unset-by-test")
+	}
+	cmd := gitOracleCmd(context.Background(), "/some/repo", "rev-parse", "HEAD")
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "core.fsmonitor=false") || !strings.Contains(args, "-C /some/repo") {
+		t.Errorf("args = %q, want gitutil's hardening and -C dir", args)
+	}
+	// exec keeps the LAST value of a duplicated key; Environ() applies that
+	// dedup, so this checks the value git actually receives.
+	got := map[string]string{}
+	for _, kv := range cmd.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
+		}
+	}
+	for k, want := range map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"} {
+		if got[k] != want {
+			t.Errorf("git would see %s=%q, want %q", k, got[k], want)
+		}
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/inth3shadows/runecho/internal/gitutil"
 )
 
 // GitOracle answers the audit's dated existence questions by matching
@@ -260,12 +262,20 @@ func bindPatterns(lang, sym string, inImportBlock bool) []string {
 func (g GitOracle) git(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout())
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	// A repo-local or global hook/config must not run against an audit. This is
-	// read-only tooling pointed at trees the user did not necessarily write.
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
+	out, err := gitOracleCmd(ctx, dir, args...).Output()
 	return string(out), err
+}
+
+// gitOracleCmd builds the audit's git invocation on gitutil.Command, so it gets
+// the same hardening as every other git call in runecho (core.fsmonitor off, no
+// system config, no prompts). The audit runs git in repos named by paths in the
+// decision log — trees the user did not necessarily write — so a repo-local
+// config must not run code here. Optional locks are off too: the audit is
+// read-only and must not contend with the user's own git commands.
+func gitOracleCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := gitutil.Command(ctx, dir, args...)
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0")
+	return cmd
 }
 
 // Worktree resolves a recorded absolute file path to a usable git worktree.

@@ -69,7 +69,8 @@ func wrapHookBlock(body string) string {
 
 // legacyHookLine matches every line a pre-#443 runecho ever wrote into a hook,
 // with the binary quoted by %q (early releases) or shellQuote, at any path
-// (`.exe` on Windows). The line must start with the quoted binary, so a line a
+// (`.exe` on Windows). The quoted binary may be preceded only by the fixed
+// prefixes runecho wrote (`exec `, the `[ "$3" = "1" ] && ` gate), so a line a
 // person wrapped (`flock '/l' '/x/runecho-ir' …`) does not match and is never
 // silently rewritten; a single-quoted path admits only shellQuote's escape for
 // an apostrophe. Frozen: every hook written since #443 carries markers.

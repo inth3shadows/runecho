@@ -20,13 +20,17 @@ install time from `git describe --tags` (see `install.sh`).
 - install: runecho now owns a marked `# >>> runecho >>>` block in each git hook
   instead of the whole file, so another tool's content in the same hook (e.g.
   kb-mcp's `kb-drift`) survives `runecho-ir install` / `repo add`. Legacy hooks
-  migrate once, a `.runecho.bak` keeps the previous version, the guard no
-  longer `exec`s and post-checkout no longer exits early, and malformed markers
-  are refused without touching the file. A symlinked hook is refused (its
-  target is often a tracked or shared file). `install` warns loudly when the
-  commit guard ends up inactive. `install.sh --hook` no longer rewrites a
-  pre-commit holding runecho's block or other content. `--force` now only adds
-  the block where runecho is already wired in by hand (#443).
+  migrate once, a `.runecho.bak` keeps the original, the guard no longer
+  `exec`s and post-checkout no longer exits early. Malformed markers, symlinked
+  hooks and non-shell hooks are refused without touching the file, with a
+  warning when that leaves pre-commit without the guard. `--force` now only
+  adds or migrates where runecho is already called outside its markers, and
+  says so (#443).
+- install.sh: `--hook` skips a pre-commit holding runecho's block, and
+  otherwise overwrites an existing pre-commit only if it already matches
+  exactly; anything else, including a guard-only hook pointing at an older
+  binary path, is refused with a pointer to `runecho-ir install`, which
+  migrates it in place (`--force` still overwrites) (#443).
 
 ## [0.66.3] — 2026-10-01
 

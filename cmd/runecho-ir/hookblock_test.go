@@ -182,7 +182,11 @@ func TestMergeHookBlock_ForceNotes(t *testing.T) {
 	if n == 0 {
 		t.Fatalf("no line-numbered note in %q", notes)
 	}
-	if got := strings.Split(out, "\n")[n-1]; got != "/x/runecho-ir repo reindex ." {
+	outLines := strings.Split(out, "\n")
+	if n < 1 || n > len(outLines) {
+		t.Fatalf("note names line %d; output has %d lines", n, len(outLines))
+	}
+	if got := outLines[n-1]; got != "/x/runecho-ir repo reindex ." {
 		t.Errorf("note names line %d = %q, want the leftover runecho line", n, got)
 	}
 	_, _, notes, _ = mergeHookBlock("#!/bin/sh\n/usr/bin/runecho-guard\n", block, true)

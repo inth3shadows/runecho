@@ -14,10 +14,21 @@ import (
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }
 
-// mustOpenDB opens the central snapshot store (~/.runecho/history.db) or returns 1.
-// History is centralized so the oracle serves all enrolled repos from one
-// durable, integrity-checked store; the working ir.json stays repo-local.
-func mustOpenDB() (*snapshot.DB, int) {
+// mustOpenDB opens the central snapshot store (~/.runecho/history.db) without the
+// whole-file integrity scan (snapshot.OpenFast; ~3 s on a ~0.9 GiB store, #441).
+// For reads and incremental writes only. Anything that copies the store,
+// bulk-deletes from it, or is the periodic sweep uses mustOpenDBVerified.
+// History is centralized so the oracle serves all enrolled repos from one store;
+// the working ir.json stays repo-local.
+func mustOpenDB() (*snapshot.DB, int) { return openCentralStore(snapshot.OpenFast) }
+
+// mustOpenDBVerified opens the store with the full PRAGMA quick_check
+// (snapshot.Open). Rule: checked = destructive, copies the store, or the
+// periodic sweep — backup, prune, prune-missing, repo rm, reindex --all. A failed
+// check also blocks every fast open until a checked open passes again.
+func mustOpenDBVerified() (*snapshot.DB, int) { return openCentralStore(snapshot.Open) }
+
+func openCentralStore(open func(string) (*snapshot.DB, error)) (*snapshot.DB, int) {
 	dir, err := runechoDir()
 	if err != nil {
 		return nil, printErr(err)
@@ -29,7 +40,7 @@ func mustOpenDB() (*snapshot.DB, int) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, printErr(fmt.Errorf("create %s: %w", dir, err))
 	}
-	db, err := snapshot.Open(filepath.Join(dir, "history.db"))
+	db, err := open(filepath.Join(dir, "history.db"))
 	if err != nil {
 		return nil, printErr(fmt.Errorf("open snapshot DB: %w", err))
 	}

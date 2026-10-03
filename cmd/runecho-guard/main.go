@@ -216,7 +216,10 @@ func runPreCommit(dryRun, verbose bool) int {
 		return 0
 	}
 
-	db, err := snapshot.Open(dbPath)
+	// OpenFast: Open's whole-file quick_check cost ~3 s on every commit at
+	// ~0.9 GiB (#441). This path only reads; corrupt pages it touches still
+	// error, and a failed check elsewhere refuses here via ErrStoreCorrupt.
+	db, err := snapshot.OpenFast(dbPath)
 	if err != nil {
 		if errors.Is(err, snapshot.ErrSchemaNewer) {
 			warnf("this runecho-guard binary is older than the store — symbol validation is DISABLED until it is rebuilt (bash install.sh): %v", err)

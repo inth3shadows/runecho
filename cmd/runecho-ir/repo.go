@@ -193,7 +193,7 @@ func runRepoRemove(args []string) int {
 		fmt.Fprintln(os.Stderr, "Usage: runecho-ir repo rm <name>")
 		return ExitError
 	}
-	db, code := mustOpenDB()
+	db, code := mustOpenDBVerified() // cascade delete
 	if code != 0 {
 		return code
 	}
@@ -284,7 +284,7 @@ func runRepoReindex(args []string) int {
 // installed hourly job runs, so the store stays bounded without a second
 // scheduled entry.
 func runRepoReindexAll(prune bool, keepN int) int {
-	db, code := mustOpenDB()
+	db, code := mustOpenDBVerified() // the hourly sweep: doubles as the periodic integrity check
 	if code != 0 {
 		return code
 	}
@@ -411,7 +411,7 @@ func runRepoPrune(args []string) int {
 		return ExitError
 	}
 
-	db, code := mustOpenDB()
+	db, code := mustOpenDBVerified() // bulk delete (and optional VACUUM)
 	if code != 0 {
 		return code
 	}
@@ -512,7 +512,7 @@ func runRepoPruneMissing(args []string) int {
 		return code
 	}
 
-	db, code := mustOpenDB()
+	db, code := mustOpenDBVerified() // bulk delete
 	if code != 0 {
 		return code
 	}

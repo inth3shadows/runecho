@@ -238,7 +238,6 @@ func lessSymbolDelta(a, b SymbolDelta) bool {
 	return a.Kind < b.Kind
 }
 
-// symbolSet converts a slice of SymbolDelta to a map keyed by "kind:name".
 // symbolSet keys a file's symbols for the set-diff, dropping the internal kinds
 // (ir.InternalKinds: unexported helpers, struct fields) so a diff reports what
 // a reader would call a change — those kinds are indexed for edit-time

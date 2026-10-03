@@ -987,9 +987,11 @@ func TestRepoAdd_FailedInitialIndexExitsNonzero(t *testing.T) {
 }
 
 // TestInstall_AllHooksSkippedExitsNonzeroAndSaysSo pins the F30/F33/F34 fix:
-// when every hook is skipped (existing non-runecho hooks, no --force), install
-// printed "Hooks installed" and exited 0 — success theater while the guard is
-// not actually active. It must say no hooks were installed and exit soft-fail.
+// when every hook is skipped, install printed "Hooks installed" and exited 0 —
+// success theater while the guard is not actually active. Since #443 a foreign
+// hook gets runecho's block added rather than skipped, so "skipped" now means
+// refused: here every hook carries an orphan runecho marker. It must say no
+// hooks were installed and exit soft-fail.
 func TestInstall_AllHooksSkippedExitsNonzeroAndSaysSo(t *testing.T) {
 	home := t.TempDir()
 	dir := t.TempDir()
@@ -1000,16 +1002,16 @@ func TestInstall_AllHooksSkippedExitsNonzeroAndSaysSo(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, h := range []string{"pre-commit", "post-commit", "post-merge", "post-checkout"} {
-		if err := os.WriteFile(filepath.Join(hooksDir, h), []byte("#!/bin/sh\n# husky, not ours\n"), 0755); err != nil {
+		if err := os.WriteFile(filepath.Join(hooksDir, h), []byte("#!/bin/sh\n# >>> runecho >>>\n# husky, not ours\n"), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	code, out, _ := runWith(t, home, []string{"runecho-ir", "install", dir})
 	if code == 0 {
-		t.Fatalf("install with all hooks skipped exited 0; want nonzero (soft)")
+		t.Fatalf("install with all hooks refused exited 0; want nonzero (soft)")
 	}
-	if strings.Contains(out, "Hooks installed in") {
+	if strings.Contains(out, "Created") || strings.Contains(out, "Updated") {
 		t.Errorf("output still claims success: %q", out)
 	}
 	if !strings.Contains(out, "No hooks installed") {

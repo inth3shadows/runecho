@@ -119,7 +119,7 @@ func runRepoAdd(args []string) int {
 			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
 			fmt.Fprintf(os.Stderr, "  Run manually: runecho-ir install\n")
 		} else if installed == 0 {
-			fmt.Fprintf(os.Stderr, "Warning: no hooks installed (existing non-runecho hooks). Overwrite with: runecho-ir install --force\n")
+			fmt.Fprintf(os.Stderr, "Warning: no hooks installed (every hook refused; see the reasons above). Fix those, then run: runecho-ir install\n")
 		}
 	}
 	return reindexCode

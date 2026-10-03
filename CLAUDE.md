@@ -16,6 +16,13 @@ Both installers write into `$(git rev-parse --git-common-dir)/hooks`, which is
 shared across every worktree of this repo. Knowing which installer owns a hook
 matters: a change that overwrites one silently disables the other's feature.
 
+Since #443 `installHooks` owns only a `# >>> runecho >>>` … `# <<< runecho <<<`
+block in each of its four hooks (`cmd/runecho-ir/hookblock.go`), inserted after
+the shebang and replaced in place, so other tools' content in the same file
+(kb-mcp's `kb-drift` block) survives a reinstall. Blocks never `exec` or exit
+early except to propagate a guard failure; legacy unmarked runecho hooks are
+migrated once; malformed markers are refused with the file left untouched.
+
 | Hook | Installed by | Does |
 |---|---|---|
 | `pre-commit` | `runecho-ir install` → `installHooks` (`cmd/runecho-ir/install.go`) | runs `runecho-guard` at commit time |

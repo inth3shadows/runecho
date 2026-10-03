@@ -22,7 +22,7 @@ import (
 func runInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	periodic := fs.Bool("periodic", false, "also install an hourly reindex job (launchd on macOS, cron on Linux)")
-	force := fs.Bool("force", false, "overwrite existing hooks not created by runecho")
+	force := fs.Bool("force", false, "add runecho's hook block even where runecho is already called outside its markers (hand-wired, or left below other content in an old hook); never deletes content")
 	source := fs.String("source", "", "with --periodic: the runecho checkout whose origin the job keeps the binaries fresh from (default: the current directory, #375)")
 	if code, ok := parseSub(fs, args); !ok {
 		return code
@@ -45,9 +45,9 @@ func runInstall(args []string) int {
 			}
 			fmt.Fprintf(os.Stderr, "Warning: could not install hooks: %v\n", err)
 		} else if installed == 0 && !*periodic {
-			// Every hook was skipped (existing non-runecho hooks): an explicit
-			// `install` that changed nothing must not exit 0 claiming success —
-			// scripts read the code, and the guard is NOT active (F30/F33/F34).
+			// Every hook was refused: an explicit `install` that left no runecho
+			// block anywhere must not exit 0 claiming success — scripts read the
+			// code, and the guard is NOT active (F30/F33/F34).
 			return ExitNoData
 		}
 	}
@@ -80,28 +80,7 @@ func installHooks(root string, force bool) (installed int, err error) {
 	guardBin := filepath.Join(filepath.Dir(irBin), "runecho-guard")
 	warnIfNotInstalledBinary(irBin)
 
-	preCommit := fmt.Sprintf("#!/usr/bin/env bash\nexec %s \"$@\"\n", shellQuote(guardBin))
-	reindex := fmt.Sprintf("#!/usr/bin/env bash\n%s repo reindex . >/dev/null 2>&1 &\n", shellQuote(irBin))
-	// freshness ADVISORY: on the two moments a worktree picks up newer master (a
-	// merge, a branch switch), say so if the installed binaries are behind the
-	// nearest tag — one line, offline, and it executes nothing (#375). Rebuilding
-	// moved to the periodic job and an explicit `version-check --reinstall`
-	// (freshen.go): a checkout is not an act of trust, so the hook path must not
-	// run the checked-out tree, and #373's attempt to gate that made the rebuild
-	// inert on nearly every branch. The version-check exits 0 on every path;
-	// `|| true` is belt-and-braces. It stays folded into these hooks (#228) rather
-	// than a third installer that would collide with the reindex hooks.
-	advise := fmt.Sprintf("%s version-check --quiet || true", shellQuote(irBin))
-	postMerge := fmt.Sprintf("#!/usr/bin/env bash\n%s\n%s repo reindex . >/dev/null 2>&1 &\n", advise, shellQuote(irBin))
-	// post-checkout: only act on branch switches ($3 == 1), not file checkouts.
-	postCheckout := fmt.Sprintf("#!/usr/bin/env bash\n[ \"$3\" = \"1\" ] || exit 0\n%s\n%s repo reindex . >/dev/null 2>&1 &\n", advise, shellQuote(irBin))
-
-	hooks := map[string]string{
-		"pre-commit":    preCommit,
-		"post-commit":   reindex,
-		"post-merge":    postMerge,
-		"post-checkout": postCheckout,
-	}
+	hooks := hookBlocks(irBin, guardBin)
 
 	// core.hooksPath redirects git to run hooks from THERE, not the common-dir we
 	// just wrote to — so a "success" message would be a lie. Warn instead. Empty
@@ -109,23 +88,36 @@ func installHooks(root string, force bool) (installed int, err error) {
 	if hp := gitutil.HooksPath(root); hp != "" {
 		fmt.Fprintf(os.Stderr, "  Warning: core.hooksPath is set to %q — git will NOT run the hooks just installed in %s.\n", hp, hooksDir)
 	}
-	for name, content := range hooks {
-		ok, hErr := installHookFile(hooksDir, name, content, force)
+	// installed counts hooks that hold runecho's block after this run (every
+	// action but refused), so callers' "nothing installed" check still means
+	// the guard is not active.
+	counts := map[hookAction]int{}
+	refusedPreCommit := false
+	for _, name := range []string{"pre-commit", "post-commit", "post-merge", "post-checkout"} {
+		action, hErr := installHookFile(hooksDir, name, hooks[name], force)
 		if hErr != nil {
 			return installed, hErr
 		}
-		if ok {
+		counts[action]++
+		if name == "pre-commit" && action == hookRefused {
+			refusedPreCommit = true
+		}
+		if action != hookRefused {
 			installed++
 		}
 	}
-	// Honest summary: "Hooks installed" used to print unconditionally, even
-	// when every hook was skipped — reading as success while the guard is
-	// not actually active.
-	if installed == 0 {
-		fmt.Printf("No hooks installed in %s (all %d skipped; use --force to overwrite existing hooks)\n", hooksDir, len(hooks))
-	} else {
-		fmt.Printf("Hooks installed in %s (%d/%d)\n", hooksDir, installed, len(hooks))
+	// The guard is the hook that matters most: when pre-commit was refused,
+	// say so even if the other three installed. Phrased as what runecho did,
+	// not as whether the guard runs — a refused hook may still call it by hand.
+	if refusedPreCommit {
+		fmt.Fprintf(os.Stderr, "  WARNING: runecho did not install the commit guard (pre-commit refused above); unless that hook already runs runecho-guard, commits are not checked.\n")
 	}
+	if installed == 0 {
+		fmt.Printf("No hooks installed in %s (all %d refused; see the reasons above)\n", hooksDir, len(hooks))
+		return 0, nil
+	}
+	fmt.Printf("Hooks in %s: %d created, %d updated, %d migrated, %d unchanged, %d refused\n",
+		hooksDir, counts[hookCreated], counts[hookUpdated], counts[hookMigrated], counts[hookUnchanged], counts[hookRefused])
 	return installed, nil
 }
 
@@ -170,23 +162,6 @@ func warnIfNotInstalledBinary(irBin string) {
 			"  this repo. If unintentional, re-run from the installed binary, or\n"+
 			"  pass --no-hooks.\n",
 		irBin, installed)
-}
-
-// installHookFile writes a single hook script. Skips if an existing hook is not
-// a runecho hook (unless force). Overwrites existing runecho hooks always.
-func installHookFile(hooksDir, name, content string, force bool) (installed bool, err error) {
-	path := filepath.Join(hooksDir, name)
-	if existing, err := os.ReadFile(path); err == nil {
-		if !strings.Contains(string(existing), "runecho") && !force {
-			fmt.Fprintf(os.Stderr, "  Skipping %s: existing hook (use --force to overwrite)\n", name)
-			return false, nil
-		}
-	}
-	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-		return false, fmt.Errorf("write %s hook: %w", name, err)
-	}
-	fmt.Printf("  Installed %s\n", name)
-	return true, nil
 }
 
 // reindexLogPath returns the file the periodic reindex job writes its output to,

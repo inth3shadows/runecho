@@ -399,7 +399,11 @@ func (db *DB) loadFilesBySnapshot(snapshotID int64) (map[string]string, error) {
 	return m, rows.Err()
 }
 
-// loadSymbolsBySnapshot returns path→[]SymbolDelta for all symbols in a snapshot.
+// loadSymbolsBySnapshot returns path→[]SymbolDelta for a snapshot's symbols,
+// without the internal kinds (ir.InternalKinds) — the same view irToMaps gives
+// the live side. Before, a snapshot-vs-live diff of any modified Go file listed
+// every unexported helper and struct field as removed, because only the live
+// side dropped them.
 func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta, error) {
 	rows, err := db.conn.Query(
 		`SELECT f.path, s.name, s.kind, s.sig_hash
@@ -419,6 +423,9 @@ func (db *DB) loadSymbolsBySnapshot(snapshotID int64) (map[string][]SymbolDelta,
 		var path, name, kind, sigHash string
 		if err := rows.Scan(&path, &name, &kind, &sigHash); err != nil {
 			return nil, err
+		}
+		if ir.InternalKinds[kind] {
+			continue
 		}
 		m[path] = append(m[path], SymbolDelta{Name: name, Kind: kind, Hash: sigHash})
 	}

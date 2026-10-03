@@ -183,3 +183,39 @@ func TestDiffLive_NoChange(t *testing.T) {
 		t.Errorf("FormatFull should report no changes:\n%s", FormatFull(res))
 	}
 }
+
+// A snapshot-vs-live diff must compare like with like: the live side drops the
+// internal kinds (unexported helpers, struct fields), so the stored side must
+// too. Before, changing only Exported's body listed helper and T.field as
+// removed although both still existed (audit, 2026-10-03).
+func TestDiffLive_InternalKindsNotReportedAsRemoved(t *testing.T) {
+	db, _ := openTemp(t)
+	id, err := db.EnrollRepo("r", "/repos/r", "", 0)
+	if err != nil {
+		t.Fatalf("EnrollRepo: %v", err)
+	}
+	syms := func(exportedHash string) []ir.Symbol {
+		return []ir.Symbol{
+			{Name: "Exported", Kind: "function", Hash: exportedHash},
+			{Name: "helper", Kind: "unexported", Hash: "hH"},
+			{Name: "T.field", Kind: "field", Hash: "hF"},
+		}
+	}
+	base := &ir.IR{Version: ir.IRVersion, RootHash: "r1",
+		Files: map[string]ir.FileIR{"p.go": {Hash: "f1", Symbols: syms("hE1")}}}
+	sid, err := db.SaveSnapshot(id, "s", "base", "/repos/r", base)
+	if err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	meta, _ := db.GetByID(sid)
+	live := &ir.IR{Version: ir.IRVersion, RootHash: "r2",
+		Files: map[string]ir.FileIR{"p.go": {Hash: "f2", Symbols: syms("hE2")}}}
+
+	res, err := db.DiffLive(*meta, live)
+	if err != nil {
+		t.Fatalf("DiffLive: %v", err)
+	}
+	if res.TotalRemoved != 0 || res.TotalModified != 1 {
+		t.Fatalf("removed=%d modified=%d, want 0 and 1 (only Exported changed): %+v", res.TotalRemoved, res.TotalModified, res.Files)
+	}
+}

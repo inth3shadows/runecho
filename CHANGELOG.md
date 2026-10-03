@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.66.7] — 2026-10-03
+
+### Changed
+- diff: stop reporting internal symbols of a modified file as removed (filter once in computeDiff) (#454)
+
 ## [0.66.6] — 2026-10-03
 
 ### Fixed

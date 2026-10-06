@@ -175,10 +175,10 @@ type decisionRecord struct {
 	// the PostToolUse session. recentUnrecordedAsk's fingerprint track does not
 	// consult a session, so two sessions making the byte-identical edit can
 	// still leave an outcome whose session differs from its ask's. Its window
-	// track does (#459): it joins only an ask from the outcome's own session, or
-	// one side with no session at all — so an outcome with a session can still
-	// window-join an ask written before this field existed. Group flagged
-	// symbols by the ASK's session, never the outcome's.
+	// track does (#459): it skips an ask known to be another session's, and
+	// joins when the sessions are equal or either side has none — so an outcome
+	// with a session can still window-join an ask written before this field
+	// existed. Group flagged symbols by the ASK's session, never the outcome's.
 	//
 	// Hashed, like ContractSession and for the same reason (the tag joins; the
 	// raw id is of no use to a report). A main-thread transcript is still
@@ -367,9 +367,11 @@ const (
 // best-effort elsewhere — it is not an absolute guarantee, and the comments and
 // docs must not claim one.
 //
-// sessionID and permissionMode come from the PostToolUse payload and feed only
-// the contract once-per-binding memo (#209, contractonce.go); pass "" when the
-// caller has neither, which records no memo — the fail-safe direction.
+// sessionID and permissionMode come from the PostToolUse payload. Both feed the
+// contract once-per-binding memo (#209, contractonce.go), where "" records no
+// memo — the fail-safe direction. sessionID also limits the window join to this
+// session's asks (#459, windowSessionMatch), and there "" is the PERMISSIVE
+// value: it admits every ask on the file.
 func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 	dir, err := runechoDir()
 	if err != nil {
@@ -444,12 +446,17 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 //   - window track — latest ask for this file within maxOutcomeAge, no
 //     fingerprint involved. This is what a record written by an older guard
 //     (no Edit field) or a caller with no editHash (editHash == "") falls back
-//     to. It sees only records windowSessionMatch admits (#459): an ask or an
-//     outcome from a different known session takes no part, so one session's
-//     edit is never recorded as the approval of another session's ask.
+//     to. An ASK takes part only if windowSessionMatch admits it (#459), so an
+//     outcome that carries a session is not recorded as the approval of an ask
+//     known to be another session's. OUTCOMES are deliberately not filtered:
+//     any outcome on the file after the ask closes it, whoever wrote it. An
+//     outcome-side filter was tried and rejected — a session-less ask matches
+//     every session, so each session's outcome was invisible to the next and
+//     one ask was approved once per session.
 //
 // session is contractSessionTag of the PostToolUse session, "" when the payload
-// carried none. Only the window track reads it.
+// carried none — and "" admits every ask, so it switches the filter off. Only
+// the window track's ask test reads it.
 //
 // The "unrecorded" half of each track exists because a single edit can fire the
 // PostToolUse hook more than once. Claude Code merges hooks from the plugin,
@@ -484,8 +491,8 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 // function exists to fix. A genuine double-fire for the SAME edit always
 // recomputes the SAME non-empty hash (editFingerprint is deterministic over
 // the same tool_input), so requiring an exact match still dedupes it; it is
-// the window track, unchanged below, that remains the fallback for records an
-// older guard wrote with no Edit at all.
+// the window track below that remains the fallback for records an older guard
+// wrote with no Edit at all.
 //
 // Ordering is what makes the single pass correct for each track independently.
 // The log is append-ordered, so resetting a track's recorded flag on each
@@ -556,9 +563,7 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 				if editHash != "" && cur.Edit == editHash {
 					hashRecorded = true
 				}
-				if windowSessionMatch(cur.Session, session) {
-					winRecorded = true
-				}
+				winRecorded = true
 			}
 		}
 		if readErr != nil {
@@ -578,15 +583,16 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 	return winMatch, "window", winFound
 }
 
-// windowSessionMatch reports whether a logged record may take part in the
-// window track for an outcome from session. The window track has no fingerprint
-// to tell edits apart, so without this a second session's unrelated edit to the
+// windowSessionMatch reports whether a logged ASK may be the window track's
+// match for an outcome from session. The window track has no fingerprint to
+// tell edits apart, so without this a second session's unrelated edit to the
 // same file was recorded as the approval of the first session's ask — inflating
 // fpreport and training learned-allow on an approval nobody gave (#459).
 //
-// A record with no session, or an outcome with none, matches everything: asks
-// written before #458 carry no session and are exactly what the window track
-// exists for, so treating "" as a mismatch would drop their approvals.
+// An ask with no session, or an outcome with none, matches: asks written
+// before #458 carry no session and are exactly what the window track exists
+// for, so treating "" as a mismatch would drop their approvals. The price is
+// that the filter does nothing for those records.
 func windowSessionMatch(recSession, session string) bool {
 	return recSession == "" || session == "" || recSession == session
 }

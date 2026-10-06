@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -185,14 +188,36 @@ func windowOutcome(t *testing.T, file, session string) {
 }
 
 // askAs logs an ask on file as session would (session "" writes none, like a
-// guard older than #458).
+// guard older than #458). Its fingerprint matches no windowOutcome.
 func askAs(t *testing.T, session, file string, symbols ...string) {
+	t.Helper()
+	askWithEdit(t, session, file, "aaaaaaaaaaaa", symbols...)
+}
+
+func askWithEdit(t *testing.T, session, file, editHash string, symbols ...string) {
 	t.Helper()
 	setDecisionSession(session)
 	logDecision(decisionRecord{
 		Mode: "hook", Repo: "r", File: file, Lang: "go", Decision: "ask",
-		Reason: "violations", Symbols: symbols, LearnSymbols: symbols, Edit: "aaaaaaaaaaaa",
+		Reason: "violations", Symbols: symbols, LearnSymbols: symbols, Edit: editHash,
 	})
+}
+
+// outcomesFor counts the outcome records logged for file.
+func outcomesFor(t *testing.T, home, file string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, "decisions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec decisionRecord
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Decision == "outcome" && rec.File == file {
+			n++
+		}
+	}
+	return n
 }
 
 // #459: another session's unrelated edit must not be recorded as the approval
@@ -218,11 +243,13 @@ func TestRunOutcomeMode_WindowJoinDoesNotCrossSessions(t *testing.T) {
 }
 
 // The filter must not cost the window track what it exists for: the same
-// session's non-matching edit still joins, and so does an ask with no session.
+// session's non-matching edit still joins, and so does a pair where either
+// side has no session.
 func TestRunOutcomeMode_WindowJoinWithinSessionAndLegacy(t *testing.T) {
-	for _, tc := range []struct{ name, askSession string }{
-		{"same session", "session-a"},
-		{"ask without session", ""},
+	for _, tc := range []struct{ name, askSession, outcomeSession string }{
+		{"same session", "session-a", "session-a"},
+		{"ask without session", "", "session-a"},
+		{"outcome without session", "session-a", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateDecisionSession(t)
@@ -233,7 +260,7 @@ func TestRunOutcomeMode_WindowJoinWithinSessionAndLegacy(t *testing.T) {
 
 			const file = "/some/repo/main.go"
 			askAs(t, tc.askSession, file, "Ghost")
-			windowOutcome(t, file, "session-a")
+			windowOutcome(t, file, tc.outcomeSession)
 
 			rec := readLastDecisionLog(t)
 			if got, _ := rec["decision"].(string); got != "outcome" {
@@ -249,27 +276,67 @@ func TestRunOutcomeMode_WindowJoinWithinSessionAndLegacy(t *testing.T) {
 	}
 }
 
-// Another session's outcome on the file answered that session's ask, not this
-// one's, so it must not mark this session's ask as already recorded.
-func TestRunOutcomeMode_ForeignOutcomeDoesNotCloseWindowAsk(t *testing.T) {
+// An ask with no session matches every session, so the ask filter alone cannot
+// stop a second session joining it. What stops it is that ANY outcome on the
+// file closes the ask: outcomes are not filtered by session. Filtering them
+// approved this one ask once per session.
+func TestRunOutcomeMode_SessionlessAskIsApprovedOnce(t *testing.T) {
 	isolateDecisionSession(t)
-	t.Setenv("RUNECHO_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
 	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
 
 	const file = "/some/repo/main.go"
-	askAs(t, "session-a", file, "GhostA")
-	askAs(t, "session-b", file, "GhostB")
+	askAs(t, "", file, "Ghost")
+	windowOutcome(t, file, "session-a")
 	windowOutcome(t, file, "session-b")
-	if rec := readLastDecisionLog(t); rec["decision"] != "outcome" || rec["session"] != contractSessionTag("session-b") {
-		t.Fatalf("setup: session-b's outcome was not recorded: %v", rec)
+
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
+		t.Errorf("learned-allow count = %d, want 1", got)
+	}
+}
+
+// The fingerprint track does not consult a session: another session's
+// byte-identical edit joins this ask (join "edit"), and the outcome carries
+// that other session. That outcome must then close the ask for the window
+// track too, or the asker's next, different edit approves it a second time.
+// Also pins that neither half of the fingerprint track filters on session.
+func TestRunOutcomeMode_FingerprintOutcomeFromOtherSessionClosesAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	fp := editFingerprint(hookEdit{ToolName: "Edit", OldString: "x", NewString: "y"})
+	askWithEdit(t, "session-a", file, fp, "Ghost")
+
+	windowOutcome(t, file, "session-b") // the identical x -> y edit
+	rec := readLastDecisionLog(t)
+	if rec["decision"] != "outcome" || rec["join"] != "edit" || rec["session"] != contractSessionTag("session-b") {
+		t.Fatalf("identical edit from another session: want an edit-joined outcome tagged session-b, got %v", rec)
 	}
 
+	// A second fire of the same edit, from the asking session, is a duplicate
+	// of an outcome already recorded for this fingerprint (#300 dedupe).
 	windowOutcome(t, file, "session-a")
-	rec := readLastDecisionLog(t)
-	if got, want := rec["session"], contractSessionTag("session-a"); rec["decision"] != "outcome" || got != want {
-		t.Fatalf("session-a's outcome was not recorded: %v", rec)
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Fatalf("after a repeat of the identical edit: outcomes = %d, want 1", n)
 	}
-	if syms, _ := rec["symbols"].([]any); len(syms) != 1 || syms[0] != "GhostA" {
-		t.Errorf("symbols = %v, want [GhostA] (session-a's own ask)", rec["symbols"])
+
+	other := `{"tool_name":"Edit","session_id":"session-a","tool_input":{"file_path":"` + file + `","old_string":"m","new_string":"n"}}`
+	if code := runOutcomeMode(strings.NewReader(other)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
+		t.Errorf("learned-allow count = %d, want 1", got)
 	}
 }

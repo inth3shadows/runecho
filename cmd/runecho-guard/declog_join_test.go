@@ -15,6 +15,10 @@ import (
 // maxOutcomeAge (5 min) — the exact case #300 exists to fix.
 func writeAskEntryAt(t *testing.T, file string, ts time.Time, editHash string, symbols []string) {
 	t.Helper()
+	// Seeded with no session: logDecision would otherwise stamp whatever the
+	// previous test's hook run left in the process, and the window track reads
+	// an ask's session (#459).
+	isolateDecisionSession(t)
 	logDecision(decisionRecord{
 		TS:       ts.UTC().Format(time.RFC3339),
 		Mode:     "hook",

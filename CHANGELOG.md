@@ -21,8 +21,9 @@ install time from `git describe --tags` (see `install.sh`).
   ask no longer crosses sessions. A second session's unrelated edit to a file
   was recorded as the approval of the first session's ask on it — inflating
   `fpreport`'s approval rate and, with `RUNECHO_GUARD_LEARN=1`, training
-  learned-allow on an approval nobody gave. Records with no `session` (older
-  guards, payloads without `session_id`) pair as before (#459).
+  learned-allow on an approval nobody gave. An ask or an outcome with no
+  `session` (older guards, payloads without `session_id`) pairs as before
+  (#459).
 
 ### Added
 - guard: every record a hook process appends to `decisions.jsonl` (asks,

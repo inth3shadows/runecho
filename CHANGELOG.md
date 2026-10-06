@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.68.0] — 2026-10-06
+
 ### Fixed
 - guard: the 5-minute window fallback that pairs a PostToolUse outcome with an
   ask now skips an ask known to be from a different session. A second

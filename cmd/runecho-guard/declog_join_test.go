@@ -83,7 +83,7 @@ func TestRecentUnrecordedAsk_FingerprintBeatsWindow(t *testing.T) {
 	writeAskEntryAt(t, file, time.Now().Add(-10*time.Minute), "target-hash", []string{"Old"})
 	writeAskEntryAt(t, file, time.Now().Add(-1*time.Minute), "other-hash", []string{"New"})
 
-	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "target-hash")
+	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "target-hash", "")
 	if !ok {
 		t.Fatal("expected a match via the fingerprint track")
 	}
@@ -105,7 +105,7 @@ func TestRecentUnrecordedAsk_LegacyAskFallsBackToWindow(t *testing.T) {
 
 	inWindow := "/repo/in_window.go"
 	writeAskEntryAt(t, inWindow, time.Now().Add(-2*time.Minute), "", []string{"Foo"})
-	_, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), inWindow, "some-new-hash")
+	_, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), inWindow, "some-new-hash", "")
 	if !ok {
 		t.Fatal("legacy ask within maxOutcomeAge should still be found via the window fallback")
 	}
@@ -115,7 +115,7 @@ func TestRecentUnrecordedAsk_LegacyAskFallsBackToWindow(t *testing.T) {
 
 	outOfWindow := "/repo/out_of_window.go"
 	writeAskEntryAt(t, outOfWindow, time.Now().Add(-10*time.Minute), "", []string{"Bar"})
-	if _, _, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), outOfWindow, "some-new-hash"); ok {
+	if _, _, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), outOfWindow, "some-new-hash", ""); ok {
 		t.Error("legacy ask beyond maxOutcomeAge must not be found — the window fallback is unchanged by #300")
 	}
 }
@@ -171,7 +171,7 @@ func TestRecentUnrecordedAsk_OversizedLineDoesNotAbortScan(t *testing.T) {
 	file := "/some/repo/main.go"
 	writeAskEntryAt(t, file, time.Now().Add(-1*time.Minute), "", []string{"Foo"})
 
-	rec, _, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "")
+	rec, _, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "", "")
 	if !ok {
 		t.Fatal("the real ask must still be found despite a preceding oversized line")
 	}
@@ -201,7 +201,7 @@ func TestRecentUnrecordedAsk_UnattributedOutcomeDoesNotCloseADifferentHash(t *te
 		Decision: "outcome", Reason: "approved",
 	})
 
-	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "hash-b")
+	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "hash-b", "")
 	if !ok {
 		t.Fatal("ask B must still be findable — an unattributed outcome must not falsely close it")
 	}

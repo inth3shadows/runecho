@@ -16,6 +16,14 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- guard: the 5-minute window fallback that pairs a PostToolUse outcome with an
+  ask no longer crosses sessions. A second session's unrelated edit to a file
+  was recorded as the approval of the first session's ask on it — inflating
+  `fpreport`'s approval rate and, with `RUNECHO_GUARD_LEARN=1`, training
+  learned-allow on an approval nobody gave. Records with no `session` (older
+  guards, payloads without `session_id`) pair as before (#459).
+
 ### Added
 - guard: every record a hook process appends to `decisions.jsonl` (asks,
   defers, outcomes, `e6` refreshes) carries `session`, a 12-hex hash of the

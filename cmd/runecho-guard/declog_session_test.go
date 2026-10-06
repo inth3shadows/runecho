@@ -174,39 +174,102 @@ func TestDeferOnPanic_TimeoutBeforeDecodeHasNoSession(t *testing.T) {
 	}
 }
 
-// The outcome join never consults a session. When no ask carries the outcome's
-// fingerprint it takes the newest ask on that file inside maxOutcomeAge, so a
-// different edit from another session is joined to this ask and the outcome
-// carries the OTHER session. Pinned because decisionRecord.Session documents
-// it: an analysis must group by the ask's session.
-func TestRunOutcomeMode_WindowJoinCrossesSessions(t *testing.T) {
+// windowOutcome sends a PostToolUse for an edit no ask carries the fingerprint
+// of, so the join can only take the window track.
+func windowOutcome(t *testing.T, file, session string) {
+	t.Helper()
+	payload := `{"tool_name":"Edit","session_id":"` + session + `","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
+	if code := runOutcomeMode(strings.NewReader(payload)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// askAs logs an ask on file as session would (session "" writes none, like a
+// guard older than #458).
+func askAs(t *testing.T, session, file string, symbols ...string) {
+	t.Helper()
+	setDecisionSession(session)
+	logDecision(decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go", Decision: "ask",
+		Reason: "violations", Symbols: symbols, LearnSymbols: symbols, Edit: "aaaaaaaaaaaa",
+	})
+}
+
+// #459: another session's unrelated edit must not be recorded as the approval
+// of this ask, and must not train learned-allow on it.
+func TestRunOutcomeMode_WindowJoinDoesNotCrossSessions(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "Ghost")
+	before := countDecisionLogLines(t)
+	windowOutcome(t, file, "session-b")
+
+	if after := countDecisionLogLines(t); after != before {
+		t.Errorf("log grew by %d record(s); want none: %v", after-before, readLastDecisionLog(t))
+	}
+	if la := loadLearnedAllow(home); len(la.Repos["r"]) != 0 {
+		t.Errorf("learned-allow trained across sessions: %v", la.Repos["r"])
+	}
+}
+
+// The filter must not cost the window track what it exists for: the same
+// session's non-matching edit still joins, and so does an ask with no session.
+func TestRunOutcomeMode_WindowJoinWithinSessionAndLegacy(t *testing.T) {
+	for _, tc := range []struct{ name, askSession string }{
+		{"same session", "session-a"},
+		{"ask without session", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDecisionSession(t)
+			home := t.TempDir()
+			t.Setenv("RUNECHO_HOME", home)
+			t.Setenv("RUNECHO_DEBUG", "")
+			t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+			const file = "/some/repo/main.go"
+			askAs(t, tc.askSession, file, "Ghost")
+			windowOutcome(t, file, "session-a")
+
+			rec := readLastDecisionLog(t)
+			if got, _ := rec["decision"].(string); got != "outcome" {
+				t.Fatalf("decision = %q, want outcome", got)
+			}
+			if got, _ := rec["join"].(string); got != "window" {
+				t.Errorf("join = %q, want window", got)
+			}
+			if _, ok := loadLearnedAllow(home).Repos["r"]["Ghost"]; !ok {
+				t.Errorf("learned-allow has no entry for the approved symbol")
+			}
+		})
+	}
+}
+
+// Another session's outcome on the file answered that session's ask, not this
+// one's, so it must not mark this session's ask as already recorded.
+func TestRunOutcomeMode_ForeignOutcomeDoesNotCloseWindowAsk(t *testing.T) {
 	isolateDecisionSession(t)
 	t.Setenv("RUNECHO_HOME", t.TempDir())
 	t.Setenv("RUNECHO_DEBUG", "")
 
 	const file = "/some/repo/main.go"
-	setDecisionSession("session-a")
-	writeAskEntryAt(t, file, time.Now(), "aaaaaaaaaaaa", []string{"Ghost"})
-	ask := readLastDecisionLog(t)
-	if got, want := ask["session"], contractSessionTag("session-a"); got != want {
-		t.Fatalf("ask session = %v, want %q", got, want)
+	askAs(t, "session-a", file, "GhostA")
+	askAs(t, "session-b", file, "GhostB")
+	windowOutcome(t, file, "session-b")
+	if rec := readLastDecisionLog(t); rec["decision"] != "outcome" || rec["session"] != contractSessionTag("session-b") {
+		t.Fatalf("setup: session-b's outcome was not recorded: %v", rec)
 	}
 
-	payload := `{"tool_name":"Edit","session_id":"session-b","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
-	if code := runOutcomeMode(strings.NewReader(payload)); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
+	windowOutcome(t, file, "session-a")
 	rec := readLastDecisionLog(t)
-	if got, _ := rec["decision"].(string); got != "outcome" {
-		t.Fatalf("decision = %q, want outcome", got)
+	if got, want := rec["session"], contractSessionTag("session-a"); rec["decision"] != "outcome" || got != want {
+		t.Fatalf("session-a's outcome was not recorded: %v", rec)
 	}
-	if got, _ := rec["join"].(string); got != "window" {
-		t.Errorf("join = %q, want window", got)
-	}
-	if got, want := rec["session"], contractSessionTag("session-b"); got != want {
-		t.Errorf("outcome session = %v, want %q (the PostToolUse session)", got, want)
-	}
-	if rec["session"] == ask["session"] {
-		t.Errorf("outcome session %v equals the ask's; the join is expected to cross sessions", rec["session"])
+	if syms, _ := rec["symbols"].([]any); len(syms) != 1 || syms[0] != "GhostA" {
+		t.Errorf("symbols = %v, want [GhostA] (session-a's own ask)", rec["symbols"])
 	}
 }

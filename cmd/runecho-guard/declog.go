@@ -184,9 +184,12 @@ type decisionRecord struct {
 	// raw id is of no use to a report). A main-thread transcript is still
 	// findable from it: its filename is <session id>.jsonl, so hash the name
 	// without the extension. Subagent transcripts sit beside it under
-	// <session id>/subagents/. Not verified: which session_id a subagent's hook
-	// fires carry, or whether a resumed session keeps its id — settle both on
-	// live records before reading "same session" off this field. Deliberately a
+	// <session id>/subagents/, and a subagent's PreToolUse fire carries the
+	// PARENT session's id (one live probe, 2026-10-06, Claude Code 2.1.291), so
+	// subagent edits group under the parent's tag. Not verified: whether the
+	// PreToolUse and PostToolUse fires of one call carry the same id, or whether
+	// a resumed session keeps its id — settle both on live records before
+	// reading "same session" off this field. Deliberately a
 	// SEPARATE field from ContractSession, which is set on contract asks only
 	// and whose absence the once-per-binding memo reads as "record no memo".
 	//

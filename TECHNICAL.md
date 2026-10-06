@@ -941,8 +941,10 @@ can be grouped by session — the question "was the flagged symbol defined later
 in the same session" was unanswerable before it. The raw id is never logged; a
 main-thread transcript is matched by hashing its filename without the `.jsonl`
 extension; subagent transcripts sit beside it under `<session id>/subagents/`.
-Not verified: which `session_id` a subagent's hook fires carry, or whether a
-resumed session keeps its id. Each record carries the session of the fire that
+A subagent's PreToolUse fire carries the parent session's id (one live probe,
+2026-10-06, Claude Code 2.1.291), so subagent edits group under the parent's
+tag. Not verified: whether the PreToolUse and PostToolUse fires of one call
+carry the same id, or whether a resumed session keeps its id. Each record carries the session of the fire that
 wrote it. The outcome join matches on file and edit fingerprint without
 consulting a session, so when two sessions make the identical edit an outcome's
 `session` can differ from its ask's — group flagged symbols by the ask's. When

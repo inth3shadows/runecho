@@ -173,13 +173,15 @@ type decisionRecord struct {
 	//
 	// Each record carries the session of the fire that WROTE it. An outcome's is
 	// the PostToolUse session, and recentUnrecordedAsk never consults a session:
-	// it joins on file and edit fingerprint, and when no ask carries the
-	// outcome's fingerprint it falls back to the newest ask on that file inside
-	// maxOutcomeAge (join "window"). So an outcome's session can differ from its
-	// ask's whenever two sessions make the byte-identical edit, or one session
-	// makes ANY edit to a file within five minutes of another session's
-	// unanswered ask on it. Group flagged symbols by the ASK's session, never the
-	// outcome's.
+	// it joins on file and edit fingerprint, and when no ask inside
+	// maxKeyedOutcomeAge carries the outcome's fingerprint it falls back to the
+	// last ask logged on that file inside maxOutcomeAge with no outcome after it
+	// (join "window"). So an outcome's session can differ from its ask's when two
+	// sessions make the byte-identical edit, or when one session's edit matches
+	// no ask's fingerprint and lands within five minutes of another session's ask
+	// on that file that has no outcome yet — a denied ask included, since a
+	// denial leaves no outcome. Group flagged symbols by the ASK's session, never
+	// the outcome's.
 	//
 	// Hashed, like ContractSession and for the same reason (the tag joins; the
 	// raw id is of no use to a report). A main-thread transcript is still

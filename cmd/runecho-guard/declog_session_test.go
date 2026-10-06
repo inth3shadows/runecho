@@ -103,9 +103,11 @@ func TestRunOutcomeMode_StampsSession(t *testing.T) {
 }
 
 // Pre-commit reads no hook payload, so its records carry no session. Driven
-// through runArgs, not neverBlockOnPanic, so a session set anywhere on the real
-// pre-commit entry path is caught. The panic record is used because it is the
-// pre-commit record that needs no enrolled repo to produce.
+// through runArgs, so a session set in runArgs or in the panic barrier is
+// caught. NOT covered: runPreCommit itself is stubbed out here, so a session
+// set inside it, and the ask records it writes, are unpinned. The panic record
+// is used because it is the pre-commit record that needs no enrolled repo to
+// produce.
 func TestRunArgs_PreCommitRecordHasNoSession(t *testing.T) {
 	isolateDecisionSession(t)
 	t.Setenv("RUNECHO_HOME", t.TempDir())

@@ -276,8 +276,9 @@ type FPStats struct {
 	// join to in-window. Causes, in rough order of likelihood:
 	//
 	//  1. The outcome recorder's window track pairs on FILE (declog.go's
-	//     recentUnrecordedAsk; since #459 it skips an ask of another known
-	//     session, which narrows this but does not remove it), so a
+	//     recentUnrecordedAsk). Since #461 it does so only when the ask or the
+	//     outcome has no edit fingerprint, so this mostly concerns records
+	//     written before that. Where it applies, a
 	//     later tool call on the same file inside maxOutcomeAge re-emits an
 	//     approval carrying the earlier ask's symbols. Those extra outcomes never
 	//     had a distinct ask.
@@ -527,7 +528,8 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// ask, so N duplicate asks at one timestamp can each claim a DIFFERENT
 			// outcome within the match window. Outcomes are plentiful enough for that to
 			// bite because the recorder's window track pairs on file (declog.go's
-			// recentUnrecordedAsk; another known session's ask excepted, #459), so a
+			// recentUnrecordedAsk; before #461 for any ask, since then only when
+			// the ask or the outcome has no edit fingerprint), so a
 			// later edit to the same file re-emits an approval carrying the earlier
 			// symbol set. Collapsing the asks therefore also releases the extra approvals
 			// their duplicates had claimed.

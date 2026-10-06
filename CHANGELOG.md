@@ -16,6 +16,15 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- guard: a PostToolUse outcome is no longer paired with an ask by the 5-minute
+  window fallback when both carry an edit fingerprint and the fingerprints
+  differ. A clean second edit to a file was recorded as the approval of a
+  pending or denied ask on it, and the asked edit then approved the same ask
+  again by fingerprint — two approvals from one ask, which is learned-allow's
+  auto-allow threshold under `RUNECHO_GUARD_LEARN=1`. The window fallback
+  remains for an ask or an outcome with no fingerprint (#461).
+
 ## [0.68.0] — 2026-10-06
 
 ### Fixed

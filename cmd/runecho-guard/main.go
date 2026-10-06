@@ -548,8 +548,9 @@ func runOutcomeMode(in io.Reader) int {
 	// same tool_input shape to Pre and Post for Edit/Write/MultiEdit, so hashing
 	// the same fields here reproduces it exactly and lets logOutcomeForFile join
 	// on it instead of guessing from a time window. If that assumption is ever
-	// wrong for some tool or hook wiring, the hash simply fails to match and the
-	// join falls back to the window track — see recentUnrecordedAsk.
+	// wrong for some tool or hook wiring, the hash fails to match and nothing
+	// joins: the ask carries a fingerprint, so since #461 the window track does
+	// not take it, and the approval goes unrecorded — see recentUnrecordedAsk.
 	editHash := editFingerprint(hookEdit{
 		ToolName:  payload.ToolName,
 		OldString: payload.ToolInput.OldString,

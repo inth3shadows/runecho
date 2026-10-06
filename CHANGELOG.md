@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.67.0] — 2026-10-06
+
 ### Added
 - guard: every record a hook process appends to `decisions.jsonl` (asks,
   defers, outcomes, `e6` refreshes) carries `session`, a 12-hex hash of the

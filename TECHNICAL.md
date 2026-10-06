@@ -935,6 +935,25 @@ hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
 reports the approval rate (an upper bound on the true false-positive rate).
 Delete the file freely if you don't want the history.
 
+`session` is a 12-hex hash of the Claude Code session id, stamped on every
+record a hook process writes (asks, defers, outcomes, `e6` refreshes) so edits
+can be grouped by session — the question "was the flagged symbol defined later
+in the same session" was unanswerable before it. The raw id is never logged; a
+main-thread transcript is matched by hashing its filename without the `.jsonl`
+extension; subagent transcripts sit beside it under `<session id>/subagents/`.
+Not verified: which `session_id` a subagent's hook fires carry, or whether a
+resumed session keeps its id. Each record carries the session of the fire that
+wrote it, and the outcome join never consults a session: it matches on file and
+edit fingerprint, and when no ask from the last 24h carries the fingerprint it
+falls back to the last ask logged on that file within 5 minutes that has no
+outcome after it (`join: window`). An outcome's `session` can therefore differ
+from its ask's when two sessions make the identical edit, or when one session's
+edit matches no ask's fingerprint and lands within 5 minutes of another
+session's ask on that file that has no outcome yet (a denied ask included,
+since a denial leaves no outcome) — group flagged symbols by the ask's. Absent on pre-commit records, on a payload with
+no `session_id`, on a `parse-fail` record, on a `timeout` or `panic` record
+written before the payload was decoded, and on records from an older guard.
+
 `edit` (ask and outcome records) is a 12-hex fingerprint of the tool call's
 edit content, added in #300. `join` (outcome records only) records which track
 matched the outcome to its ask: `edit` (the fingerprint) or `window` (the

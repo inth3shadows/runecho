@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/inth3shadows/runecho/internal/store"
@@ -162,6 +163,56 @@ type decisionRecord struct {
 	// gate is eating it. Written alongside Checks on the same records, and read
 	// back via guardstats.Decision.CheckReasons.
 	CheckReasons map[string]string `json:"check_reasons,omitempty"`
+	// Session is contractSessionTag of the Claude Code session the hook fired in,
+	// stamped by logDecision on EVERY record a hook process writes — asks,
+	// defers, outcomes and e6 refreshes alike. It exists so "was the callee
+	// written later in the same session" is answerable from the log: before it,
+	// 0 of 49,682 records carried a session, and every premature-latency number
+	// was commit-time (#329's known gap). Defers need it as much as asks do — the
+	// later edit that defines a flagged symbol is usually a defer.
+	//
+	// Each record carries the session of the fire that WROTE it. An outcome's is
+	// the PostToolUse session, and recentUnrecordedAsk never consults a session:
+	// it joins on file and edit fingerprint, and when no ask inside
+	// maxKeyedOutcomeAge carries the outcome's fingerprint it falls back to the
+	// last ask logged on that file inside maxOutcomeAge with no outcome after it
+	// (join "window"). So an outcome's session can differ from its ask's when two
+	// sessions make the byte-identical edit, or when one session's edit matches
+	// no ask's fingerprint and lands within five minutes of another session's ask
+	// on that file that has no outcome yet — a denied ask included, since a
+	// denial leaves no outcome. Group flagged symbols by the ASK's session, never
+	// the outcome's.
+	//
+	// Hashed, like ContractSession and for the same reason (the tag joins; the
+	// raw id is of no use to a report). A main-thread transcript is still
+	// findable from it: its filename is <session id>.jsonl, so hash the name
+	// without the extension. Subagent transcripts sit beside it under
+	// <session id>/subagents/. Not verified: which session_id a subagent's hook
+	// fires carry, or whether a resumed session keeps its id — settle both on
+	// live records before reading "same session" off this field. Deliberately a
+	// SEPARATE field from ContractSession, which is set on contract asks only
+	// and whose absence the once-per-binding memo reads as "record no memo".
+	//
+	// Absent on pre-commit records, on a payload that carried no session_id, on
+	// a parse-fail record, on a timeout or panic record written before the
+	// payload was decoded, and on every record from an older guard.
+	Session string `json:"session,omitempty"`
+}
+
+// decisionSession is the session tag logDecision stamps on records that do not
+// set one. One funnel rather than seventeen call sites, for the reason
+// ClaimSymbols is normalised in logDecision: a site can forget, a funnel
+// cannot. Process-wide because a hook process serves exactly one tool call.
+// Atomic because deferOnPanic's timeout branch logs from the parent goroutine
+// while the hook body, which sets this, may still be running.
+var decisionSession atomic.Pointer[string]
+
+// setDecisionSession records the session of the hook payload being served.
+// Called with "" before the payload is decoded so a parse-fail record (and, in
+// tests, a second hook run in one process) never inherits an earlier session.
+func setDecisionSession(sessionID string) {
+	tag := contractSessionTag(sessionID)
+	decisionSession.Store(&tag)
 }
 
 // editFingerprint returns a 12-hex-character fingerprint of a tool call's edit
@@ -224,6 +275,11 @@ func logDecision(rec decisionRecord) {
 	// Canonical so an install.sh build (v0.17.4) and a goreleaser build (0.17.4)
 	// of the SAME release stamp one label, not two (#233).
 	rec.GV = version.Canonical(version.Version)
+	if rec.Session == "" {
+		if tag := decisionSession.Load(); tag != nil {
+			rec.Session = *tag
+		}
+	}
 	if rec.TS == "" {
 		rec.TS = time.Now().UTC().Format(time.RFC3339)
 	}

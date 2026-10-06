@@ -230,11 +230,15 @@ func splitContractOnce(cw *contractWarning) (ask, suppressed *contractWarning) {
 
 // contractSessionTag is the short, stable tag of a session id stamped on
 // contract asks (decisionRecord.ContractSession), so an outcome can only record
-// a memo from an ask made in ITS OWN session. Ask records otherwise carry no
-// session, and two sessions making the byte-identical edit to one file would
-// join each other's asks (#209 review). Hashed rather than raw: the log is
-// read by reports that have no use for the id, and the tag is all the check
-// needs. "" for an empty id, which matches nothing.
+// a memo from an ask made in ITS OWN session: two sessions making the
+// byte-identical edit to one file would otherwise join each other's asks
+// (#209 review). Hashed rather than raw: the log is read by reports that have
+// no use for the id, and the tag is all the check needs. "" for an empty id,
+// which matches nothing.
+//
+// The same tag is stamped on every hook record as decisionRecord.Session, so
+// changing this hash re-keys that field too and splits session grouping across
+// guard versions.
 func contractSessionTag(sessionID string) string {
 	if sessionID == "" {
 		return ""

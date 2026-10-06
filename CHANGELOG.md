@@ -16,6 +16,15 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- guard: every record a hook process appends to `decisions.jsonl` (asks,
+  defers, outcomes, `e6` refreshes) carries `session`, a 12-hex hash of the
+  Claude Code session id, so edits can be grouped by session. The raw id is
+  never logged. Absent on pre-commit records, on payloads with no
+  `session_id`, on `parse-fail` records, and on a `timeout` or `panic` record
+  written before the payload was decoded. Telemetry only: no decision or hook
+  output changes.
+
 ### Fixed
 - doctor: the hook-wiring check judges only the guard's own entries — the mode
   must appear as a whole flag, not as an assignment's value — so a user's

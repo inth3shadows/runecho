@@ -271,3 +271,25 @@ func TestPayload_ArraysNeverNil(t *testing.T) {
 		}
 	}
 }
+
+// rawDecision mirrors the guard's decisionRecord by JSON tag, not by a shared
+// type. This pins the READER's tag and its copy into Decision; the writer's tag
+// is pinned in cmd/runecho-guard (TestLogDecision_StampsHashedSession).
+func TestLoadReader_Session(t *testing.T) {
+	in := `{"v":1,"ts":"2026-10-06T12:00:00Z","mode":"hook","decision":"defer","reason":"unknown-lang","session":"666ff6ccaa5b"}
+{"v":1,"ts":"2026-10-06T12:00:01Z","mode":"precommit","decision":"defer","reason":"panic"}
+`
+	got, err := LoadReader(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("LoadReader: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Session != "666ff6ccaa5b" {
+		t.Errorf("Session = %q, want %q", got[0].Session, "666ff6ccaa5b")
+	}
+	if got[1].Session != "" {
+		t.Errorf("Session on a record without one = %q, want empty", got[1].Session)
+	}
+}

@@ -177,9 +177,10 @@ func TestDeferOnPanic_TimeoutBeforeDecodeHasNoSession(t *testing.T) {
 	}
 }
 
-// windowOutcome sends a PostToolUse for the edit x -> y. No askAs ask carries
-// that fingerprint, so against those the join can only take the window track;
-// an ask seeded with askWithEdit and that fingerprint joins on the edit track.
+// windowOutcome sends a PostToolUse for the edit x -> y. An askAs ask carries no
+// fingerprint, so against those the join can only take the window track; an
+// ask seeded with askWithEdit and that edit's fingerprint joins on the edit
+// track.
 func windowOutcome(t *testing.T, file, session string) {
 	t.Helper()
 	payload := `{"tool_name":"Edit","session_id":"` + session + `","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
@@ -189,10 +190,12 @@ func windowOutcome(t *testing.T, file, session string) {
 }
 
 // askAs logs an ask on file as session would (session "" writes none, like a
-// guard older than #458). Its fingerprint matches no windowOutcome.
+// guard older than #458), with NO edit fingerprint, like a guard older than
+// #300. The window track is the only way such an ask can be joined, and since
+// #461 the only kind of ask a fingerprinted outcome can window-join.
 func askAs(t *testing.T, session, file string, symbols ...string) {
 	t.Helper()
-	askWithEdit(t, session, file, "aaaaaaaaaaaa", symbols...)
+	askWithEdit(t, session, file, "", symbols...)
 }
 
 func askWithEdit(t *testing.T, session, file, editHash string, symbols ...string) {
@@ -303,9 +306,12 @@ func TestRunOutcomeMode_SessionlessAskIsApprovedOnce(t *testing.T) {
 
 // The fingerprint track does not consult a session: another session's
 // byte-identical edit joins this ask (join "edit"), and the outcome carries
-// that other session. That outcome must then close the ask for the window
-// track too, or the asker's next, different edit approves it a second time.
-// Also pins that neither half of the fingerprint track filters on session.
+// that other session. Pins that neither half of the fingerprint track filters
+// on session: the cross-session join happens, and a repeat of the identical
+// edit is deduped against it. The last step, the asker's different edit, is
+// refused twice over since #461 (the fingerprints differ), so it no longer
+// tests that an outcome closes the ask for the window track;
+// TestRunOutcomeMode_SessionlessAskIsApprovedOnce does.
 func TestRunOutcomeMode_FingerprintOutcomeFromOtherSessionClosesAsk(t *testing.T) {
 	isolateDecisionSession(t)
 	home := t.TempDir()
@@ -363,5 +369,150 @@ func TestRunOutcomeMode_ForeignAskDoesNotReopenRecordedAsk(t *testing.T) {
 	}
 	if got := loadLearnedAllow(home).Repos["r"]["GhostA"].Count; got != 1 {
 		t.Errorf("learned-allow count for GhostA = %d, want 1", got)
+	}
+}
+
+// xyFingerprint is the fingerprint of windowOutcome's edit.
+func xyFingerprint() string {
+	return editFingerprint(hookEdit{ToolName: "Edit", OldString: "x", NewString: "y"})
+}
+
+// otherOutcome sends a PostToolUse for the edit m -> n: a different edit from
+// windowOutcome's, with its own fingerprint.
+func otherOutcome(t *testing.T, file, session string) {
+	t.Helper()
+	payload := `{"tool_name":"Edit","session_id":"` + session + `","tool_input":{"file_path":"` + file + `","old_string":"m","new_string":"n"}}`
+	if code := runOutcomeMode(strings.NewReader(payload)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// #461: when the ask and the outcome both carry a fingerprint and they differ,
+// the outcome is a different edit. It must not be recorded as approving the
+// ask, and the asked edit, when it does run, must be the ask's only approval.
+func TestRunOutcomeMode_DifferentEditDoesNotApproveFingerprintedAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+
+	otherOutcome(t, file, "session-a")
+	if n := outcomesFor(t, home, file); n != 0 {
+		t.Fatalf("a different edit was recorded as an approval: outcomes = %d, want 0", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 0 {
+		t.Fatalf("learned-allow trained by a different edit: count = %d, want 0", got)
+	}
+
+	windowOutcome(t, file, "session-a") // the asked edit itself
+	if rec := readLastDecisionLog(t); rec["decision"] != "outcome" || rec["join"] != "edit" {
+		t.Fatalf("the asked edit: want an edit-joined outcome, got %v", rec)
+	}
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
+		t.Errorf("learned-allow count = %d, want 1", got)
+	}
+}
+
+// The window track is still the join when a fingerprint comparison is
+// impossible because the OUTCOME has none (a payload with no tool_name): the
+// fingerprinted ask is joined by window, as before #461.
+func TestRunOutcomeMode_OutcomeWithoutFingerprintStillWindowJoins(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	const file = "/some/repo/main.go"
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+	noFingerprintOutcome(t, file, "session-a")
+	rec := readLastDecisionLog(t)
+	if rec["decision"] != "outcome" || rec["join"] != "window" {
+		t.Fatalf("want a window-joined outcome, got %v", rec)
+	}
+	if _, has := rec["edit"]; has {
+		t.Errorf("precondition: the outcome was meant to carry no fingerprint, got %v", rec["edit"])
+	}
+}
+
+// noFingerprintOutcome sends a PostToolUse whose payload has no tool_name, so
+// it carries no edit fingerprint and can only be joined by window.
+func noFingerprintOutcome(t *testing.T, file, session string) {
+	t.Helper()
+	payload := `{"session_id":"` + session + `","tool_input":{"file_path":"` + file + `"}}`
+	if code := runOutcomeMode(strings.NewReader(payload)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The one window path a current guard's ask can still take is an outcome with
+// no fingerprint. The #459 session filter must hold on it.
+func TestRunOutcomeMode_NoFingerprintOutcomeDoesNotCrossSessions(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	const file = "/some/repo/main.go"
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+	noFingerprintOutcome(t, file, "session-b")
+	if n := outcomesFor(t, home, file); n != 0 {
+		t.Errorf("outcomes = %d, want 0: %v", n, readLastDecisionLog(t))
+	}
+}
+
+// An ask the window track passes over for its fingerprint must leave the
+// track's state alone, exactly as a foreign-session ask must. If it reset the
+// "already recorded" flag, the older fingerprint-less ask would be approved a
+// second time by the next different edit.
+func TestRunOutcomeMode_SkippedFingerprintedAskDoesNotReopenRecordedAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "Legacy")
+	windowOutcome(t, file, "session-a")
+	askWithEdit(t, "session-a", file, "gggggggggggg", "Current")
+	otherOutcome(t, file, "session-a")
+
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Legacy"].Count; got != 1 {
+		t.Errorf("learned-allow count for Legacy = %d, want 1", got)
+	}
+}
+
+// A fingerprinted ask the window track passes over does not hide an older ask
+// with no fingerprint: a different edit is window-joined to that older ask.
+// This pins the behaviour as it is, not as a goal. It needs an ask from a guard
+// older than #300 within five minutes of a current one, and the join is still
+// a guess about which edit ran.
+func TestRunOutcomeMode_SkippedFingerprintedAskDoesNotShadowOlderAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "Legacy")
+	askWithEdit(t, "session-a", file, "gggggggggggg", "Current")
+	otherOutcome(t, file, "session-a")
+
+	rec := readLastDecisionLog(t)
+	if rec["decision"] != "outcome" || rec["join"] != "window" {
+		t.Fatalf("want a window-joined outcome, got %v", rec)
+	}
+	if syms, _ := rec["symbols"].([]any); len(syms) != 1 || syms[0] != "Legacy" {
+		t.Errorf("symbols = %v, want [Legacy]", rec["symbols"])
 	}
 }

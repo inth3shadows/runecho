@@ -135,10 +135,11 @@ type decisionRecord struct {
 	// outcome to join.
 	Edit string `json:"edit,omitempty"`
 	// Join records which track matched an outcome to its ask: "edit" (fingerprint,
-	// precise) or "window" (file+time fallback, the pre-#300 behavior). Outcome
-	// records only. This is a diagnostic, not a policy input — its only purpose is
-	// making a silent regression to the fallback path observable via
-	// `jq -r 'select(.decision=="outcome")|.join'` rather than invisible.
+	// precise) or "window" (the file+time guess, taken since #461 only when the
+	// ask or the outcome has no fingerprint). Outcome records only. A diagnostic,
+	// not a policy input. It does NOT reveal a PreToolUse/PostToolUse fingerprint
+	// mismatch: that used to surface as a "window" row carrying a fingerprint,
+	// and since #461 it writes no outcome at all.
 	Join string `json:"join,omitempty"`
 	// Checks is checkStatusMap(results) (#333): check name -> "ok"/"violation"/
 	// "unknown"/"skipped", for every check that ran to a verdict for this edit.
@@ -175,10 +176,9 @@ type decisionRecord struct {
 	// the PostToolUse session. recentUnrecordedAsk's fingerprint track does not
 	// consult a session, so two sessions making the byte-identical edit can
 	// still leave an outcome whose session differs from its ask's. Its window
-	// track does (#459): it skips an ask known to be another session's, and
-	// joins when the sessions are equal or either side has none — so an outcome
-	// with a session can still window-join an ask written before this field
-	// existed. Group flagged symbols by the ASK's session, never the outcome's.
+	// track does (#459): it skips an ask known to be another session's. An ask
+	// or an outcome with no session is not filtered there. Group flagged symbols
+	// by the ASK's session, never the outcome's.
 	//
 	// Hashed, like ContractSession and for the same reason (the tag joins; the
 	// raw id is of no use to a report). A main-thread transcript is still
@@ -343,9 +343,9 @@ const (
 	maxOutcomeReadBytes = int64(1 << 20)
 )
 
-// logOutcomeForFile appends an approved-outcome record if a recent "ask"
-// entry exists for file in decisions.jsonl (within maxOutcomeAge). No-ops
-// silently when no matching ask is found or on any I/O error.
+// logOutcomeForFile appends an approved-outcome record if decisions.jsonl holds
+// an ask on file that this outcome answers (recentUnrecordedAsk decides).
+// No-ops silently when no matching ask is found or on any I/O error.
 //
 // C3 enrichment: the ask record carries the violating Symbols (and Repo); copy
 // them forward onto the outcome record so a later analysis (or recordApprovals
@@ -446,10 +446,16 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 //     how long the human took to decide, which is the whole point — a
 //     5-minute cutoff was silently discarding every outcome recorded after a
 //     considered (rather than reflex) approval.
-//   - window track — latest ask for this file within maxOutcomeAge, no
-//     fingerprint involved. This is what a record written by an older guard
-//     (no Edit field) or a caller with no editHash (editHash == "") falls back
-//     to. An ASK takes part only if windowSessionMatch admits it (#459), so an
+//   - window track — latest ask for this file within maxOutcomeAge. A guess,
+//     so it is taken only when the fingerprints cannot be compared: the ask
+//     carries no Edit (an older guard wrote it) or the caller has no editHash
+//     (editHash == ""). When both carry one and they differ, the outcome is a
+//     different edit and THAT ask is not joined (#461); before that, a clean
+//     second edit to the file was recorded as the approval of a pending or
+//     denied ask, and the asked edit then approved it again by fingerprint.
+//     A skipped ask is passed over, not a stop: the match stays on an older
+//     in-window ask with no fingerprint, if the log holds one.
+//     An ASK also takes part only if windowSessionMatch admits it (#459), so an
 //     outcome that carries a session is not recorded as the approval of an ask
 //     known to be another session's. OUTCOMES are deliberately not filtered:
 //     any outcome on the file after the ask closes it, whoever wrote it. An
@@ -558,7 +564,7 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 					if editHash != "" && cur.Edit == editHash && ts.After(keyedCutoff) {
 						hashMatch, hashFound, hashRecorded = cur, true, false
 					}
-					if ts.After(windowCutoff) && windowSessionMatch(cur.Session, session) {
+					if ts.After(windowCutoff) && windowSessionMatch(cur.Session, session) && (cur.Edit == "" || editHash == "") {
 						winMatch, winFound, winRecorded = cur, true, false
 					}
 				}

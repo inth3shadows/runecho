@@ -135,10 +135,11 @@ type decisionRecord struct {
 	// outcome to join.
 	Edit string `json:"edit,omitempty"`
 	// Join records which track matched an outcome to its ask: "edit" (fingerprint,
-	// precise) or "window" (file+time fallback, the pre-#300 behavior). Outcome
-	// records only. This is a diagnostic, not a policy input — its only purpose is
-	// making a silent regression to the fallback path observable via
-	// `jq -r 'select(.decision=="outcome")|.join'` rather than invisible.
+	// precise) or "window" (the file+time guess, taken since #461 only when the
+	// ask or the outcome has no fingerprint). Outcome records only. A diagnostic,
+	// not a policy input. It does NOT reveal a PreToolUse/PostToolUse fingerprint
+	// mismatch: that used to surface as a "window" row carrying a fingerprint,
+	// and since #461 it writes no outcome at all.
 	Join string `json:"join,omitempty"`
 	// Checks is checkStatusMap(results) (#333): check name -> "ok"/"violation"/
 	// "unknown"/"skipped", for every check that ran to a verdict for this edit.
@@ -449,9 +450,11 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 //     so it is taken only when the fingerprints cannot be compared: the ask
 //     carries no Edit (an older guard wrote it) or the caller has no editHash
 //     (editHash == ""). When both carry one and they differ, the outcome is a
-//     different edit and the ask is not joined (#461); before that, a clean
+//     different edit and THAT ask is not joined (#461); before that, a clean
 //     second edit to the file was recorded as the approval of a pending or
 //     denied ask, and the asked edit then approved it again by fingerprint.
+//     A skipped ask is passed over, not a stop: the match stays on an older
+//     in-window ask with no fingerprint, if the log holds one.
 //     An ASK also takes part only if windowSessionMatch admits it (#459), so an
 //     outcome that carries a session is not recorded as the approval of an ask
 //     known to be another session's. OUTCOMES are deliberately not filtered:

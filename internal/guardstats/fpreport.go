@@ -528,8 +528,9 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// ask, so N duplicate asks at one timestamp can each claim a DIFFERENT
 			// outcome within the match window. Outcomes are plentiful enough for that to
 			// bite because the recorder's window track pairs on file (declog.go's
-			// recentUnrecordedAsk; before #461 for any ask, since then only when
-			// the ask or the outcome has no edit fingerprint), so a
+			// recentUnrecordedAsk; another known session's ask excepted, #459, and
+			// since #461 only when the ask or the outcome has no edit fingerprint),
+			// so a
 			// later edit to the same file re-emits an approval carrying the earlier
 			// symbol set. Collapsing the asks therefore also releases the extra approvals
 			// their duplicates had claimed.

@@ -949,11 +949,12 @@ wrote it. The outcome join matches on file and edit fingerprint without
 consulting a session, so when two sessions make the identical edit an outcome's
 `session` can differ from its ask's — group flagged symbols by the ask's. When
 no ask from the last 24h carries the fingerprint, the join falls back to the
-last ask logged on that file within 5 minutes that has no outcome after it
-(`join: window`). It takes that fallback only when the ask or the outcome has
-no edit fingerprint (#461): two fingerprints that differ are two different
-edits, and joining them recorded a clean second edit as the approval of a
-pending or denied ask. The fallback also skips an ask whose `session` is known and
+last ask on that file within 5 minutes that the fallback may take and that has
+no outcome after it (`join: window`). It may take an ask only when the ask or
+the outcome has no edit fingerprint (#461): two fingerprints that differ are
+two different edits, and joining them recorded a clean second edit as the
+approval of a pending or denied ask. An ask it may not take is passed over, so
+the match can fall on an older ask that has no fingerprint. The fallback also skips an ask whose `session` is known and
 differs from the outcome's (#459), so through the fallback an outcome that
 carries a session is not recorded as the approval of another session's ask. An
 ask or an outcome with no `session` is not filtered. Absent on pre-commit records, on a payload with

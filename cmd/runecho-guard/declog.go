@@ -172,21 +172,28 @@ type decisionRecord struct {
 	// later edit that defines a flagged symbol is usually a defer.
 	//
 	// Each record carries the session of the fire that WROTE it. An outcome's is
-	// the PostToolUse session, and recentUnrecordedAsk joins on file and edit
-	// fingerprint alone, so two sessions making the byte-identical edit can leave
-	// an outcome whose session differs from its ask's. Group flagged symbols by
-	// the ASK's session, never the outcome's.
+	// the PostToolUse session, and recentUnrecordedAsk never consults a session:
+	// it joins on file and edit fingerprint, and when no ask carries the
+	// outcome's fingerprint it falls back to the newest ask on that file inside
+	// maxOutcomeAge (join "window"). So an outcome's session can differ from its
+	// ask's whenever two sessions make the byte-identical edit, or one session
+	// makes ANY edit to a file within five minutes of another session's
+	// unanswered ask on it. Group flagged symbols by the ASK's session, never the
+	// outcome's.
 	//
 	// Hashed, like ContractSession and for the same reason (the tag joins; the
 	// raw id is of no use to a report). A main-thread transcript is still
 	// findable from it: its filename is <session id>.jsonl, so hash the name
-	// without the extension. Subagent transcripts are separate files not named
-	// by this id, and a resumed session that is issued a new id gets a new tag,
-	// so "same session" read off this field is a lower bound. Deliberately a
+	// without the extension. Subagent transcripts sit beside it under
+	// <session id>/subagents/. Not verified: which session_id a subagent's hook
+	// fires carry, or whether a resumed session keeps its id — settle both on
+	// live records before reading "same session" off this field. Deliberately a
 	// SEPARATE field from ContractSession, which is set on contract asks only
 	// and whose absence the once-per-binding memo reads as "record no memo".
-	// Absent on pre-commit records, on a payload that carried no session_id or
-	// did not parse, and on every record from an older guard.
+	//
+	// Absent on pre-commit records, on a payload that carried no session_id, on
+	// a parse-fail record, on a timeout or panic record written before the
+	// payload was decoded, and on every record from an older guard.
 	Session string `json:"session,omitempty"`
 }
 

@@ -940,14 +940,17 @@ record a hook process writes (asks, defers, outcomes, `e6` refreshes) so edits
 can be grouped by session — the question "was the flagged symbol defined later
 in the same session" was unanswerable before it. The raw id is never logged; a
 main-thread transcript is matched by hashing its filename without the `.jsonl`
-extension. Subagent transcripts are separate files not named by the session id,
-and a resumed session issued a new id gets a new tag, so "same session" read
-off this field is a lower bound. Each record carries the session of the fire
-that wrote it: an outcome is joined to its ask by file and edit fingerprint
-only, so when two sessions make the identical edit the outcome's `session` can
-differ from the ask's — group flagged symbols by the ask's. Absent on
-pre-commit records, on a payload with no `session_id`, and on records from an
-older guard.
+extension; subagent transcripts sit beside it under `<session id>/subagents/`.
+Not verified: which `session_id` a subagent's hook fires carry, or whether a
+resumed session keeps its id. Each record carries the session of the fire that
+wrote it, and the outcome join never consults a session: it matches on file and
+edit fingerprint, falling back to the newest ask on that file within 5 minutes
+(`join: window`). An outcome's `session` can therefore differ from its ask's
+when two sessions make the identical edit, or when one session makes any edit
+to a file within 5 minutes of another session's unanswered ask on it — group
+flagged symbols by the ask's. Absent on pre-commit records, on a payload with
+no `session_id`, on a `parse-fail` record, on a `timeout` or `panic` record
+written before the payload was decoded, and on records from an older guard.
 
 `edit` (ask and outcome records) is a 12-hex fingerprint of the tool call's
 edit content, added in #300. `join` (outcome records only) records which track

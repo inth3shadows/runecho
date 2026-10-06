@@ -273,7 +273,8 @@ func TestPayload_ArraysNeverNil(t *testing.T) {
 }
 
 // rawDecision mirrors the guard's decisionRecord by JSON tag, not by a shared
-// type, so a tag typo on either side would read every Session back as "".
+// type. This pins the READER's tag and its copy into Decision; the writer's tag
+// is pinned in cmd/runecho-guard (TestLogDecision_StampsHashedSession).
 func TestLoadReader_Session(t *testing.T) {
 	in := `{"v":1,"ts":"2026-10-06T12:00:00Z","mode":"hook","decision":"defer","reason":"unknown-lang","session":"666ff6ccaa5b"}
 {"v":1,"ts":"2026-10-06T12:00:01Z","mode":"precommit","decision":"defer","reason":"panic"}

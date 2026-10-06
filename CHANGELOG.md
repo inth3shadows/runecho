@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.69.0] — 2026-10-06
+
 ### Fixed
 - guard: a PostToolUse outcome is no longer paired with an ask by the 5-minute
   window fallback when both carry an edit fingerprint and the fingerprints

@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -174,39 +177,191 @@ func TestDeferOnPanic_TimeoutBeforeDecodeHasNoSession(t *testing.T) {
 	}
 }
 
-// The outcome join never consults a session. When no ask carries the outcome's
-// fingerprint it takes the newest ask on that file inside maxOutcomeAge, so a
-// different edit from another session is joined to this ask and the outcome
-// carries the OTHER session. Pinned because decisionRecord.Session documents
-// it: an analysis must group by the ask's session.
-func TestRunOutcomeMode_WindowJoinCrossesSessions(t *testing.T) {
-	isolateDecisionSession(t)
-	t.Setenv("RUNECHO_HOME", t.TempDir())
-	t.Setenv("RUNECHO_DEBUG", "")
-
-	const file = "/some/repo/main.go"
-	setDecisionSession("session-a")
-	writeAskEntryAt(t, file, time.Now(), "aaaaaaaaaaaa", []string{"Ghost"})
-	ask := readLastDecisionLog(t)
-	if got, want := ask["session"], contractSessionTag("session-a"); got != want {
-		t.Fatalf("ask session = %v, want %q", got, want)
-	}
-
-	payload := `{"tool_name":"Edit","session_id":"session-b","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
+// windowOutcome sends a PostToolUse for the edit x -> y. No askAs ask carries
+// that fingerprint, so against those the join can only take the window track;
+// an ask seeded with askWithEdit and that fingerprint joins on the edit track.
+func windowOutcome(t *testing.T, file, session string) {
+	t.Helper()
+	payload := `{"tool_name":"Edit","session_id":"` + session + `","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
 	if code := runOutcomeMode(strings.NewReader(payload)); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
+}
+
+// askAs logs an ask on file as session would (session "" writes none, like a
+// guard older than #458). Its fingerprint matches no windowOutcome.
+func askAs(t *testing.T, session, file string, symbols ...string) {
+	t.Helper()
+	askWithEdit(t, session, file, "aaaaaaaaaaaa", symbols...)
+}
+
+func askWithEdit(t *testing.T, session, file, editHash string, symbols ...string) {
+	t.Helper()
+	setDecisionSession(session)
+	logDecision(decisionRecord{
+		Mode: "hook", Repo: "r", File: file, Lang: "go", Decision: "ask",
+		Reason: "violations", Symbols: symbols, LearnSymbols: symbols, Edit: editHash,
+	})
+}
+
+// outcomesFor counts the outcome records logged for file.
+func outcomesFor(t *testing.T, home, file string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, "decisions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec decisionRecord
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Decision == "outcome" && rec.File == file {
+			n++
+		}
+	}
+	return n
+}
+
+// #459: another session's unrelated edit must not be recorded as the approval
+// of this ask, and must not train learned-allow on it.
+func TestRunOutcomeMode_WindowJoinDoesNotCrossSessions(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "Ghost")
+	before := countDecisionLogLines(t)
+	windowOutcome(t, file, "session-b")
+
+	if after := countDecisionLogLines(t); after != before {
+		t.Errorf("log grew by %d record(s); want none: %v", after-before, readLastDecisionLog(t))
+	}
+	if la := loadLearnedAllow(home); len(la.Repos["r"]) != 0 {
+		t.Errorf("learned-allow trained across sessions: %v", la.Repos["r"])
+	}
+}
+
+// The filter must not cost the window track what it exists for: the same
+// session's non-matching edit still joins, and so does a pair where either
+// side has no session.
+func TestRunOutcomeMode_WindowJoinWithinSessionAndLegacy(t *testing.T) {
+	for _, tc := range []struct{ name, askSession, outcomeSession string }{
+		{"same session", "session-a", "session-a"},
+		{"ask without session", "", "session-a"},
+		{"outcome without session", "session-a", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDecisionSession(t)
+			home := t.TempDir()
+			t.Setenv("RUNECHO_HOME", home)
+			t.Setenv("RUNECHO_DEBUG", "")
+			t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+			const file = "/some/repo/main.go"
+			askAs(t, tc.askSession, file, "Ghost")
+			windowOutcome(t, file, tc.outcomeSession)
+
+			rec := readLastDecisionLog(t)
+			if got, _ := rec["decision"].(string); got != "outcome" {
+				t.Fatalf("decision = %q, want outcome", got)
+			}
+			if got, _ := rec["join"].(string); got != "window" {
+				t.Errorf("join = %q, want window", got)
+			}
+			if _, ok := loadLearnedAllow(home).Repos["r"]["Ghost"]; !ok {
+				t.Errorf("learned-allow has no entry for the approved symbol")
+			}
+		})
+	}
+}
+
+// An ask with no session matches every session, so the ask filter alone cannot
+// stop a second session joining it. What stops it is that ANY outcome on the
+// file closes the ask: outcomes are not filtered by session. Filtering them
+// approved this one ask once per session.
+func TestRunOutcomeMode_SessionlessAskIsApprovedOnce(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "", file, "Ghost")
+	windowOutcome(t, file, "session-a")
+	windowOutcome(t, file, "session-b")
+
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
+		t.Errorf("learned-allow count = %d, want 1", got)
+	}
+}
+
+// The fingerprint track does not consult a session: another session's
+// byte-identical edit joins this ask (join "edit"), and the outcome carries
+// that other session. That outcome must then close the ask for the window
+// track too, or the asker's next, different edit approves it a second time.
+// Also pins that neither half of the fingerprint track filters on session.
+func TestRunOutcomeMode_FingerprintOutcomeFromOtherSessionClosesAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	fp := editFingerprint(hookEdit{ToolName: "Edit", OldString: "x", NewString: "y"})
+	askWithEdit(t, "session-a", file, fp, "Ghost")
+
+	windowOutcome(t, file, "session-b") // the identical x -> y edit
 	rec := readLastDecisionLog(t)
-	if got, _ := rec["decision"].(string); got != "outcome" {
-		t.Fatalf("decision = %q, want outcome", got)
+	if rec["decision"] != "outcome" || rec["join"] != "edit" || rec["session"] != contractSessionTag("session-b") {
+		t.Fatalf("identical edit from another session: want an edit-joined outcome tagged session-b, got %v", rec)
 	}
-	if got, _ := rec["join"].(string); got != "window" {
-		t.Errorf("join = %q, want window", got)
+
+	// A second fire of the same edit, from the asking session, is a duplicate
+	// of an outcome already recorded for this fingerprint (#300 dedupe).
+	windowOutcome(t, file, "session-a")
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Fatalf("after a repeat of the identical edit: outcomes = %d, want 1", n)
 	}
-	if got, want := rec["session"], contractSessionTag("session-b"); got != want {
-		t.Errorf("outcome session = %v, want %q (the PostToolUse session)", got, want)
+
+	other := `{"tool_name":"Edit","session_id":"session-a","tool_input":{"file_path":"` + file + `","old_string":"m","new_string":"n"}}`
+	if code := runOutcomeMode(strings.NewReader(other)); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if rec["session"] == ask["session"] {
-		t.Errorf("outcome session %v equals the ask's; the join is expected to cross sessions", rec["session"])
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
+		t.Errorf("learned-allow count = %d, want 1", got)
+	}
+}
+
+// A skipped foreign ask must leave the window track's state alone. If it reset
+// the "already recorded" flag, as an admitted ask does, this session's ask
+// would be approved again by its next edit.
+func TestRunOutcomeMode_ForeignAskDoesNotReopenRecordedAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "GhostA")
+	windowOutcome(t, file, "session-a")
+	askAs(t, "session-b", file, "GhostB")
+	windowOutcome(t, file, "session-a")
+
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["GhostA"].Count; got != 1 {
+		t.Errorf("learned-allow count for GhostA = %d, want 1", got)
 	}
 }

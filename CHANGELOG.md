@@ -16,6 +16,15 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Fixed
+- guard: the 5-minute window fallback that pairs a PostToolUse outcome with an
+  ask now skips an ask known to be from a different session. A second
+  session's unrelated edit to a file was recorded as the approval of the first
+  session's ask on it — inflating `fpreport`'s approval rate and, with
+  `RUNECHO_GUARD_LEARN=1`, training learned-allow on an approval nobody gave.
+  An outcome with no `session` pairs exactly as before; an ask with no
+  `session` is never skipped (#459).
+
 ## [0.67.0] — 2026-10-06
 
 ### Added

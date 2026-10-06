@@ -943,14 +943,15 @@ main-thread transcript is matched by hashing its filename without the `.jsonl`
 extension; subagent transcripts sit beside it under `<session id>/subagents/`.
 Not verified: which `session_id` a subagent's hook fires carry, or whether a
 resumed session keeps its id. Each record carries the session of the fire that
-wrote it, and the outcome join never consults a session: it matches on file and
-edit fingerprint, and when no ask from the last 24h carries the fingerprint it
-falls back to the last ask logged on that file within 5 minutes that has no
-outcome after it (`join: window`). An outcome's `session` can therefore differ
-from its ask's when two sessions make the identical edit, or when one session's
-edit matches no ask's fingerprint and lands within 5 minutes of another
-session's ask on that file that has no outcome yet (a denied ask included,
-since a denial leaves no outcome) — group flagged symbols by the ask's. Absent on pre-commit records, on a payload with
+wrote it. The outcome join matches on file and edit fingerprint without
+consulting a session, so when two sessions make the identical edit an outcome's
+`session` can differ from its ask's — group flagged symbols by the ask's. When
+no ask from the last 24h carries the fingerprint, the join falls back to the
+last ask logged on that file within 5 minutes that has no outcome after it
+(`join: window`); that fallback skips an ask whose `session` is known and
+differs from the outcome's (#459), so through the fallback an outcome that
+carries a session is not recorded as the approval of another session's ask. An
+ask or an outcome with no `session` is not filtered. Absent on pre-commit records, on a payload with
 no `session_id`, on a `parse-fail` record, on a `timeout` or `panic` record
 written before the payload was decoded, and on records from an older guard.
 

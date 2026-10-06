@@ -167,7 +167,7 @@ func TestRecentUnrecordedAsk_ReturnsSymbolsAndRepo(t *testing.T) {
 		Symbols:  []string{"Foo", "Bar"},
 	})
 
-	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "")
+	rec, join, ok := recentUnrecordedAsk(filepath.Join(home, "decisions.jsonl"), file, "", "")
 	if !ok {
 		t.Fatal("recentUnrecordedAsk should find the ask record")
 	}

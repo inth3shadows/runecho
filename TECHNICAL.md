@@ -949,9 +949,9 @@ consulting a session, so when two sessions make the identical edit an outcome's
 no ask from the last 24h carries the fingerprint, the join falls back to the
 last ask logged on that file within 5 minutes that has no outcome after it
 (`join: window`); that fallback skips an ask whose `session` is known and
-differs from the outcome's (#459), so an outcome that carries a session is not
-recorded as the approval of another session's ask. An ask or an outcome with no
-`session` is not filtered. Absent on pre-commit records, on a payload with
+differs from the outcome's (#459), so through the fallback an outcome that
+carries a session is not recorded as the approval of another session's ask. An
+ask or an outcome with no `session` is not filtered. Absent on pre-commit records, on a payload with
 no `session_id`, on a `parse-fail` record, on a `timeout` or `panic` record
 written before the payload was decoded, and on records from an older guard.
 

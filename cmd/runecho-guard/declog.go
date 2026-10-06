@@ -369,9 +369,9 @@ const (
 //
 // sessionID and permissionMode come from the PostToolUse payload. Both feed the
 // contract once-per-binding memo (#209, contractonce.go), where "" records no
-// memo — the fail-safe direction. sessionID also limits the window join to this
-// session's asks (#459, windowSessionMatch), and there "" is the PERMISSIVE
-// value: it admits every ask on the file.
+// memo — the fail-safe direction. sessionID also makes the window join skip
+// asks known to be another session's (#459, windowSessionMatch), and there ""
+// is the PERMISSIVE value: it admits every ask on the file.
 func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 	dir, err := runechoDir()
 	if err != nil {
@@ -589,10 +589,10 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 // same file was recorded as the approval of the first session's ask — inflating
 // fpreport and training learned-allow on an approval nobody gave (#459).
 //
-// An ask with no session, or an outcome with none, matches: asks written
-// before #458 carry no session and are exactly what the window track exists
-// for, so treating "" as a mismatch would drop their approvals. The price is
-// that the filter does nothing for those records.
+// An ask with no session, or an outcome with none, matches: every ask written
+// before #458 lacks one, including the pre-#300 asks with no Edit that the
+// window track exists for, so treating "" as a mismatch would drop their
+// approvals. The price is that the filter does nothing for those records.
 func windowSessionMatch(recSession, session string) bool {
 	return recSession == "" || session == "" || recSession == session
 }

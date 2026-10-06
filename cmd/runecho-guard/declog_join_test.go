@@ -17,8 +17,9 @@ func writeAskEntryAt(t *testing.T, file string, ts time.Time, editHash string, s
 	t.Helper()
 	// Seeded with no session: logDecision would otherwise stamp whatever the
 	// previous test's hook run left in the process, and the window track reads
-	// an ask's session (#459).
-	isolateDecisionSession(t)
+	// an ask's session (#459). The caller's own session is put back afterwards.
+	prev := decisionSession.Swap(nil)
+	defer decisionSession.Store(prev)
 	logDecision(decisionRecord{
 		TS:       ts.UTC().Format(time.RFC3339),
 		Mode:     "hook",

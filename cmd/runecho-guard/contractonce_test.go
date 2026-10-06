@@ -430,8 +430,8 @@ func TestContract_WindowJoinDoesNotWriteMemo(t *testing.T) {
 	t.Setenv("RUNECHO_HOME", home)
 	file := "/some/repo/internal/a.go"
 	// Session tag present, so the window join is the ONLY reason for no memo.
-	// The ask is logged AS "sess": the window track pairs records of one session
-	// only (#459), and a direct logDecision otherwise inherits whatever session
+	// The ask is logged AS "sess": the window track skips an ask of a different
+	// known session (#459), and a direct logDecision otherwise inherits whatever session
 	// the previous test's hook run left in the process.
 	isolateDecisionSession(t)
 	setDecisionSession("sess")

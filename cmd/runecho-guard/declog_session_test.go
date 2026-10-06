@@ -177,8 +177,9 @@ func TestDeferOnPanic_TimeoutBeforeDecodeHasNoSession(t *testing.T) {
 	}
 }
 
-// windowOutcome sends a PostToolUse for an edit no ask carries the fingerprint
-// of, so the join can only take the window track.
+// windowOutcome sends a PostToolUse for the edit x -> y. No askAs ask carries
+// that fingerprint, so against those the join can only take the window track;
+// an ask seeded with askWithEdit and that fingerprint joins on the edit track.
 func windowOutcome(t *testing.T, file, session string) {
 	t.Helper()
 	payload := `{"tool_name":"Edit","session_id":"` + session + `","tool_input":{"file_path":"` + file + `","old_string":"x","new_string":"y"}}`
@@ -338,5 +339,29 @@ func TestRunOutcomeMode_FingerprintOutcomeFromOtherSessionClosesAsk(t *testing.T
 	}
 	if got := loadLearnedAllow(home).Repos["r"]["Ghost"].Count; got != 1 {
 		t.Errorf("learned-allow count = %d, want 1", got)
+	}
+}
+
+// A skipped foreign ask must leave the window track's state alone. If it reset
+// the "already recorded" flag, as an admitted ask does, this session's ask
+// would be approved again by its next edit.
+func TestRunOutcomeMode_ForeignAskDoesNotReopenRecordedAsk(t *testing.T) {
+	isolateDecisionSession(t)
+	home := t.TempDir()
+	t.Setenv("RUNECHO_HOME", home)
+	t.Setenv("RUNECHO_DEBUG", "")
+	t.Setenv("RUNECHO_GUARD_LEARN", "1")
+
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "GhostA")
+	windowOutcome(t, file, "session-a")
+	askAs(t, "session-b", file, "GhostB")
+	windowOutcome(t, file, "session-a")
+
+	if n := outcomesFor(t, home, file); n != 1 {
+		t.Errorf("outcomes = %d, want 1", n)
+	}
+	if got := loadLearnedAllow(home).Repos["r"]["GhostA"].Count; got != 1 {
+		t.Errorf("learned-allow count for GhostA = %d, want 1", got)
 	}
 }

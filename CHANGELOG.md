@@ -18,12 +18,12 @@ install time from `git describe --tags` (see `install.sh`).
 
 ### Fixed
 - guard: the 5-minute window fallback that pairs a PostToolUse outcome with an
-  ask no longer crosses sessions. A second session's unrelated edit to a file
-  was recorded as the approval of the first session's ask on it — inflating
-  `fpreport`'s approval rate and, with `RUNECHO_GUARD_LEARN=1`, training
-  learned-allow on an approval nobody gave. An ask or an outcome with no
-  `session` (older guards, payloads without `session_id`) pairs as before
-  (#459).
+  ask now skips an ask known to be from a different session. A second
+  session's unrelated edit to a file was recorded as the approval of the first
+  session's ask on it — inflating `fpreport`'s approval rate and, with
+  `RUNECHO_GUARD_LEARN=1`, training learned-allow on an approval nobody gave.
+  An outcome with no `session` pairs exactly as before; an ask with no
+  `session` is never skipped (#459).
 
 ## [0.67.0] — 2026-10-06
 

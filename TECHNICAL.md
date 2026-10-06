@@ -935,6 +935,13 @@ hook. `runecho-ir guard-stats` reports ask volume over it; `runecho-ir fpreport`
 reports the approval rate (an upper bound on the true false-positive rate).
 Delete the file freely if you don't want the history.
 
+`session` is a 12-hex hash of the Claude Code session id, stamped on every
+record a hook process writes (asks, defers, outcomes, `e6` refreshes) so edits
+can be grouped by session — the question "was the flagged symbol defined later
+in the same session" was unanswerable before it. The raw id is never logged; a
+transcript is matched by hashing its filename. Absent on pre-commit records, on
+a payload with no `session_id`, and on records from an older guard.
+
 `edit` (ask and outcome records) is a 12-hex fingerprint of the tool call's
 edit content, added in #300. `join` (outcome records only) records which track
 matched the outcome to its ask: `edit` (the fingerprint) or `window` (the

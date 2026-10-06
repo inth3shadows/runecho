@@ -87,6 +87,11 @@ type Decision struct {
 	// answered). Nil on records that suppressed nothing and on every record
 	// written before the field existed.
 	Suppressed []string
+	// Session is decisionRecord.Session: the hashed tag of the Claude Code
+	// session the hook fired in, on every hook-process record from a guard new
+	// enough to write it. "" on pre-commit records and on older records, so ""
+	// means "not reported", never "no session". No report aggregates it yet.
+	Session string
 }
 
 // rawDecision mirrors cmd/runecho-guard's decisionRecord by JSON tag (not by
@@ -108,6 +113,7 @@ type rawDecision struct {
 	Checks       map[string]string   `json:"checks,omitempty"`
 	CheckReasons map[string]string   `json:"check_reasons,omitempty"`
 	Suppressed   []string            `json:"suppressed,omitempty"`
+	Session      string              `json:"session,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -147,6 +153,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Checks:       raw.Checks,
 						CheckReasons: raw.CheckReasons,
 						Suppressed:   raw.Suppressed,
+						Session:      raw.Session,
 					})
 				}
 			}

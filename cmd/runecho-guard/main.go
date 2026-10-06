@@ -531,9 +531,11 @@ func runOutcomeMode(in io.Reader) int {
 			Edits     []editOp `json:"edits"`
 		} `json:"tool_input"`
 	}
+	setDecisionSession("")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		return 0
 	}
+	setDecisionSession(payload.SessionID)
 	if payload.ToolInput.FilePath == "" {
 		return 0
 	}
@@ -730,7 +732,8 @@ func writeCheckSection(w io.Writer, syms *[]string, header string, vs []guard.Vi
 func runHookMode(in io.Reader, out io.Writer) int {
 	var payload struct {
 		// SessionID binds an edit to the contract activated for this session
-		// (#12 D2). It is read for no other purpose and is never logged in full.
+		// (#12 D2) and tags every decision record this fire writes
+		// (decisionRecord.Session). It is never logged in full.
 		SessionID string `json:"session_id"`
 		ToolName  string `json:"tool_name"`
 		ToolInput struct {
@@ -741,11 +744,13 @@ func runHookMode(in io.Reader, out io.Writer) int {
 			Edits     []editOp `json:"edits"`      // MultiEdit tool
 		} `json:"tool_input"`
 	}
+	setDecisionSession("")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
 		return 0
 	}
+	setDecisionSession(payload.SessionID)
 
 	// One value for the tool call, so the checks below and the extracted phases
 	// read the same five fields by name instead of re-spelling the payload path.

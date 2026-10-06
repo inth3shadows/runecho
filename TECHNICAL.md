@@ -977,6 +977,18 @@ back to the original 5-minute window only when no fingerprint match exists.
 Since #461 `runecho-guard` narrows that further, to an ask or an outcome that
 carries no fingerprint at all; `fpreport`'s own join is unchanged.
 
+When a fingerprinted outcome joins nothing and an ask on the file was passed
+over only because its fingerprint differs, the guard writes an `unjoined`
+record instead (#464): `mode: outcome`, `decision: unjoined`, `reason:
+fingerprint-mismatch`, `edit` set to the outcome's fingerprint, no symbols. The
+ask must be within the 5-minute window, from the outcome's session (or either
+side with none), and have no outcome after it; a repeat fire of the same edit
+adds no second record. It trains nothing and no report reads it yet. It exists
+so that a PreToolUse/PostToolUse fingerprint mismatch, which would otherwise
+read as a denial, leaves something to count. It is not a count of mismatches:
+an unrelated edit made after a denied ask leaves the same record, and a
+mismatch approved more than 5 minutes after its ask leaves none.
+
 A PreToolUse hook panic now logs a file-less `{decision: defer, reason: panic}`
 record (#209), as the timeout path already did, so a panicked run is visible.
 

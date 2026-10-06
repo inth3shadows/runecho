@@ -139,7 +139,14 @@ type decisionRecord struct {
 	// ask or the outcome has no fingerprint). Outcome records only. A diagnostic,
 	// not a policy input. It does NOT reveal a PreToolUse/PostToolUse fingerprint
 	// mismatch: that used to surface as a "window" row carrying a fingerprint,
-	// and since #461 it writes no outcome at all.
+	// and since #461 it writes no outcome at all. What it leaves instead is an
+	// "unjoined" record (#464, see logOutcomeForFile): mode "outcome", reason
+	// "fingerprint-mismatch", the outcome's fingerprint in Edit, no symbols. One
+	// is written when a fingerprinted outcome joins nothing and an in-window ask
+	// of its session, with no outcome after it, was passed over only because its
+	// fingerprint differs. It is not a count of mismatches. A different edit
+	// made after a denied ask leaves the same record, and a mismatch approved
+	// more than maxOutcomeAge after its ask leaves none.
 	Join string `json:"join,omitempty"`
 	// Checks is checkStatusMap(results) (#333): check name -> "ok"/"violation"/
 	// "unknown"/"skipped", for every check that ran to a verdict for this edit.
@@ -386,8 +393,25 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 	var askStands bool
 	var wrote bool
 	store.WithFileLock(filepath.Join(dir, "decisions.jsonl.lock"), func() {
-		rec, join, ok := recentUnrecordedAsk(filepath.Join(dir, "decisions.jsonl"), file, editHash, contractSessionTag(sessionID))
+		rec, join, ok, passed, unjoined := scanRecentAsk(filepath.Join(dir, "decisions.jsonl"), file, editHash, contractSessionTag(sessionID))
 		if !ok {
+			// Nothing joined. If an ask was passed over only because its fingerprint
+			// differs, leave a trace (#464): since #461 that case writes no outcome,
+			// so a real PreToolUse/PostToolUse fingerprint mismatch would otherwise be
+			// indistinguishable from a denial. It carries no symbols and trains
+			// nothing. mode is "outcome", not "hook": contractAskStillStands reads a
+			// later hook record on the file as answering the ask.
+			if unjoined {
+				logDecision(decisionRecord{
+					Mode:     "outcome",
+					Repo:     passed.Repo,
+					File:     file,
+					Lang:     passed.Lang,
+					Decision: "unjoined",
+					Reason:   "fingerprint-mismatch",
+					Edit:     editHash,
+				})
+			}
 			return
 		}
 		logDecision(decisionRecord{
@@ -467,6 +491,12 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 // carried none — and "" admits every ask, so it switches the filter off. Only
 // the window track's ask test reads it.
 //
+// When nothing joins, passed and unjoined report the last in-window ask the
+// session filter admits that was passed over only because both sides carry a
+// fingerprint and they differ (#464) — unless an outcome on the file, or an
+// "unjoined" record for this same editHash, already follows it. The caller
+// writes the trace; this function only reads.
+//
 // The "unrecorded" half of each track exists because a single edit can fire the
 // PostToolUse hook more than once. Claude Code merges hooks from the plugin,
 // the user's settings.json and the project's settings.json, and runs EVERY
@@ -507,30 +537,35 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 // The log is append-ordered, so resetting a track's recorded flag on each
 // newly-seen matching ask means an outcome only suppresses the ask it FOLLOWS —
 // an outcome for a previous edit cannot mask a genuine new ask.
-func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionRecord, join string, found bool) {
+func scanRecentAsk(path, file, editHash, session string) (rec decisionRecord, join string, found bool, passed decisionRecord, unjoined bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return decisionRecord{}, "", false
+		return decisionRecord{}, "", false, decisionRecord{}, false
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		return decisionRecord{}, "", false
+		return decisionRecord{}, "", false, decisionRecord{}, false
 	}
 	offset := stat.Size() - maxOutcomeReadBytes
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return decisionRecord{}, "", false
+		return decisionRecord{}, "", false, decisionRecord{}, false
 	}
 
 	windowCutoff := time.Now().UTC().Add(-maxOutcomeAge)
 	keyedCutoff := time.Now().UTC().Add(-maxKeyedOutcomeAge)
 
-	var hashMatch, winMatch decisionRecord
+	var hashMatch, winMatch, passedAsk decisionRecord
 	var hashFound, winFound, hashRecorded, winRecorded bool
+	// passedFound: an in-window ask of this session was passed over only because
+	// its fingerprint differs from the outcome's. passedClosed: something after
+	// it already accounts for it — any outcome on the file, or an unjoined trace
+	// for this same edit (a second fire of one PostToolUse).
+	var passedFound, passedClosed bool
 
 	// needle is the JSON-encoded form of file, so the prefilter below matches
 	// exactly what rec.File would decode to without unmarshalling every line —
@@ -564,8 +599,12 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 					if editHash != "" && cur.Edit == editHash && ts.After(keyedCutoff) {
 						hashMatch, hashFound, hashRecorded = cur, true, false
 					}
-					if ts.After(windowCutoff) && windowSessionMatch(cur.Session, session) && (cur.Edit == "" || editHash == "") {
-						winMatch, winFound, winRecorded = cur, true, false
+					if ts.After(windowCutoff) && windowSessionMatch(cur.Session, session) {
+						if cur.Edit == "" || editHash == "" {
+							winMatch, winFound, winRecorded = cur, true, false
+						} else if cur.Edit != editHash {
+							passedAsk, passedFound, passedClosed = cur, true, false
+						}
 					}
 				}
 			case "outcome":
@@ -573,6 +612,11 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 					hashRecorded = true
 				}
 				winRecorded = true
+				passedClosed = true
+			case "unjoined":
+				if cur.Edit == editHash {
+					passedClosed = true
+				}
 			}
 		}
 		if readErr != nil {
@@ -582,14 +626,24 @@ func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionReco
 
 	if hashFound {
 		if hashRecorded {
-			return decisionRecord{}, "", false
+			return decisionRecord{}, "", false, decisionRecord{}, false
 		}
-		return hashMatch, "edit", true
+		return hashMatch, "edit", true, decisionRecord{}, false
 	}
-	if winRecorded {
-		return decisionRecord{}, "", false
+	if winFound && !winRecorded {
+		return winMatch, "window", true, decisionRecord{}, false
 	}
-	return winMatch, "window", winFound
+	if passedFound && !passedClosed {
+		return decisionRecord{}, "", false, passedAsk, true
+	}
+	return decisionRecord{}, "", false, decisionRecord{}, false
+}
+
+// recentUnrecordedAsk is scanRecentAsk without the passed-over report: the ask
+// an outcome joins, if any.
+func recentUnrecordedAsk(path, file, editHash, session string) (rec decisionRecord, join string, found bool) {
+	rec, join, found, _, _ = scanRecentAsk(path, file, editHash, session)
+	return rec, join, found
 }
 
 // windowSessionMatch reports whether a logged ASK may be the window track's

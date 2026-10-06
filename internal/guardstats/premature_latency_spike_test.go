@@ -41,10 +41,11 @@
 // should be read as a mix of "true fix latency" (branch still alive) and
 // "merge latency" (branch gone), not a clean measurement of either.
 //
-// KNOWN GAP, unrelated to the above and still unresolved: Decision
-// (declog.go) carries no session or task id, so "resolved within the same
-// agent session" cannot be measured directly even with a correct commit
-// timestamp — only elapsed wall-clock time can. Given this project's own
+// KNOWN GAP, unrelated to the above and still unresolved HERE: this spike
+// does not read Decision.Session, and records written before that field
+// existed carry none, so "resolved within the same agent session" is not
+// measured directly even with a correct commit timestamp — only elapsed
+// wall-clock time is. Given this project's own
 // workflow (short claudew/codexw sessions, often well under an hour), two
 // SEPARATE short sessions on the same repo can easily land inside the same
 // elapsed-time bucket as one continuous session would — so even a clean
@@ -165,7 +166,7 @@ func TestSpikePrematureLatency(t *testing.T) {
 			within1h, resolved, 100*float64(within1h)/float64(resolved),
 			within5h, resolved, 100*float64(within5h)/float64(resolved))
 	}
-	fmt.Fprintf(&b, "KNOWN GAP: elapsed wall-clock only — Decision carries no session id, so this is a proxy for \"resolved within the same task,\" not proof of it. Two separate short sessions can land in the same bucket as one continuous one.\n")
+	fmt.Fprintf(&b, "KNOWN GAP: elapsed wall-clock only — this spike does not read Decision.Session (absent on older records), so this is a proxy for \"resolved within the same task,\" not proof of it. Two separate short sessions can land in the same bucket as one continuous one.\n")
 	fmt.Fprintf(&b, "RESIDUAL LIMITATION: once a feature branch is deleted post-merge, only the squash-merge commit remains reachable, so its entry reflects merge latency, not fix latency — see file header.\n")
 	for _, e := range examples {
 		fmt.Fprintf(&b, "  %s\n", e)

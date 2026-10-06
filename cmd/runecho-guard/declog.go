@@ -171,9 +171,18 @@ type decisionRecord struct {
 	// was commit-time (#329's known gap). Defers need it as much as asks do — the
 	// later edit that defines a flagged symbol is usually a defer.
 	//
+	// Each record carries the session of the fire that WROTE it. An outcome's is
+	// the PostToolUse session, and recentUnrecordedAsk joins on file and edit
+	// fingerprint alone, so two sessions making the byte-identical edit can leave
+	// an outcome whose session differs from its ask's. Group flagged symbols by
+	// the ASK's session, never the outcome's.
+	//
 	// Hashed, like ContractSession and for the same reason (the tag joins; the
-	// raw id is of no use to a report). A transcript is still findable from it:
-	// its filename is the session id, so hash the filename. Deliberately a
+	// raw id is of no use to a report). A main-thread transcript is still
+	// findable from it: its filename is <session id>.jsonl, so hash the name
+	// without the extension. Subagent transcripts are separate files not named
+	// by this id, and a resumed session that is issued a new id gets a new tag,
+	// so "same session" read off this field is a lower bound. Deliberately a
 	// SEPARATE field from ContractSession, which is set on contract asks only
 	// and whose absence the once-per-binding memo reads as "record no memo".
 	// Absent on pre-commit records, on a payload that carried no session_id or

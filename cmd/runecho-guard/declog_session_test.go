@@ -15,7 +15,18 @@ func hookSessionJSON(session string) string {
 	return s + `}`
 }
 
+// isolateDecisionSession gives a test the fresh-process state (no session ever
+// set) and restores it afterwards. decisionSession is process-wide, so without
+// this a session-carrying test leaves its tag behind for whichever test logs
+// next without going through a hook entry point.
+func isolateDecisionSession(t *testing.T) {
+	t.Helper()
+	decisionSession.Store(nil)
+	t.Cleanup(func() { decisionSession.Store(nil) })
+}
+
 func TestLogDecision_StampsHashedSession(t *testing.T) {
+	isolateDecisionSession(t)
 	t.Setenv("RUNECHO_HOME", t.TempDir())
 	t.Setenv("RUNECHO_DEBUG", "")
 
@@ -38,6 +49,7 @@ func TestLogDecision_StampsHashedSession(t *testing.T) {
 // caller) run several in one process: a record must never carry the session of
 // an earlier payload.
 func TestLogDecision_SessionDoesNotLeakAcrossRuns(t *testing.T) {
+	isolateDecisionSession(t)
 	t.Setenv("RUNECHO_HOME", t.TempDir())
 	t.Setenv("RUNECHO_DEBUG", "")
 
@@ -65,6 +77,7 @@ func TestLogDecision_SessionDoesNotLeakAcrossRuns(t *testing.T) {
 }
 
 func TestRunOutcomeMode_StampsSession(t *testing.T) {
+	isolateDecisionSession(t)
 	t.Setenv("RUNECHO_HOME", t.TempDir())
 	t.Setenv("RUNECHO_DEBUG", "")
 
@@ -83,5 +96,26 @@ func TestRunOutcomeMode_StampsSession(t *testing.T) {
 	}
 	if got, want := rec["session"], contractSessionTag(session); got != want {
 		t.Errorf("session = %v, want %q", got, want)
+	}
+}
+
+// Pre-commit runs in its own process and reads no hook payload, so its records
+// carry no session. Pinned on the panic record because that is the pre-commit
+// record that needs no enrolled repo to produce.
+func TestLogDecision_PreCommitRecordHasNoSession(t *testing.T) {
+	isolateDecisionSession(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	neverBlockOnPanic(func() int { panic("boom") })
+	rec := readLastDecisionLog(t)
+	if rec == nil {
+		t.Fatal("no record written")
+	}
+	if got, _ := rec["mode"].(string); got != "precommit" {
+		t.Fatalf("mode = %q, want precommit", got)
+	}
+	if _, ok := rec["session"]; ok {
+		t.Errorf("pre-commit record carries session = %v", rec["session"])
 	}
 }

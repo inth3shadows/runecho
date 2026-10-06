@@ -939,8 +939,15 @@ Delete the file freely if you don't want the history.
 record a hook process writes (asks, defers, outcomes, `e6` refreshes) so edits
 can be grouped by session — the question "was the flagged symbol defined later
 in the same session" was unanswerable before it. The raw id is never logged; a
-transcript is matched by hashing its filename. Absent on pre-commit records, on
-a payload with no `session_id`, and on records from an older guard.
+main-thread transcript is matched by hashing its filename without the `.jsonl`
+extension. Subagent transcripts are separate files not named by the session id,
+and a resumed session issued a new id gets a new tag, so "same session" read
+off this field is a lower bound. Each record carries the session of the fire
+that wrote it: an outcome is joined to its ask by file and edit fingerprint
+only, so when two sessions make the identical edit the outcome's `session` can
+differ from the ask's — group flagged symbols by the ask's. Absent on
+pre-commit records, on a payload with no `session_id`, and on records from an
+older guard.
 
 `edit` (ask and outcome records) is a 12-hex fingerprint of the tool call's
 edit content, added in #300. `join` (outcome records only) records which track

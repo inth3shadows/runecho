@@ -556,10 +556,12 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// gateMinAsks can drop below it and skip the gate (with the stderr note, not
 			// silently). On this log `--days=3` goes 33 asks to 20 — right at the floor.
 			//
-			// Two genuine edits to the same file inside one second are indistinguishable
-			// from a re-invocation and collapse too. That is the right trade: it moves
-			// counts slightly, whereas the alternative moves the rate the report exists
-			// to state.
+			// Two genuine edits to the same file inside one second collapse too when
+			// they cannot be told from a re-invocation: byte-identical edits, or
+			// records with no fingerprint. That is the right trade: it moves counts
+			// slightly, whereas the alternative moves the rate the report exists to
+			// state. Two edits with different fingerprints stay distinct (#465, see
+			// askEventKey).
 			// Symbol-less asks collapse on the same key and for the same reason.
 			// #254 is what makes that observable: askEventKey never ran on them
 			// before, because the drop above `continue`d first. It is exactly the

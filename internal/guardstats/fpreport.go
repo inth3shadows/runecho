@@ -283,7 +283,8 @@ type FPStats struct {
 	//     approval carrying the earlier ask's symbols. Those extra outcomes never
 	//     had a distinct ask. Where such an outcome and the ask both carry an
 	//     edit fingerprint and they differ, the join below refuses the pair
-	//     (#465), so the outcome is counted here.
+	//     (#465), so the outcome is counted here unless another ask it may pair
+	//     with takes it.
 	//  2. Ask records collapsed as hook re-invocations (#252) release the extra
 	//     outcomes their duplicates had claimed.
 	//  3. The log really is missing asks — rotated, or written by an older guard
@@ -365,8 +366,15 @@ func symbolKey(file string, symbols []string) string {
 // at all: a re-invocation lands in the same second, so identical records pair up
 // without a tolerance window to tune. It also bounds the damage — an over-eager
 // key would erase real asks, and the only way two distinct events collide here is
-// if they share a second, a file, a repo, a language, a guard version, a reason
-// AND a symbol set.
+// if they share a second, a file, a repo, a language, a guard version, a reason,
+// a symbol set AND an edit fingerprint.
+//
+// The fingerprint is in the key since #465. A re-invocation replays the same
+// payload, so its fingerprint is identical and it still collapses. Two
+// different edits in one second used to collapse too, keeping the first; once
+// the join stopped pairing differing fingerprints, the kept ask could carry the
+// wrong one and lose the other's approval. Records with no fingerprint (older
+// guards) all share "" and collapse as before.
 //
 // Deliberately NOT applied to outcome records. They measured 1.000 records per
 // event on the reference log — the recorder is not on the re-invoked path — and
@@ -379,6 +387,7 @@ func askEventKey(d Decision) string {
 		d.GV,
 		d.Reason,
 		symbolKey(d.File, d.Symbols),
+		d.Edit,
 	}, "\x02")
 }
 
@@ -792,7 +801,14 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 //
 // askEdit, when non-empty, excludes a candidate whose own fingerprint is
 // non-empty and different: both edits are identified and they are not the same
-// one. A candidate or an ask with no fingerprint is never excluded by it.
+// one. A candidate or an ask with no fingerprint is never excluded by it. An
+// excluded candidate is skipped, not a stop: the scan goes on to later ones.
+//
+// Known limit (#465 review): that scan-on can hand a fingerprinted ask a later
+// FINGERPRINT-LESS outcome that belongs to a fingerprint-less ask logged after
+// it, which then reads as unapproved. It needs records from guards before and
+// after #300 on the same file and symbols within the window; logs from one
+// guard generation cannot produce it.
 func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration, askEdit string) int {
 	for _, idx := range candidates {
 		if consumed[idx] {

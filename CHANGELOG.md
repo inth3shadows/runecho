@@ -31,11 +31,13 @@ install time from `git describe --tags` (see `install.sh`).
 - fpreport: the symbol+window fallback no longer pairs an ask with an approved
   outcome whose edit fingerprint is known to differ. A denied ask could consume
   the outcome of the tweaked retry that followed it, so the denied ask was
-  reported approved and the retry was not; the approval count was right but
-  latency and the per-version, per-reason and per-language buckets were
-  credited to the wrong ask. An outcome that a guard older than #463
-  window-joined to a differently-fingerprinted ask now counts as unmatched
-  (#465).
+  reported approved and the retry was not; in that case the approval count was
+  right but latency and the per-version, per-reason and per-language buckets
+  were credited to the wrong ask. An outcome that a guard older than #463
+  window-joined to a differently-fingerprinted ask is no longer that ask's
+  approval, and counts as unmatched unless another ask takes it. The
+  duplicate-ask collapse now keys on the fingerprint as well, so two different
+  edits logged in the same second stay two asks (#465).
 
 ## [0.69.0] — 2026-10-06
 

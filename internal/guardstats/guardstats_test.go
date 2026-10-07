@@ -293,3 +293,16 @@ func TestLoadReader_Session(t *testing.T) {
 		t.Errorf("Session on a record without one = %q, want empty", got[1].Session)
 	}
 }
+
+// The "unjoined" trace (#464) names the ask it was not joined to in ask_edit.
+func TestLoadReader_AskEdit(t *testing.T) {
+	in := `{"v":1,"ts":"2026-10-06T12:00:00Z","mode":"outcome","decision":"unjoined","reason":"fingerprint-mismatch","edit":"222222222222","ask_edit":"111111111111"}
+`
+	got, err := LoadReader(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("LoadReader: %v", err)
+	}
+	if len(got) != 1 || got[0].AskEdit != "111111111111" || got[0].Edit != "222222222222" {
+		t.Errorf("got %+v, want AskEdit 111111111111 and Edit 222222222222", got)
+	}
+}

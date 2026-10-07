@@ -16,6 +16,17 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+### Added
+- guard: an `unjoined` record in `decisions.jsonl` (`mode: outcome`, `reason:
+  fingerprint-mismatch`) when a PostToolUse outcome's edit fingerprint matches
+  no ask and an in-window ask on the file was passed over only because its
+  fingerprint differs. Since #461 that case wrote nothing, so a
+  PreToolUse/PostToolUse fingerprint mismatch was indistinguishable from a
+  denial. Written only when that ask is the last PreToolUse record on the file
+  from the session, so a clean edit after a denied ask leaves none. The record
+  names the ask in `ask_edit`, carries no symbols, trains nothing, and changes
+  no join (#464).
+
 ## [0.69.0] — 2026-10-06
 
 ### Fixed

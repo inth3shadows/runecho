@@ -917,7 +917,9 @@ approval rate while the trailing 2 days reported 19%, because the installed
 binary was six releases stale (#207). Records predating the field report as
 `unknown` rather than being attributed to whatever is installed now.
 
-`decision` is `ask`, `defer`, or `outcome`; `reason` classifies why. Defer
+`decision` is `ask`, `defer`, `outcome`, or `unjoined` (#464, described below;
+the one non-defer record written with `mode: outcome`); `reason` classifies
+why. Defer
 reasons: `clean`, `stale-ir`, `no-repo` (which since #402 also covers a machine
 with no store at all — previously `store-degraded`, and in practice unlogged,
 since the log needs the same directory), `store-degraded`, `check-degraded`,
@@ -976,6 +978,28 @@ long the decision took, so `fpreport` and `runecho-guard` now join on it first
 back to the original 5-minute window only when no fingerprint match exists.
 Since #461 `runecho-guard` narrows that further, to an ask or an outcome that
 carries no fingerprint at all; `fpreport`'s own join is unchanged.
+
+When a fingerprinted outcome joins nothing and an ask on the file was passed
+over only because its fingerprint differs, the guard writes an `unjoined`
+record instead (#464): `mode: outcome`, `decision: unjoined`, `reason:
+fingerprint-mismatch`, `edit` set to the outcome's fingerprint, `ask_edit` set
+to the passed-over ask's, no symbols. The ask must be within the 5-minute
+window, from the outcome's session (or either side with none), and the last
+PreToolUse record on the file from that session: a later `ask` or hook-mode
+`defer` there means the outcome belongs to a later tool call, which is what a
+clean edit after a denied ask looks like. No record is written if the ask is
+already accounted for (an outcome carrying its fingerprint, or no fingerprint,
+follows it, or an `unjoined` record already names it) or if an outcome carrying
+the outcome's own fingerprint is already in the log, so repeat fires add
+nothing. It trains nothing and no report reads it yet. It exists so that a
+PreToolUse/PostToolUse fingerprint mismatch, which would otherwise read as a
+denial, leaves a record: the outcome followed that ask with no PreToolUse of
+its own in between. It is evidence, not proof and not a count. An edit whose
+own PreToolUse left no record on the file (a timeout, a panic, a payload that
+did not parse) leaves the same record; a mismatch approved more than 5 minutes
+after its ask, or with another PreToolUse on the file in between (parallel tool
+calls, a subagent), leaves none; and two asks with the same fingerprint are not
+told apart.
 
 A PreToolUse hook panic now logs a file-less `{decision: defer, reason: panic}`
 record (#209), as the timeout path already did, so a panicked run is visible.

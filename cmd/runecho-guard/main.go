@@ -550,7 +550,8 @@ func runOutcomeMode(in io.Reader) int {
 	// on it instead of guessing from a time window. If that assumption is ever
 	// wrong for some tool or hook wiring, the hash fails to match and the ask is
 	// not joined: it carries a fingerprint, so since #461 the window track does
-	// not take it, and its approval goes unrecorded — see recentUnrecordedAsk.
+	// not take it, and its approval is not recorded as one. An "unjoined" trace
+	// is written in its place (#464) — see logOutcomeForFile.
 	editHash := editFingerprint(hookEdit{
 		ToolName:  payload.ToolName,
 		OldString: payload.ToolInput.OldString,

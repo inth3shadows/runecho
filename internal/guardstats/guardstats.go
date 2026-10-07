@@ -52,11 +52,14 @@ type Decision struct {
 	// heuristic for those. An empty non-nil map is the guard saying this ask made
 	// no rateable claim at all.
 	ClaimSymbols map[string][]string
-	// Edit is the ask-side edit fingerprint (see cmd/runecho-guard/declog.go's
-	// editFingerprint), present on both ask and outcome records once #300
-	// landed. Empty on records from older guards, on pre-commit asks, and on
-	// outcome records whose PostToolUse fire failed to reproduce the ask's
-	// hash — those fall back to FPReport's window-based join.
+	// Edit is the edit fingerprint of the tool call that wrote the record (see
+	// cmd/runecho-guard/declog.go's editFingerprint), present on both ask and
+	// outcome records once #300 landed. On an outcome it is the OUTCOME's own
+	// fingerprint, which equals its ask's for an edit-joined pair and can
+	// differ on a window-joined one. Empty on records from older guards, on
+	// pre-commit asks, and on an outcome whose payload had no tool name.
+	// FPReport's fallback join does not pair an ask and an outcome whose
+	// fingerprints are both present and differ (#465).
 	Edit string
 	// Checks is decisionRecord.Checks (#333): check name -> "ok"/"violation"/
 	// "unknown"/"skipped", one entry per check that ran to a verdict on this

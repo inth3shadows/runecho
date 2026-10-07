@@ -1237,3 +1237,114 @@ func TestLoadReader_ReadsSuppressed(t *testing.T) {
 		t.Errorf("Suppressed = %v, want [contract]", got)
 	}
 }
+
+// #465: a denied ask must not consume the outcome of the tweaked retry that
+// followed it. Both asks flag the same symbol on the same file, so before the
+// fix the first (matched first, missing on its own fingerprint) took the
+// retry's outcome on the symbol+window fallback and the retry read as
+// unapproved.
+func TestFPReport_FallbackDoesNotPairDifferingFingerprints(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), GV: "v1", Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h1"},
+		{TS: ts(1), GV: "v2", Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h2"},
+		{TS: ts(2), Mode: "hook", File: "a.go",
+			Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h2"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 || s.Window.Approved != 1 {
+		t.Fatalf("asks=%d approved=%d, want 2/1", s.Window.Asks, s.Window.Approved)
+	}
+	// The approval belongs to the SECOND ask: one minute of latency, and the v2
+	// bucket, not the two minutes and v1 the first ask would have been given.
+	if s.Window.Latency.N != 1 || s.Window.Latency.MedianS != 60 {
+		t.Errorf("latency = %+v, want n=1 median_s=60 (the retry's own ask)", s.Window.Latency)
+	}
+	if got := s.ByVersion["v2"].Approved; got != 1 {
+		t.Errorf("v2 approved = %d, want 1", got)
+	}
+	if got := s.ByVersion["v1"].Approved; got != 0 {
+		t.Errorf("v1 approved = %d, want 0 (the denied ask)", got)
+	}
+}
+
+// The exclusion needs BOTH fingerprints. A pair with one missing is what the
+// fallback exists for and still joins.
+func TestFPReport_FallbackStillPairsWhenAFingerprintIsMissing(t *testing.T) {
+	for name, decs := range map[string][]Decision{
+		"ask without fingerprint": {
+			ask("violations", "go", "r", "a.go", 0, "foo"),
+			{TS: ts(1), Mode: "hook", File: "a.go", Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h2"},
+		},
+		"outcome without fingerprint": {
+			{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go", Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h1"},
+			outcome("a.go", 1, "foo"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := FPReport(decs, ts(-1000), 10)
+			if s.Window.Approved != 1 || s.UnmatchedOutcomes != 0 {
+				t.Errorf("approved=%d unmatched=%d, want 1/0", s.Window.Approved, s.UnmatchedOutcomes)
+			}
+		})
+	}
+}
+
+// A guard older than #463 window-joined an outcome to an ask with a different
+// fingerprint and stamped the outcome with its OWN fingerprint. That pairing
+// was the recorder's mis-join; the report no longer repeats it, and the outcome
+// is counted as unmatched.
+func TestFPReport_OldWindowJoinedOutcomeIsUnmatched(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h1"},
+		{TS: ts(1), Mode: "hook", File: "a.go",
+			Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h9"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Approved != 0 {
+		t.Errorf("approved = %d, want 0", s.Window.Approved)
+	}
+	if s.UnmatchedOutcomes != 1 {
+		t.Errorf("unmatched = %d, want 1", s.UnmatchedOutcomes)
+	}
+}
+
+// The #252 collapse keys on the fingerprint (#465): a re-invocation replays the
+// same payload and still collapses, but two different edits logged in the same
+// second are two asks. Collapsed to the first, the survivor carried the wrong
+// fingerprint and the second edit's approval was refused.
+func TestFPReport_SameSecondAsksWithDifferentFingerprintsStayDistinct(t *testing.T) {
+	a := func(edit string) Decision {
+		return Decision{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: edit}
+	}
+	decs := []Decision{
+		a("h1"), a("h1"), // a re-invocation of one ask
+		a("h2"), // a different edit in the same second
+		{TS: ts(1), Mode: "hook", File: "a.go", Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h2"},
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Asks != 2 || s.Window.Approved != 1 || s.UnmatchedOutcomes != 0 {
+		t.Errorf("asks=%d approved=%d unmatched=%d, want 2/1/0", s.Window.Asks, s.Window.Approved, s.UnmatchedOutcomes)
+	}
+}
+
+// An excluded candidate is skipped, not a stop: the fallback goes on to a later
+// outcome it may pair with.
+func TestFPReport_FallbackScansPastAnExcludedOutcome(t *testing.T) {
+	decs := []Decision{
+		{TS: ts(0), Mode: "hook", Repo: "r", File: "a.go", Lang: "go",
+			Decision: "ask", Reason: "violations", Symbols: []string{"foo"}, Edit: "h1"},
+		{TS: ts(1), Mode: "hook", File: "a.go", Decision: "outcome", Reason: "approved", Symbols: []string{"foo"}, Edit: "h2"},
+		outcome("a.go", 2, "foo"),
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	if s.Window.Approved != 1 || s.UnmatchedOutcomes != 1 {
+		t.Fatalf("approved=%d unmatched=%d, want 1/1", s.Window.Approved, s.UnmatchedOutcomes)
+	}
+	if s.Window.Latency.MedianS != 120 {
+		t.Errorf("latency median = %v, want 120 (the fingerprint-less outcome)", s.Window.Latency.MedianS)
+	}
+}

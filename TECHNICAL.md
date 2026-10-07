@@ -977,7 +977,15 @@ long the decision took, so `fpreport` and `runecho-guard` now join on it first
 `cmd/runecho-guard/declog.go` and `internal/guardstats/fpreport.go`) and fall
 back to the original 5-minute window only when no fingerprint match exists.
 Since #461 `runecho-guard` narrows that further, to an ask or an outcome that
-carries no fingerprint at all; `fpreport`'s own join is unchanged.
+carries no fingerprint at all. `fpreport` keeps its symbol+window fallback but,
+since #465, will not pair an ask with an outcome whose fingerprint is known to
+differ: an approved outcome that an older guard window-joined to a
+differently-fingerprinted ask is no longer that ask's approval, and is reported
+as unmatched unless another ask it may pair with takes it. For the same reason
+the report's duplicate-ask collapse now keys on the fingerprint too. One limit
+remains in logs that mix guards from before and after #300: a fingerprinted ask
+can take a later fingerprint-less outcome that belonged to a fingerprint-less
+ask.
 
 When a fingerprinted outcome joins nothing and an ask on the file was passed
 over only because its fingerprint differs, the guard writes an `unjoined`

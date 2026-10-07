@@ -281,7 +281,10 @@ type FPStats struct {
 	//     written before that. Where it applies, a
 	//     later tool call on the same file inside maxOutcomeAge re-emits an
 	//     approval carrying the earlier ask's symbols. Those extra outcomes never
-	//     had a distinct ask.
+	//     had a distinct ask. Where such an outcome and the ask both carry an
+	//     edit fingerprint and they differ, the join below refuses the pair
+	//     (#465), so the outcome is counted here unless another ask it may pair
+	//     with takes it.
 	//  2. Ask records collapsed as hook re-invocations (#252) release the extra
 	//     outcomes their duplicates had claimed.
 	//  3. The log really is missing asks — rotated, or written by an older guard
@@ -363,8 +366,15 @@ func symbolKey(file string, symbols []string) string {
 // at all: a re-invocation lands in the same second, so identical records pair up
 // without a tolerance window to tune. It also bounds the damage — an over-eager
 // key would erase real asks, and the only way two distinct events collide here is
-// if they share a second, a file, a repo, a language, a guard version, a reason
-// AND a symbol set.
+// if they share a second, a file, a repo, a language, a guard version, a reason,
+// a symbol set AND an edit fingerprint.
+//
+// The fingerprint is in the key since #465. A re-invocation replays the same
+// payload, so its fingerprint is identical and it still collapses. Two
+// different edits in one second used to collapse too, keeping the first; once
+// the join stopped pairing differing fingerprints, the kept ask could carry the
+// wrong one and lose the other's approval. Records with no fingerprint (older
+// guards) all share "" and collapse as before.
 //
 // Deliberately NOT applied to outcome records. They measured 1.000 records per
 // event on the reference log — the recorder is not on the re-invoked path — and
@@ -377,6 +387,7 @@ func askEventKey(d Decision) string {
 		d.GV,
 		d.Reason,
 		symbolKey(d.File, d.Symbols),
+		d.Edit,
 	}, "\x02")
 }
 
@@ -545,10 +556,12 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// gateMinAsks can drop below it and skip the gate (with the stderr note, not
 			// silently). On this log `--days=3` goes 33 asks to 20 — right at the floor.
 			//
-			// Two genuine edits to the same file inside one second are indistinguishable
-			// from a re-invocation and collapse too. That is the right trade: it moves
-			// counts slightly, whereas the alternative moves the rate the report exists
-			// to state.
+			// Two genuine edits to the same file inside one second collapse too when
+			// they cannot be told from a re-invocation: byte-identical edits, or
+			// records with no fingerprint. That is the right trade: it moves counts
+			// slightly, whereas the alternative moves the rate the report exists to
+			// state. Two edits with different fingerprints stay distinct (#465, see
+			// askEventKey).
 			// Symbol-less asks collapse on the same key and for the same reason.
 			// #254 is what makes that observable: askEventKey never ran on them
 			// before, because the drop above `continue`d first. It is exactly the
@@ -666,14 +679,19 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		// however long the human took to decide, so it must win whenever it finds
 		// anything. Falling back to the symbol+window guess only when it doesn't —
 		// an ask from a pre-#300 guard (no Edit) or whose matching outcome fell
-		// outside KeyedOutcomeJoinWindow — keeps every existing pairing exactly as
-		// it was.
+		// outside KeyedOutcomeJoinWindow.
+		//
+		// The fallback is a guess, so it does not pair an ask with an outcome whose
+		// fingerprint is known to differ (#465): those are two different edits.
+		// Without that, a denied ask consumed the outcome of the tweaked retry that
+		// followed it (same file, same symbols), and the retry's own ask, matched
+		// second, read as unapproved.
 		matchIdx := -1
 		if a.Edit != "" {
-			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow)
+			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow, "")
 		}
 		if matchIdx < 0 {
-			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow)
+			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow, a.Edit)
 		}
 		if matchIdx >= 0 {
 			consumed[matchIdx] = true
@@ -782,9 +800,23 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 // cmd/runecho-guard writes an outcome only when now-ask < maxOutcomeAge or
 // maxKeyedOutcomeAge (declog.go), so it never emits a record at exactly the
 // window edge, and the join must not admit one either.
-func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration) int {
+//
+// askEdit, when non-empty, excludes a candidate whose own fingerprint is
+// non-empty and different: both edits are identified and they are not the same
+// one. A candidate or an ask with no fingerprint is never excluded by it. An
+// excluded candidate is skipped, not a stop: the scan goes on to later ones.
+//
+// Known limit (#465 review): that scan-on can hand a fingerprinted ask a later
+// FINGERPRINT-LESS outcome that belongs to a fingerprint-less ask logged after
+// it, which then reads as unapproved. It needs records from guards before and
+// after #300 on the same file and symbols within the window; logs from one
+// guard generation cannot produce it.
+func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration, askEdit string) int {
 	for _, idx := range candidates {
 		if consumed[idx] {
+			continue
+		}
+		if askEdit != "" && all[idx].edit != "" && all[idx].edit != askEdit {
 			continue
 		}
 		ts := all[idx].ts

@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.70.0] — 2026-10-07
+
 ### Added
 - guard: an `unjoined` record in `decisions.jsonl` (`mode: outcome`, `reason:
   fingerprint-mismatch`) when a PostToolUse outcome's edit fingerprint matches

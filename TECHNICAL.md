@@ -984,18 +984,22 @@ over only because its fingerprint differs, the guard writes an `unjoined`
 record instead (#464): `mode: outcome`, `decision: unjoined`, `reason:
 fingerprint-mismatch`, `edit` set to the outcome's fingerprint, `ask_edit` set
 to the passed-over ask's, no symbols. The ask must be within the 5-minute
-window and from the outcome's session (or either side with none). One record
-is written per ask: none if an outcome carrying that ask's fingerprint, or no
-fingerprint, already follows it, and none if an `unjoined` record already names
-it — so repeat fires and further different edits add nothing. None is written
-either when the outcome's own fingerprint already has an outcome. It trains
-nothing and no report reads it yet. It exists so that a PreToolUse/PostToolUse
-fingerprint mismatch, which would otherwise read as a denial, leaves something
-to count: an ask with an `unjoined` record and no `edit`-joined outcome is the
-candidate. It is not a count of mismatches: an unrelated edit made after a
-denied ask leaves the same record, a mismatch approved more than 5 minutes
-after its ask leaves none, and only the first unjoined edit after an ask is
-recorded.
+window, from the outcome's session (or either side with none), and the last
+PreToolUse record on the file from that session: a later `ask` or hook-mode
+`defer` there means the outcome belongs to a later tool call, which is what a
+clean edit after a denied ask looks like. No record is written if the ask is
+already accounted for (an outcome carrying its fingerprint, or no fingerprint,
+follows it, or an `unjoined` record already names it) or if an outcome carrying
+the outcome's own fingerprint is already in the log, so repeat fires add
+nothing. It trains nothing and no report reads it yet. It exists so that a
+PreToolUse/PostToolUse fingerprint mismatch, which would otherwise read as a
+denial, leaves a record: the outcome followed that ask with no PreToolUse of
+its own in between. It is evidence, not proof and not a count. An edit whose
+own PreToolUse left no record on the file (a timeout, a panic, a payload that
+did not parse) leaves the same record; a mismatch approved more than 5 minutes
+after its ask, or with another PreToolUse on the file in between (parallel tool
+calls, a subagent), leaves none; and two asks with the same fingerprint are not
+told apart.
 
 A PreToolUse hook panic now logs a file-less `{decision: defer, reason: panic}`
 record (#209), as the timeout path already did, so a panicked run is visible.

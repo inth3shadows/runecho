@@ -39,6 +39,14 @@ func editOutcome(t *testing.T, file, session, oldStr, newStr string) {
 	}
 }
 
+// deferAs logs the record a PreToolUse writes when it lets an edit to file
+// through without asking.
+func deferAs(t *testing.T, session, file string) {
+	t.Helper()
+	setDecisionSession(session)
+	logDecision(decisionRecord{Mode: "hook", Repo: "r", File: file, Lang: "go", Decision: "defer", Reason: "clean"})
+}
+
 func unjoinedEnv(t *testing.T) string {
 	t.Helper()
 	isolateDecisionSession(t)
@@ -202,6 +210,17 @@ func TestRunOutcomeMode_NoUnjoinedTrace(t *testing.T) {
 			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
 			windowOutcome(t, file, "session-a")
 		},
+		"the edit had a PreToolUse of its own (a later defer on the file)": func(t *testing.T) {
+			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+			deferAs(t, "session-a", file)
+			otherOutcome(t, file, "session-a")
+		},
+		"a later ask with no fingerprint superseded it": func(t *testing.T) {
+			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+			askAs(t, "session-a", file, "Legacy")
+			otherOutcome(t, file, "session-a")          // window-joins the later ask
+			editOutcome(t, file, "session-a", "p", "q") // a further, different edit
+		},
 		"an outcome with no fingerprint already answered the ask": func(t *testing.T) {
 			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
 			noFingerprintOutcome(t, file, "session-a")
@@ -265,5 +284,38 @@ func TestContract_UnjoinedTraceDoesNotAnswerTheAsk(t *testing.T) {
 	logOutcomeForFile(file, "e1", "sess", "acceptEdits")
 	if !contractApproved(home, "sess", "abcdefabcdef", file, time.Now()) {
 		t.Errorf("the memo was not written: the trace was read as answering the ask")
+	}
+}
+
+// Another session's PreToolUse on the file says nothing about this session's
+// tool calls, so it must not close this session's passed-over ask.
+func TestRunOutcomeMode_UnjoinedTraceSurvivesAnotherSessionsDefer(t *testing.T) {
+	home := unjoinedEnv(t)
+	const file = "/some/repo/main.go"
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+	deferAs(t, "session-b", file)
+	otherOutcome(t, file, "session-a")
+	if got := recordsFor(t, home, file, "unjoined"); len(got) != 1 || got[0].AskEdit != xyFingerprint() {
+		t.Errorf("unjoined records = %+v, want one naming session-a's ask", got)
+	}
+}
+
+// A repeat fire of a PostToolUse whose first fire joined by WINDOW finds its
+// own outcome already in the log. That is not a mismatch: no trace, whatever
+// fingerprinted ask sits in the window. Trace or no trace must not depend on
+// how many times the hook is wired.
+func TestRunOutcomeMode_NoUnjoinedTraceOnRepeatFireOfWindowJoin(t *testing.T) {
+	home := unjoinedEnv(t)
+	const file = "/some/repo/main.go"
+	askAs(t, "session-a", file, "Legacy")
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+	otherOutcome(t, file, "session-a")
+	otherOutcome(t, file, "session-a")
+
+	if out := recordsFor(t, home, file, "outcome"); len(out) != 1 || out[0].Join != "window" {
+		t.Fatalf("outcomes = %+v, want one window-joined outcome", out)
+	}
+	if got := recordsFor(t, home, file, "unjoined"); len(got) != 0 {
+		t.Errorf("unjoined records = %+v, want none", got)
 	}
 }

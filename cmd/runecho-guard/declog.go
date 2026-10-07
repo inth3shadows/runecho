@@ -142,13 +142,15 @@ type decisionRecord struct {
 	// and since #461 it writes no outcome at all. What it leaves instead is an
 	// "unjoined" record (#464, see logOutcomeForFile): mode "outcome", reason
 	// "fingerprint-mismatch", the outcome's fingerprint in Edit, the passed-over
-	// ask's in AskEdit, no symbols. One is written, once per ask, when a
-	// fingerprinted outcome joins nothing and an in-window ask the session
-	// filter admits was passed over only because its fingerprint differs. It is
-	// not a count of mismatches. A different edit made after a denied ask
-	// leaves the same record, a mismatch approved more than maxOutcomeAge after
-	// its ask leaves none, and only the first unjoined edit after an ask is
-	// recorded.
+	// ask's in AskEdit, no symbols. One is written when a fingerprinted outcome
+	// joins nothing and the last PreToolUse record on the file that the session
+	// filter admits is an in-window ask whose fingerprint differs: the outcome
+	// followed that ask with no PreToolUse of its own in between. It is evidence
+	// of a mismatch, not proof and not a count. An edit whose own PreToolUse
+	// left no record on the file (a timeout, a panic, a payload that did not
+	// parse) leaves the same record; a mismatch approved more than
+	// maxOutcomeAge after its ask, or with another PreToolUse on the file in
+	// between (parallel tool calls, a subagent), leaves none.
 	Join string `json:"join,omitempty"`
 	// AskEdit is, on an "unjoined" record only, the fingerprint of the ask that
 	// was passed over (#464). It ties the trace to its ask: an ask that later
@@ -502,13 +504,14 @@ func logOutcomeForFile(file, editHash, sessionID, permissionMode string) {
 // carried none — and "" admits every ask, so it switches the filter off. Only
 // the window track's ask test reads it.
 //
-// When nothing joins, passed and unjoined report the last in-window ask the
-// session filter admits that was passed over only because both sides carry a
-// fingerprint and they differ (#464) — unless it is already accounted for by a
-// later outcome carrying its own fingerprint or none, or by an "unjoined"
-// record naming it (AskEdit). No trace either when editHash already has an
-// outcome against an ask of its own. The caller writes the trace; this function
-// only reads.
+// When nothing joins, passed and unjoined report an ask passed over only
+// because both sides carry a fingerprint and they differ (#464). It must be the
+// LAST PreToolUse record on the file the session filter admits: a later ask or
+// hook-mode defer means the outcome belongs to a later tool call. And it must
+// not be accounted for already, by a later outcome carrying its fingerprint or
+// none, or by an "unjoined" record naming it (AskEdit). No trace either when an
+// outcome carrying editHash is already in the log. The caller writes the trace;
+// this function only reads.
 //
 // The "unrecorded" half of each track exists because a single edit can fire the
 // PostToolUse hook more than once. Claude Code merges hooks from the plugin,
@@ -574,10 +577,9 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 
 	var hashMatch, winMatch, passedAsk decisionRecord
 	var hashFound, winFound, hashRecorded, winRecorded bool
-	// passedFound: an in-window ask of this session was passed over only because
-	// its fingerprint differs from the outcome's. passedClosed: something after
-	// it already accounts for it — any outcome on the file, or an unjoined trace
-	// for this same edit (a second fire of one PostToolUse).
+	// passedFound: an in-window ask the session filter admits was passed over
+	// only because its fingerprint differs from the outcome's. passedClosed:
+	// something after it accounts for it — see the three arms that set it below.
 	var passedFound, passedClosed bool
 
 	// needle is the JSON-encoded form of file, so the prefilter below matches
@@ -615,10 +617,22 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 					if ts.After(windowCutoff) && windowSessionMatch(cur.Session, session) {
 						if cur.Edit == "" || editHash == "" {
 							winMatch, winFound, winRecorded = cur, true, false
-						} else if cur.Edit != editHash {
-							passedAsk, passedFound, passedClosed = cur, true, false
 						}
+						// Every admitted ask is a later PreToolUse on the file, so it
+						// supersedes whatever was passed over before it. It becomes the
+						// passed-over ask itself only if the fingerprints can be compared
+						// and differ.
+						passedAsk, passedClosed = cur, false
+						passedFound = cur.Edit != "" && editHash != "" && cur.Edit != editHash
 					}
+				}
+			case "defer":
+				// A later PreToolUse on this file that did not ask. The outcome being
+				// joined belongs to that call (or a later one), not to the ask before
+				// it: a clean edit after a denied ask, not a fingerprint mismatch. A
+				// genuine mismatch has nothing between its ask and its outcome.
+				if cur.Mode == "hook" && windowSessionMatch(cur.Session, session) {
+					passedClosed = true
 				}
 			case "outcome":
 				if editHash != "" && cur.Edit == editHash {
@@ -648,8 +662,6 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 
 	if hashFound {
 		if hashRecorded {
-			// This fingerprint already has its outcome: a repeat fire, or the
-			// identical edit re-applied. Not a mismatch, so no trace either.
 			return res
 		}
 		return askScan{rec: hashMatch, join: "edit"}
@@ -657,7 +669,10 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 	if winFound && !winRecorded {
 		return askScan{rec: winMatch, join: "window"}
 	}
-	if passedFound && !passedClosed {
+	// hashRecorded without hashFound: an outcome carrying this very fingerprint
+	// is already in the log — a repeat fire of a PostToolUse that joined by
+	// window, or the identical edit re-applied. Not a mismatch, so no trace.
+	if passedFound && !passedClosed && !hashRecorded {
 		return askScan{passed: passedAsk, unjoined: true}
 	}
 	return res

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -66,6 +67,9 @@ func TestRunOutcomeMode_UnjoinedTraceForDifferingFingerprint(t *testing.T) {
 	if rec.Mode != "outcome" || rec.Reason != "fingerprint-mismatch" || rec.Edit != want || rec.Repo != "r" || rec.Lang != "go" {
 		t.Errorf("trace = %+v, want mode outcome, reason fingerprint-mismatch, edit %s, repo r, lang go", rec, want)
 	}
+	if rec.AskEdit != xyFingerprint() {
+		t.Errorf("ask_edit = %q, want the passed-over ask's fingerprint %q", rec.AskEdit, xyFingerprint())
+	}
 	if rec.Session != contractSessionTag("session-a") {
 		t.Errorf("session = %q, want the PostToolUse session's tag", rec.Session)
 	}
@@ -80,9 +84,11 @@ func TestRunOutcomeMode_UnjoinedTraceForDifferingFingerprint(t *testing.T) {
 	}
 }
 
-// The PostToolUse hook can be wired more than once, and every wiring fires. One
-// edit must leave one trace; a second, different edit leaves its own.
-func TestRunOutcomeMode_UnjoinedTraceOncePerEdit(t *testing.T) {
+// One trace per passed-over ask. The PostToolUse hook can be wired more than
+// once, and every wiring fires; and an unanswered ask can be followed by any
+// number of different edits inside the window. Neither adds a record. A new
+// ask does: it is a new thing to account for.
+func TestRunOutcomeMode_UnjoinedTraceOncePerAsk(t *testing.T) {
 	home := unjoinedEnv(t)
 	const file = "/some/repo/main.go"
 	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
@@ -93,8 +99,68 @@ func TestRunOutcomeMode_UnjoinedTraceOncePerEdit(t *testing.T) {
 		t.Fatalf("after three fires of one edit: unjoined records = %d, want 1", n)
 	}
 	editOutcome(t, file, "session-a", "p", "q")
+	if n := len(recordsFor(t, home, file, "unjoined")); n != 1 {
+		t.Fatalf("after a second, different edit: unjoined records = %d, want 1", n)
+	}
+	askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+	otherOutcome(t, file, "session-a")
 	if n := len(recordsFor(t, home, file, "unjoined")); n != 2 {
-		t.Errorf("after a second, different edit: unjoined records = %d, want 2", n)
+		t.Errorf("after the ask was raised again: unjoined records = %d, want 2", n)
+	}
+}
+
+// An outcome that carries a different fingerprint answered a different ask,
+// here another session's, and says nothing about this one. If it closed the
+// passed-over ask, a real mismatch on this ask would leave no trace whenever
+// anything else on the file was approved first.
+func TestRunOutcomeMode_UnjoinedTraceSurvivesAnotherAsksOutcome(t *testing.T) {
+	home := unjoinedEnv(t)
+	const file = "/some/repo/main.go"
+	pq := editFingerprint(hookEdit{ToolName: "Edit", OldString: "p", NewString: "q"})
+	askWithEdit(t, "session-a", file, xyFingerprint(), "GhostA")
+	askWithEdit(t, "session-b", file, pq, "GhostB")
+	editOutcome(t, file, "session-b", "p", "q")
+	if out := recordsFor(t, home, file, "outcome"); len(out) != 1 || out[0].Join != "edit" {
+		t.Fatalf("setup: session-b's own edit should join its ask by fingerprint, got %+v", out)
+	}
+
+	otherOutcome(t, file, "session-a")
+	got := recordsFor(t, home, file, "unjoined")
+	if len(got) != 1 || got[0].AskEdit != xyFingerprint() {
+		t.Errorf("unjoined records = %+v, want one naming session-a's ask", got)
+	}
+}
+
+// Concurrent fires of one PostToolUse must leave one trace, like the outcome
+// dedupe they share a lock with. Repeated rounds because the window is small;
+// see TestLogOutcomeForFile_ConcurrentFiresWriteOnce.
+func TestLogOutcomeForFile_ConcurrentFiresWriteOneUnjoinedTrace(t *testing.T) {
+	isolateDecisionSession(t)
+	t.Setenv("RUNECHO_DEBUG", "")
+	const rounds = 40
+	for round := 0; round < rounds; round++ {
+		home := t.TempDir()
+		t.Setenv("RUNECHO_HOME", home)
+		const file = "/some/repo/race.go"
+		setDecisionSession("sess")
+		logDecision(decisionRecord{Mode: "hook", Repo: "r", File: file, Lang: "go", Decision: "ask", Reason: "violations", Symbols: []string{"Foo"}, Edit: "e1"})
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				logOutcomeForFile(file, "e2", "sess", "")
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if n := len(recordsFor(t, home, file, "unjoined")); n != 1 {
+			t.Fatalf("round %d: unjoined records = %d, want 1", round, n)
+		}
 	}
 }
 
@@ -135,6 +201,18 @@ func TestRunOutcomeMode_NoUnjoinedTrace(t *testing.T) {
 		"the fingerprints match": func(t *testing.T) {
 			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
 			windowOutcome(t, file, "session-a")
+		},
+		"an outcome with no fingerprint already answered the ask": func(t *testing.T) {
+			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+			noFingerprintOutcome(t, file, "session-a")
+			otherOutcome(t, file, "session-a")
+		},
+		"the outcome's fingerprint already has an outcome of its own": func(t *testing.T) {
+			mn := editFingerprint(hookEdit{ToolName: "Edit", OldString: "m", NewString: "n"})
+			askWithEdit(t, "session-a", file, mn, "Earlier")
+			otherOutcome(t, file, "session-a") // joins that ask by fingerprint
+			askWithEdit(t, "session-a", file, xyFingerprint(), "Ghost")
+			otherOutcome(t, file, "session-a") // the identical edit again
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

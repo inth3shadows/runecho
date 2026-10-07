@@ -917,7 +917,9 @@ approval rate while the trailing 2 days reported 19%, because the installed
 binary was six releases stale (#207). Records predating the field report as
 `unknown` rather than being attributed to whatever is installed now.
 
-`decision` is `ask`, `defer`, or `outcome`; `reason` classifies why. Defer
+`decision` is `ask`, `defer`, `outcome`, or `unjoined` (#464, described below;
+the one non-defer record written with `mode: outcome`); `reason` classifies
+why. Defer
 reasons: `clean`, `stale-ir`, `no-repo` (which since #402 also covers a machine
 with no store at all — previously `store-degraded`, and in practice unlogged,
 since the log needs the same directory), `store-degraded`, `check-degraded`,
@@ -980,14 +982,20 @@ carries no fingerprint at all; `fpreport`'s own join is unchanged.
 When a fingerprinted outcome joins nothing and an ask on the file was passed
 over only because its fingerprint differs, the guard writes an `unjoined`
 record instead (#464): `mode: outcome`, `decision: unjoined`, `reason:
-fingerprint-mismatch`, `edit` set to the outcome's fingerprint, no symbols. The
-ask must be within the 5-minute window, from the outcome's session (or either
-side with none), and have no outcome after it; a repeat fire of the same edit
-adds no second record. It trains nothing and no report reads it yet. It exists
-so that a PreToolUse/PostToolUse fingerprint mismatch, which would otherwise
-read as a denial, leaves something to count. It is not a count of mismatches:
-an unrelated edit made after a denied ask leaves the same record, and a
-mismatch approved more than 5 minutes after its ask leaves none.
+fingerprint-mismatch`, `edit` set to the outcome's fingerprint, `ask_edit` set
+to the passed-over ask's, no symbols. The ask must be within the 5-minute
+window and from the outcome's session (or either side with none). One record
+is written per ask: none if an outcome carrying that ask's fingerprint, or no
+fingerprint, already follows it, and none if an `unjoined` record already names
+it — so repeat fires and further different edits add nothing. None is written
+either when the outcome's own fingerprint already has an outcome. It trains
+nothing and no report reads it yet. It exists so that a PreToolUse/PostToolUse
+fingerprint mismatch, which would otherwise read as a denial, leaves something
+to count: an ask with an `unjoined` record and no `edit`-joined outcome is the
+candidate. It is not a count of mismatches: an unrelated edit made after a
+denied ask leaves the same record, a mismatch approved more than 5 minutes
+after its ask leaves none, and only the first unjoined edit after an ask is
+recorded.
 
 A PreToolUse hook panic now logs a file-less `{decision: defer, reason: panic}`
 record (#209), as the timeout path already did, so a panicked run is visible.

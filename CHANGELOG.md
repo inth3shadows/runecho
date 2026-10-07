@@ -22,8 +22,8 @@ install time from `git describe --tags` (see `install.sh`).
   no ask and an in-window ask on the file was passed over only because its
   fingerprint differs. Since #461 that case wrote nothing, so a
   PreToolUse/PostToolUse fingerprint mismatch was indistinguishable from a
-  denial. The record carries no symbols, trains nothing, and changes no join
-  (#464).
+  denial. The record names the ask in `ask_edit`, is written once per ask,
+  carries no symbols, trains nothing, and changes no join (#464).
 
 ## [0.69.0] — 2026-10-06
 

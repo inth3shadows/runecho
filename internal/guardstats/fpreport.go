@@ -281,7 +281,9 @@ type FPStats struct {
 	//     written before that. Where it applies, a
 	//     later tool call on the same file inside maxOutcomeAge re-emits an
 	//     approval carrying the earlier ask's symbols. Those extra outcomes never
-	//     had a distinct ask.
+	//     had a distinct ask. Where such an outcome and the ask both carry an
+	//     edit fingerprint and they differ, the join below refuses the pair
+	//     (#465), so the outcome is counted here.
 	//  2. Ask records collapsed as hook re-invocations (#252) release the extra
 	//     outcomes their duplicates had claimed.
 	//  3. The log really is missing asks — rotated, or written by an older guard
@@ -666,14 +668,19 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		// however long the human took to decide, so it must win whenever it finds
 		// anything. Falling back to the symbol+window guess only when it doesn't —
 		// an ask from a pre-#300 guard (no Edit) or whose matching outcome fell
-		// outside KeyedOutcomeJoinWindow — keeps every existing pairing exactly as
-		// it was.
+		// outside KeyedOutcomeJoinWindow.
+		//
+		// The fallback is a guess, so it does not pair an ask with an outcome whose
+		// fingerprint is known to differ (#465): those are two different edits.
+		// Without that, a denied ask consumed the outcome of the tweaked retry that
+		// followed it (same file, same symbols), and the retry's own ask, matched
+		// second, read as unapproved.
 		matchIdx := -1
 		if a.Edit != "" {
-			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow)
+			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow, "")
 		}
 		if matchIdx < 0 {
-			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow)
+			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow, a.Edit)
 		}
 		if matchIdx >= 0 {
 			consumed[matchIdx] = true
@@ -782,9 +789,16 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 // cmd/runecho-guard writes an outcome only when now-ask < maxOutcomeAge or
 // maxKeyedOutcomeAge (declog.go), so it never emits a record at exactly the
 // window edge, and the join must not admit one either.
-func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration) int {
+//
+// askEdit, when non-empty, excludes a candidate whose own fingerprint is
+// non-empty and different: both edits are identified and they are not the same
+// one. A candidate or an ask with no fingerprint is never excluded by it.
+func matchOutcome(all []approvedOutcome, candidates []int, consumed map[int]bool, askTS time.Time, window time.Duration, askEdit string) int {
 	for _, idx := range candidates {
 		if consumed[idx] {
+			continue
+		}
+		if askEdit != "" && all[idx].edit != "" && all[idx].edit != askEdit {
 			continue
 		}
 		ts := all[idx].ts

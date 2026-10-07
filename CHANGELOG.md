@@ -16,6 +16,8 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.70.1] — 2026-10-07
+
 ### Fixed
 - fpreport: the symbol+window fallback no longer pairs an ask with an approved
   outcome whose edit fingerprint is known to differ. A denied ask could consume

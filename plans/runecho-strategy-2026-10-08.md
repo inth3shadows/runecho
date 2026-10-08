@@ -66,7 +66,7 @@ That last item is the uncomfortable one, and it decides everything else (§4).
 | Index freshness from **git hooks** (human and tool commits, not just agent edits) | Yes, as part of the gate | Keep; fix the silent-staleness bugs (#479, #480, #481, #482) |
 | **Measured precision** (`fpaudit`: fp / premature / stands against git history) | Yes. No harness measures hook precision | **Keep. This is the credibility lever** |
 | Symbol snapshots, structural diff, churn | Unique, but who uses them? | Freeze; keep only what the gate needs |
-| `runecho-mcp` locate/structure/hash/diff | **No.** The LSP tool, Serena and graph MCPs do this better | **Freeze → deprecate** |
+| `runecho-mcp` locate/structure/hash/diff | **No.** The LSP tool, Serena and graph MCPs do this better | **Keep (maintainer uses it), but stop growing it**: fix #488/#489, no new tools |
 | Edit-scope contracts | Mostly covered by `Edit(glob)` permission rules | **Freeze**; don't deepen (#427 stays as is) |
 | `doctor` | Needed for RunEcho's own install, not a differentiator | Keep, narrowed to "is the gate actually live" (#490) |
 | Claims extraction / truth-trail | Niche | Freeze |
@@ -126,22 +126,19 @@ The audit's most damaging findings are not false positives. They are cases where
   - If arm 2 is not better than arm 1, revert the posture.
   - If no arm beats "nothing", archive the gate (§4).
 
-### Phase 2: if the gate earns its place, go cross-harness (adoption, second priority)
+### Phase 2: if the gate earns its place, make the Claude Code install first-class; other harnesses only for adoption
 
-- **One gate, many adapters.**
-  - Claude Code plugin (marketplace install, not hand-edited settings, as `anti-halu` already does).
-  - VS Code Copilot: reads `.claude/settings.json`, so verify only.
-  - Copilot `.github/hooks`.
-  - Gemini `BeforeTool` (`write_file|replace`).
-  - Kiro `PreToolUse` (`write`).
-  - Codex, gated on #27833.
-  - Cursor `preToolUse` with a native payload, not the fail-open import path.
-- **A deny-conformance suite.** For each harness and version: does `deny` actually stop the write, for each write tool? Nobody publishes this, the research found three harnesses where it is reported broken, and RunEcho's value is zero wherever it fails. It is small, differentiated, and useful to others even if they never adopt the gate.
+Claude Code is the maintainer's primary harness (decided 2026-10-08), so the order below is fixed and items 2+ are adoption work that waits until item 1 is solid.
+
+1. **Claude Code plugin**: marketplace install that bundles the hooks, the MCP server and a SessionStart install for cloud sessions, replacing hand-edited settings (as `anti-halu` already does). This is personal value, not adoption.
+2. *(adoption, later)* VS Code Copilot reads `.claude/settings.json`, so it needs verification only. Then Copilot `.github/hooks`, Gemini `BeforeTool` (`write_file|replace`), Kiro `PreToolUse` (`write`), Codex (gated on #27833), and Cursor `preToolUse` with a native payload rather than the fail-open import path.
+
+- **A deny-conformance suite.** Start with Claude Code's own write tools (Edit, Write, MultiEdit, NotebookEdit) and settle #13744 first. For each harness and version: does `deny` actually stop the write, for each write tool? Nobody publishes this, the research found three harnesses where it is reported broken, and RunEcho's value is zero wherever it fails. It is small, differentiated, and useful to others even if they never adopt the gate.
 - **Publish the precision numbers** (fp/premature/stands per language, per version). The field is moving toward deterministic signals precisely because LLM reviewers are noisy. A gate with a published, falsifiable precision record is the adoption argument.
 
 ### Phase 3: shrink the surface (in parallel, low effort)
 
-- **Deprecate `runecho-mcp` `structure`/`locate`** in favour of the LSP tool and Serena. Keep `locate` only if Phase 1 shows the agent uses it. Fixing #488/#489 is cheaper as removal than as repair.
+- **Keep `runecho-mcp`, but stop growing it** (the maintainer uses it; decided 2026-10-08). Fix #488/#489: cap and paginate `structure`, report coverage in `locate`, and serve from the enrolled snapshot instead of a live 30s walk. Add no new tools; navigation beyond that belongs to the LSP tool.
 - **Freeze contracts, claims and truth-trail.** No new work; close #12 as superseded by `Edit(glob)` permission rules unless a concrete use appears.
 - **Parser and extractor work stays under Gate 0.** The false-positive issues filed by the audit (#473–#477, #483–#485) are verified bugs, but their repros are constructed. Per `docs/check-worthiness.md`, each needs a live `decisions.jsonl` observation and a first-party exposure count before it is fixed. Measure exposure first: dot-imports, wrapped signatures and inline `type` imports are likely common, while docstring-seeded edits may not be.
 - **Consider using the language server as an oracle where one exists.** When gopls, pyright or tsserver is running, ask it instead of hand-extending regex extractors. Keep the AST path for environments without one. This could retire a large share of `internal/guard/extract.go`'s special cases. It needs a latency test against the 5s hook budget before any commitment.
@@ -158,18 +155,18 @@ The audit's most damaging findings are not false positives. They are cases where
 
 | Decision | Personal-value answer (wins) | Adoption answer |
 |---|---|---|
-| Ask vs deny posture | Whatever the Phase 1 arms show for your own sessions | Deny by default reads better in demos |
-| Cross-harness adapters | Only the harnesses you actually use, after Phase 1 | All of them |
-| Keep `runecho-mcp` | Only if you call it; otherwise remove | A "full toolkit" sells better, but competes with free LSP |
+| Ask vs deny posture | **`deny`+reason becomes the default if Phase 1 supports it** (decided) | Deny by default reads better in demos |
+| Cross-harness adapters | **Claude Code only** (decided) | All of them, later |
+| Keep `runecho-mcp` | **Keep** (you use it); fix, don't grow | A "full toolkit" sells better, but competes with free LSP |
 | Cloud-session install | **First**: it is where your own gate is currently off | Also a differentiator |
 
 ---
 
-## 7. Open questions for the maintainer
+## 7. Decisions (maintainer, 2026-10-08)
 
-1. Which harnesses do you personally use day to day besides Claude Code? That sets the Phase 2 adapter order.
-2. Is the `runecho-mcp` server part of your own workflow today? If not, Phase 3 can remove it rather than freeze it.
-3. Should `deny`+reason become the default posture if Phase 1 supports it, or stay opt-in?
+1. **Harness:** Claude Code is primary. Phase 2 builds the Claude Code plugin first; other adapters are deferred adoption work.
+2. **`runecho-mcp`:** in use. Keep it, fix #488/#489, add no new tools.
+3. **Posture:** if Phase 1 shows `deny`+reason beats `ask`, it becomes the default; `ask` stays available as an opt-in.
 
 ## 8. Re-verification
 

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.70.2] — 2026-10-14
+
+### Changed
+- guardstats: spike for same-session resolution of premature asks (#469)
+
 ## [0.70.1] — 2026-10-07
 
 ### Fixed

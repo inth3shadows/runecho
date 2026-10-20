@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.70.3] — 2026-10-20
+
+### Changed
+- agent-eval: run the headless with/without arms in modelbench's sandbox (#497)
+
 ## [0.70.2] — 2026-10-14
 
 ### Changed

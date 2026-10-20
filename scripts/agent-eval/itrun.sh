@@ -8,6 +8,11 @@
 # interactive TUI reproduces the behavior users actually see. (Idle-detection
 # technique borrowed from devpit's WaitForIdle.)
 #
+# HOST-ONLY, not arm-parity-safe: this loads the host ~/.claude (hooks, CLAUDE.md,
+# skills) and runs with --dangerously-skip-permissions on the host. Do not use it
+# for a with/without comparison that has to hold the config constant; the
+# headless arms (run-all.sh -> sandboxed_arm.py) are the parity-safe ones.
+#
 # Usage: itrun.sh <repo-path> <label> "<prompt>"
 # Output dir: $AGENT_EVAL_OUT (default /tmp/agent-eval)
 # Requires: tmux 3.0+, a logged-in `claude` CLI, runecho MCP configured.

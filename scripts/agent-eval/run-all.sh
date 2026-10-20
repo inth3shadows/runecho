@@ -41,41 +41,35 @@ echo "###### repo:        $REPO"
 echo "###### question:    $Q"
 echo
 
-# Headless arm: claude -p with stream-json -> exact tool sequence + tokens/cost.
-# The WITH arm also gets RUNECHO_HOME/PATH in the OUTER claude process's env
-# (not just the MCP subprocess's) so a self-discovering `Bash: runecho-ir
-# repo list` call hits the same isolated registry and finds the binary.
-# CODEGRAPH_NO_PROMPT_HOOK=1 is applied to BOTH arms unconditionally: this
-# machine's global ~/.claude/settings.json runs `codegraph prompt-hook` on
-# every prompt regardless of --strict-mcp-config (which only restricts MCP
-# servers, not Claude Code's own hooks) -- without this, the "without" arm
-# silently gets CodeGraph's structural analysis injected for free, which
-# invalidated an earlier run (it answered a symbol-lookup question in 2s with
-# zero tool calls, citing "verified via CodeGraph's live re-parse").
+# Headless arm: claude -p with stream-json -> exact tool sequence + tokens/cost,
+# run INSIDE modelbench's sandbox (sandboxed_arm.py; SANDBOX.md tier C). A fresh
+# config dir means the host's hooks, CLAUDE.md and skills cannot reach either
+# arm (the host `codegraph prompt-hook` once leaked structural analysis into the
+# "without" arm and invalidated a run; CODEGRAPH_NO_PROMPT_HOOK is no longer
+# needed here), and bypassPermissions is bounded by the sandbox, not the host.
+# The WITH arm gets the runecho MCP + runecho-ir; the WITHOUT arm an empty MCP.
+# Needs CLAUDE_CODE_OAUTH_TOKEN (dedicated benchmark token) via secret-broker.
 headless() {
-  local label="$1" cfg="$2" withenv="$3"
+  local label="$1"; shift
   echo "############################## HEADLESS [$label] ##############################"
-  ( cd "$REPO" && env CODEGRAPH_NO_PROMPT_HOOK=1 $withenv claude -p "$Q" \
-      --output-format stream-json --verbose \
-      --permission-mode bypassPermissions \
-      --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" \
-      --max-budget-usd 4 \
-      --strict-mcp-config --mcp-config "$cfg" \
-      > "$OUT/run-$label.jsonl" 2>"$OUT/run-$label.err" )
-  echo "exit $? -> $OUT/run-$label.jsonl ($(wc -l < "$OUT/run-$label.jsonl" | tr -d ' ') lines)"
+  python3 "$HARNESS/sandboxed_arm.py" --repo "$REPO" --label "$label" --question "$Q" \
+      --out "$OUT" --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" "$@"
   tail -2 "$OUT/run-$label.err" 2>/dev/null
   node "$HARNESS/parse-run.mjs" "$OUT/run-$label.jsonl" 2>&1 || true
   echo
 }
 
 if [ "$MODE" = headless ] || [ "$MODE" = all ]; then
-  headless "headless-with"    "$OUT/mcp-runecho.json" "RUNECHO_HOME=$RUNECHO_HOME_DIR PATH=$RUNECHO_BUILD_DIR:$PATH"
-  headless "headless-without" "$OUT/mcp-empty.json"    ""
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "headless arms run sandboxed and need CLAUDE_CODE_OAUTH_TOKEN (run via secret-broker; see sandboxed_arm.py)"; exit 1; }
+  headless "headless-with"    --mcp-bin "$RUNECHO_MCP_BIN" --home-dir "$RUNECHO_HOME_DIR" --build-dir "$RUNECHO_BUILD_DIR"
+  headless "headless-without"
 fi
 
 if [ "$MODE" = tmux ] || [ "$MODE" = all ]; then
-  # Same CODEGRAPH_NO_PROMPT_HOOK=1 rationale as the headless arm above --
-  # applied to both arms unconditionally.
+  # HOST-ONLY and not arm-parity-safe: itrun.sh drives the real TUI with the
+  # host ~/.claude (that is its point: users' interactive behaviour). The host
+  # `codegraph prompt-hook` fires regardless of --strict-mcp-config, so
+  # CODEGRAPH_NO_PROMPT_HOOK=1 is applied to both arms unconditionally.
   echo "############################## INTERACTIVE [with] ##############################"
   CLAUDE_ENV_PREFIX="env CODEGRAPH_NO_PROMPT_HOOK=1 RUNECHO_HOME=$RUNECHO_HOME_DIR PATH=$RUNECHO_BUILD_DIR:$PATH" \
     CLAUDE_EXTRA_ARGS="--model ${MODEL:-sonnet} --effort ${EFFORT:-high} --strict-mcp-config --mcp-config $OUT/mcp-runecho.json" \

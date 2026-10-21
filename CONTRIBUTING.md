@@ -24,6 +24,9 @@ go vet ./...
 gofmt -l .               # must print nothing
 ```
 
+CI runs the suite with `-race -cover`, and with `ruff` on PATH: some guard
+fixtures skip without it, so install `ruff` to run what CI runs.
+
 CI formats with the gofmt of the Go version in `go.mod`. A much newer local
 gofmt can disagree with it; if CI's Format step fails and yours doesn't, use
 that version's gofmt.
@@ -43,9 +46,9 @@ branch build separate.
   hallucination elsewhere. Say what you checked: a differential over a real corpus
   (for example GOROOT/src) and what changed, or why it can't change other inputs.
 - **The PR title sets the release.** PRs are squash-merged, and the squash
-  commit's subject is the PR title. `docs:` and `chore:` (with or without a scope,
-  e.g. `docs(bench):`) cut no release, `guard:` and `parser:` cut a minor
-  release, and anything else cuts a patch.
+  commit's subject is the PR title. A lowercase `docs:` or `chore:` (a scope
+  such as `docs(bench):` is fine) cuts no release, `guard:` or `parser:` cuts a
+  minor release, and anything else, including `Docs:` or `docs!:`, cuts a patch.
 - **Keep a PR to one issue.** Reference it with `Fixes #N` only when it fixes all
   of that issue.
 

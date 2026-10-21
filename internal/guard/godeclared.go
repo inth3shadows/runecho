@@ -110,14 +110,13 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if i > 0 && l.LineNo != prevNo+1 {
 			sig = "" // never join text across a hunk gap into one parameter list
-			// Nor carry an entry's opener or trailing operator across one: its
-			// other half is an unchanged line this scan never sees (#509).
-			if inVarBlock {
-				blockDepth, blockCont = 1, false
-				// The block may have closed in those unseen lines too, so a bare
-				// identifier after the gap is not trusted as a const repetition.
-				constBlock = false
-			}
+			// Nor carry block state across one: whether the block is still open is
+			// decided in unseen lines, so lines after the gap are not trusted as
+			// entries (#514, over-binding), and a later opener re-enters instead of
+			// reading as nesting (under-binding). Trade-off: an entry after a gap
+			// whose opener is not in the hunk goes unbound, a false positive.
+			inVarBlock = false
+			blockDepth, blockCont, constBlock = 0, false, false
 		}
 		prevNo = l.LineNo
 		// Literal stripping allocates a fresh byte slice per line, and it is the

@@ -279,15 +279,17 @@ func TestGoDeclaredNames_BlockGluedProductVsGenericEntry(t *testing.T) {
 
 // TestGoDeclaredNames_BlockStateResetsAtHunkGap: in hunk mode only the added
 // lines are scanned, so an opener or a trailing operator whose other half is an
-// unchanged line must not carry across a gap and hide the next entry (review
-// on #509).
+// unchanged line must not carry across a gap (review on #509). Since #514 the
+// whole block state is unknown after a gap: an entry after it is not bound (the
+// block may have closed unseen; a false positive, the safe direction), and the
+// pre-gap names still are.
 func TestGoDeclaredNames_BlockStateResetsAtHunkGap(t *testing.T) {
 	for _, ls := range [][]AddedLine{
 		{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\terrs = map[int]string{"}, {LineNo: 10, Text: "\ty int"}},
 		{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\tx = a +"}, {LineNo: 10, Text: "\ty int"}},
 	} {
-		if got := GoDeclaredNames(ls); !slices.Contains(got, "y") {
-			t.Errorf("entry after a hunk gap not bound: %v", got)
+		if got := GoDeclaredNames(ls); slices.Contains(got, "y") {
+			t.Errorf("entry after a hunk gap bound (block state must be unknown): %v", got)
 		}
 	}
 }
@@ -660,6 +662,48 @@ func TestGoDeclaredNames_WrappedGenericSignature(t *testing.T) {
 	for _, c := range cases {
 		if got := declaredNames(c.src); !slices.Equal(got, c.want) {
 			t.Errorf("%q\n  got  %v\n  want %v", c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoDeclaredNames_HunkGapBlockState pins #514: block state is unknown
+// across a hunk gap. Lines after the gap are not block entries (the block may
+// have closed unseen), and a later opener re-enters rather than reading as
+// nesting. A block wholly inside one hunk, and whole-file input, are unchanged.
+func TestGoDeclaredNames_HunkGapBlockState(t *testing.T) {
+	sorted := func(in []AddedLine) []string {
+		out := GoDeclaredNames(in)
+		sort.Strings(out)
+		return out
+	}
+	mk := func(nos []int, texts []string) []AddedLine {
+		var out []AddedLine
+		for i := range nos {
+			out = append(out, AddedLine{LineNo: nos[i], Text: texts[i]})
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		in   []AddedLine
+		want []string
+	}{
+		{"over-binding after gap",
+			mk([]int{1, 2, 50, 51}, []string{"var (", "\tv = 1", "\tfmt.Println(x)", "\tdoThing x"}),
+			[]string{"v"}},
+		{"opener after gap re-enters",
+			AddedLinesWithGap([]string{"const (\n\tA = iota", "const (\n\tX = iota\n\tY\n)"}),
+			[]string{"A", "X", "Y"}},
+		{"block inside one hunk still binds",
+			mk([]int{10, 11, 12, 13}, []string{"var (", "\ta = 1", "\tb int", ")"}),
+			[]string{"a", "b"}},
+		{"whole file unchanged",
+			TextToAddedLines("package p\n\nvar (\n\ta = 1\n\tb int\n)\n\nconst (\n\tA = iota\n\tB\n)\n"),
+			[]string{"A", "B", "a", "b"}},
+	}
+	for _, c := range cases {
+		if got := sorted(c.in); !slices.Equal(got, c.want) {
+			t.Errorf("%s\n  got  %v\n  want %v", c.name, got, c.want)
 		}
 	}
 }

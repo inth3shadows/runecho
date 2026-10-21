@@ -2654,6 +2654,14 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 	if open != "" {
 		for i < n {
 			if hasAt(b, i, open) {
+				// A block comment's `*/` is comment text and is blanked, as in the
+				// same-line branch below; left in place it sat between a comma and the
+				// next name and hid wrapped Go params (#500). A string keeps its
+				// closing delimiter, as same-line strings do.
+				if open == "*/" {
+					out[i] = ' '
+					out[i+1] = ' '
+				}
 				i += len(open)
 				open = ""
 				break

@@ -85,9 +85,10 @@ func goDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) 
 	return intersectNames(goDeclaredNamesScan(lines, openSeed), goDeclaredNamesScan(lines, nil))
 }
 
-// goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed it is
-// exactly the historical whole-file scan (no reset at line gaps); with one, the
-// literal state is taken from the seed at the start of every contiguous run.
+// goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed the
+// literal state carries across line gaps (the historical whole-file scan); with
+// one, it is taken from the seed at the start of every contiguous run. A wrapped
+// signature is dropped at a gap either way.
 func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string) []string {
 	seen := make(map[string]struct{})
 	open := ""

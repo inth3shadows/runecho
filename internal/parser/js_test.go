@@ -617,3 +617,34 @@ func TestExtractFunctions_GenericFallback(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractExports_TypeModifier pins #501 item 1: the regex fallback (taken
+// when the tree has errors or no grammar is embedded) recorded
+// `export { type Props }` as an export named "type Props". The AST path already
+// records Props. A binding literally named `type` is kept.
+func TestExtractExports_TypeModifier(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{"export { type Props, Button }\n", []string{"Props", "Button"}},
+		{"export { type X as Y }\n", []string{"Y"}},
+		{"export {\ttype\tA, type  B }\n", []string{"A", "B"}},
+		{"export { type }\n", []string{"type"}},
+		{"export { type as kind }\n", []string{"kind"}},
+		{"export { typeName }\n", []string{"typeName"}},
+		{"export { type\tFoo\tas\tBar }\n", []string{"Bar"}},
+		{"export { type Ωmega }\n", []string{"Ωmega"}},
+		{"export { type as as X }\n", []string{"X"}},
+		{"export { type as }\n", []string{"as"}},
+		{"export {\n\ttype A,\n\tB as C,\n}\n", []string{"A", "C"}},
+		{"export { foo as 'str name' } from './m'\n", []string{"str name"}},
+		{"export { type 'a b' }\n", []string{"a b"}},
+		{"export { type A as \"B\" }\n", []string{"B"}},
+	}
+	for _, c := range cases {
+		if got := extractExports(c.src); !equalStringSlices(got, c.want) {
+			t.Errorf("%q: got %q, want %q", c.src, got, c.want)
+		}
+	}
+}

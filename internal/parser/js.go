@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	ts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -1149,9 +1150,7 @@ func extractExports(source string) []string {
 				// Handle "as" syntax: `export { foo as Bar }` exports Bar, not the
 				// local foo — record the name AFTER "as", which is what consumers
 				// import. (Previously recorded the pre-alias local name.)
-				if idx := strings.Index(name, " as "); idx >= 0 {
-					name = strings.TrimSpace(name[idx+len(" as "):])
-				}
+				name = exportItemName(name)
 				if name != "" {
 					exports = append(exports, name)
 				}
@@ -1211,6 +1210,63 @@ func extractExports(source string) []string {
 	}
 
 	return exports
+}
+
+// exportItemName is the name one `export { … }` item exports: the alias after
+// `as` if any, with a TS `type` modifier dropped (#501). Tokens split on any
+// whitespace outside quotes (tabs, wrapped lines, ES2022 string names such as
+// `foo as 'str name'`, which are unquoted). `type` is a modifier only when a
+// name follows it: `{ type }` and `{ type as kind }` export a binding named
+// type (as itself, or as kind).
+func exportItemName(item string) string {
+	f := exportItemTokens(item)
+	if len(f) >= 2 && f[0] == "type" && !(len(f) == 3 && f[1] == "as") {
+		f = f[1:]
+	}
+	if len(f) >= 3 && f[len(f)-2] == "as" {
+		return unquoteExportName(f[len(f)-1])
+	}
+	if len(f) == 0 {
+		return ""
+	}
+	return unquoteExportName(f[0])
+}
+
+// exportItemTokens splits on whitespace, keeping a '…' or "…" string whole.
+func exportItemTokens(item string) []string {
+	var out []string
+	var b strings.Builder
+	var quote rune
+	for _, r := range item {
+		switch {
+		case quote != 0:
+			b.WriteRune(r)
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+func unquoteExportName(tok string) string {
+	if len(tok) >= 2 && (tok[0] == '\'' || tok[0] == '"') && tok[len(tok)-1] == tok[0] {
+		return tok[1 : len(tok)-1]
+	}
+	return tok
 }
 
 // extractWildcardReexports finds bare `export * from './mod'` module

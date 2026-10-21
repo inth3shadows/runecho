@@ -106,6 +106,10 @@ func TestGoDeclaredNames_ConstRepetitionScope(t *testing.T) {
 		{{LineNo: 1, Text: "const ("}, {LineNo: 50, Text: "\treturn"}, {LineNo: 51, Text: "\tfoo"}},
 	} {
 		got := GoDeclaredNames(ls)
+		// Positive control: the spec before the gap still binds.
+		if ls[1].Text == "\tA = iota" && !slices.Contains(got, "A") {
+			t.Errorf("the spec before the gap was not bound: %v", got)
+		}
 		for _, bogus := range []string{"FlagB", "return", "foo"} {
 			if slices.Contains(got, bogus) {
 				t.Errorf("%q bound as a const repetition after a hunk gap: %v", bogus, got)

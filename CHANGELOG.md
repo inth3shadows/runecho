@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.76.0] — 2026-10-21
+
+### Changed
+- guard(go): bind receive-only channel params (#500 item 5) (#505)
+
 ## [0.75.0] — 2026-10-21
 
 ### Changed

@@ -316,7 +316,10 @@ func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
 		}
 		return func(lineNo int) (GoBlockState, bool) { return t.at(lineNo).GoBlock, true }
 	}
-	if len(fd.GoBlockByLine) > 0 {
+	// Non-nil, not non-empty: a hook map emptied by withoutStaleGoBlocks still
+	// means a seed is in use, every block unknown, so each starts outside any
+	// block rather than falling back to the unseeded #509 carry (#517).
+	if fd.GoBlockByLine != nil {
 		byLine := fd.GoBlockByLine
 		return func(lineNo int) (GoBlockState, bool) {
 			b, ok := byLine[lineNo]

@@ -87,7 +87,8 @@ type FileDiff struct {
 	// present for every block the hook LOCATED, zero state included: a missing
 	// entry means "unknown", and the scan then keeps its unseeded gap handling
 	// rather than reading the block as starting outside any block. Consulted
-	// only when AbsPath is empty.
+	// only when AbsPath is empty. A non-nil empty map means "seeded, every block
+	// unknown"; only nil means no seed at all (#517).
 	GoBlockByLine map[int]GoBlockState
 }
 

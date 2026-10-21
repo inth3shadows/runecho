@@ -470,6 +470,46 @@ func TestHookStructuralEditStalesLaterGoBlockSeeds(t *testing.T) {
 			t.Errorf("%s: halluc() masked by a stale in-block seed", c.name)
 		}
 	}
+	// Round 1 on PR #518. F1: every seed dropped must not fall back to the
+	// unseeded #509 handling, which carried edit 0's open `var (` into edit 1.
+	// F3: an unlocated edit nested deeper than the block's own depth that
+	// closes the block (a struct type, a composite literal).
+	for _, c := range []struct {
+		name, src string
+		edits     []editOp
+	}{
+		{"all seeds dropped (F1)", "package p\n\nvar (\n\ta = 1\n)\n\nfunc f() {\n\tc := 0\n\t_ = c\n}\n", []editOp{
+			{OldString: "var (\n\ta = 1", NewString: "var (\n\ta = 2"},
+			{OldString: "\tc := 0", NewString: "\thalluc = other()\n\thalluc()"},
+			{OldString: "_ = c", NewString: "_ = c\n}\n\nfunc h() {"},
+		}},
+		{"unlocated close from a struct type (F3)", "package p\n\ntype (\n\tS struct {\n\t\tX int\n\t}\n\tT int\n)\n", []editOp{
+			{OldString: "X int\n\t}", NewString: "X int\n\t}\n)\n\nfunc g() {"},
+			{OldString: "\tT int\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"unlocated close from a composite literal (F3)", "package p\n\nvar (\n\tx = T{\n\t\ta: 1,\n\t}\n\ty = 2\n)\n", []editOp{
+			{OldString: "a: 1,\n\t}", NewString: "a: 1,\n\t})\nfunc g() {"},
+			{OldString: "\ty = 2", NewString: "\thalluc = other()\n\thalluc()"},
+		}},
+	} {
+		if !flags(c.src, c.edits) {
+			t.Errorf("%s: halluc() masked", c.name)
+		}
+	}
+
+	// F2: an unlocated body edit that only changes whether its last line ends
+	// in an operator (`case 1:`) is not structural, and keeps the other seeds.
+	body := "package p\n\nvar (\n\ta = 1\n)\n\nfunc f(x int) {\n\tswitch x {\n\tcase 1:\n\t\treturn\n\t}\n}\n"
+	bodyEdits := []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 2\n\tb = 3"},
+		{OldString: "case 1:", NewString: "case 1:\n\t\tx = 1"},
+	}
+	bf := guard.TextToAddedLines(body)
+	bi := hookBlockIndices("MultiEdit", "", bodyEdits, bf)
+	if s := hookSeedMaps(bi, bf, guard.LangGo).withoutStaleGoBlocks("MultiEdit", bodyEdits, bi, bf, guard.LangGo); len(s.goBlock) != 1 {
+		t.Errorf("a non-structural body edit dropped the block seed: %v", s.goBlock)
+	}
+
 	// Control: edits that change no block structure keep their seeds, so an
 	// entry edited in place still binds.
 	edits := []editOp{

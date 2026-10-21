@@ -974,13 +974,13 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 // new_string from where it sits leaves different block states; a deletion
 // (empty new_string) counts, though it adds no block of its own. A dropped
 // entry reads as unknown, which starts outside any block: a possible missed
-// binding, never a masked call.
+// binding, never a masked call. The map is copied, never trimmed in place.
 func (s hookSeeds) withoutStaleGoBlocks(toolName string, edits []editOp, indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
 	if lang != guard.LangGo || toolName != "MultiEdit" || len(s.goBlock) == 0 {
 		return s
 	}
 	structural := func(st guard.SeedState, e editOp) bool {
-		return guard.AdvanceSeedText(lang, st, e.OldString).GoBlock != guard.AdvanceSeedText(lang, st, e.NewString).GoBlock
+		return !guard.AdvanceSeedText(lang, st, e.OldString).GoBlock.SameStructure(guard.AdvanceSeedText(lang, st, e.NewString).GoBlock)
 	}
 	at := make([]int, len(edits))
 	var located []int
@@ -991,25 +991,43 @@ func (s hookSeeds) withoutStaleGoBlocks(toolName string, edits []editOp, indices
 		}
 	}
 	states := guard.SeedStatesAt(lang, fileLines, located)
-	// An edit that was not located could sit anywhere, inside a block or not.
-	inBlock := guard.AdvanceSeedText(lang, guard.SeedState{}, "var (")
+	// An edit that was not located could sit anywhere: outside a block, at a
+	// block's own depth, or nested inside an entry (a struct type, a composite
+	// literal) from where a `}` closes the entry and a `)` the block. It is
+	// probed from each of those depths.
+	probes := []guard.SeedState{{}}
+	probe := "var ("
+	for d := 0; d < maxProbeDepth; d++ {
+		probes = append(probes, guard.AdvanceSeedText(lang, guard.SeedState{}, probe))
+		probe += "\n\tx = f("
+	}
 	cut := len(fileLines) // drop every block that starts after this index
 	for j, e := range edits {
 		if at[j] >= 0 {
 			if at[j] < cut && structural(states[at[j]], e) {
 				cut = at[j]
 			}
-		} else if structural(guard.SeedState{}, e) || structural(inBlock, e) {
-			cut = -1
+		} else {
+			for _, p := range probes {
+				if structural(p, e) {
+					cut = -1
+					break
+				}
+			}
 		}
 	}
-	for start, idx := range indices {
-		if idx > cut {
-			delete(s.goBlock, start)
+	kept := make(map[int]guard.GoBlockState, len(s.goBlock))
+	for start, b := range s.goBlock {
+		if indices[start] <= cut {
+			kept[start] = b
 		}
 	}
+	s.goBlock = kept
 	return s
 }
+
+// maxProbeDepth bounds the nesting depths an unlocated edit is probed from.
+const maxProbeDepth = 8
 
 // applyTo sets fd's per-block seed maps.
 func (s hookSeeds) applyTo(fd *guard.FileDiff) {

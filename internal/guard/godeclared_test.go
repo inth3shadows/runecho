@@ -97,6 +97,21 @@ func TestGoDeclaredNames_ConstRepetitionScope(t *testing.T) {
 	if slices.Contains(got, "w") || slices.Contains(got, "U") {
 		t.Errorf("a bare name outside a const block was bound: %v", got)
 	}
+	// Hunk mode: after a gap the block may have closed in lines this scan never
+	// saw, so a bare identifier there is not trusted as a repetition (review on
+	// #512): an unchanged `X = FlagA |` continues on line 10, and lines 50-51
+	// are a function body.
+	for _, ls := range [][]AddedLine{
+		{{LineNo: 1, Text: "const ("}, {LineNo: 2, Text: "\tA = iota"}, {LineNo: 10, Text: "\t\tFlagB"}},
+		{{LineNo: 1, Text: "const ("}, {LineNo: 50, Text: "\treturn"}, {LineNo: 51, Text: "\tfoo"}},
+	} {
+		got := GoDeclaredNames(ls)
+		for _, bogus := range []string{"FlagB", "return", "foo"} {
+			if slices.Contains(got, bogus) {
+				t.Errorf("%q bound as a const repetition after a hunk gap: %v", bogus, got)
+			}
+		}
+	}
 }
 
 // TestGoDeclaredNames_NestedParenParamList is the regression that the

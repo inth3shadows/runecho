@@ -902,10 +902,14 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 
 // hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
 // the synthetic LineNo that starts each block (see hookBlockIndices). A block
-// with no entry reads the zero value — "starts outside any string / at depth 0".
+// with no entry reads the zero value — "starts outside any string / at depth 0"
+// — in every map except goBlock, where a missing entry means "unknown".
 type hookSeeds struct {
 	open                             map[int]string
 	brace, bracket, defSig, paramSig map[int]int
+	// goBlock has an entry for every located block, zero included (see
+	// guard.FileDiff.GoBlockByLine); Go only.
+	goBlock map[int]guard.GoBlockState
 }
 
 // hookSeedMaps builds all of an edit's per-block seeds from one
@@ -915,7 +919,9 @@ type hookSeeds struct {
 // file meant five O(file) walks on the hook's latency path.
 //
 // A zero field is omitted from its map, so a nil map means "no block starts
-// inside anything" — what every consumer already reads a missing entry as. The
+// inside anything" — what every consumer already reads a missing entry as.
+// goBlock is the exception: it holds every located block, zero included, since
+// its consumer reads a missing entry as "unknown" (guard.FileDiff.GoBlockByLine). The
 // four depths are tracked for Python only (guard.SeedStatesAt leaves them 0
 // elsewhere), so their maps stay nil for every other language.
 func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
@@ -949,6 +955,12 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 		setInt(&s.bracket, start, st.Bracket)
 		setInt(&s.defSig, start, st.DefSig)
 		setInt(&s.paramSig, start, st.ParamSig)
+		if lang == guard.LangGo {
+			if s.goBlock == nil {
+				s.goBlock = make(map[int]guard.GoBlockState)
+			}
+			s.goBlock[start] = st.GoBlock
+		}
 	}
 	return s
 }
@@ -960,6 +972,7 @@ func (s hookSeeds) applyTo(fd *guard.FileDiff) {
 	fd.PyBracketDepthByLine = s.bracket
 	fd.PyDefSigDepthByLine = s.defSig
 	fd.PyParamSigDepthByLine = s.paramSig
+	fd.GoBlockByLine = s.goBlock
 }
 
 // hookBlockIndices resolves, per added-line block, the 0-based index in

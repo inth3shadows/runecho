@@ -71,52 +71,147 @@ var (
 // any package-level declaration existing, which is why FoldInFileDefs folds them
 // into the known set before the additive check runs.
 func GoDeclaredNames(fileLines []AddedLine) []string {
-	return goDeclaredNamesScan(fileLines, nil)
+	return goDeclaredNamesScan(fileLines, nil, nil)
 }
 
 // goDeclaredNamesSeeded is GoDeclaredNames for a diff hunk with validate.go's
 // openSeed, so a declaration that is only text inside a raw string opened above
-// the hunk is not bound (#436). Intersected with the unseeded read so a seed
-// can only remove names, never add them (see knownDefs).
-func goDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) []string {
+// the hunk is not bound (#436). Intersected with the read without it so the
+// string seed can only remove names, never add them (see knownDefs).
+//
+// blockSeed is not intersected away: it is the file's own var/const/type block
+// state at each hunk start (#514), and the names it adds are real entries of a
+// block the hunk sits in (a second `const (` after a gap, an entry edited
+// without its opener).
+func goDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string, blockSeed func(lineNo int) (GoBlockState, bool)) []string {
 	if openSeed == nil {
-		return goDeclaredNamesScan(lines, nil)
+		return goDeclaredNamesScan(lines, nil, blockSeed)
 	}
-	return intersectNames(goDeclaredNamesScan(lines, openSeed), goDeclaredNamesScan(lines, nil))
+	return intersectNames(goDeclaredNamesScan(lines, openSeed, blockSeed), goDeclaredNamesScan(lines, nil, blockSeed))
+}
+
+// GoBlockState is the parenthesised `var (` / `const (` / `type (` block
+// tracker's state at the start of a line. A hunk-only scan cannot see whether a
+// block opened above it or closed in a gap, so the file's own state is carried
+// as a seed (SeedState.GoBlock, #514), computed by the same advance.
+type GoBlockState struct {
+	in    bool
+	depth int
+	// The last line at the block's own depth ended mid-expression (`a +`,
+	// `x &&`, `f(a,`), so the next one continues it rather than declaring.
+	cont bool
+	// A const block: a spec of names alone repeats the one above (`Bar` after
+	// `A = iota`) and declares them (#506, from #507).
+	isConst bool
+}
+
+// advance threads b through one masked, non-comment line and returns the
+// name list it declares as a block entry ("" for none).
+func (b *GoBlockState) advance(scan string) string {
+	// A parenthesised block declares names on lines that carry no keyword of
+	// their own, so the block has to be tracked. Entry requires the paren to
+	// stay open past the line; a single-line `var (x = 1)` is already covered
+	// by reGoVarConst.
+	if !b.in {
+		if hasGoDeclKeyword(scan) {
+			if m := reGoVarBlockOpen.FindStringSubmatch(scan); m != nil {
+				*b = GoBlockState{in: true, depth: 1, isConst: m[1] == "const"}
+			}
+		}
+		return ""
+	}
+	// Depth, not "the first line starting with ')'". A wrapped call inside
+	// the block — `a = compute(\n  1,\n)` — closes on an indented paren
+	// without ending the block, and treating that as the end dropped every
+	// name declared after it. This is the same nested-paren bug the parser's
+	// AST rewrite fixed for the exported half (internal/parser/go.go), and
+	// it came straight back in a regex extractor.
+	//
+	// Brackets and braces count too (#506): a struct's fields, a wrapped
+	// type-parameter list, a func literal's body and a composite literal's
+	// entries are all deeper than the block's entries, not entries.
+	before := b.depth
+	b.depth += bracketDelta(scan)
+	if b.depth <= 0 {
+		*b = GoBlockState{}
+		return ""
+	}
+	// Only lines at the block's own depth declare names, and not one that
+	// continues the expression above it: gofmt glues a product there
+	// (`total = a +` / `x*(y+1)`), which otherwise reads as `x *(T)`.
+	names, nameList := "", false
+	if before == 1 && !b.cont {
+		if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
+			names = m[1]
+		} else if m := reGoBlockNameList.FindStringSubmatch(scan); m != nil {
+			// `a,` / `b,` / `c Type`: a name list wrapped one per line.
+			names, nameList = m[1], true
+		} else if b.isConst {
+			if m := reGoBlockNamesOnly.FindStringSubmatch(scan); m != nil {
+				names = m[1]
+			}
+		}
+	}
+	if t := strings.TrimRight(scan, " \t"); b.depth == 1 && t != "" && !nameList {
+		b.cont = strings.ContainsAny(t[len(t)-1:], ",+-*/%&|^<>=!.:") && !reGoFloatEnd.MatchString(t)
+	}
+	return names
+}
+
+// goNeedsStrip reports whether a Go line must go through the literal stripper.
+// A line with no quote character cannot open, close or contain a literal, so
+// when no multi-line literal is already open its text, less a trailing `//`
+// comment, is its own scan. `/*` is checked alongside the quote characters
+// because a block-comment opener needs none of them.
+func goNeedsStrip(text, open string) bool {
+	return open != "" || strings.ContainsAny(text, "\"'`") || strings.Contains(text, "/*")
 }
 
 // goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed the
 // literal state carries across line gaps (the historical whole-file scan); with
 // one, it is taken from the seed at the start of every contiguous run. A wrapped
-// signature is dropped at a gap either way.
-func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string) []string {
+// signature is dropped at a gap either way. blockSeed, when it knows the line,
+// sets the block state at the start of every contiguous run the same way; a
+// run it does not know starts outside any block, and only with no blockSeed at
+// all does a gap fall back to the #509 reset below.
+func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string, blockSeed func(lineNo int) (GoBlockState, bool)) []string {
 	seen := make(map[string]struct{})
 	open := ""
-	inVarBlock := false
-	blockDepth := 0
-	// The last line at the block's own depth ended mid-expression (`a +`,
-	// `x &&`, `f(a,`), so the next one continues it rather than declaring.
-	blockCont := false
-	// A const block: a spec of names alone repeats the one above (`Bar` after
-	// `A = iota`) and declares them (#506, from #507).
-	constBlock := false
+	var block GoBlockState
 	// A wrapped `func` signature, joined line by line until its groups close
 	// (#473); sigLines bounds how far a group that never closes is carried.
 	sig, sigLines := "", 0
 	prevNo := 0
 	for i, l := range fileLines {
-		if openSeed != nil && (i == 0 || l.LineNo != prevNo+1) {
+		gap := i > 0 && l.LineNo != prevNo+1
+		if openSeed != nil && (i == 0 || gap) {
 			open = openSeed(l.LineNo)
 		}
-		if i > 0 && l.LineNo != prevNo+1 {
+		seeded := false
+		if blockSeed != nil && (i == 0 || gap) {
+			var b GoBlockState
+			if b, seeded = blockSeed(l.LineNo); seeded {
+				block = b
+			}
+		}
+		if gap {
 			sig = "" // never join text across a hunk gap into one parameter list
-			// Nor carry an entry's opener or trailing operator across one: its
-			// other half is an unchanged line this scan never sees (#509).
-			if inVarBlock {
-				blockDepth, blockCont = 1, false
+			switch {
+			case seeded:
+			case blockSeed != nil:
+				// A seed in use that does not know this run (a hook block it could
+				// not locate): the state carried here may be one the seed set for a
+				// different block, so start outside any block rather than bind on
+				// it (#514 round 2).
+				block = GoBlockState{}
+			case block.in:
+				// No seed at all: do not carry an entry's opener or trailing
+				// operator across a gap; its other half is an unchanged line this
+				// scan never sees (#509).
+				block.depth, block.cont = 1, false
 				// The block may have closed in those unseen lines too, so a bare
 				// identifier after the gap is not trusted as a const repetition.
-				constBlock = false
+				block.isConst = false
 			}
 		}
 		prevNo = l.LineNo
@@ -126,13 +221,13 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// already open its text, less a trailing `//` comment, is its own scan. Most lines qualify, which is what
 		// takes this pass from 6.75ms to well under 1ms on a 2,200-line file.
 		scan := l.Text
-		// `/*` is checked alongside the quote characters because a block-comment
-		// opener needs none of them. Without it the stripper never runs on such a
-		// line, the multi-line comment state is never entered, and declarations
-		// inside commented-out code get folded into the known set — over-inclusion,
-		// which masks real hallucinations and is the failure this file's header
-		// calls strictly worse than a false positive.
-		if open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*") {
+		// `/*` is checked alongside the quote characters (goNeedsStrip) because a
+		// block-comment opener needs none of them. Without it the stripper never
+		// runs on such a line, the multi-line comment state is never entered, and
+		// declarations inside commented-out code get folded into the known set —
+		// over-inclusion, which masks real hallucinations and is the failure this
+		// file's header calls strictly worse than a false positive.
+		if goNeedsStrip(l.Text, open) {
 			scan, open = stripLiteralsStateful(LangGo, l.Text, open)
 		} else {
 			// The stripper did not run, so a trailing comment survives in scan; cut
@@ -177,54 +272,8 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 				addList(seen, m[1])
 			}
 		}
-		// A parenthesised `var (` / `const (` / `type (` block declares names on lines that
-		// carry no keyword of their own, so the block has to be tracked. Entry
-		// requires the paren to stay open past the line; a single-line
-		// `var (x = 1)` is already covered by reGoVarConst.
-		if !inVarBlock {
-			if hasGoDeclKeyword(scan) {
-				if m := reGoVarBlockOpen.FindStringSubmatch(scan); m != nil {
-					inVarBlock, blockDepth, blockCont = true, 1, false
-					constBlock = m[1] == "const"
-				}
-			}
-		} else {
-			// Depth, not "the first line starting with ')'". A wrapped call inside
-			// the block — `a = compute(\n  1,\n)` — closes on an indented paren
-			// without ending the block, and treating that as the end dropped every
-			// name declared after it. This is the same nested-paren bug the parser's
-			// AST rewrite fixed for the exported half (internal/parser/go.go), and
-			// it came straight back in a regex extractor.
-			//
-			// Brackets and braces count too (#506): a struct's fields, a wrapped
-			// type-parameter list, a func literal's body and a composite literal's
-			// entries are all deeper than the block's entries, not entries.
-			before := blockDepth
-			blockDepth += bracketDelta(scan)
-			if blockDepth <= 0 {
-				inVarBlock = false
-			} else {
-				// Only lines at the block's own depth declare names, and not one that
-				// continues the expression above it: gofmt glues a product there
-				// (`total = a +` / `x*(y+1)`), which otherwise reads as `x *(T)`.
-				nameList := false
-				if before == 1 && !blockCont {
-					if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
-						addList(seen, m[1])
-					} else if m := reGoBlockNameList.FindStringSubmatch(scan); m != nil {
-						// `a,` / `b,` / `c Type`: a name list wrapped one per line.
-						addList(seen, m[1])
-						nameList = true
-					} else if constBlock {
-						if m := reGoBlockNamesOnly.FindStringSubmatch(scan); m != nil {
-							addList(seen, m[1])
-						}
-					}
-				}
-				if t := strings.TrimRight(scan, " \t"); blockDepth == 1 && t != "" && !nameList {
-					blockCont = strings.ContainsAny(t[len(t)-1:], ",+-*/%&|^<>=!.:") && !reGoFloatEnd.MatchString(t)
-				}
-			}
+		if names := block.advance(scan); names != "" {
+			addList(seen, names)
 		}
 		// Every balanced group after a `func` keyword: the receiver, the parameter
 		// list, and the named-return list are all `name Type` lists that bind, and

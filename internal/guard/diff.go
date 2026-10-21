@@ -82,6 +82,13 @@ type FileDiff struct {
 	// nil map) mean depth 0, the previous behavior. Consulted only when
 	// AbsPath is empty.
 	PyParamSigDepthByLine map[int]int
+	// GoBlockByLine is SeedByLine's counterpart for GoDeclaredNames' var/const/
+	// type block state (#514), for Go only. Unlike the maps above, an entry is
+	// present for every block the hook LOCATED, zero state included: a missing
+	// entry means "unknown", and the scan then keeps its unseeded gap handling
+	// rather than reading the block as starting outside any block. Consulted
+	// only when AbsPath is empty.
+	GoBlockByLine map[int]GoBlockState
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

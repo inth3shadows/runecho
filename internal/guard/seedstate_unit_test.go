@@ -9,6 +9,23 @@ import (
 
 const seedUnitSrc = "cfg = {\n    \"a\": [\n        1,\n    ],\n}\n\"\"\"doc\n"
 
+// TestSeedTableGoBlockCRLF pins R2-5 (#514 round 2): the seed table keeps a
+// CRLF file's `\r`, which the diff parser strips from hunk text, so the block
+// state must not depend on it — a line ending in `+\r` still continues.
+func TestSeedTableGoBlockCRLF(t *testing.T) {
+	src := "var (\n\tx = a +\n\t\tb\n)\n"
+	lf := buildSeedTable(LangGo, strings.Split(src, "\n"))
+	crlf := buildSeedTable(LangGo, strings.Split(strings.ReplaceAll(src, "\n", "\r\n"), "\n"))
+	for n := 1; n <= 5; n++ {
+		if lf.at(n).GoBlock != crlf.at(n).GoBlock {
+			t.Errorf("line %d: LF %+v, CRLF %+v", n, lf.at(n).GoBlock, crlf.at(n).GoBlock)
+		}
+	}
+	if !lf.at(3).GoBlock.cont {
+		t.Fatalf("fixture: line 3 should continue line 2")
+	}
+}
+
 // TestSeedTableClampsLineNo pins seedTable.at's one clamp: line 0 and below
 // read the state before line 1, and anything past the end reads the state
 // after the last line (the unterminated docstring here), never a panic.

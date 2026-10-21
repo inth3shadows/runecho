@@ -122,6 +122,20 @@ func run(cfg HallucinatedConfig) {
 	}
 }
 
+// TestGoDeclaredNames_ReceiveOnlyChanParam pins #500 item 5: reGoParamName's
+// type-start class had no `<`, so a `<-chan T` parameter bound nothing. A bare
+// `<` (a comparison in a call group after func) must still bind nothing.
+func TestGoDeclaredNames_ReceiveOnlyChanParam(t *testing.T) {
+	got := declaredNames("package p\n\nfunc drain(in <-chan int, done <-chan struct{}, out chan<- int) {\n}\n")
+	if missing := hasAll(got, "in", "done", "out"); len(missing) > 0 {
+		t.Errorf("channel params not bound: missing %v (got %v)", missing, got)
+	}
+	got = declaredNames("package p\n\nvar r = (func(a int) bool)(x < y)\n")
+	if slices.Contains(got, "x") || slices.Contains(got, "y") {
+		t.Errorf("a comparison operand was bound as a param: %v", got)
+	}
+}
+
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {
 	src := "package p\n\n" +
 		"func run() {\n" +

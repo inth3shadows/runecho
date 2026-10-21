@@ -56,8 +56,9 @@ var (
 	// type is not captured: folding a type name into the known set would mask a
 	// genuinely undefined type, which is the over-inclusion trap above. A group
 	// may open with '(' as well as a comma, so the parameters of an inline func
-	// literal bind too.
-	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\*?\.{0,3}\s*[A-Za-z_\[\]*\.]`)
+	// literal bind too. A type may also start with `<-` (a receive-only channel,
+	// #500); a bare `<` is a comparison, not a type.
+	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\*?\.{0,3}\s*(?:<-|[A-Za-z_\[\]*\.])`)
 
 	// reGoIdentList splits a captured left-hand side into individual names.
 	reGoIdentList = regexp.MustCompile(`[A-Za-z_]\w*`)

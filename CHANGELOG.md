@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.75.0] — 2026-10-21
+
+### Changed
+- guard(go): step over type-parameter lists in func signatures (#500 item 4) (#504)
+
 ## [0.74.0] — 2026-10-21
 
 ### Changed

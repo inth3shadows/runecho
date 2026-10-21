@@ -409,3 +409,31 @@ func TestGoDeclaredNames_BlockCommentCloseOnParamLine(t *testing.T) {
 		}
 	}
 }
+
+// TestGoDeclaredNames_WrappedGenericSignature pins #500 item 4: gofmt wraps a
+// long type-parameter list too, and goFuncGroups ignored `[`, so a line ending
+// inside one started no carry and the parameter list after it was never
+// scanned; an `interface{ ~int }` constraint read as the body brace. Type
+// parameters themselves are types and stay unbound (see #474).
+func TestGoDeclaredNames_WrappedGenericSignature(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{"package p\n\nfunc Map[\n\tT any,\n](xs []T, fn func(T) T) {\n\tfn(xs[0])\n}\n", []string{"fn", "xs"}},
+		{"package p\n\nfunc Map[T any,\n\tU any](\n\txs []T,\n\tfn func(T) U,\n) []U {\n\treturn nil\n}\n", []string{"fn", "xs"}},
+		{"package p\n\nfunc Sum[T interface{ ~int }](xs []T) (total T) {\n\treturn\n}\n", []string{"total", "xs"}},
+		{"package p\n\nfunc Sum[\n\tT interface {\n\t\t~int | ~int64\n\t},\n](\n\txs []T,\n) T {\n\treturn 0\n}\n", []string{"xs"}},
+		{"package p\n\nfunc (s *Set[K]) Add(\n\tk K,\n) []K {\n\treturn nil\n}\n", []string{"k", "s"}},
+		{"package p\n\nfunc f() map[string]int {\n\tm := map[string]int{}\n\treturn m\n}\n", []string{"m"}},
+		// A func-typed constraint's own parameter names are inside the type list
+		// too: x must stay unbound, single-line and wrapped (review on #504).
+		{"package p\n\nfunc Apply[F func(x int) bool](f F) {\n}\n", []string{"f"}},
+		{"package p\n\nfunc Apply[\n\tF func(x int) bool,\n](f F) {\n}\n", []string{"f"}},
+	}
+	for _, c := range cases {
+		if got := declaredNames(c.src); !slices.Equal(got, c.want) {
+			t.Errorf("%q\n  got  %v\n  want %v", c.src, got, c.want)
+		}
+	}
+}

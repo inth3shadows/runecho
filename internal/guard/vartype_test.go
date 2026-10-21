@@ -323,6 +323,34 @@ func other() {
 	}
 }
 
+// TestGoVarTypeAbstainsOnWrappedGenericConstraint pins #500 item 4 in the
+// second signature walker: a wrapped type-parameter constraint `interface {`
+// sat at paren depth 0 and ended the signature before the parameter list, so
+// "parent" was not reserved and the collision above came back.
+func TestGoVarTypeAbstainsOnWrappedGenericConstraint(t *testing.T) {
+	src := `package p
+
+func Sum[
+	T interface {
+		~int
+	},
+](
+	parent T,
+) T {
+	return parent
+}
+
+func other() {
+	var parent *LDML
+	parent.Parse()
+}
+`
+	got := varTypeViolationsForTest(t, src, knownSetOf("LDML.Fetch"))
+	if len(got) != 0 {
+		t.Fatalf("want no violation — parent is a parameter of the wrapped generic, got %+v", got)
+	}
+}
+
 func TestGoVarTypeAbstainsOnMultiLineSignatureWithBareInterfaceReturnParam(t *testing.T) {
 	// Pins the adversarial-review finding: a multi-line signature carrying a
 	// map[string]interface{} parameter on an earlier line was closing the

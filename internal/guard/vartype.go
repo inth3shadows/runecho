@@ -160,11 +160,13 @@ func goFuncSignatureIdents(ctx []AddedLine) map[string]struct{} {
 				out[m] = struct{}{}
 			}
 		}
+		// Brackets count as depth too: a wrapped type-parameter constraint's
+		// `interface {` is not the body brace (#500).
 		for i := 0; i < len(scan) && inSig; i++ {
 			switch scan[i] {
-			case '(':
+			case '(', '[':
 				parenDepth++
-			case ')':
+			case ')', ']':
 				if parenDepth > 0 {
 					parenDepth--
 				}

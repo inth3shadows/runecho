@@ -976,6 +976,10 @@ func TestExtractImports_JSTypeModifier(t *testing.T) {
 		{`import type { Config } from "./config";`, []string{"Config"}},
 		{`import type Foo from "./foo";`, []string{"Foo"}},
 		{`import type * as T from "./types";`, []string{"T"}},
+		{`import type{ Config } from "./config";`, []string{"Config"}},
+		{`import type* as T from "./types";`, []string{"T"}},
+		{"import {\ttype\tX,\ttype\tY\t} from \"m\";", []string{"X", "Y"}},
+		{`import typeName, { typeof2 } from "./t";`, []string{"typeof2", "typeName"}},
 		// A binding literally named `type` is still that name.
 		{`import { type } from "./kinds";`, []string{"type"}},
 		{`import { type as kind } from "./kinds";`, []string{"kind"}},

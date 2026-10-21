@@ -444,9 +444,10 @@ var (
 	reJSRequire = regexp.MustCompile(`^\s*(?:const|let|var)\s+(.+?)\s*=\s*require\s*\(`)
 	reIdent     = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
 	// The TS `type` modifier before a clause or a named item (#476). It must be
-	// followed by a name, `{` or `*`, so `import type, { a }` and `{ type }` keep a
-	// binding literally named `type`.
-	reTSTypeModifier = regexp.MustCompile(`^type\s+([A-Za-z_$*{])`)
+	// followed by a name, `{` or `*` (with no space before `{` or `*`: `import
+	// type{X}`), so `import type, { a }` and `{ type }` keep a binding literally
+	// named `type`.
+	reTSTypeModifier = regexp.MustCompile(`^type(?:\s+([A-Za-z_$*{])|([{*]))`)
 	// reJSImportKeyword matches the start of any `import` statement, single- or
 	// multi-line. Used only to detect a multi-line named-import block —
 	// reJSImport itself already handles the single-line case where `from` sits
@@ -618,7 +619,7 @@ func parsePyPlainImport(s string) []string {
 // name, `* as ns`, and/or a `{a, b as B}` named group.
 func parseJSImportClause(s string) []string {
 	var out []string
-	s = reTSTypeModifier.ReplaceAllString(strings.TrimSpace(s), "$1")
+	s = reTSTypeModifier.ReplaceAllString(strings.TrimSpace(s), "$1$2")
 	if i := strings.IndexByte(s, '{'); i >= 0 {
 		if j := strings.IndexByte(s, '}'); j > i {
 			for _, item := range strings.Split(s[i+1:j], ",") {
@@ -626,7 +627,7 @@ func parseJSImportClause(s string) []string {
 				if idx := strings.Index(item, " as "); idx >= 0 {
 					item = strings.TrimSpace(item[idx+4:])
 				}
-				item = reTSTypeModifier.ReplaceAllString(item, "$1")
+				item = reTSTypeModifier.ReplaceAllString(item, "$1$2")
 				if reIdent.MatchString(item) {
 					out = append(out, item)
 				}

@@ -56,9 +56,8 @@ var (
 	// type is not captured: folding a type name into the known set would mask a
 	// genuinely undefined type, which is the over-inclusion trap above. A group
 	// may open with '(' as well as a comma, so the parameters of an inline func
-	// literal bind too. A type may also start with `<-` (a receive-only channel,
-	// #500); a bare `<` is a comparison, not a type.
-	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\*?\.{0,3}\s*(?:<-|[A-Za-z_\[\]*\.])`)
+	// literal bind too.
+	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\*?\.{0,3}\s*` + goTypeStart)
 
 	// reGoIdentList splits a captured left-hand side into individual names.
 	reGoIdentList = regexp.MustCompile(`[A-Za-z_]\w*`)
@@ -215,9 +214,17 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 // something else, and carrying it further only risks binding body text.
 const maxWrappedSigLines = 64
 
+// goTypeStart is how a Go type may begin after a declared name, shared by the
+// parameter and var-block patterns so the two cannot drift (#500). `<-` must be
+// followed by `chan`: `x <-1` is the comparison `x < -1`, and a bare `<` never
+// starts a type.
+const goTypeStart = `(?:<-\s*chan\b|[A-Za-z_\[\]*\.])`
+
 var (
-	reGoVarBlockOpen  = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
-	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*(?:[A-Za-z_\[\]*\.]|=)`)
+	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
+	// `\b` after the names: without it a name the type pattern rejects
+	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
+	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
 )
 
 // goShortDeclNames returns the identifiers bound by every `:=` on the line,

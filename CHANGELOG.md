@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.73.0] — 2026-10-21
+
+### Changed
+- guard(go): cut a trailing // comment once for every extractor (#500 items 1-2) (#502)
+
 ## [0.72.0] — 2026-10-21
 
 ### Changed

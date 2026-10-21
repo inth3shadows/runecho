@@ -152,7 +152,7 @@ full semantic analysis.
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
-   …or **build from source** (needs Go 1.26+), which also installs the guard hooks:
+   …or **build from source** (needs Go 1.26+). This installs the binaries only; the hooks come from `--hook` / `--hook-pre-push` (below) or `runecho-ir install`:
    ```bash
    bash install.sh
    runecho-ir install --periodic   # optional, run inside the checkout: hourly reindex that also keeps the binaries at the newest release
@@ -269,6 +269,11 @@ not general-purpose code intelligence.
 - [Token cost](bench/TOKEN-COST.md) — measured context cost of every surface, including where RunEcho is expensive
 - [False-positive audit](bench/FPAUDIT.md) — the guard's fp/premature/stands rate against git history, and why approval rate isn't a false-positive proxy
 - [Changelog](CHANGELOG.md) — notable changes per release; versioning policy
+
+## Contributing
+
+Reports and fixes are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

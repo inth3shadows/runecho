@@ -6,6 +6,10 @@ Use GitHub's private reporting: **Security tab → Report a vulnerability** (or
 https://github.com/inth3shadows/runecho/security/advisories/new). Do not open
 a public issue for a suspected vulnerability until it's triaged.
 
+The same private channel takes Code of Conduct reports (see
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)); those are handled under the code of
+conduct and never published as advisories.
+
 ## Threat model
 
 RunEcho is a local, single-operator dev tool: no server, no accounts, no

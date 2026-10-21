@@ -226,7 +226,13 @@ var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
 	// `\b` after the names: without it a name the type pattern rejects
 	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
-	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
+	// A type needs whitespace before it: gofmt always writes `name Type`, and with
+	// none a continuation line gofmt glues (`x*(y+1)`, `x.Sel |`, `x[:],`) read
+	// as a declaration of x (#506). The one glued form gofmt does write is a
+	// generic type entry, `List[T any] struct{`, admitted only in type-parameter
+	// shape: names, whitespace, then a constraint (`any`, `~int`, `*T`, `[]T`).
+	// `=` may follow directly.
+	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b(?:\s+` + goTypeStart + `|\s*=|\[\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s+[A-Za-z_\[*(~])`)
 )
 
 // goShortDeclNames returns the identifiers bound by every `:=` on the line,

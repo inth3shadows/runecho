@@ -188,6 +188,24 @@ func TestGoDeclaredNames_PointerStarIsNotMultiplication(t *testing.T) {
 	}
 }
 
+// TestGoDeclaredNames_BlockGluedProductVsGenericEntry pins #506 item 1b. gofmt
+// glues a product inside a lower-precedence expression, so a var-block
+// continuation `x*(y+1)` read as `x *(T)` and bound x. gofmt also glues a
+// generic type entry's `[` (`List[T any] struct{`), so the fix must keep those.
+func TestGoDeclaredNames_BlockGluedProductVsGenericEntry(t *testing.T) {
+	for _, line := range []string{"x*c", "x*(y+1)", "x*Ärger", "x**p", "x.Sel |", "x[:],", "x[i] = 1"} {
+		src := "package p\n\nvar (\n\ttotal = a +\n\t\t" + line + "\n)\n"
+		if got := declaredNames(src); slices.Contains(got, "x") {
+			t.Errorf("continuation %q bound x: %v", line, got)
+		}
+	}
+	src := "package p\n\ntype (\n\tA int\n\tList[T any] struct {\n\t\tv T\n\t}\n\tPair[K comparable, V any] = struct{ k K }\n\tS[_ any] struct{}\n\tN1[P any] *M1[P]\n\tT1[P T1[P]] interface{}\n\tC[T ~int | ~string] []T\n\tI[T interface{ M() }] T\n)\n\nvar (\n\tx int\n\ta, b []string\n\tp *T\n\tch <-chan int\n\tn = 1\n\tm=2\n)\n"
+	want := []string{"A", "C", "I", "List", "N1", "Pair", "S", "T1", "a", "b", "ch", "m", "n", "p", "x"}
+	if missing := hasAll(declaredNames(src), want...); len(missing) > 0 {
+		t.Errorf("block declarations not bound: missing %v (got %v)", missing, declaredNames(src))
+	}
+}
+
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {
 	src := "package p\n\n" +
 		"func run() {\n" +

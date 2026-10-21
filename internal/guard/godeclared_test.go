@@ -71,6 +71,13 @@ func run(ctx Context, name string) (n int, err error) {
 	}
 }
 
+func TestGoDeclaredNames_IotaContinuation(t *testing.T) {
+	got := declaredNames("package p\nconst (\n\tA = iota\n\tBar\n)\n")
+	if !slices.Equal(got, []string{"A", "Bar"}) {
+		t.Errorf("bare const continuation must bind exactly Bar; got %v", got)
+	}
+}
+
 // TestGoDeclaredNames_NestedParenParamList is the regression that the
 // compiler-oracle differential caught within minutes of this extractor going
 // live. A func-typed parameter nests parentheses, and the original `[^)]*`

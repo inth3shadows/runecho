@@ -93,6 +93,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 	seen := make(map[string]struct{})
 	open := ""
 	inVarBlock := false
+	constBlock := false
 	blockDepth := 0
 	// The last line at the block's own depth ended mid-expression (`a +`,
 	// `x &&`, `f(a,`), so the next one continues it rather than declaring.
@@ -178,6 +179,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		if !inVarBlock {
 			if hasGoDeclKeyword(scan) && reGoVarBlockOpen.MatchString(scan) {
 				inVarBlock, blockDepth, blockCont = true, 1, false
+				constBlock = strings.HasPrefix(strings.TrimSpace(scan), "const")
 			}
 		} else {
 			// Depth, not "the first line starting with ')'". A wrapped call inside
@@ -194,13 +196,16 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			blockDepth += bracketDelta(scan)
 			if blockDepth <= 0 {
 				inVarBlock = false
+				constBlock, blockCont = false, false
 			} else {
 				// Only lines at the block's own depth declare names, and not one that
 				// continues the expression above it: gofmt glues a product there
 				// (`total = a +` / `x*(y+1)`), which otherwise reads as `x *(T)`.
 				nameList := false
 				if before == 1 && !blockCont {
-					if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
+					if constBlock && reGoConstContinuation.MatchString(scan) {
+						addList(seen, strings.TrimSpace(scan))
+					} else if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
 						addList(seen, m[1])
 					} else if m := reGoBlockNameList.FindStringSubmatch(scan); m != nil {
 						// `a,` / `b,` / `c Type`: a name list wrapped one per line.
@@ -255,7 +260,8 @@ var (
 	reGoFloatEnd = regexp.MustCompile(`(?:^|[^\w.])\d[\d_]*\.$`)
 	// `\b` after the names: without it a name the type pattern rejects
 	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
-	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
+	reGoBlockDeclName     = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
+	reGoConstContinuation = regexp.MustCompile(`^\s*[A-Za-z_]\w*\s*$`)
 )
 
 // bracketDelta is the net count of openers ( [ { less closers ) ] } on a

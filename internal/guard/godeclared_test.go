@@ -176,6 +176,12 @@ func TestGoDeclaredNames_PointerStarIsNotMultiplication(t *testing.T) {
 		// The var-block pattern shares goTypeStart: a spaced product on a
 		// continuation line is not a declaration.
 		"package p\n\nvar (\n\ttotal = a +\n\t\tx * c\n)\n",
+		// gofmt glues a product inside a lower-precedence expression, so these
+		// are real gofmt output on a var-block continuation (review on #508).
+		"package p\n\nvar (\n\ttotal = a +\n\t\tx*c\n)\n",
+		"package p\n\nvar (\n\ttotal = a +\n\t\tx*(y+1)\n)\n",
+		"package p\n\nvar (\n\ttotal = a +\n\t\tx*Ärger\n)\n",
+		"package p\n\nvar (\n\ttotal = a +\n\t\tx**p\n)\n",
 	} {
 		got := declaredNames(src)
 		if slices.Contains(got, "x") || slices.Contains(got, "f") {

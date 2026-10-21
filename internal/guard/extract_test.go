@@ -961,6 +961,42 @@ func TestExtractImports_JS(t *testing.T) {
 	}
 }
 
+// TestExtractImports_JSTypeModifier pins #476: the TS `type` modifier, inline on a
+// named item (`consistent-type-imports` inline style, `verbatimModuleSyntax`) or
+// on the whole clause, binds the name after it. Before the fix `type ReactNode`
+// failed the identifier check and was dropped, and `import type { X }` bound a
+// symbol named "type".
+func TestExtractImports_JSTypeModifier(t *testing.T) {
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{`import { type ReactNode, useState } from "react";`, []string{"ReactNode", "useState"}},
+		{`import { type Props as P, type  FC } from "react";`, []string{"P", "FC"}},
+		{`import type { Config } from "./config";`, []string{"Config"}},
+		{`import type Foo from "./foo";`, []string{"Foo"}},
+		{`import type * as T from "./types";`, []string{"T"}},
+		{`import type{ Config } from "./config";`, []string{"Config"}},
+		{`import type* as T from "./types";`, []string{"T"}},
+		{"import {\ttype\tX,\ttype\tY\t} from \"m\";", []string{"X", "Y"}},
+		{`import typeName, { typeof2 } from "./t";`, []string{"typeof2", "typeName"}},
+		// A binding literally named `type` is still that name.
+		{`import { type } from "./kinds";`, []string{"type"}},
+		{`import { type as kind } from "./kinds";`, []string{"kind"}},
+		{`import type, { other } from "./kinds";`, []string{"other", "type"}},
+	}
+	for _, c := range cases {
+		got := ExtractImports(LangJS, lines(c.line))
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s\n  got  %v\n  want %v", c.line, got, c.want)
+		}
+	}
+	multi := ExtractImports(LangJS, lines(`import {`, `  type ReactNode,`, `  useState,`, `} from "react";`))
+	if !slices.Equal(multi, []string{"ReactNode", "useState"}) {
+		t.Errorf("multi-line inline type import: got %v", multi)
+	}
+}
+
 // TestExtractImports_JSMultiLine pins #304: a multi-line named-import block is
 // the dominant style in any real TS codebase, and ExtractImports previously
 // returned nothing for it — a bare call to a multi-line-imported name then read

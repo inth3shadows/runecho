@@ -77,6 +77,9 @@ var (
 	// (idiomatic under isolatedModules / verbatimModuleSyntax). The optional
 	// group leaves the value form untouched.
 	exportNamedRegex = regexp.MustCompile(`export\s+(?:type\s+)?\{([^}]+)\}`)
+	// The TS `type` modifier on one named item (`export { type Props }`); it must
+	// be followed by a name, so `export { type }` keeps a binding named type (#501).
+	exportTypeModifierRegex = regexp.MustCompile(`^type\s+([A-Za-z_$])`)
 	// Matches: export function/class/type/interface/enum name. const/let/var
 	// are handled separately by exportMultiDeclRegex below, because a single
 	// declaration can bind more than one name (`export const A = 1, B = 2;`).
@@ -1152,6 +1155,7 @@ func extractExports(source string) []string {
 				if idx := strings.Index(name, " as "); idx >= 0 {
 					name = strings.TrimSpace(name[idx+len(" as "):])
 				}
+				name = exportTypeModifierRegex.ReplaceAllString(name, "$1")
 				if name != "" {
 					exports = append(exports, name)
 				}

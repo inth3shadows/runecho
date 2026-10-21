@@ -2580,7 +2580,7 @@ func TestKnownSet_Go_SeedCanOnlyRemoveNames(t *testing.T) {
 	for _, seed := range []string{"", "`", "*/"} {
 		fn := func(int) string { return seed }
 		subset("knownDefs/"+seed, knownDefs(LangGo, hunk, fn, nil), ExtractDefs(LangGo, hunk))
-		subset("goDeclaredNames/"+seed, goDeclaredNamesSeeded(hunk, fn), GoDeclaredNames(hunk))
+		subset("goDeclaredNames/"+seed, goDeclaredNamesSeeded(hunk, fn, nil), GoDeclaredNames(hunk))
 	}
 }
 

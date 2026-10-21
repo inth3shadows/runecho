@@ -906,6 +906,9 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 type hookSeeds struct {
 	open                             map[int]string
 	brace, bracket, defSig, paramSig map[int]int
+	// goBlock has an entry for every located block, zero included (see
+	// guard.FileDiff.GoBlockByLine); Go only.
+	goBlock map[int]guard.GoBlockState
 }
 
 // hookSeedMaps builds all of an edit's per-block seeds from one
@@ -949,6 +952,12 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 		setInt(&s.bracket, start, st.Bracket)
 		setInt(&s.defSig, start, st.DefSig)
 		setInt(&s.paramSig, start, st.ParamSig)
+		if lang == guard.LangGo {
+			if s.goBlock == nil {
+				s.goBlock = make(map[int]guard.GoBlockState)
+			}
+			s.goBlock[start] = st.GoBlock
+		}
 	}
 	return s
 }
@@ -960,6 +969,7 @@ func (s hookSeeds) applyTo(fd *guard.FileDiff) {
 	fd.PyBracketDepthByLine = s.bracket
 	fd.PyDefSigDepthByLine = s.defSig
 	fd.PyParamSigDepthByLine = s.paramSig
+	fd.GoBlockByLine = s.goBlock
 }
 
 // hookBlockIndices resolves, per added-line block, the 0-based index in

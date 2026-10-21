@@ -2,6 +2,7 @@ package guard
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -556,7 +557,7 @@ func TestGoDeclaredNamesSeeded_WrappedSignature(t *testing.T) {
 		{LineNo: 30, Text: "\tstray int,"},
 		{LineNo: 31, Text: ") {"},
 	}
-	got := goDeclaredNamesSeeded(ls, seed)
+	got := goDeclaredNamesSeeded(ls, seed, nil)
 	if !slices.Contains(got, "next") || slices.Contains(got, "stray") {
 		t.Errorf("seeded wrapped signature: got %v, want next bound and stray not", got)
 	}
@@ -664,44 +665,107 @@ func TestGoDeclaredNames_WrappedGenericSignature(t *testing.T) {
 	}
 }
 
-// TestGoDeclaredNames_HunkGapBlockState pins #514: block state is unknown
-// across a hunk gap. Lines after the gap are not block entries (the block may
-// have closed unseen), and a later opener re-enters rather than reading as
-// nesting. A block wholly inside one hunk, and whole-file input, are unchanged.
-func TestGoDeclaredNames_HunkGapBlockState(t *testing.T) {
-	sorted := func(in []AddedLine) []string {
-		out := GoDeclaredNames(in)
-		sort.Strings(out)
-		return out
-	}
-	mk := func(nos []int, texts []string) []AddedLine {
-		var out []AddedLine
-		for i := range nos {
-			out = append(out, AddedLine{LineNo: nos[i], Text: texts[i]})
-		}
-		return out
-	}
-	cases := []struct {
+// TestGoDeclaredNamesSeeded_BlockStateFromFile pins #514: at each hunk start
+// the block state comes from the file (the seed table), not from the hunk's own
+// lines. A block that closed in the gap binds nothing after it, an opener after
+// the gap starts a block of its own, and a hunk that begins inside a block
+// reads its entries in the block's real state.
+func TestGoDeclaredNamesSeeded_BlockStateFromFile(t *testing.T) {
+	for _, c := range []struct {
 		name string
-		in   []AddedLine
+		file string
+		nos  []int // 1-based lines of file that are the hunk
 		want []string
 	}{
-		{"over-binding after gap",
-			mk([]int{1, 2, 50, 51}, []string{"var (", "\tv = 1", "\tfmt.Println(x)", "\tdoThing x"}),
-			[]string{"v"}},
-		{"opener after gap re-enters",
-			AddedLinesWithGap([]string{"const (\n\tA = iota", "const (\n\tX = iota\n\tY\n)"}),
-			[]string{"A", "X", "Y"}},
-		{"block inside one hunk still binds",
-			mk([]int{10, 11, 12, 13}, []string{"var (", "\ta = 1", "\tb int", ")"}),
-			[]string{"a", "b"}},
-		{"whole file unchanged",
-			TextToAddedLines("package p\n\nvar (\n\ta = 1\n\tb int\n)\n\nconst (\n\tA = iota\n\tB\n)\n"),
-			[]string{"A", "B", "a", "b"}},
-	}
-	for _, c := range cases {
-		if got := sorted(c.in); !slices.Equal(got, c.want) {
+		{"block closed in the gap: body lines bind nothing",
+			"var (\n\tv = 1\n)\n\nfunc f() {\n\tfmt.Println(x)\n\tdoThing x\n}\n",
+			[]int{1, 2, 6, 7}, []string{"v"}},
+		{"body assignment after a closed block",
+			"var (\n\ta = 1\n)\n\nfunc f() {\n\terr = g()\n}\n",
+			[]int{1, 2, 6}, []string{"a"}},
+		{"opener after a gap starts its own block",
+			"const (\n\tA = iota\n\tB\n)\n\nconst (\n\tX = iota\n\tY\n)\n",
+			[]int{1, 2, 6, 7, 8}, []string{"A", "X", "Y"}},
+		{"bare const repetition after a gap",
+			"const (\n\tA = iota\n\tB\n\tC\n)\n",
+			[]int{1, 2, 4}, []string{"A", "C"}},
+		{"entry after a gap, opener or operator above it (#509)",
+			"var (\n\terrs = map[int]string{\n\t\t1: \"a\",\n\t}\n\tx = a +\n\t\tb\n\ty int\n)\n",
+			[]int{1, 2, 7}, []string{"errs", "y"}},
+		{"continuation after a gap is not an entry",
+			"var (\n\tx = a +\n\t\tb\n\tz int\n)\n",
+			[]int{1, 3, 4}, []string{"z"}},
+		{"wrapped name list after a gap",
+			"var (\n\ta int\n\tp,\n\tq int\n)\n",
+			[]int{1, 2, 4}, []string{"a", "q"}},
+		{"composite-literal and generic entries after a gap",
+			"var (\n\ta = 1\n\tMax = UUID{\n\t\t0xff,\n\t}\n\tm = map[string]int{\n\t\t\"k\": 1,\n\t}\n)\n",
+			[]int{1, 2, 3, 6}, []string{"Max", "a", "m"}},
+		{"hunk that begins inside a block",
+			"var (\n\ta = 1\n\tb int\n)\n",
+			[]int{3}, []string{"b"}},
+		{"hunk that begins in a const block's repetition",
+			"const (\n\tA = iota\n\tB\n)\n",
+			[]int{3}, []string{"B"}},
+	} {
+		lines := strings.Split(c.file, "\n")
+		tb := buildSeedTable(LangGo, lines)
+		var hunk []AddedLine
+		for _, n := range c.nos {
+			hunk = append(hunk, AddedLine{LineNo: n, Text: lines[n-1]})
+		}
+		openSeed := func(n int) string { return tb.at(n).Open }
+		blockSeed := func(n int) (GoBlockState, bool) { return tb.at(n).GoBlock, true }
+		got := goDeclaredNamesSeeded(hunk, openSeed, blockSeed)
+		sort.Strings(got)
+		if !slices.Equal(got, c.want) {
 			t.Errorf("%s\n  got  %v\n  want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestGoDeclaredNamesSeeded_UnknownBlockKeepsGapReset: where the block seed
+// knows nothing (a hook block it could not locate), a gap keeps the #509
+// handling rather than reading the block as closed.
+func TestGoDeclaredNamesSeeded_UnknownBlockKeepsGapReset(t *testing.T) {
+	ls := []AddedLine{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\tx = a +"}, {LineNo: 10, Text: "\ty int"}}
+	unknown := func(int) (GoBlockState, bool) { return GoBlockState{}, false }
+	if got := goDeclaredNamesSeeded(ls, nil, unknown); !slices.Contains(got, "y") {
+		t.Errorf("entry after an unseeded gap not bound: %v", got)
+	}
+}
+
+// TestRun_GoBlockSeedReachesKnownSet pins validate.go's #514 wiring end to end:
+// on the pre-commit path (AbsPath), a body assignment after a gap in which the
+// block closed binds nothing, so a call through that name is still checked.
+// Without the file the gap keeps the #509 handling and the name binds.
+func TestRun_GoBlockSeedReachesKnownSet(t *testing.T) {
+	src := "package p\n\nvar (\n\tv = 1\n)\n\nfunc f() {\n\tghost = 1\n\tghost()\n}\n"
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(src, "\n")
+	var hunk []AddedLine
+	for _, n := range []int{3, 4, 8, 9} {
+		hunk = append(hunk, AddedLine{LineNo: n, Text: lines[n-1]})
+	}
+	flagged := func(fd FileDiff) bool {
+		for _, v := range Run(map[string]struct{}{}, "", []FileDiff{fd}) {
+			if v.Symbol == "ghost" {
+				return true
+			}
+		}
+		return false
+	}
+	if !flagged(FileDiff{Path: "a.go", AbsPath: p, AddedLines: hunk}) {
+		t.Errorf("seeded: ghost bound by a body assignment after the block closed")
+	}
+	if flagged(FileDiff{Path: "a.go", AddedLines: hunk}) {
+		t.Errorf("control: unseeded, the #509 gap handling should still bind ghost")
+	}
+	// The hook path's map carries the same state.
+	if !flagged(FileDiff{Path: "a.go", AddedLines: hunk, GoBlockByLine: map[int]GoBlockState{3: {}, 8: {}}}) {
+		t.Errorf("hook map: ghost bound despite a located block outside any var block")
 	}
 }

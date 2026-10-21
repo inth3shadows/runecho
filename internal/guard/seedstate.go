@@ -12,7 +12,8 @@ import (
 // dict nesting for pyBraceDepth (#289), general bracket depth for
 // PyDeclaredNames (#294), LocallyBoundNames' paren-only def-signature depth
 // (#294), and PyParamNames' own all-bracket def-signature depth (#294). The two
-// signature depths are DIFFERENT rules; see PyParamSigDepthBefore's doc.
+// signature depths are DIFFERENT rules; see PyParamSigDepthBefore's doc. For
+// Go only, GoBlock is GoDeclaredNames' var/const/type block state (#514).
 //
 // Before #335 each field had its own hand-kept per-line rule in two places (a
 // pre-commit prefix builder and a hook *Before walker), ten copies in all, and
@@ -21,15 +22,28 @@ import (
 type SeedState struct {
 	Open                             string
 	Brace, Bracket, DefSig, ParamSig int
+	GoBlock                          GoBlockState
 }
 
 // advanceSeed threads st through one line and returns the state at the start
 // of the next. It is the single per-line rule for every seed: one
 // stripLiteralsBraces call feeds all five trackers. Outside Python only Open is
-// tracked; the depths are never consulted there.
+// tracked; the depths are never consulted there. Go also tracks GoBlock.
 func advanceSeed(lang Lang, st SeedState, line string) SeedState {
 	scan, braceScan, open := stripLiteralsBraces(lang, line, st.Open)
 	next := SeedState{Open: open}
+	if lang == LangGo {
+		// The same scan and comment-line skip goDeclaredNamesScan feeds its own
+		// tracker, so a seed is exactly the state that scan would have reached.
+		next.GoBlock = st.GoBlock
+		if !isCommentLine(LangGo, line) {
+			if !goNeedsStrip(line, st.Open) {
+				scan = withoutLineComment(line)
+			}
+			next.GoBlock.advance(scan)
+		}
+		return next
+	}
 	if lang != LangPython {
 		return next
 	}
@@ -81,9 +95,10 @@ func advanceSeed(lang Lang, st SeedState, line string) SeedState {
 // a full SeedState whose depths are always 0 there; the depths are int32
 // (a file is capped at 8 MiB, so no depth can exceed that).
 type seedTable struct {
-	lang  Lang
-	open  []string
-	depth []seedDepths // Python only; nil otherwise
+	lang    Lang
+	open    []string
+	depth   []seedDepths   // Python only; nil otherwise
+	goBlock []GoBlockState // Go only; nil otherwise
 }
 
 type seedDepths struct{ brace, bracket, defSig, paramSig int32 }
@@ -93,9 +108,15 @@ func buildSeedTable(lang Lang, lines []string) *seedTable {
 	if lang == LangPython {
 		t.depth = make([]seedDepths, len(lines)+1)
 	}
+	if lang == LangGo {
+		t.goBlock = make([]GoBlockState, len(lines)+1)
+	}
 	var st SeedState
 	for i := 0; ; i++ {
 		t.open[i] = st.Open
+		if t.goBlock != nil {
+			t.goBlock[i] = st.GoBlock
+		}
 		if t.depth != nil {
 			t.depth[i] = seedDepths{int32(st.Brace), int32(st.Bracket), int32(st.DefSig), int32(st.ParamSig)}
 		}
@@ -121,6 +142,9 @@ func (t *seedTable) at(lineNo int) SeedState {
 	if t.depth != nil {
 		d := t.depth[idx]
 		st.Brace, st.Bracket, st.DefSig, st.ParamSig = int(d.brace), int(d.bracket), int(d.defSig), int(d.paramSig)
+	}
+	if t.goBlock != nil {
+		st.GoBlock = t.goBlock[idx]
 	}
 	return st
 }

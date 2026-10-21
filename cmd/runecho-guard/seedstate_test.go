@@ -375,6 +375,36 @@ inside line
 	}
 }
 
+// TestHookSeedMapsGoBlock pins the Go block-state seed (#514): every located
+// block gets an entry, the zero state included (a missing entry means
+// "unknown", not "outside a block"), and applyTo routes it to the FileDiff.
+func TestHookSeedMapsGoBlock(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar (\n\ta = 1\n\tb int\n)\n\nfunc f() {\n\tg()\n}\n")
+	edits := []editOp{
+		{OldString: "\tb int", NewString: "\tb int64"}, // inside the block, synthetic line 1
+		{OldString: "\tg()", NewString: "\tg(1)"},      // outside it, line 3
+		{OldString: "\tmissing()", NewString: "\tx()"}, // not located, line 5
+	}
+	s := hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo)
+	if len(s.goBlock) != 2 {
+		t.Fatalf("goBlock = %v, want entries for the two located blocks only", s.goBlock)
+	}
+	if b, ok := s.goBlock[3]; !ok || b != (guard.GoBlockState{}) {
+		t.Errorf("block outside any var block: %+v (present %v), want a present zero state", b, ok)
+	}
+	if s.goBlock[1] == (guard.GoBlockState{}) {
+		t.Errorf("block inside `var (` carries the zero state")
+	}
+	var fd guard.FileDiff
+	s.applyTo(&fd)
+	if len(fd.GoBlockByLine) != 2 {
+		t.Errorf("applyTo did not route goBlock: %v", fd.GoBlockByLine)
+	}
+	if py := hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangPython); py.goBlock != nil {
+		t.Errorf("non-Go goBlock map must be nil, got %v", py.goBlock)
+	}
+}
+
 // TestHookSeedsReachGuardRun pins the hook path's seed wiring end to end
 // (verify.go's hookSeedMaps(...).applyTo): the unit tests above check what
 // hookSeedMaps computes, but without this nothing failed when its result never

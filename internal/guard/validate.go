@@ -62,6 +62,8 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	// must not share a seed). Hoisted the same way as openSeeds/braceSeeds.
 	bracketSeeds := make([]func(lineNo int) int, len(diffs))
 	paramSigSeeds := make([]func(lineNo int) int, len(diffs))
+	// goBlockSeeds is GoDeclaredNames' block-state seed (#514).
+	goBlockSeeds := make([]func(lineNo int) (GoBlockState, bool), len(diffs))
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		fd = fd.withSeeds()
@@ -69,6 +71,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		braceSeeds[i] = braceDepthSeedFunc(lang, fd)
 		bracketSeeds[i] = bracketDepthSeedFunc(lang, fd)
 		paramSigSeeds[i] = paramSigDepthSeedFunc(lang, fd)
+		goBlockSeeds[i] = goBlockSeedFunc(lang, fd)
 	}
 
 	// Pass 1: collect all new definitions AND imported names across the entire
@@ -132,7 +135,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// were affected: every Edit hunk, and every Write creating a new Go file
 		// (where readFileLines returns nil and nothing is folded at all).
 		if lang == LangGo {
-			for _, name := range goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i]) {
+			for _, name := range goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], goBlockSeeds[i]) {
 				known[name] = struct{}{}
 			}
 		}
@@ -284,6 +287,33 @@ func defSigDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
 // ALL of ()/[]/{}, not parens alone.
 func paramSigDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
 	return depthSeedFunc(lang, fd, func(s SeedState) int { return s.ParamSig }, fd.PyParamSigDepthByLine)
+}
+
+// goBlockSeedFunc returns GoDeclaredNames' block-state seed for a diff: the
+// var/const/type block state at the START of each line (#514), so a hunk that
+// begins inside a block, or follows a gap in which one closed or opened, is
+// read in the file's real state rather than a guess from its own lines. ok is
+// false where no state is known (a hook block that was not located), and the
+// scan falls back to its unseeded gap handling there. nil outside Go.
+func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
+	if lang != LangGo {
+		return nil
+	}
+	if fd.AbsPath != "" {
+		t := fd.seedTable(lang)
+		if t == nil {
+			return nil
+		}
+		return func(lineNo int) (GoBlockState, bool) { return t.at(lineNo).GoBlock, true }
+	}
+	if len(fd.GoBlockByLine) > 0 {
+		byLine := fd.GoBlockByLine
+		return func(lineNo int) (GoBlockState, bool) {
+			b, ok := byLine[lineNo]
+			return b, ok
+		}
+	}
+	return nil
 }
 
 // matchesIgnoreGlob reports whether name matches any of the guardignore glob

@@ -107,6 +107,11 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if i > 0 && l.LineNo != prevNo+1 {
 			sig = "" // never join text across a hunk gap into one parameter list
+			// Nor carry an entry's opener or trailing operator across one: its
+			// other half is an unchanged line this scan never sees (#509).
+			if inVarBlock {
+				blockDepth, blockCont = 1, false
+			}
 		}
 		prevNo = l.LineNo
 		// Literal stripping allocates a fresh byte slice per line, and it is the
@@ -186,8 +191,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			// type-parameter list, a func literal's body and a composite literal's
 			// entries are all deeper than the block's entries, not entries.
 			before := blockDepth
-			blockDepth += strings.Count(scan, "(") + strings.Count(scan, "[") + strings.Count(scan, "{") -
-				strings.Count(scan, ")") - strings.Count(scan, "]") - strings.Count(scan, "}")
+			blockDepth += bracketDelta(scan)
 			if blockDepth <= 0 {
 				inVarBlock = false
 			} else {
@@ -243,16 +247,31 @@ const goTypeStart = `(?:<-\s*chan\b|\*+(?:[\pL_\[(]|<-\s*chan\b)|[A-Za-z_\[\]\.]
 
 var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
-	// `\b` after the names: without it a name the type pattern rejects
-	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
 	// A block line that is only names and a trailing comma: the next line
 	// continues the name list, not an expression.
 	reGoBlockNameList = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,\s*$`)
 	// A float literal ending in its dot (`tf0 float32 = 0.`), which is not a
 	// selector continued on the next line.
-	reGoFloatEnd      = regexp.MustCompile(`(?:^|[^\w.])\d[\d_]*\.$`)
+	reGoFloatEnd = regexp.MustCompile(`(?:^|[^\w.])\d[\d_]*\.$`)
+	// `\b` after the names: without it a name the type pattern rejects
+	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
 	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
 )
+
+// bracketDelta is the net count of openers ( [ { less closers ) ] } on a
+// masked line, in one pass.
+func bracketDelta(scan string) int {
+	d := 0
+	for i := 0; i < len(scan); i++ {
+		switch scan[i] {
+		case '(', '[', '{':
+			d++
+		case ')', ']', '}':
+			d--
+		}
+	}
+	return d
+}
 
 // goShortDeclNames returns the identifiers bound by every `:=` on the line,
 // found by walking LEFT from each operator rather than matching a line-anchored

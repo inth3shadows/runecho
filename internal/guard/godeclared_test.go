@@ -389,10 +389,10 @@ func TestGoDeclaredNames_CommentAfterBlockOpener(t *testing.T) {
 	}
 }
 
-// TestGoDeclaredNames_BlockCommentCloseOnParamLine pins #500 item 3: the
-// stripper blanks a carried block comment up to its `*/` but leaves the `*/`
-// itself, so on a wrapped-param line it sat between the comma and the next
-// name and reGoParamName's `[,(]\s*` anchor missed it.
+// TestGoDeclaredNames_BlockCommentCloseOnParamLine pins #500 item 3: a block
+// comment closing on a wrapped-param line must not hide the name after it. The
+// stripper used to leave the carried comment's `*/`, which sat between the comma
+// and the name so reGoParamName's `[,(]\s*` anchor missed it.
 func TestGoDeclaredNames_BlockCommentCloseOnParamLine(t *testing.T) {
 	cases := []struct {
 		src  string

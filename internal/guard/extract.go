@@ -2659,8 +2659,9 @@ func stripLiteralsBraces(lang Lang, text, open string) (string, string, string) 
 				// next name and hid wrapped Go params (#500). A string keeps its
 				// closing delimiter, as same-line strings do.
 				if open == "*/" {
-					out[i] = ' '
-					out[i+1] = ' '
+					for k := i; k < i+len(open); k++ {
+						out[k] = ' '
+					}
 				}
 				i += len(open)
 				open = ""

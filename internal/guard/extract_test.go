@@ -2774,8 +2774,8 @@ func TestStripLiteralsStateful_CarriedBlockCommentCloseIsBlanked(t *testing.T) {
 	if want := "   ` + x"; got != want || open != "" {
 		t.Errorf("raw string close: got %q open %q, want %q", got, open, want)
 	}
-	got, _ = stripLiteralsStateful(LangPython, `doc""" + y`, `"""`)
-	if want := `   """ + y`; got != want {
-		t.Errorf("triple-quote close: got %q, want %q", got, want)
+	got, open = stripLiteralsStateful(LangPython, `doc""" + y`, `"""`)
+	if want := `   """ + y`; got != want || open != "" {
+		t.Errorf("triple-quote close: got %q open %q, want %q open \"\"", got, open, want)
 	}
 }

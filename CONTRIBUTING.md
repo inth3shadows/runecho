@@ -24,8 +24,9 @@ go vet ./...
 gofmt -l .               # must print nothing
 ```
 
-CI runs the suite with `-race -cover`, and with `ruff` on PATH: some guard
-fixtures skip without it, so install `ruff` to run what CI runs.
+CI runs the suite with `-race -cover` (except `TestPyResolve`, which it runs
+separately without `-race`; under `-race` it outlasts the default test timeout),
+and with `ruff` on PATH: some guard fixtures skip without it.
 
 CI formats with the gofmt of the Go version in `go.mod`. A much newer local
 gofmt can disagree with it; if CI's Format step fails and yours doesn't, use
@@ -33,8 +34,8 @@ that version's gofmt.
 
 `bash install.sh` builds the three binaries **and installs them** into
 `$RUNECHO_BIN_DIR` (default `~/.local/bin`). If you use RunEcho's hooks yourself,
-that replaces the binaries they run. Set `RUNECHO_BIN_DIR=$PWD/bin` to keep a
-branch build separate.
+that replaces the binaries they run. To keep a branch build separate, point it
+outside the checkout, e.g. `RUNECHO_BIN_DIR="$(mktemp -d)" bash install.sh`.
 
 ## Pull requests
 
@@ -46,7 +47,8 @@ branch build separate.
   hallucination elsewhere. Say what you checked: a differential over a real corpus
   (for example GOROOT/src) and what changed, or why it can't change other inputs.
 - **The PR title sets the release.** PRs are squash-merged, and the squash
-  commit's subject is the PR title. A lowercase `docs:` or `chore:` (a scope
+  commit's subject is the PR title (a merge commit or a rebase merge would not
+  carry it, so maintainers squash). A lowercase `docs:` or `chore:` (a scope
   such as `docs(bench):` is fine) cuts no release, `guard:` or `parser:` cuts a
   minor release, and anything else, including `Docs:` or `docs!:`, cuts a patch.
 - **Keep a PR to one issue.** Reference it with `Fixes #N` only when it fixes all
@@ -56,12 +58,11 @@ Maintainers merge a PR only after review and with CI green.
 
 ## Credit
 
-PRs are squash-merged, which on its own would leave only the merger as the
-commit's author. So whenever a merged change includes your work, whether your
-PR as-is or part of it reworked in another PR (for example because the code it
-touches changed while it was open), the squash commit carries a
-`Co-authored-by:` trailer with your GitHub identity, and GitHub lists you as a
-contributor. If your PR is superseded, we also comment on it to say what was used
+PRs are squash-merged, and the squash commit is authored by whoever opened the
+PR, so a PR of yours merged as-is credits you directly. When part of your PR is
+reworked into another PR instead (for example because the code it touches
+changed while it was open), that squash commit carries a `Co-authored-by:`
+trailer with your GitHub identity, and GitHub lists you as a contributor. If your PR is superseded, we also comment on it to say what was used
 and where it landed before closing it.
 
 ## Licensing

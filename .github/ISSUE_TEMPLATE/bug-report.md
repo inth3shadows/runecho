@@ -1,19 +1,21 @@
 ---
-name: Report a false positive or a missed defect
-about: The guard flagged something that exists, or missed something that doesn't
-title: "guard(<lang>): <what was flagged or missed>"
+name: Report a bug
+about: A guard false positive or missed defect, or a bug in runecho-ir, runecho-mcp, install.sh or self-update
+title: "<area>: <what went wrong>"
 labels: bug
 ---
 
 **What happened**
-<!-- What the guard said (the exact output line), or what it should have caught. -->
+<!-- The exact output line, error or log message. For the guard: what it flagged, or what it should have caught. -->
 
-**Smallest input that reproduces it**
+**Smallest input or steps that reproduce it**
+<!-- For the guard, paste a few lines of code in the block below and say which file extension. -->
+
 ```
-<!-- a few lines of code; say which file extension -->
+
 ```
 
 **What you expected**
 
 **Version**
-<!-- `runecho-guard --version` -->
+<!-- `runecho-guard --version` (or the version of the binary involved) -->

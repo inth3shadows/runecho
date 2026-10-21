@@ -60,10 +60,12 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement privately, through
-GitHub: open a private report from the repository's **Security** tab
-(**Report a vulnerability**, or
-https://github.com/inth3shadows/runecho/security/advisories/new) and say that it
-concerns conduct. Only the maintainers can see these reports.
+GitHub's private reporting on this repository: the **Security** tab, **Report a
+vulnerability** (https://github.com/inth3shadows/runecho/security/advisories/new).
+The form is built for vulnerabilities; put "Conduct report" in the title, and
+fill in the other fields however you like. A report is visible only to you, the
+maintainers and anyone you or they add to it, and conduct reports are never
+published.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

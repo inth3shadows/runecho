@@ -279,17 +279,15 @@ func TestGoDeclaredNames_BlockGluedProductVsGenericEntry(t *testing.T) {
 
 // TestGoDeclaredNames_BlockStateResetsAtHunkGap: in hunk mode only the added
 // lines are scanned, so an opener or a trailing operator whose other half is an
-// unchanged line must not carry across a gap (review on #509). Since #514 the
-// whole block state is unknown after a gap: an entry after it is not bound (the
-// block may have closed unseen; a false positive, the safe direction), and the
-// pre-gap names still are.
+// unchanged line must not carry across a gap and hide the next entry (review
+// on #509).
 func TestGoDeclaredNames_BlockStateResetsAtHunkGap(t *testing.T) {
 	for _, ls := range [][]AddedLine{
 		{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\terrs = map[int]string{"}, {LineNo: 10, Text: "\ty int"}},
 		{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\tx = a +"}, {LineNo: 10, Text: "\ty int"}},
 	} {
-		if got := GoDeclaredNames(ls); slices.Contains(got, "y") {
-			t.Errorf("entry after a hunk gap bound (block state must be unknown): %v", got)
+		if got := GoDeclaredNames(ls); !slices.Contains(got, "y") {
+			t.Errorf("entry after a hunk gap not bound: %v", got)
 		}
 	}
 }

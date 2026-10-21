@@ -100,6 +100,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 	// A const block: a spec of names alone repeats the one above (`Bar` after
 	// `A = iota`) and declares them (#506, from #507).
 	constBlock := false
+	// Set at a hunk gap inside a block: the block may have closed unseen, so
+	// entries bind only while they look like gofmt'd ones (#514).
+	afterGap := false
 	// A wrapped `func` signature, joined line by line until its groups close
 	// (#473); sigLines bounds how far a group that never closes is carried.
 	sig, sigLines := "", 0
@@ -110,13 +113,17 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if i > 0 && l.LineNo != prevNo+1 {
 			sig = "" // never join text across a hunk gap into one parameter list
-			// Nor carry block state across one: whether the block is still open is
-			// decided in unseen lines, so lines after the gap are not trusted as
-			// entries (#514, over-binding), and a later opener re-enters instead of
-			// reading as nesting (under-binding). Trade-off: an entry after a gap
-			// whose opener is not in the hunk goes unbound, a false positive.
-			inVarBlock = false
-			blockDepth, blockCont, constBlock = 0, false, false
+			// Nor carry an entry's opener or trailing operator across one: its
+			// other half is an unchanged line this scan never sees (#509).
+			if inVarBlock {
+				blockDepth, blockCont = 1, false
+				// The block may have closed in those unseen lines too, so a bare
+				// identifier after the gap is not trusted as a const repetition.
+				constBlock = false
+				// ...and so may the block itself (#514): stay in it only
+				// tentatively, until a line that is not shaped like an entry.
+				afterGap = true
+			}
 		}
 		prevNo = l.LineNo
 		// Literal stripping allocates a fresh byte slice per line, and it is the
@@ -180,10 +187,14 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// carry no keyword of their own, so the block has to be tracked. Entry
 		// requires the paren to stay open past the line; a single-line
 		// `var (x = 1)` is already covered by reGoVarConst.
+		if inVarBlock && afterGap && hasGoDeclKeyword(scan) && reGoVarBlockOpen.MatchString(scan) {
+			// A fresh opener after a gap is a new block, not nesting (#514).
+			inVarBlock, afterGap = false, false
+		}
 		if !inVarBlock {
 			if hasGoDeclKeyword(scan) {
 				if m := reGoVarBlockOpen.FindStringSubmatch(scan); m != nil {
-					inVarBlock, blockDepth, blockCont = true, 1, false
+					inVarBlock, blockDepth, blockCont, afterGap = true, 1, false, false
 					constBlock = m[1] == "const"
 				}
 			}
@@ -201,7 +212,10 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			before := blockDepth
 			blockDepth += bracketDelta(scan)
 			if blockDepth <= 0 {
-				inVarBlock = false
+				inVarBlock, afterGap = false, false
+			} else if afterGap && before == 1 && strings.TrimSpace(scan) != "" && !goLooksLikeBlockEntry(scan) {
+				// First non-entry after a gap: the block closed unseen. Bind nothing.
+				inVarBlock, afterGap = false, false
 			} else {
 				// Only lines at the block's own depth declare names, and not one that
 				// continues the expression above it: gofmt glues a product there
@@ -461,4 +475,43 @@ func goFuncGroups(scan string) (out []string, open string) {
 		}
 	}
 	return out, ""
+}
+
+var (
+	// Entry shapes gofmt writes: `names Type` (space before the type) or `names =`.
+	reGoEntryType   = regexp.MustCompile(`^\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s+` + goTypeStart)
+	reGoEntryAssign = regexp.MustCompile(`^\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s*=(?:$|[^=])`)
+	reGoFirstWord   = regexp.MustCompile(`^\s*([A-Za-z_]\w*)`)
+)
+
+var goStmtKeywords = map[string]bool{
+	"return": true, "if": true, "else": true, "for": true, "switch": true, "select": true,
+	"case": true, "default": true, "go": true, "defer": true, "break": true,
+	"continue": true, "goto": true, "fallthrough": true,
+}
+
+// goLooksLikeBlockEntry reports whether a line at block depth after a hunk gap
+// is shaped like a gofmt'd var/const/type entry (#514). Deliberately strict: a
+// miss only leaves a name unbound, a false positive in the safe direction.
+func goLooksLikeBlockEntry(scan string) bool {
+	if strings.Contains(scan, ":=") {
+		return false
+	}
+	if m := reGoFirstWord.FindStringSubmatch(scan); m == nil || goStmtKeywords[m[1]] {
+		return false
+	}
+	t := strings.TrimSpace(scan)
+	typed := reGoEntryType.MatchString(scan)
+	if !typed && !reGoEntryAssign.MatchString(scan) {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(t, "}"), strings.HasSuffix(t, ")"):
+		// A balanced trailing group (`= syscall.Errno(0x4a)`) is a whole entry;
+		// an unbalanced one closes something opened above the gap.
+		return bracketDelta(scan) == 0
+	case strings.HasSuffix(t, "{"):
+		return typed
+	}
+	return true
 }

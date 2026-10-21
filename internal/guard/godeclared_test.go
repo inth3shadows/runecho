@@ -134,6 +134,10 @@ func TestGoDeclaredNames_ReceiveOnlyChanParam(t *testing.T) {
 	if missing := hasAll(got, "xs", "out"); len(missing) > 0 {
 		t.Errorf("variadic / named-result channel not bound: missing %v (got %v)", missing, got)
 	}
+	got = declaredNames("package p\n\nfunc g(a, b <- chan int) {\n}\n")
+	if missing := hasAll(got, "a", "b"); len(missing) > 0 {
+		t.Errorf("spaced `<- chan` not bound: missing %v (got %v)", missing, got)
+	}
 	got = declaredNames("package p\n\nvar (\n\tin <-chan int\n\tn  int\n)\n")
 	if !slices.Equal(got, []string{"in", "n"}) {
 		t.Errorf("var block with a receive-only channel: got %v, want [in n]", got)
@@ -150,6 +154,7 @@ func TestGoDeclaredNames_ReceiveOnlyChanParam(t *testing.T) {
 		"package p\n\nvar r = (func(a int) bool)(x <= y)\n",
 		"package p\n\nvar r = (func(a int) bool)(f, x <-ch)\n",
 		"package p\n\nvar r = (func(a int) bool)(x <-1)\n",
+		"package p\n\nvar r = (func(a int) bool)(f, x <-chanVar)\n",
 	} {
 		got = declaredNames(src)
 		if slices.Contains(got, "x") || slices.Contains(got, "f") {

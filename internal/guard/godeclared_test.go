@@ -4,6 +4,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -222,5 +223,134 @@ func TestGoDeclaredNames_BlockCommentNotFolded(t *testing.T) {
 	FoldInFileDefs(known, lines, LangGo)
 	if v := Run(known, "", []FileDiff{{Path: "p.go", AddedLines: lines}}); len(v) != 1 || v[0].Symbol != "handler" {
 		t.Errorf("a call to a commented-out declaration is a real violation, got %+v", v)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureBindsParams pins #473: gofmt wraps a long
+// signature one parameter per line, and goFuncGroups stopped at the group that
+// did not close on the `func` line, so a bare call to a parameter (`next(w, r)`)
+// was flagged. The repro is the issue's fixture.
+func TestGoDeclaredNames_WrappedSignatureBindsParams(t *testing.T) {
+	src := `package p
+
+import "net/http"
+
+func middleware(
+	next http.HandlerFunc,
+	fn func() error,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = fn()
+		next(w, r)
+	}
+}
+
+func (s *server) handle(ctx context.Context,
+	req *Request) (resp *Response,
+	err error) {
+	return nil, nil
+}
+`
+	got := declaredNames(src)
+	if missing := hasAll(got, "next", "fn", "w", "r", "s", "ctx", "req", "resp", "err"); len(missing) > 0 {
+		t.Errorf("wrapped signature params not bound: missing %v (got %v)", missing, got)
+	}
+	// The body is not a parameter list: nothing inside it may be bound by the
+	// carried-over group.
+	if slices.Contains(got, "http") || slices.Contains(got, "error") {
+		t.Errorf("type names bound as params: %v", got)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureStopsAtGap: a hunk whose wrapped signature
+// is cut by a line gap must not join unrelated text into a parameter list.
+func TestGoDeclaredNames_WrappedSignatureStopsAtGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: "func f("},
+		{LineNo: 9, Text: "	stray int,"},
+		{LineNo: 10, Text: ") {"},
+	}
+	if got := GoDeclaredNames(ls); slices.Contains(got, "stray") {
+		t.Errorf("a line across a gap was bound as a parameter: %v", got)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureIgnoresCommentParens: a `//` comment on a
+// carried line is not masked by the pre-filtered stripper, so a paren inside it
+// must not shift the carried depth (review on #499).
+func TestGoDeclaredNames_WrappedSignatureIgnoresCommentParens(t *testing.T) {
+	src := "package p\n\nfunc New(\n\taddr string, // see (a\n\ttimeout int,\n) *S {\n\t// 1) step\n\tfoo bar\n\treturn nil\n}\n"
+	got := declaredNames(src)
+	if missing := hasAll(got, "addr", "timeout"); len(missing) > 0 {
+		t.Errorf("params after a comment paren not bound: missing %v (got %v)", missing, got)
+	}
+	if slices.Contains(got, "foo") {
+		t.Errorf("body text bound as a param: %v", got)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureCap: a group that never closes is dropped
+// after maxWrappedSigLines, and a signature opened on the line that closes the
+// previous one gets its own budget.
+func TestGoDeclaredNames_WrappedSignatureCap(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("func f(\n")
+	for i := 0; i < maxWrappedSigLines+5; i++ {
+		b.WriteString("\tx int,\n")
+	}
+	b.WriteString("\tlate int,\n) {}\n")
+	if got := GoDeclaredNames(TextToAddedLines(b.String())); slices.Contains(got, "late") {
+		t.Errorf("a group past the cap was still carried: %v", got)
+	}
+
+	b.Reset()
+	b.WriteString("func g(\n")
+	for i := 0; i < maxWrappedSigLines-2; i++ {
+		b.WriteString("\ta int,\n")
+	}
+	b.WriteString(") { go func(\n")
+	for i := 0; i < 10; i++ {
+		b.WriteString("\tb int,\n")
+	}
+	b.WriteString("\tlast int,\n) {}()\n}\n")
+	if missing := hasAll(GoDeclaredNames(TextToAddedLines(b.String())), "a", "b", "last"); len(missing) > 0 {
+		t.Errorf("second signature inherited the first one's budget: missing %v", missing)
+	}
+}
+
+// TestGoDeclaredNamesSeeded_WrappedSignature: the hunk path binds a wrapped
+// signature too, and resets it at a gap.
+func TestGoDeclaredNamesSeeded_WrappedSignature(t *testing.T) {
+	seed := func(int) string { return "" }
+	ls := []AddedLine{
+		{LineNo: 3, Text: "func h("},
+		{LineNo: 4, Text: "\tnext Handler,"},
+		{LineNo: 5, Text: ") {"},
+		{LineNo: 20, Text: "func k("},
+		{LineNo: 30, Text: "\tstray int,"},
+		{LineNo: 31, Text: ") {"},
+	}
+	got := goDeclaredNamesSeeded(ls, seed)
+	if !slices.Contains(got, "next") || slices.Contains(got, "stray") {
+		t.Errorf("seeded wrapped signature: got %v, want next bound and stray not", got)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureTrailingComments: one comment per
+// parameter is ordinary gofmt output; the comment text must neither hide the
+// next parameter nor bind its own words, and a `func (` inside a comment must
+// not open a carry that shadows the real signature after it (review on #499).
+func TestGoDeclaredNames_WrappedSignatureTrailingComments(t *testing.T) {
+	src := "package p\n\nfunc f(\n\tnext http.HandlerFunc, // downstream handler\n\tfn func() error,\n\ttimeout int, // seconds, in total\n\tretries int,\n) {\n}\n"
+	got := declaredNames(src)
+	if missing := hasAll(got, "next", "fn", "timeout", "retries"); len(missing) > 0 {
+		t.Errorf("params after a trailing comment not bound: missing %v (got %v)", missing, got)
+	}
+	if slices.Contains(got, "in") {
+		t.Errorf("a word from a comment was bound: %v", got)
+	}
+	src = "package p\n\nx := 1 // wraps func (see below\nfunc real(\n\ta int,\n) {\n}\n"
+	if missing := hasAll(declaredNames(src), "x", "a"); len(missing) > 0 {
+		t.Errorf("a func in a comment shadowed the real signature: missing %v", missing)
 	}
 }

@@ -85,18 +85,25 @@ func goDeclaredNamesSeeded(lines []AddedLine, openSeed func(lineNo int) string) 
 	return intersectNames(goDeclaredNamesScan(lines, openSeed), goDeclaredNamesScan(lines, nil))
 }
 
-// goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed it is
-// exactly the historical whole-file scan (no reset at line gaps); with one, the
-// literal state is taken from the seed at the start of every contiguous run.
+// goDeclaredNamesScan is the GoDeclaredNames pass. With a nil openSeed the
+// literal state carries across line gaps (the historical whole-file scan); with
+// one, it is taken from the seed at the start of every contiguous run. A wrapped
+// signature is dropped at a gap either way.
 func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string) []string {
 	seen := make(map[string]struct{})
 	open := ""
 	inVarBlock := false
 	blockDepth := 0
+	// A wrapped `func` signature, joined line by line until its groups close
+	// (#473); sigLines bounds how far a group that never closes is carried.
+	sig, sigLines := "", 0
 	prevNo := 0
 	for i, l := range fileLines {
 		if openSeed != nil && (i == 0 || l.LineNo != prevNo+1) {
 			open = openSeed(l.LineNo)
+		}
+		if i > 0 && l.LineNo != prevNo+1 {
+			sig = "" // never join text across a hunk gap into one parameter list
 		}
 		prevNo = l.LineNo
 		// Literal stripping allocates a fresh byte slice per line, and it is the
@@ -116,6 +123,19 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if isCommentLine(LangGo, l.Text) {
 			continue
+		}
+		if sig != "" {
+			sigLines++
+			joined := sig + " " + withoutLineComment(scan)
+			groups, rest := goFuncGroups(joined)
+			bindFuncGroups(seen, groups)
+			if rest != joined {
+				sigLines = 0 // a new signature opened on the line that closed the last
+			}
+			sig = rest
+			if sigLines >= maxWrappedSigLines {
+				sig = ""
+			}
 		}
 		// Cheap pre-filters before any regex. This pass runs on every Go hook
 		// invocation inside a ~12ms end-to-end budget, and the unfiltered version
@@ -166,10 +186,10 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
 		if strings.Contains(scan, "func") {
-			for _, group := range goFuncGroups(scan) {
-				for _, p := range reGoParamName.FindAllStringSubmatch(group, -1) {
-					addList(seen, p[1])
-				}
+			groups, rest := goFuncGroups(withoutLineComment(scan))
+			bindFuncGroups(seen, groups)
+			if rest != "" && sig == "" {
+				sig, sigLines = rest, 0
 			}
 		}
 	}
@@ -179,6 +199,11 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 	}
 	return out
 }
+
+// maxWrappedSigLines caps how many lines a still-open signature group is joined
+// across. gofmt output closes one within a few dozen; a group that has not is
+// something else, and carrying it further only risks binding body text.
+const maxWrappedSigLines = 64
 
 var (
 	reGoVarBlockOpen  = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
@@ -245,6 +270,27 @@ func hasGoDeclKeyword(scan string) bool {
 	return strings.HasPrefix(rest, "var") || strings.HasPrefix(rest, "const") || strings.HasPrefix(rest, "type")
 }
 
+// bindFuncGroups records the parameter names in each group goFuncGroups returned.
+func bindFuncGroups(seen map[string]struct{}, groups []string) {
+	for _, group := range groups {
+		for _, p := range reGoParamName.FindAllStringSubmatch(group, -1) {
+			addList(seen, p[1])
+		}
+	}
+}
+
+// withoutLineComment cuts a trailing `//` comment from a carried signature line.
+// The stripper only runs on lines with a quote or `/*` (see the pre-filter
+// above), so an unmasked comment survives in scan, and a paren inside it would
+// shift the depth carried to the following lines. Any `//` still in scan is a
+// comment: string content has already been masked whenever a quote is present.
+func withoutLineComment(scan string) string {
+	if i := strings.Index(scan, "//"); i >= 0 {
+		return scan[:i]
+	}
+	return scan
+}
+
 // addList records every identifier in a captured left-hand side, skipping the
 // blank identifier.
 func addList(seen map[string]struct{}, lhs string) {
@@ -260,11 +306,11 @@ func addList(seen map[string]struct{}, lhs string) {
 // tracked, so a group whose content contains its own parens is returned whole
 // rather than cut at the first close paren.
 //
-// scan must already have string and comment content masked; an unbalanced line
-// (a signature wrapped across lines) simply yields the groups that do close,
-// which under-collects rather than mis-collects.
-func goFuncGroups(scan string) []string {
-	var out []string
+// scan must already have string and comment content masked. A group still open
+// at the end of scan (a signature gofmt wrapped across lines) is not guessed at:
+// the groups that closed are returned, and open is scan from that group's `func`
+// keyword on, for the caller to join to the following lines and scan again (#473).
+func goFuncGroups(scan string) (out []string, open string) {
 	for _, loc := range reGoFunc.FindAllStringIndex(scan, -1) {
 		i := loc[1]
 		for i < len(scan) {
@@ -281,7 +327,7 @@ func goFuncGroups(scan string) []string {
 					}
 				}
 				if depth != 0 {
-					return out // unbalanced: stop rather than guess
+					return out, scan[loc[0]:]
 				}
 				out = append(out, scan[start:j-1])
 				i = j
@@ -293,5 +339,5 @@ func goFuncGroups(scan string) []string {
 			i++
 		}
 	}
-	return out
+	return out, ""
 }

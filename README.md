@@ -270,6 +270,11 @@ not general-purpose code intelligence.
 - [False-positive audit](bench/FPAUDIT.md) — the guard's fp/premature/stands rate against git history, and why approval rate isn't a false-positive proxy
 - [Changelog](CHANGELOG.md) — notable changes per release; versioning policy
 
+## Contributing
+
+Reports and fixes are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

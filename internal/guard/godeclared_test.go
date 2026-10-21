@@ -267,6 +267,23 @@ func TestGoDeclaredNames_DroppedCarryKeepsInnerLiterals(t *testing.T) {
 	if got := GoDeclaredNames(gap); !slices.Contains(got, "k") {
 		t.Errorf("func literal param lost when the carry was cut by a hunk gap: %v", got)
 	}
+	// The added lines can also simply stop inside the call.
+	if got := GoDeclaredNames(gap[:2]); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the input ended inside the call: %v", got)
+	}
+	// #504's exclusion still holds for a carry that is dropped: a func-typed
+	// constraint or param inside a real wrapped signature binds nothing.
+	for _, ls := range [][]AddedLine{
+		{{LineNo: 1, Text: "func Map["}, {LineNo: 2, Text: "\tF func(x int) bool,"}, {LineNo: 9, Text: "\tother(q)"}},
+		{{LineNo: 1, Text: "func Register("}, {LineNo: 2, Text: "\thandler func(ctx int, req string) error,"}, {LineNo: 9, Text: "\tother(q)"}},
+	} {
+		got := GoDeclaredNames(ls)
+		for _, bogus := range []string{"x", "ctx", "req"} {
+			if slices.Contains(got, bogus) {
+				t.Errorf("%q bound from inside a dropped signature: %v", bogus, got)
+			}
+		}
+	}
 }
 
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {

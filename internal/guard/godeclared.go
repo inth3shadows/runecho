@@ -109,7 +109,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// Literal stripping allocates a fresh byte slice per line, and it is the
 		// single largest cost in this pass. A line with no quote character cannot
 		// open, close or contain a literal, so when no multi-line literal is
-		// already open its text is its own scan. Most lines qualify, which is what
+		// already open its text, less a trailing `//` comment, is its own scan. Most lines qualify, which is what
 		// takes this pass from 6.75ms to well under 1ms on a 2,200-line file.
 		scan := l.Text
 		// `/*` is checked alongside the quote characters because a block-comment
@@ -120,10 +120,12 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// calls strictly worse than a false positive.
 		if open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*") {
 			scan, open = stripLiteralsStateful(LangGo, l.Text, open)
+		} else {
+			// The stripper did not run, so a trailing comment survives in scan; cut
+			// it once for every extractor below (#500). Stripped lines have theirs
+			// blanked already.
+			scan = withoutLineComment(scan)
 		}
-		// The stripper is skipped on most lines, so a trailing comment survives in
-		// scan; cut it once for every extractor below (#500).
-		scan = withoutLineComment(scan)
 		if isCommentLine(LangGo, l.Text) {
 			continue
 		}

@@ -372,3 +372,19 @@ func TestGoDeclaredNames_TrailingCommentBindsNothing(t *testing.T) {
 		t.Errorf("text outside the var block bound: %v", got)
 	}
 }
+
+// TestGoDeclaredNames_CommentAfterBlockOpener: with the comment cut, a
+// `var ( // note` opener now starts a block (before, the trailing comment failed
+// reGoVarBlockOpen and nothing inside was bound). A quoted line's own `//` stays
+// masked, and the comment after it binds nothing.
+func TestGoDeclaredNames_CommentAfterBlockOpener(t *testing.T) {
+	got := declaredNames("package p\n\nvar ( // group\n\ta = 1\n\tb = 2\n)\n\nconst ( // c\n\tk = 1\n) // end\n\nfunc f() {\n\tu := \"http://x\" // y := 1\n\tv := 2 // w := \"q\"\n}\n")
+	if missing := hasAll(got, "a", "b", "k", "u", "v"); len(missing) > 0 {
+		t.Errorf("missing %v (got %v)", missing, got)
+	}
+	for _, bogus := range []string{"y", "w"} {
+		if slices.Contains(got, bogus) {
+			t.Errorf("%q bound from a comment: %v", bogus, got)
+		}
+	}
+}

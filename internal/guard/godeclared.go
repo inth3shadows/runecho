@@ -94,6 +94,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 	open := ""
 	inVarBlock := false
 	blockDepth := 0
+	// The last line at the block's own depth ended mid-expression (`a +`,
+	// `x &&`, `f(a,`), so the next one continues it rather than declaring.
+	blockCont := false
 	// A wrapped `func` signature, joined line by line until its groups close
 	// (#473); sigLines bounds how far a group that never closes is carried.
 	sig, sigLines := "", 0
@@ -169,7 +172,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// `var (x = 1)` is already covered by reGoVarConst.
 		if !inVarBlock {
 			if hasGoDeclKeyword(scan) && reGoVarBlockOpen.MatchString(scan) {
-				inVarBlock, blockDepth = true, 1
+				inVarBlock, blockDepth, blockCont = true, 1, false
 			}
 		} else {
 			// Depth, not "the first line starting with ')'". A wrapped call inside
@@ -178,15 +181,31 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			// name declared after it. This is the same nested-paren bug the parser's
 			// AST rewrite fixed for the exported half (internal/parser/go.go), and
 			// it came straight back in a regex extractor.
+			//
+			// Brackets and braces count too (#506): a struct's fields, a wrapped
+			// type-parameter list, a func literal's body and a composite literal's
+			// entries are all deeper than the block's entries, not entries.
 			before := blockDepth
-			blockDepth += strings.Count(scan, "(") - strings.Count(scan, ")")
+			blockDepth += strings.Count(scan, "(") + strings.Count(scan, "[") + strings.Count(scan, "{") -
+				strings.Count(scan, ")") - strings.Count(scan, "]") - strings.Count(scan, "}")
 			if blockDepth <= 0 {
 				inVarBlock = false
-			} else if before == 1 {
-				// Only lines at the block's own depth declare names; deeper lines are
-				// arguments to a wrapped call.
-				if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
-					addList(seen, m[1])
+			} else {
+				// Only lines at the block's own depth declare names, and not one that
+				// continues the expression above it: gofmt glues a product there
+				// (`total = a +` / `x*(y+1)`), which otherwise reads as `x *(T)`.
+				nameList := false
+				if before == 1 && !blockCont {
+					if m := reGoBlockDeclName.FindStringSubmatch(scan); m != nil {
+						addList(seen, m[1])
+					} else if m := reGoBlockNameList.FindStringSubmatch(scan); m != nil {
+						// `a,` / `b,` / `c Type`: a name list wrapped one per line.
+						addList(seen, m[1])
+						nameList = true
+					}
+				}
+				if t := strings.TrimRight(scan, " \t"); blockDepth == 1 && t != "" && !nameList {
+					blockCont = strings.ContainsAny(t[len(t)-1:], ",+-*/%&|^<>=!.:") && !reGoFloatEnd.MatchString(t)
 				}
 			}
 		}
@@ -226,13 +245,13 @@ var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
 	// `\b` after the names: without it a name the type pattern rejects
 	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
-	// A type needs whitespace before it: gofmt always writes `name Type`, and with
-	// none a continuation line gofmt glues (`x*(y+1)`, `x.Sel |`, `x[:],`) read
-	// as a declaration of x (#506). The one glued form gofmt does write is a
-	// generic type entry, `List[T any] struct{`, admitted only in type-parameter
-	// shape: names, whitespace, then a constraint (`any`, `~int`, `*T`, `[]T`).
-	// `=` may follow directly.
-	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b(?:\s+` + goTypeStart + `|\s*=|\[\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s+[A-Za-z_\[*(~])`)
+	// A block line that is only names and a trailing comma: the next line
+	// continues the name list, not an expression.
+	reGoBlockNameList = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,\s*$`)
+	// A float literal ending in its dot (`tf0 float32 = 0.`), which is not a
+	// selector continued on the next line.
+	reGoFloatEnd      = regexp.MustCompile(`(?:^|[^\w.])\d[\d_]*\.$`)
+	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
 )
 
 // goShortDeclNames returns the identifiers bound by every `:=` on the line,

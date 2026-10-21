@@ -204,6 +204,30 @@ func TestGoDeclaredNames_BlockGluedProductVsGenericEntry(t *testing.T) {
 	if missing := hasAll(declaredNames(src), want...); len(missing) > 0 {
 		t.Errorf("block declarations not bound: missing %v (got %v)", missing, declaredNames(src))
 	}
+
+	// gofmt layouts from the #509 review: a wrapped type-parameter list and a
+	// receive-only channel constraint still bind the type name; the wrapped
+	// list's own names, a func literal's body and a composite literal's entries
+	// are deeper than the block's entries and bind nothing; a comparison or a
+	// generic call continuing the line above binds nothing.
+	src = "package p\n\ntype (\n\tBig[\n\t\tK comparable,\n\t\tV any,\n\t] struct{ f K }\n\tG[T <-chan int] struct{}\n)\n\nvar (\n\th = func() {\n\t\terr = f()\n\t}\n\terrs = map[int]string{\n\t\tsqlite3.Abort: \"a\",\n\t}\n\tok = a &&\n\t\tx == y\n\tc = b ||\n\t\tMap[string, chan int](nil)\n\tlast int\n)\n"
+	got := declaredNames(src)
+	if missing := hasAll(got, "Big", "G", "h", "errs", "ok", "c", "last"); len(missing) > 0 {
+		t.Errorf("block entries not bound: missing %v (got %v)", missing, got)
+	}
+	for _, bogus := range []string{"K", "V", "f", "err", "sqlite3", "x", "Map"} {
+		if slices.Contains(got, bogus) {
+			t.Errorf("%q bound from inside an entry: %v", bogus, got)
+		}
+	}
+
+	// Shapes the corpus differential found the continuation rule must not
+	// swallow: a name list wrapped one name per line (x/sys's zsyscall files),
+	// and a float literal ending in its dot (go/types testdata).
+	got = declaredNames("package p\n\nvar (\n\tlibc_umount,\n\tlibc_lseek,\n\tlibc_mmap64 syscallFunc\n\tnext int\n)\n\nconst (\n\ttf0 float32 = 0.\n\ttf1 float32 = 1.\n)\n")
+	if missing := hasAll(got, "libc_umount", "libc_lseek", "libc_mmap64", "next", "tf0", "tf1"); len(missing) > 0 {
+		t.Errorf("wrapped name list / float-dot entries not bound: missing %v (got %v)", missing, got)
+	}
 }
 
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {

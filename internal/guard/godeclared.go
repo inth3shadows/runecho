@@ -307,7 +307,8 @@ func addList(seen map[string]struct{}, lhs string) {
 }
 
 // goFuncGroups returns the text inside each top-level parenthesised group that
-// follows a `func` keyword on scan, stopping at the body brace. Nesting is
+// follows a `func` keyword on scan, stopping at the body brace; a bracket group
+// (type parameters, `[]T`) is stepped over, not returned. Nesting is
 // tracked, so a group whose content contains its own parens is returned whole
 // rather than cut at the first close paren.
 //
@@ -335,6 +336,27 @@ func goFuncGroups(scan string) (out []string, open string) {
 					return out, scan[loc[0]:]
 				}
 				out = append(out, scan[start:j-1])
+				i = j
+				continue
+			case '[':
+				// A type-parameter list (or a `[]T` / `map[K]V` type). Its names are
+				// types, so it is skipped, not collected; stepping over it whole keeps
+				// a constraint's brace (`interface{ ~int }`) from reading as the body.
+				// Left open at end of line it is a wrapped signature like an open
+				// paren group (#500).
+				depth := 1
+				j := i + 1
+				for ; j < len(scan) && depth > 0; j++ {
+					switch scan[j] {
+					case '[':
+						depth++
+					case ']':
+						depth--
+					}
+				}
+				if depth != 0 {
+					return out, scan[loc[0]:]
+				}
 				i = j
 				continue
 			case '{':

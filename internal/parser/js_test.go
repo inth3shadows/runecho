@@ -638,6 +638,9 @@ func TestExtractExports_TypeModifier(t *testing.T) {
 		{"export { type as as X }\n", []string{"X"}},
 		{"export { type as }\n", []string{"as"}},
 		{"export {\n\ttype A,\n\tB as C,\n}\n", []string{"A", "C"}},
+		{"export { foo as 'str name' } from './m'\n", []string{"str name"}},
+		{"export { type 'a b' }\n", []string{"a b"}},
+		{"export { type A as \"B\" }\n", []string{"B"}},
 	}
 	for _, c := range cases {
 		if got := extractExports(c.src); !equalStringSlices(got, c.want) {

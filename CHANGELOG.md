@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.74.0] — 2026-10-21
+
+### Changed
+- guard: blank a carried block comment's closing */ (#500 item 3) (#503)
+
 ## [0.73.0] — 2026-10-21
 
 ### Changed

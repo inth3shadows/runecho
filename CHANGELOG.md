@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-10-21
+
+### Changed
+- guard(go): seed block state from the file at each hunk start (#514) (#515)
+
 ## [0.80.0] — 2026-10-21
 
 ### Changed

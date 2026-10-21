@@ -71,6 +71,53 @@ func run(ctx Context, name string) (n int, err error) {
 	}
 }
 
+// TestGoDeclaredNames_IotaContinuation is from #507 (by @jay23606): a bare
+// name in a const block repeats the previous spec and declares that name.
+func TestGoDeclaredNames_IotaContinuation(t *testing.T) {
+	got := declaredNames("package p\nconst (\n\tA = iota\n\tBar\n)\n")
+	if !slices.Equal(got, []string{"A", "Bar"}) {
+		t.Errorf("bare const continuation must bind exactly Bar; got %v", got)
+	}
+}
+
+// TestGoDeclaredNames_ConstRepetitionScope pins the edges of #506 item 4: a
+// repeated name list binds every name, a trailing comment does not matter, and
+// only const blocks repeat; a bare name that continues the expression above it,
+// or one in a var or type block (invalid Go), binds nothing.
+func TestGoDeclaredNames_ConstRepetitionScope(t *testing.T) {
+	got := declaredNames("package p\nconst (\n\tA, D = iota, iota\n\tB, C\n\tE // note\n)\n")
+	if !slices.Equal(got, []string{"A", "B", "C", "D", "E"}) {
+		t.Errorf("const repetition: got %v, want [A B C D E]", got)
+	}
+	got = declaredNames("package p\nconst (\n\tK = a +\n\t\tx\n\tL\n)\n")
+	if slices.Contains(got, "x") || !slices.Contains(got, "L") {
+		t.Errorf("continuation vs repetition: got %v, want L bound and x not", got)
+	}
+	got = declaredNames("package p\nvar (\n\tv int\n\tw\n)\ntype (\n\tT int\n\tU\n)\n")
+	if slices.Contains(got, "w") || slices.Contains(got, "U") {
+		t.Errorf("a bare name outside a const block was bound: %v", got)
+	}
+	// Hunk mode: after a gap the block may have closed in lines this scan never
+	// saw, so a bare identifier there is not trusted as a repetition (review on
+	// #512): an unchanged `X = FlagA |` continues on line 10, and lines 50-51
+	// are a function body.
+	for _, ls := range [][]AddedLine{
+		{{LineNo: 1, Text: "const ("}, {LineNo: 2, Text: "\tA = iota"}, {LineNo: 10, Text: "\t\tFlagB"}},
+		{{LineNo: 1, Text: "const ("}, {LineNo: 50, Text: "\treturn"}, {LineNo: 51, Text: "\tfoo"}},
+	} {
+		got := GoDeclaredNames(ls)
+		// Positive control: the spec before the gap still binds.
+		if ls[1].Text == "\tA = iota" && !slices.Contains(got, "A") {
+			t.Errorf("the spec before the gap was not bound: %v", got)
+		}
+		for _, bogus := range []string{"FlagB", "return", "foo"} {
+			if slices.Contains(got, bogus) {
+				t.Errorf("%q bound as a const repetition after a hunk gap: %v", bogus, got)
+			}
+		}
+	}
+}
+
 // TestGoDeclaredNames_NestedParenParamList is the regression that the
 // compiler-oracle differential caught within minutes of this extractor going
 // live. A func-typed parameter nests parentheses, and the original `[^)]*`

@@ -97,6 +97,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 	// The last line at the block's own depth ended mid-expression (`a +`,
 	// `x &&`, `f(a,`), so the next one continues it rather than declaring.
 	blockCont := false
+	// A const block: a spec of names alone repeats the one above (`Bar` after
+	// `A = iota`) and declares them (#506, from #507).
+	constBlock := false
 	// A wrapped `func` signature, joined line by line until its groups close
 	// (#473); sigLines bounds how far a group that never closes is carried.
 	sig, sigLines := "", 0
@@ -111,6 +114,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			// other half is an unchanged line this scan never sees (#509).
 			if inVarBlock {
 				blockDepth, blockCont = 1, false
+				// The block may have closed in those unseen lines too, so a bare
+				// identifier after the gap is not trusted as a const repetition.
+				constBlock = false
 			}
 		}
 		prevNo = l.LineNo
@@ -176,8 +182,11 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// requires the paren to stay open past the line; a single-line
 		// `var (x = 1)` is already covered by reGoVarConst.
 		if !inVarBlock {
-			if hasGoDeclKeyword(scan) && reGoVarBlockOpen.MatchString(scan) {
-				inVarBlock, blockDepth, blockCont = true, 1, false
+			if hasGoDeclKeyword(scan) {
+				if m := reGoVarBlockOpen.FindStringSubmatch(scan); m != nil {
+					inVarBlock, blockDepth, blockCont = true, 1, false
+					constBlock = m[1] == "const"
+				}
 			}
 		} else {
 			// Depth, not "the first line starting with ')'". A wrapped call inside
@@ -206,6 +215,10 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 						// `a,` / `b,` / `c Type`: a name list wrapped one per line.
 						addList(seen, m[1])
 						nameList = true
+					} else if constBlock {
+						if m := reGoBlockNamesOnly.FindStringSubmatch(scan); m != nil {
+							addList(seen, m[1])
+						}
 					}
 				}
 				if t := strings.TrimRight(scan, " \t"); blockDepth == 1 && t != "" && !nameList {
@@ -246,10 +259,13 @@ const maxWrappedSigLines = 64
 const goTypeStart = `(?:<-\s*chan\b|\*+(?:[\pL_\[(]|<-\s*chan\b)|[A-Za-z_\[\]\.])`
 
 var (
-	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
+	reGoVarBlockOpen = regexp.MustCompile(`^\s*(var|const|type)\s*\(\s*$`)
 	// A block line that is only names and a trailing comma: the next line
 	// continues the name list, not an expression.
 	reGoBlockNameList = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,\s*$`)
+	// A block line that is only names: in a const block, an implicit repetition
+	// of the spec above (`Bar` after `A = iota`).
+	reGoBlockNamesOnly = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*$`)
 	// A float literal ending in its dot (`tf0 float32 = 0.`), which is not a
 	// selector continued on the next line.
 	reGoFloatEnd = regexp.MustCompile(`(?:^|[^\w.])\d[\d_]*\.$`)

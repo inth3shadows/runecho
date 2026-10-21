@@ -365,7 +365,9 @@ func addList(seen map[string]struct{}, lhs string) {
 }
 
 // goFuncGroups returns the text inside each top-level parenthesised group that
-// follows a `func` keyword on scan, stopping at the body brace; a bracket group
+// follows a `func` keyword on scan, stopping at the body brace, or where the
+// func turns out to be a type inside a larger expression (an unmatched closer,
+// a top-level `=` or `,`), so open is never set for one; a bracket group
 // (type parameters, `[]T`) is stepped over, not returned. Nesting is
 // tracked, so a group whose content contains its own parens is returned whole
 // rather than cut at the first close paren.
@@ -428,10 +430,13 @@ func goFuncGroups(scan string) (out []string, open string) {
 			case '{':
 				i = len(scan) // body starts; no more signature groups
 				continue
-			case ')', ']':
-				// A closer this walk never opened: the func was a type nested in a
-				// group opened before its keyword (`NewCache[K, func() error](`,
-				// `(func(a int) bool)(x)`), and it has ended. What follows is that
+			case ')', ']', '=', ',':
+				// A closer this walk never opened, or a top-level `=` or `,`: the
+				// func was a type nested in a group opened before its keyword
+				// (`NewCache[K, func() error](`, `(func(a int) bool)(x)`), or it was
+				// a declared type with a value after it (`var cb func(int) int =
+				// compute(`, `make(chan func() error, n(`), and it has ended. A real
+				// signature has neither between its groups. What follows is the
 				// enclosing expression, not this func's signature, so it must not
 				// open a carry (#506).
 				i = len(scan)

@@ -122,6 +122,47 @@ func run(cfg HallucinatedConfig) {
 	}
 }
 
+// TestGoDeclaredNames_ReceiveOnlyChanParam pins #500 item 5: reGoParamName's
+// type-start class had no `<`, so a `<-chan T` parameter bound nothing. A bare
+// `<` (a comparison in a call group after func) must still bind nothing.
+func TestGoDeclaredNames_ReceiveOnlyChanParam(t *testing.T) {
+	got := declaredNames("package p\n\nfunc drain(in <-chan int, done <-chan struct{}, out chan<- int) {\n}\n")
+	if missing := hasAll(got, "in", "done", "out"); len(missing) > 0 {
+		t.Errorf("channel params not bound: missing %v (got %v)", missing, got)
+	}
+	got = declaredNames("package p\n\nfunc f(xs ...<-chan int) (out <-chan int) {\n}\n")
+	if missing := hasAll(got, "xs", "out"); len(missing) > 0 {
+		t.Errorf("variadic / named-result channel not bound: missing %v (got %v)", missing, got)
+	}
+	got = declaredNames("package p\n\nfunc g(a, b <- chan int) {\n}\n")
+	if missing := hasAll(got, "a", "b"); len(missing) > 0 {
+		t.Errorf("spaced `<- chan` not bound: missing %v (got %v)", missing, got)
+	}
+	got = declaredNames("package p\n\nvar (\n\tin <-chan int\n\tn  int\n)\n")
+	if !slices.Equal(got, []string{"in", "n"}) {
+		t.Errorf("var block with a receive-only channel: got %v, want [in n]", got)
+	}
+	// A type start the pattern does not know must not split the name either:
+	// without `\b` this bound "c" (and "a" for `as`).
+	got = declaredNames("package p\n\nvar (\n\tch (chan int)\n\tas (int)\n)\n")
+	if slices.Contains(got, "c") || slices.Contains(got, "a") {
+		t.Errorf("a var-block name was split into a shorter bogus name: %v", got)
+	}
+	// Comparisons, never types: `x <-1` is `x < -1` before gofmt.
+	for _, src := range []string{
+		"package p\n\nvar r = (func(a int) bool)(x < y)\n",
+		"package p\n\nvar r = (func(a int) bool)(x <= y)\n",
+		"package p\n\nvar r = (func(a int) bool)(f, x <-ch)\n",
+		"package p\n\nvar r = (func(a int) bool)(x <-1)\n",
+		"package p\n\nvar r = (func(a int) bool)(f, x <-chanVar)\n",
+	} {
+		got = declaredNames(src)
+		if slices.Contains(got, "x") || slices.Contains(got, "f") {
+			t.Errorf("a comparison operand was bound as a param in %q: %v", src, got)
+		}
+	}
+}
+
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {
 	src := "package p\n\n" +
 		"func run() {\n" +

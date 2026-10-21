@@ -388,3 +388,24 @@ func TestGoDeclaredNames_CommentAfterBlockOpener(t *testing.T) {
 		}
 	}
 }
+
+// TestGoDeclaredNames_BlockCommentCloseOnParamLine pins #500 item 3: a block
+// comment closing on a wrapped-param line must not hide the name after it. The
+// stripper used to leave the carried comment's `*/`, which sat between the comma
+// and the name so reGoParamName's `[,(]\s*` anchor missed it.
+func TestGoDeclaredNames_BlockCommentCloseOnParamLine(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{"package p\n\nfunc F(\n\ta int, /* note\n\t   more */\n\tc int,\n) {\n}\n", []string{"a", "c"}},
+		{"package p\n\nfunc F(\n\t/* note\n\t   more */\n\tc int,\n) {\n}\n", []string{"c"}},
+		{"package p\n\nfunc F(\n\ta int, /* note\n\t   more */ c int,\n\td int,\n) {\n}\n", []string{"a", "c", "d"}},
+		{"package p\n\nfunc F(\n\tp string, /* (legacy\n\tstill comment */ n int,\n\tm int,\n) {\n}\n", []string{"m", "n", "p"}},
+	}
+	for _, c := range cases {
+		if got := declaredNames(c.src); !slices.Equal(got, c.want) {
+			t.Errorf("%q\n  got  %v\n  want %v", c.src, got, c.want)
+		}
+	}
+}

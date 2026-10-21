@@ -2759,3 +2759,23 @@ func TestStripLiterals_JSRegexToggle(t *testing.T) {
 		t.Errorf("with jsRegexStrip off the pre-#437 reading must return, got %q", scan)
 	}
 }
+
+// TestStripLiteralsStateful_CarriedBlockCommentCloseIsBlanked pins #500 item 3:
+// a block comment closing on a continuation line blanks its `*/`, as the
+// same-line branch does, while a carried string keeps its closing delimiter.
+func TestStripLiteralsStateful_CarriedBlockCommentCloseIsBlanked(t *testing.T) {
+	for _, lang := range []Lang{LangGo, LangJS} {
+		got, open := stripLiteralsStateful(lang, "  more */ n int,", "*/")
+		if want := strings.Repeat(" ", len("  more */ ")) + "n int,"; got != want || open != "" {
+			t.Errorf("lang %v: got %q open %q, want %q open \"\"", lang, got, open, want)
+		}
+	}
+	got, open := stripLiteralsStateful(LangGo, "raw` + x", "`")
+	if want := "   ` + x"; got != want || open != "" {
+		t.Errorf("raw string close: got %q open %q, want %q", got, open, want)
+	}
+	got, open = stripLiteralsStateful(LangPython, `doc""" + y`, `"""`)
+	if want := `   """ + y`; got != want || open != "" {
+		t.Errorf("triple-quote close: got %q open %q, want %q open \"\"", got, open, want)
+	}
+}

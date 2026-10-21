@@ -109,7 +109,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// Literal stripping allocates a fresh byte slice per line, and it is the
 		// single largest cost in this pass. A line with no quote character cannot
 		// open, close or contain a literal, so when no multi-line literal is
-		// already open its text is its own scan. Most lines qualify, which is what
+		// already open its text, less a trailing `//` comment, is its own scan. Most lines qualify, which is what
 		// takes this pass from 6.75ms to well under 1ms on a 2,200-line file.
 		scan := l.Text
 		// `/*` is checked alongside the quote characters because a block-comment
@@ -120,13 +120,18 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// calls strictly worse than a false positive.
 		if open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*") {
 			scan, open = stripLiteralsStateful(LangGo, l.Text, open)
+		} else {
+			// The stripper did not run, so a trailing comment survives in scan; cut
+			// it once for every extractor below (#500). Stripped lines have theirs
+			// blanked already.
+			scan = withoutLineComment(scan)
 		}
 		if isCommentLine(LangGo, l.Text) {
 			continue
 		}
 		if sig != "" {
 			sigLines++
-			joined := sig + " " + withoutLineComment(scan)
+			joined := sig + " " + scan
 			groups, rest := goFuncGroups(joined)
 			bindFuncGroups(seen, groups)
 			if rest != joined {
@@ -186,7 +191,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
 		if strings.Contains(scan, "func") {
-			groups, rest := goFuncGroups(withoutLineComment(scan))
+			groups, rest := goFuncGroups(scan)
 			bindFuncGroups(seen, groups)
 			if rest != "" && sig == "" {
 				sig, sigLines = rest, 0
@@ -279,10 +284,10 @@ func bindFuncGroups(seen map[string]struct{}, groups []string) {
 	}
 }
 
-// withoutLineComment cuts a trailing `//` comment from a carried signature line.
-// The stripper only runs on lines with a quote or `/*` (see the pre-filter
-// above), so an unmasked comment survives in scan, and a paren inside it would
-// shift the depth carried to the following lines. Any `//` still in scan is a
+// withoutLineComment cuts a trailing `//` comment from scan. The stripper only
+// runs on lines with a quote or `/*` (see the pre-filter in goDeclaredNamesScan),
+// so an unmasked comment survives, and its words or parens would otherwise reach
+// the `:=`, var-block and signature extractors. Any `//` still in scan is a
 // comment: string content has already been masked whenever a quote is present.
 func withoutLineComment(scan string) string {
 	if i := strings.Index(scan, "//"); i >= 0 {

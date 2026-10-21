@@ -245,6 +245,62 @@ func TestGoDeclaredNames_BlockStateResetsAtHunkGap(t *testing.T) {
 	}
 }
 
+// TestGoDeclaredNames_DroppedCarryKeepsInnerLiterals pins #506 item 3: a func
+// TYPE inside a larger expression (`NewCache[K, func() error](`) opened a false
+// carry, and since lines joined into a carry are not scanned alone (#504), a
+// func literal on the following lines lost its params when the carry was
+// dropped (the line cap, a hunk gap, or the end of input). No carry opens now.
+func TestGoDeclaredNames_DroppedCarryKeepsInnerLiterals(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package p\n\nfunc f() {\n\tc := NewCache[string, func() error](\n\t\tfunc(k string) error { return k2(k) },\n")
+	for i := 0; i < maxWrappedSigLines+6; i++ {
+		b.WriteString("\t\targ,\n")
+	}
+	b.WriteString("\t)\n}\n")
+	if got := declaredNames(b.String()); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the carry hit the cap: %v", got)
+	}
+	gap := []AddedLine{
+		{LineNo: 1, Text: "c := NewCache[string, func() error]("},
+		{LineNo: 2, Text: "\tfunc(k string) error { return nil },"},
+		{LineNo: 9, Text: "\tother(q)"},
+	}
+	if got := GoDeclaredNames(gap); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the carry was cut by a hunk gap: %v", got)
+	}
+	// The added lines can also simply stop inside the call.
+	if got := GoDeclaredNames(gap[:2]); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the input ended inside the call: %v", got)
+	}
+	// The other ways a func type ends inside an expression: an unmatched `)`
+	// (a conversion), a top-level `=` (a typed var with a value), a top-level `,`
+	// (an argument list).
+	for _, first := range []string{
+		"x := f((func(a int) bool)(g), h(",
+		"y := (func(a int) bool)(compute(",
+		"var cb func(int) int = compute(",
+		"ch := make(chan func() error, max(",
+	} {
+		ls := []AddedLine{{LineNo: 1, Text: first}, {LineNo: 2, Text: "\tfunc(k int) int { return k },"}}
+		if got := GoDeclaredNames(ls); !slices.Contains(got, "k") {
+			t.Errorf("func literal param lost after %q: %v", first, got)
+		}
+	}
+	// #504's exclusion still holds for a carry that is dropped: a func-typed
+	// constraint or param inside a real wrapped signature binds nothing.
+	for _, ls := range [][]AddedLine{
+		{{LineNo: 1, Text: "func Map["}, {LineNo: 2, Text: "\tF func(x int) bool,"}, {LineNo: 9, Text: "\tother(q)"}},
+		{{LineNo: 1, Text: "func Register("}, {LineNo: 2, Text: "\thandler func(ctx int, req string) error,"}, {LineNo: 9, Text: "\tother(q)"}},
+	} {
+		got := GoDeclaredNames(ls)
+		for _, bogus := range []string{"x", "ctx", "req"} {
+			if slices.Contains(got, bogus) {
+				t.Errorf("%q bound from inside a dropped signature: %v", bogus, got)
+			}
+		}
+	}
+}
+
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {
 	src := "package p\n\n" +
 		"func run() {\n" +

@@ -426,6 +426,10 @@ func TestGoDeclaredNames_WrappedGenericSignature(t *testing.T) {
 		{"package p\n\nfunc Sum[\n\tT interface {\n\t\t~int | ~int64\n\t},\n](\n\txs []T,\n) T {\n\treturn 0\n}\n", []string{"xs"}},
 		{"package p\n\nfunc (s *Set[K]) Add(\n\tk K,\n) []K {\n\treturn nil\n}\n", []string{"k", "s"}},
 		{"package p\n\nfunc f() map[string]int {\n\tm := map[string]int{}\n\treturn m\n}\n", []string{"m"}},
+		// A func-typed constraint's own parameter names are inside the type list
+		// too: x must stay unbound, single-line and wrapped (review on #504).
+		{"package p\n\nfunc Apply[F func(x int) bool](f F) {\n}\n", []string{"f"}},
+		{"package p\n\nfunc Apply[\n\tF func(x int) bool,\n](f F) {\n}\n", []string{"f"}},
 	}
 	for _, c := range cases {
 		if got := declaredNames(c.src); !slices.Equal(got, c.want) {

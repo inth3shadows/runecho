@@ -129,7 +129,11 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		if isCommentLine(LangGo, l.Text) {
 			continue
 		}
-		if sig != "" {
+		// A carried line is scanned as part of the joined signature; scanning it
+		// alone as well would bind names the joined scan knows are inside a type
+		// list (a constraint line `F func(x int) bool,`).
+		carried := sig != ""
+		if carried {
 			sigLines++
 			joined := sig + " " + scan
 			groups, rest := goFuncGroups(joined)
@@ -190,7 +194,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// list, and the named-return list are all `name Type` lists that bind, and
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
-		if strings.Contains(scan, "func") {
+		if !carried && strings.Contains(scan, "func") {
 			groups, rest := goFuncGroups(scan)
 			bindFuncGroups(seen, groups)
 			if rest != "" && sig == "" {
@@ -317,7 +321,14 @@ func addList(seen map[string]struct{}, lhs string) {
 // the groups that closed are returned, and open is scan from that group's `func`
 // keyword on, for the caller to join to the following lines and scan again (#473).
 func goFuncGroups(scan string) (out []string, open string) {
+	// End of the last bracket group stepped over: a `func` inside one (a
+	// func-typed constraint, `[F func(x int) bool]`) is part of a type and its
+	// parameter names are not bindings.
+	stepped := 0
 	for _, loc := range reGoFunc.FindAllStringIndex(scan, -1) {
+		if loc[0] < stepped {
+			continue
+		}
 		i := loc[1]
 		for i < len(scan) {
 			switch scan[i] {
@@ -357,6 +368,7 @@ func goFuncGroups(scan string) (out []string, open string) {
 				if depth != 0 {
 					return out, scan[loc[0]:]
 				}
+				stepped = max(stepped, j)
 				i = j
 				continue
 			case '{':

@@ -57,7 +57,7 @@ var (
 	// genuinely undefined type, which is the over-inclusion trap above. A group
 	// may open with '(' as well as a comma, so the parameters of an inline func
 	// literal bind too.
-	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\*?\.{0,3}\s*` + goTypeStart)
+	reGoParamName = regexp.MustCompile(`(?:^|[,(])\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+\.{0,3}\s*` + goTypeStart)
 
 	// reGoIdentList splits a captured left-hand side into individual names.
 	reGoIdentList = regexp.MustCompile(`[A-Za-z_]\w*`)
@@ -217,8 +217,9 @@ const maxWrappedSigLines = 64
 // goTypeStart is how a Go type may begin after a declared name, shared by the
 // parameter and var-block patterns so the two cannot drift (#500). `<-` must be
 // followed by `chan`: `x <-1` is the comparison `x < -1`, and a bare `<` never
-// starts a type.
-const goTypeStart = `(?:<-\s*chan\b|[A-Za-z_\[\]*\.])`
+// starts a type. A pointer's `*` must be glued to its base type: `x * y` is a
+// product, and gofmt never writes a binary `*` as `x *y` (#506).
+const goTypeStart = `(?:<-\s*chan\b|\*+[A-Za-z_\[<]|[A-Za-z_\[\]\.])`
 
 var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)

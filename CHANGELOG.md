@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.79.0] — 2026-10-21
+
+### Changed
+- parser(js): strip the type modifier from named exports in the regex fallback (#501 item 1) (#511)
+
 ## [0.78.0] — 2026-10-21
 
 ### Changed

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.77.0] — 2026-10-21
+
+### Changed
+- guard(go): a pointer's * must be glued to its type, not a product operand (#506 item 1) (#508)
+
 ## [0.76.0] — 2026-10-21
 
 ### Changed

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.72.0] — 2026-10-21
+
+### Changed
+- guard(go): bind parameters of a signature wrapped across lines (#473) (#499)
+
 ## [0.71.0] — 2026-10-21
 
 ### Changed

@@ -77,9 +77,6 @@ var (
 	// (idiomatic under isolatedModules / verbatimModuleSyntax). The optional
 	// group leaves the value form untouched.
 	exportNamedRegex = regexp.MustCompile(`export\s+(?:type\s+)?\{([^}]+)\}`)
-	// The TS `type` modifier on one named item (`export { type Props }`); it must
-	// be followed by a name, so `export { type }` keeps a binding named type (#501).
-	exportTypeModifierRegex = regexp.MustCompile(`^type\s+([A-Za-z_$])`)
 	// Matches: export function/class/type/interface/enum name. const/let/var
 	// are handled separately by exportMultiDeclRegex below, because a single
 	// declaration can bind more than one name (`export const A = 1, B = 2;`).
@@ -1152,10 +1149,7 @@ func extractExports(source string) []string {
 				// Handle "as" syntax: `export { foo as Bar }` exports Bar, not the
 				// local foo — record the name AFTER "as", which is what consumers
 				// import. (Previously recorded the pre-alias local name.)
-				if idx := strings.Index(name, " as "); idx >= 0 {
-					name = strings.TrimSpace(name[idx+len(" as "):])
-				}
-				name = exportTypeModifierRegex.ReplaceAllString(name, "$1")
+				name = exportItemName(name)
 				if name != "" {
 					exports = append(exports, name)
 				}
@@ -1215,6 +1209,25 @@ func extractExports(source string) []string {
 	}
 
 	return exports
+}
+
+// exportItemName is the name one `export { … }` item exports: the alias after
+// `as` if any, with a TS `type` modifier dropped (#501). Splitting on any
+// whitespace handles tabs and wrapped lines. `type` is a modifier only when a
+// name follows it: `{ type }` and `{ type as kind }` export a binding named
+// type (as itself, or as kind).
+func exportItemName(item string) string {
+	f := strings.Fields(item)
+	if len(f) >= 2 && f[0] == "type" && !(len(f) == 3 && f[1] == "as") {
+		f = f[1:]
+	}
+	if len(f) >= 3 && f[len(f)-2] == "as" {
+		return f[len(f)-1]
+	}
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
 }
 
 // extractWildcardReexports finds bare `export * from './mod'` module

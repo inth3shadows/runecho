@@ -633,6 +633,11 @@ func TestExtractExports_TypeModifier(t *testing.T) {
 		{"export { type }\n", []string{"type"}},
 		{"export { type as kind }\n", []string{"kind"}},
 		{"export { typeName }\n", []string{"typeName"}},
+		{"export { type\tFoo\tas\tBar }\n", []string{"Bar"}},
+		{"export { type Ωmega }\n", []string{"Ωmega"}},
+		{"export { type as as X }\n", []string{"X"}},
+		{"export { type as }\n", []string{"as"}},
+		{"export {\n\ttype A,\n\tB as C,\n}\n", []string{"A", "C"}},
 	}
 	for _, c := range cases {
 		if got := extractExports(c.src); !equalStringSlices(got, c.want) {

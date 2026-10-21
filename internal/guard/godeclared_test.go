@@ -245,6 +245,30 @@ func TestGoDeclaredNames_BlockStateResetsAtHunkGap(t *testing.T) {
 	}
 }
 
+// TestGoDeclaredNames_DroppedCarryKeepsInnerLiterals pins #506 item 3: lines
+// joined into a carry are not scanned alone (#504), so when the carry is
+// dropped unclosed (the line cap, or a hunk gap) a func literal inside it must
+// still bind its own params.
+func TestGoDeclaredNames_DroppedCarryKeepsInnerLiterals(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package p\n\nfunc f() {\n\tc := NewCache[string, func() error](\n\t\tfunc(k string) error { return k2(k) },\n")
+	for i := 0; i < maxWrappedSigLines+6; i++ {
+		b.WriteString("\t\targ,\n")
+	}
+	b.WriteString("\t)\n}\n")
+	if got := declaredNames(b.String()); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the carry hit the cap: %v", got)
+	}
+	gap := []AddedLine{
+		{LineNo: 1, Text: "c := NewCache[string, func() error]("},
+		{LineNo: 2, Text: "\tfunc(k string) error { return nil },"},
+		{LineNo: 9, Text: "\tother(q)"},
+	}
+	if got := GoDeclaredNames(gap); !slices.Contains(got, "k") {
+		t.Errorf("func literal param lost when the carry was cut by a hunk gap: %v", got)
+	}
+}
+
 func TestGoDeclaredNames_IgnoresCommentsAndStrings(t *testing.T) {
 	src := "package p\n\n" +
 		"func run() {\n" +

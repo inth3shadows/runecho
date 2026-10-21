@@ -106,7 +106,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			open = openSeed(l.LineNo)
 		}
 		if i > 0 && l.LineNo != prevNo+1 {
-			sig = "" // never join text across a hunk gap into one parameter list
+			// Never join text across a hunk gap into one parameter list.
+			bindDroppedSig(seen, sig)
+			sig = ""
 			// Nor carry an entry's opener or trailing operator across one: its
 			// other half is an unchanged line this scan never sees (#509).
 			if inVarBlock {
@@ -151,6 +153,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 			}
 			sig = rest
 			if sigLines >= maxWrappedSigLines {
+				bindDroppedSig(seen, sig)
 				sig = ""
 			}
 		}
@@ -331,6 +334,18 @@ func hasGoDeclKeyword(scan string) bool {
 	}
 	rest := scan[i:]
 	return strings.HasPrefix(rest, "var") || strings.HasPrefix(rest, "const") || strings.HasPrefix(rest, "type")
+}
+
+// bindDroppedSig binds what a carry abandoned unclosed still holds. Its lines
+// were scanned only as part of the joined text, never alone, so a func literal
+// inside the open group (`NewCache[K, func() error](` / `func(k K) error {`)
+// would otherwise lose its params (#506). The outer group never closed and binds
+// nothing; scanning from past its own `func` keyword reaches the inner ones.
+func bindDroppedSig(seen map[string]struct{}, sig string) {
+	if len(sig) > len("func") {
+		groups, _ := goFuncGroups(sig[len("func"):])
+		bindFuncGroups(seen, groups)
+	}
 }
 
 // bindFuncGroups records the parameter names in each group goFuncGroups returned.

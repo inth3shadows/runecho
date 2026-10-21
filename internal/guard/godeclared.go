@@ -162,8 +162,7 @@ func (b *GoBlockState) advance(scan string) string {
 // A line with no quote character cannot open, close or contain a literal, so
 // when no multi-line literal is already open its text, less a trailing `//`
 // comment, is its own scan. `/*` is checked alongside the quote characters
-// because a block-comment opener needs none of them. Shared with the seed walk
-// (advanceSeed) so the block state it carries is computed on the same scan.
+// because a block-comment opener needs none of them.
 func goNeedsStrip(text, open string) bool {
 	return open != "" || strings.ContainsAny(text, "\"'`") || strings.Contains(text, "/*")
 }
@@ -172,8 +171,9 @@ func goNeedsStrip(text, open string) bool {
 // literal state carries across line gaps (the historical whole-file scan); with
 // one, it is taken from the seed at the start of every contiguous run. A wrapped
 // signature is dropped at a gap either way. blockSeed, when it knows the line,
-// sets the block state at the start of every contiguous run the same way;
-// otherwise a gap falls back to the #509 reset below.
+// sets the block state at the start of every contiguous run the same way; a
+// run it does not know starts outside any block, and only with no blockSeed at
+// all does a gap fall back to the #509 reset below.
 func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string, blockSeed func(lineNo int) (GoBlockState, bool)) []string {
 	seen := make(map[string]struct{})
 	open := ""
@@ -196,9 +196,18 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if gap {
 			sig = "" // never join text across a hunk gap into one parameter list
-			// Unseeded, nor carry an entry's opener or trailing operator across
-			// one: its other half is an unchanged line this scan never sees (#509).
-			if !seeded && block.in {
+			switch {
+			case seeded:
+			case blockSeed != nil:
+				// A seed in use that does not know this run (a hook block it could
+				// not locate): the state carried here may be one the seed set for a
+				// different block, so start outside any block rather than bind on
+				// it (#514 round 2).
+				block = GoBlockState{}
+			case block.in:
+				// No seed at all: do not carry an entry's opener or trailing
+				// operator across a gap; its other half is an unchanged line this
+				// scan never sees (#509).
 				block.depth, block.cont = 1, false
 				// The block may have closed in those unseen lines too, so a bare
 				// identifier after the gap is not trusted as a const repetition.

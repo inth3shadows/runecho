@@ -405,6 +405,30 @@ func TestHookSeedMapsGoBlock(t *testing.T) {
 	}
 }
 
+// TestHookUnlocatedBlockAfterSeededBlock pins round-2 finding R2-1 on #514: a
+// MultiEdit block the hook cannot locate (a fragment old_string) must not
+// inherit the in-block state seeded for the located block before it. Read as
+// still inside `var (`, `halluc = other()` bound halluc and masked `halluc()`.
+func TestHookUnlocatedBlockAfterSeededBlock(t *testing.T) {
+	src := "package p\n\nvar (\n\ta int\n\tb int\n)\n\nfunc f() {\n\tfoo()\n}\n"
+	file := guard.TextToAddedLines(src)
+	edits := []editOp{
+		{OldString: "\tb int", NewString: "\tb int64"},                           // located, inside the block
+		{OldString: "foo()", NewString: "foo()\n\thalluc = other()\n\thalluc()"}, // fragment: not located
+	}
+	fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+	hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo).applyTo(&fd)
+	symbols := map[string]struct{}{"other": {}, "foo": {}}
+	guard.FoldInFileDefs(symbols, file, guard.LangGo)
+	flagged := false
+	for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+		flagged = flagged || v.Symbol == "halluc"
+	}
+	if !flagged {
+		t.Errorf("halluc() after an unlocated block was masked: the block inherited the seeded in-block state")
+	}
+}
+
 // TestHookSeedsReachGuardRun pins the hook path's seed wiring end to end
 // (verify.go's hookSeedMaps(...).applyTo): the unit tests above check what
 // hookSeedMaps computes, but without this nothing failed when its result never

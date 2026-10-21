@@ -724,14 +724,51 @@ func TestGoDeclaredNamesSeeded_BlockStateFromFile(t *testing.T) {
 	}
 }
 
-// TestGoDeclaredNamesSeeded_UnknownBlockKeepsGapReset: where the block seed
-// knows nothing (a hook block it could not locate), a gap keeps the #509
-// handling rather than reading the block as closed.
-func TestGoDeclaredNamesSeeded_UnknownBlockKeepsGapReset(t *testing.T) {
-	ls := []AddedLine{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\tx = a +"}, {LineNo: 10, Text: "\ty int"}}
-	unknown := func(int) (GoBlockState, bool) { return GoBlockState{}, false }
-	if got := goDeclaredNamesSeeded(ls, nil, unknown); !slices.Contains(got, "y") {
-		t.Errorf("entry after an unseeded gap not bound: %v", got)
+// TestGoDeclaredNamesSeeded_UnknownBlockAfterGap pins R2-1 (#514 round 2):
+// with a block seed in use, a gap it knows nothing about (a hook block it could
+// not locate) starts outside any block. The #509 guess — stay in the block —
+// is kept only when there is no seed at all; behind a seed, the state it would
+// keep is one the seed set for a different block, and binding on it masks
+// hallucinations.
+func TestGoDeclaredNamesSeeded_UnknownBlockAfterGap(t *testing.T) {
+	ls := []AddedLine{{LineNo: 1, Text: "\tb int64"}, {LineNo: 3, Text: "\thalluc = other()"}}
+	partial := func(n int) (GoBlockState, bool) {
+		if n == 1 {
+			return GoBlockState{in: true, depth: 1}, true
+		}
+		return GoBlockState{}, false
+	}
+	got := goDeclaredNamesSeeded(ls, nil, partial)
+	if !slices.Contains(got, "b") || slices.Contains(got, "halluc") {
+		t.Errorf("got %v, want b bound and halluc not", got)
+	}
+	// No seed at all: the #509 handling is unchanged.
+	ls = []AddedLine{{LineNo: 1, Text: "var ("}, {LineNo: 2, Text: "\tx = a +"}, {LineNo: 10, Text: "\ty int"}}
+	if got := goDeclaredNamesSeeded(ls, nil, nil); !slices.Contains(got, "y") {
+		t.Errorf("unseeded: entry after a gap not bound: %v", got)
+	}
+}
+
+// TestRun_GoBlockSeedRemovesOnlyOnPrecommit pins R2-2 (#514 round 2): the
+// pre-commit seed is read from the WORKING TREE at the STAGED diff's line
+// numbers, so after `git add -p` (or unstaged lines above a hunk) it can
+// describe a different line. There it may only remove names: the whole
+// working-tree file is folded into the known set anyway, so an addition buys
+// nothing and a misaligned one masks a hallucination.
+func TestRun_GoBlockSeedRemovesOnlyOnPrecommit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	work := "package p\n\nvar (\n\ta = 1\n\tb = 2\n)\n\nfunc f() {\n}\n"
+	if err := os.WriteFile(p, []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Staged: lines 4-5 are a function body, not the working tree's block.
+	hunk := []AddedLine{{LineNo: 4, Text: "\thalluc = other()"}, {LineNo: 5, Text: "\thalluc()"}}
+	flagged := false
+	for _, v := range Run(map[string]struct{}{"other": {}}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		flagged = flagged || v.Symbol == "halluc"
+	}
+	if !flagged {
+		t.Errorf("a misaligned pre-commit block seed bound halluc and masked halluc()")
 	}
 }
 

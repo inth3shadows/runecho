@@ -33,14 +33,15 @@ func advanceSeed(lang Lang, st SeedState, line string) SeedState {
 	scan, braceScan, open := stripLiteralsBraces(lang, line, st.Open)
 	next := SeedState{Open: open}
 	if lang == LangGo {
-		// The same scan and comment-line skip goDeclaredNamesScan feeds its own
-		// tracker, so a seed is exactly the state that scan would have reached.
+		// The comment-line skip goDeclaredNamesScan applies, on a scan the
+		// tracker reads the same way: where that scan cuts a trailing `//`
+		// comment (a line it does not strip), this one has it blanked, and the
+		// tracker ignores trailing blanks. A CRLF file's `\r` is dropped: the
+		// diff parser strips it from hunk text, and left in place it hides a
+		// trailing operator from the continuation check (#514 round 2).
 		next.GoBlock = st.GoBlock
 		if !isCommentLine(LangGo, line) {
-			if !goNeedsStrip(line, st.Open) {
-				scan = withoutLineComment(line)
-			}
-			next.GoBlock.advance(scan)
+			next.GoBlock.advance(strings.TrimRight(scan, "\r"))
 		}
 		return next
 	}

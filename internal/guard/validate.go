@@ -135,7 +135,17 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// were affected: every Edit hunk, and every Write creating a new Go file
 		// (where readFileLines returns nil and nothing is folded at all).
 		if lang == LangGo {
-			for _, name := range goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], goBlockSeeds[i]) {
+			names := goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], goBlockSeeds[i])
+			if fd.AbsPath != "" && goBlockSeeds[i] != nil {
+				// Pre-commit, the block seed is read from the WORKING TREE at the
+				// STAGED diff's line numbers, so after `git add -p` it can describe
+				// a different line. It may only remove names here: the whole
+				// working-tree file is folded into the known set anyway, so an
+				// addition buys nothing, and a misaligned one masks a
+				// hallucination (#514 round 2).
+				names = intersectNames(names, goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], nil))
+			}
+			for _, name := range names {
 				known[name] = struct{}{}
 			}
 		}

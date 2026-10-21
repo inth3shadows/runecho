@@ -902,7 +902,8 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 
 // hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
 // the synthetic LineNo that starts each block (see hookBlockIndices). A block
-// with no entry reads the zero value — "starts outside any string / at depth 0".
+// with no entry reads the zero value — "starts outside any string / at depth 0"
+// — in every map except goBlock, where a missing entry means "unknown".
 type hookSeeds struct {
 	open                             map[int]string
 	brace, bracket, defSig, paramSig map[int]int
@@ -918,7 +919,9 @@ type hookSeeds struct {
 // file meant five O(file) walks on the hook's latency path.
 //
 // A zero field is omitted from its map, so a nil map means "no block starts
-// inside anything" — what every consumer already reads a missing entry as. The
+// inside anything" — what every consumer already reads a missing entry as.
+// goBlock is the exception: it holds every located block, zero included, since
+// its consumer reads a missing entry as "unknown" (guard.FileDiff.GoBlockByLine). The
 // four depths are tracked for Python only (guard.SeedStatesAt leaves them 0
 // elsewhere), so their maps stay nil for every other language.
 func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {

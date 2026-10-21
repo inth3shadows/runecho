@@ -280,7 +280,8 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// and for Python the dict/bracket/def-signature depths (#289, #294), so a
 	// block editing inside a literal or signature whose opener is unchanged
 	// context above it doesn't start scanning at depth 0.
-	hookSeedMaps(blockIndices, fileLines, lang).applyTo(&diffs[0])
+	seeds := hookSeedMaps(blockIndices, fileLines, lang)
+	seeds.withoutStaleGoBlocks(edit.ToolName, edit.Edits, blockIndices, fileLines, lang).applyTo(&diffs[0])
 
 	violations := guard.Run(symbols, ignorePath, diffs)
 	// results accumulates one CheckResult per check (#330's typed epistemic

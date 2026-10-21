@@ -429,6 +429,80 @@ func TestHookUnlocatedBlockAfterSeededBlock(t *testing.T) {
 	}
 }
 
+// TestHookStructuralEditStalesLaterGoBlockSeeds pins #517: every MultiEdit
+// block is seeded from the PRE-EDIT file, so once an earlier edit closes a
+// `var (` block, a later block seeded "inside the block" is stale. Read that
+// way, `halluc = other()` bound halluc and masked `halluc()`.
+func TestHookStructuralEditStalesLaterGoBlockSeeds(t *testing.T) {
+	flags := func(src string, edits []editOp) bool {
+		file := guard.TextToAddedLines(src)
+		fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+		idx := hookBlockIndices("MultiEdit", "", edits, file)
+		hookSeedMaps(idx, file, guard.LangGo).withoutStaleGoBlocks("MultiEdit", edits, idx, file, guard.LangGo).applyTo(&fd)
+		symbols := map[string]struct{}{"other": {}}
+		guard.FoldInFileDefs(symbols, file, guard.LangGo)
+		for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+			if v.Symbol == "halluc" {
+				return true
+			}
+		}
+		return false
+	}
+	src := "package p\n\nvar (\n\ta = 1\n\tb = 2\n\tc = 3\n)\n"
+	for _, c := range []struct {
+		name  string
+		edits []editOp
+	}{
+		{"located edit closes the block", []editOp{
+			{OldString: "\ta = 1\n\tb = 2", NewString: "\ta = 1\n)\nfunc g() {\n\tb = 2"},
+			{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"unlocated fragment edit closes the block", []editOp{
+			{OldString: "b = 2", NewString: "b = 2\n)\nfunc g() {"},
+			{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"a deletion (empty new_string) removes the opener", []editOp{
+			{OldString: "var (", NewString: ""},
+			{OldString: "\tc = 3", NewString: "\thalluc = other()\n\thalluc()"},
+		}},
+	} {
+		if !flags(src, c.edits) {
+			t.Errorf("%s: halluc() masked by a stale in-block seed", c.name)
+		}
+	}
+	// Control: edits that change no block structure keep their seeds, so an
+	// entry edited in place still binds.
+	edits := []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 10"},
+		{OldString: "\tc = 3", NewString: "\tc = 3\n\td = 4"},
+	}
+	file := guard.TextToAddedLines(src)
+	idx := hookBlockIndices("MultiEdit", "", edits, file)
+	s := hookSeedMaps(idx, file, guard.LangGo).withoutStaleGoBlocks("MultiEdit", edits, idx, file, guard.LangGo)
+	if len(s.goBlock) != 2 {
+		t.Errorf("non-structural edits lost their seeds: %v", s.goBlock)
+	}
+}
+
+// TestHookStructuralEditReachesHook pins #517's wiring in the real hook
+// (verify.go): the same structural MultiEdit must ask about halluc.
+func TestHookStructuralEditReachesHook(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	enrolledStore(t, repo, []string{"other"})
+	path := filepath.Join(repo, "a.go")
+	if err := os.WriteFile(path, []byte("package p\n\nvar (\n\ta = 1\n\tb = 2\n\tc = 3\n)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, d := runHook(t, payloadOld(t, "MultiEdit", path, "", "", "", []editOp{
+		{OldString: "\ta = 1\n\tb = 2", NewString: "\ta = 1\n)\nfunc g() {\n\tb = 2"},
+		{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+	}))
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "halluc") {
+		t.Fatalf("a stale in-block seed masked halluc(), got %q:\n%s", d.Hook.PermissionDec, raw)
+	}
+}
+
 // TestHookSeedsReachGuardRun pins the hook path's seed wiring end to end
 // (verify.go's hookSeedMaps(...).applyTo): the unit tests above check what
 // hookSeedMaps computes, but without this nothing failed when its result never

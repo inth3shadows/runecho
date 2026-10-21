@@ -965,6 +965,52 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 	return s
 }
 
+// withoutStaleGoBlocks drops the Go block seeds a MultiEdit's own edits make
+// stale (#517). Every block is seeded from the PRE-EDIT file, but an edit that
+// opens or closes a `var (`/`const (`/`type (` block changes the state of
+// everything after it, and the seed is authoritative: a later block still
+// seeded "inside the block" reads body lines as entries and masks calls
+// through them. An edit is structural when walking its old_string and its
+// new_string from where it sits leaves different block states; a deletion
+// (empty new_string) counts, though it adds no block of its own. A dropped
+// entry reads as unknown, which starts outside any block: a possible missed
+// binding, never a masked call.
+func (s hookSeeds) withoutStaleGoBlocks(toolName string, edits []editOp, indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
+	if lang != guard.LangGo || toolName != "MultiEdit" || len(s.goBlock) == 0 {
+		return s
+	}
+	structural := func(st guard.SeedState, e editOp) bool {
+		return guard.AdvanceSeedText(lang, st, e.OldString).GoBlock != guard.AdvanceSeedText(lang, st, e.NewString).GoBlock
+	}
+	at := make([]int, len(edits))
+	var located []int
+	for j, e := range edits {
+		at[j] = blockStartLine(fileLines, e.OldString)
+		if at[j] >= 0 {
+			located = append(located, at[j])
+		}
+	}
+	states := guard.SeedStatesAt(lang, fileLines, located)
+	// An edit that was not located could sit anywhere, inside a block or not.
+	inBlock := guard.AdvanceSeedText(lang, guard.SeedState{}, "var (")
+	cut := len(fileLines) // drop every block that starts after this index
+	for j, e := range edits {
+		if at[j] >= 0 {
+			if at[j] < cut && structural(states[at[j]], e) {
+				cut = at[j]
+			}
+		} else if structural(guard.SeedState{}, e) || structural(inBlock, e) {
+			cut = -1
+		}
+	}
+	for start, idx := range indices {
+		if idx > cut {
+			delete(s.goBlock, start)
+		}
+	}
+	return s
+}
+
 // applyTo sets fd's per-block seed maps.
 func (s hookSeeds) applyTo(fd *guard.FileDiff) {
 	fd.SeedByLine = s.open

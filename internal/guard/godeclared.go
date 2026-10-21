@@ -218,8 +218,9 @@ const maxWrappedSigLines = 64
 // parameter and var-block patterns so the two cannot drift (#500). `<-` must be
 // followed by `chan`: `x <-1` is the comparison `x < -1`, and a bare `<` never
 // starts a type. A pointer's `*` must be glued to its base type: `x * y` is a
-// product, and gofmt never writes a binary `*` as `x *y` (#506).
-const goTypeStart = `(?:<-\s*chan\b|\*+[A-Za-z_\[<]|[A-Za-z_\[\]\.])`
+// product, and gofmt never writes a binary `*` as `x *y` (#506). The base may
+// be any letter (`*Ärger`), a slice or array, or a parenthesised type.
+const goTypeStart = `(?:<-\s*chan\b|\*+(?:[\pL_\[(]|<-\s*chan\b)|[A-Za-z_\[\]\.])`
 
 var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)

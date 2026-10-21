@@ -172,14 +172,18 @@ func TestGoDeclaredNames_PointerStarIsNotMultiplication(t *testing.T) {
 		"package p\n\nvar r = (func(a int) bool)(x * y)\n",
 		"package p\n\nvar r = (func(a int) bool)(x * (y + 1))\n",
 		"package p\n\nvar r = (func(a int) bool)(f, x * y)\n",
+		"package p\n\nvar r = (func(a int) bool)(x *<-ch)\n",
+		// The var-block pattern shares goTypeStart: a spaced product on a
+		// continuation line is not a declaration.
+		"package p\n\nvar (\n\ttotal = a +\n\t\tx * c\n)\n",
 	} {
 		got := declaredNames(src)
 		if slices.Contains(got, "x") || slices.Contains(got, "f") {
 			t.Errorf("a product operand was bound as a param in %q: %v", src, got)
 		}
 	}
-	got := declaredNames("package p\n\nfunc f(p *T, pp **T, s *[]int, m *map[K]V, fn *func(), q *pkg.T, xs ...*T, c *<-chan int) {\n}\n\nvar (\n\tptr *T\n)\n")
-	if missing := hasAll(got, "p", "pp", "s", "m", "fn", "q", "xs", "c", "ptr"); len(missing) > 0 {
+	got := declaredNames("package p\n\nfunc f(p *T, pp **T, s *[]int, m *map[K]V, fn *func(), q *pkg.T, xs ...*T, c *<-chan int, st *struct{}, it *interface{}, ch *chan int, ar *[4]int, pa *(T), u *Ärger) {\n}\n\nvar (\n\tptr *T\n)\n")
+	if missing := hasAll(got, "p", "pp", "s", "m", "fn", "q", "xs", "c", "st", "it", "ch", "ar", "pa", "u", "ptr"); len(missing) > 0 {
 		t.Errorf("pointer-typed names not bound: missing %v (got %v)", missing, got)
 	}
 }

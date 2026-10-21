@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.71.0] — 2026-10-21
+
+### Changed
+- guard(ts): bind names after the inline and clause-level type modifier (#476) (#498)
+
 ## [0.70.3] — 2026-10-20
 
 ### Changed

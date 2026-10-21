@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.78.0] — 2026-10-21
+
+### Changed
+- guard(go): block entries by depth and continuation, not per-shape regex (#506 item 1b) (#509)
+
 ## [0.77.0] — 2026-10-21
 
 ### Changed

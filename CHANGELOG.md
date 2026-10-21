@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.80.0] — 2026-10-21
+
+### Changed
+- guard(go): a names-only spec in a const block repeats the one above (#506 item 4) (#512)
+
 ## [0.79.0] — 2026-10-21
 
 ### Changed

@@ -226,10 +226,7 @@ var (
 	reGoVarBlockOpen = regexp.MustCompile(`^\s*(?:var|const|type)\s*\(\s*$`)
 	// `\b` after the names: without it a name the type pattern rejects
 	// backtracked into a shorter name plus a "type" (`in <-chan int` bound `i`).
-	// A type needs whitespace before it (gofmt always writes `name Type`); with
-	// none, `x*(y+1)` on a continuation line, where gofmt glues a product, read
-	// as `x *(T)` (#506). `=` may follow directly.
-	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b(?:\s+` + goTypeStart + `|\s*=)`)
+	reGoBlockDeclName = regexp.MustCompile(`^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\b\s*(?:` + goTypeStart + `|=)`)
 )
 
 // goShortDeclNames returns the identifiers bound by every `:=` on the line,

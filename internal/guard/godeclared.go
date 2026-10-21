@@ -105,13 +105,6 @@ type GoBlockState struct {
 	isConst bool
 }
 
-// SameStructure reports whether b and o agree on the block itself — inside one
-// or not, at what depth, const or not — ignoring the continuation flag, which
-// only says whether the next line continues an expression (#517).
-func (b GoBlockState) SameStructure(o GoBlockState) bool {
-	return b.in == o.in && b.depth == o.depth && b.isConst == o.isConst
-}
-
 // advance threads b through one masked, non-comment line and returns the
 // name list it declares as a block entry ("" for none).
 func (b *GoBlockState) advance(scan string) string {

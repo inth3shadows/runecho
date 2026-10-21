@@ -907,8 +907,10 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 type hookSeeds struct {
 	open                             map[int]string
 	brace, bracket, defSig, paramSig map[int]int
-	// goBlock has an entry for every located block, zero included (see
-	// guard.FileDiff.GoBlockByLine); Go only.
+	// goBlock has an entry for every block whose position is known, zero
+	// included, and a missing entry means unknown (see
+	// guard.FileDiff.GoBlockByLine); Go only. hookSeedsFor never leaves it nil
+	// for a Go MultiEdit.
 	goBlock map[int]guard.GoBlockState
 }
 
@@ -965,69 +967,97 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 	return s
 }
 
-// withoutStaleGoBlocks drops the Go block seeds a MultiEdit's own edits make
-// stale (#517). Every block is seeded from the PRE-EDIT file, but an edit that
-// opens or closes a `var (`/`const (`/`type (` block changes the state of
-// everything after it, and the seed is authoritative: a later block still
-// seeded "inside the block" reads body lines as entries and masks calls
-// through them. An edit is structural when walking its old_string and its
-// new_string from where it sits leaves different block states; a deletion
-// (empty new_string) counts, though it adds no block of its own. A dropped
-// entry reads as unknown, which starts outside any block: a possible missed
-// binding, never a masked call. The map is copied, never trimmed in place.
-func (s hookSeeds) withoutStaleGoBlocks(toolName string, edits []editOp, indices map[int]int, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
-	if lang != guard.LangGo || toolName != "MultiEdit" || len(s.goBlock) == 0 {
-		return s
+// hookSeedsFor is every per-block seed for one hook edit. Edit and Write seed
+// from the pre-edit file as before: a single block sits where its old_string
+// was. A MultiEdit's later blocks do not: each edit applies to the file as the
+// edits before it left it, so a seed read at a block's PRE-EDIT position is
+// stale once an earlier edit opens or closes a `var (` block, a raw string or
+// a Python bracket (#517, #520). So the edits are applied in order to the
+// pre-edit text (simulateMultiEdit) and every block is seeded from where its
+// new_string sits in the result.
+//
+// When the edits cannot be applied (an old_string missing or not unique, which
+// the tool itself would refuse), the pre-edit seeds stand except Go's block
+// seed, which is the one that can add names (#514): it becomes "seeded, every
+// block unknown". A Go MultiEdit's block seed is never nil, so a gap is never
+// read with the unseeded #509 carry.
+func hookSeedsFor(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
+	if toolName != "MultiEdit" {
+		return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
 	}
-	structural := func(st guard.SeedState, e editOp) bool {
-		return !guard.AdvanceSeedText(lang, st, e.OldString).GoBlock.SameStructure(guard.AdvanceSeedText(lang, st, e.NewString).GoBlock)
+	var s hookSeeds
+	if post, starts, ok := simulateMultiEdit(fileLines, edits); ok {
+		s = hookSeedMaps(starts, post, lang)
+	} else {
+		s = hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
+		s.goBlock = nil
 	}
-	at := make([]int, len(edits))
-	var located []int
-	for j, e := range edits {
-		at[j] = blockStartLine(fileLines, e.OldString)
-		if at[j] >= 0 {
-			located = append(located, at[j])
-		}
+	if lang == guard.LangGo && s.goBlock == nil {
+		s.goBlock = map[int]guard.GoBlockState{}
 	}
-	states := guard.SeedStatesAt(lang, fileLines, located)
-	// An edit that was not located could sit anywhere: outside a block, at a
-	// block's own depth, or nested inside an entry (a struct type, a composite
-	// literal) from where a `}` closes the entry and a `)` the block. It is
-	// probed from each of those depths.
-	probes := []guard.SeedState{{}}
-	probe := "var ("
-	for d := 0; d < maxProbeDepth; d++ {
-		probes = append(probes, guard.AdvanceSeedText(lang, guard.SeedState{}, probe))
-		probe += "\n\tx = f("
-	}
-	cut := len(fileLines) // drop every block that starts after this index
-	for j, e := range edits {
-		if at[j] >= 0 {
-			if at[j] < cut && structural(states[at[j]], e) {
-				cut = at[j]
-			}
-		} else {
-			for _, p := range probes {
-				if structural(p, e) {
-					cut = -1
-					break
-				}
-			}
-		}
-	}
-	kept := make(map[int]guard.GoBlockState, len(s.goBlock))
-	for start, b := range s.goBlock {
-		if indices[start] <= cut {
-			kept[start] = b
-		}
-	}
-	s.goBlock = kept
 	return s
 }
 
-// maxProbeDepth bounds the nesting depths an unlocated edit is probed from.
-const maxProbeDepth = 8
+// simulateMultiEdit applies edits in order to the pre-edit file and returns the
+// result's lines plus, per block (keyed by the synthetic LineNo hookAddedLines
+// gives its first line), the 0-based line where that block's new_string starts
+// in the result. Each old_string must occur exactly once in the text as the
+// edits before it left it, else ok is false. A block whose new_string a later
+// edit overlaps, or which starts mid-line (a fragment: its added "line" is not
+// a whole line of the result), gets no entry: its seed is unknown.
+func simulateMultiEdit(fileLines []guard.AddedLine, edits []editOp) (post []guard.AddedLine, starts map[int]int, ok bool) {
+	if len(fileLines) == 0 {
+		return nil, nil, false
+	}
+	texts := make([]string, len(fileLines))
+	for i, l := range fileLines {
+		texts[i] = l.Text
+	}
+	content := strings.Join(texts, "\n")
+	type span struct {
+		start, end, line int
+		lost             bool
+	}
+	var spans []span
+	// The same synthetic numbering hookAddedLines/AddedLinesWithGap use.
+	no, first := 0, true
+	for _, e := range edits {
+		if e.OldString == "" || strings.Count(content, e.OldString) != 1 {
+			return nil, nil, false
+		}
+		at := strings.Index(content, e.OldString)
+		end := at + len(e.OldString)
+		delta := len(e.NewString) - len(e.OldString)
+		content = content[:at] + e.NewString + content[end:]
+		for i := range spans {
+			switch {
+			case spans[i].end <= at:
+			case spans[i].start >= end:
+				spans[i].start += delta
+				spans[i].end += delta
+			default:
+				spans[i].lost = true
+			}
+		}
+		if e.NewString == "" {
+			continue
+		}
+		if !first {
+			no++ // the gap AddedLinesWithGap inserts between blocks
+		}
+		spans = append(spans, span{start: at, end: at + len(e.NewString), line: no + 1})
+		no += len(strings.Split(e.NewString, "\n"))
+		first = false
+	}
+	starts = make(map[int]int)
+	for _, sp := range spans {
+		if sp.lost || (sp.start > 0 && content[sp.start-1] != '\n') {
+			continue
+		}
+		starts[sp.line] = strings.Count(content[:sp.start], "\n")
+	}
+	return guard.TextToAddedLines(content), starts, true
+}
 
 // applyTo sets fd's per-block seed maps.
 func (s hookSeeds) applyTo(fd *guard.FileDiff) {

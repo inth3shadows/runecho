@@ -213,19 +213,6 @@ func SeedStatesAt(lang Lang, fileLines []AddedLine, idxs []int) map[int]SeedStat
 	return out
 }
 
-// AdvanceSeedText returns the seed state after text's lines, walked from st:
-// the hook's view of what an edit's old_string or new_string does to the state
-// after it (#517). Empty text has no lines and leaves st unchanged.
-func AdvanceSeedText(lang Lang, st SeedState, text string) SeedState {
-	if text == "" {
-		return st
-	}
-	for _, line := range strings.Split(text, "\n") {
-		st = advanceSeed(lang, st, line)
-	}
-	return st
-}
-
 // seedStateBefore is SeedStatesAt for a single position.
 func seedStateBefore(lang Lang, fileLines []AddedLine, idx int) SeedState {
 	return SeedStatesAt(lang, fileLines, []int{idx})[idx]

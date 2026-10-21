@@ -160,7 +160,7 @@ func storeFreeChecks(res lookupResult, edit hookEdit, filePath string, lang guar
 		// bracket-depth seed too (pyNonDefBindings), so an open-string-only seed
 		// here gave a kwarg line inside a wrapped call a different verdict
 		// depending on store health.
-		hookSeedMaps(hookBlockIndices(edit.ToolName, edit.OldString, edit.Edits, preLines), preLines, lang).applyTo(&fd)
+		hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, preLines, lang).applyTo(&fd)
 		degradedShapes, shapeReason = callShapeMismatchesWithReason(lang, preLines, fd, edit.ToolName, removedText)
 	}
 	// Lint answers here for exactly the same reason call-shape does (#261): it

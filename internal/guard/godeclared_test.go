@@ -224,3 +224,52 @@ func TestGoDeclaredNames_BlockCommentNotFolded(t *testing.T) {
 		t.Errorf("a call to a commented-out declaration is a real violation, got %+v", v)
 	}
 }
+
+// TestGoDeclaredNames_WrappedSignatureBindsParams pins #473: gofmt wraps a long
+// signature one parameter per line, and goFuncGroups stopped at the group that
+// did not close on the `func` line, so a bare call to a parameter (`next(w, r)`)
+// was flagged. The repro is the issue's fixture.
+func TestGoDeclaredNames_WrappedSignatureBindsParams(t *testing.T) {
+	src := `package p
+
+import "net/http"
+
+func middleware(
+	next http.HandlerFunc,
+	fn func() error,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = fn()
+		next(w, r)
+	}
+}
+
+func (s *server) handle(ctx context.Context,
+	req *Request) (resp *Response,
+	err error) {
+	return nil, nil
+}
+`
+	got := declaredNames(src)
+	if missing := hasAll(got, "next", "fn", "w", "r", "s", "ctx", "req", "resp", "err"); len(missing) > 0 {
+		t.Errorf("wrapped signature params not bound: missing %v (got %v)", missing, got)
+	}
+	// The body is not a parameter list: nothing inside it may be bound by the
+	// carried-over group.
+	if slices.Contains(got, "http") || slices.Contains(got, "error") {
+		t.Errorf("type names bound as params: %v", got)
+	}
+}
+
+// TestGoDeclaredNames_WrappedSignatureStopsAtGap: a hunk whose wrapped signature
+// is cut by a line gap must not join unrelated text into a parameter list.
+func TestGoDeclaredNames_WrappedSignatureStopsAtGap(t *testing.T) {
+	ls := []AddedLine{
+		{LineNo: 1, Text: "func f("},
+		{LineNo: 9, Text: "	stray int,"},
+		{LineNo: 10, Text: ") {"},
+	}
+	if got := GoDeclaredNames(ls); slices.Contains(got, "stray") {
+		t.Errorf("a line across a gap was bound as a parameter: %v", got)
+	}
+}

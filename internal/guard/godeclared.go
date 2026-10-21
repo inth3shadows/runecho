@@ -121,12 +121,15 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		if open != "" || strings.ContainsAny(l.Text, "\"'`") || strings.Contains(l.Text, "/*") {
 			scan, open = stripLiteralsStateful(LangGo, l.Text, open)
 		}
+		// The stripper is skipped on most lines, so a trailing comment survives in
+		// scan; cut it once for every extractor below (#500).
+		scan = withoutLineComment(scan)
 		if isCommentLine(LangGo, l.Text) {
 			continue
 		}
 		if sig != "" {
 			sigLines++
-			joined := sig + " " + withoutLineComment(scan)
+			joined := sig + " " + scan
 			groups, rest := goFuncGroups(joined)
 			bindFuncGroups(seen, groups)
 			if rest != joined {
@@ -186,7 +189,7 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
 		if strings.Contains(scan, "func") {
-			groups, rest := goFuncGroups(withoutLineComment(scan))
+			groups, rest := goFuncGroups(scan)
 			bindFuncGroups(seen, groups)
 			if rest != "" && sig == "" {
 				sig, sigLines = rest, 0
@@ -279,10 +282,10 @@ func bindFuncGroups(seen map[string]struct{}, groups []string) {
 	}
 }
 
-// withoutLineComment cuts a trailing `//` comment from a carried signature line.
-// The stripper only runs on lines with a quote or `/*` (see the pre-filter
-// above), so an unmasked comment survives in scan, and a paren inside it would
-// shift the depth carried to the following lines. Any `//` still in scan is a
+// withoutLineComment cuts a trailing `//` comment from scan. The stripper only
+// runs on lines with a quote or `/*` (see the pre-filter in goDeclaredNamesScan),
+// so an unmasked comment survives, and its words or parens would otherwise reach
+// the `:=`, var-block and signature extractors. Any `//` still in scan is a
 // comment: string content has already been masked whenever a quote is present.
 func withoutLineComment(scan string) string {
 	if i := strings.Index(scan, "//"); i >= 0 {

@@ -354,3 +354,21 @@ func TestGoDeclaredNames_WrappedSignatureTrailingComments(t *testing.T) {
 		t.Errorf("a func in a comment shadowed the real signature: missing %v", missing)
 	}
 }
+
+// TestGoDeclaredNames_TrailingCommentBindsNothing pins #500 items 1-2: a
+// trailing `//` comment is unmasked on a line with no quote, so its text reached
+// the `:=` and var-block extractors. A name bound from a comment masks a real
+// hallucination of that name.
+func TestGoDeclaredNames_TrailingCommentBindsNothing(t *testing.T) {
+	got := declaredNames("package p\n\nfunc f() {\n\tx := 1 // or y := 2\n}\n")
+	if slices.Contains(got, "y") || !slices.Contains(got, "x") {
+		t.Errorf(":= in a trailing comment: got %v, want x bound and y not", got)
+	}
+	got = declaredNames("package p\n\nvar (\n\ta = 1 // see (x\n\tb = 2\n)\n\nfunc main() {\n\tresult = compute()\n}\n")
+	if missing := hasAll(got, "a", "b"); len(missing) > 0 {
+		t.Errorf("var block after a comment paren: missing %v (got %v)", missing, got)
+	}
+	if slices.Contains(got, "result") || slices.Contains(got, "func") {
+		t.Errorf("text outside the var block bound: %v", got)
+	}
+}

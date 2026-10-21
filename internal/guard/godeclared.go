@@ -125,11 +125,11 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		}
 		if sig != "" {
 			sigLines++
-			groups, rest := goFuncGroups(sig + " " + scan)
-			for _, group := range groups {
-				for _, p := range reGoParamName.FindAllStringSubmatch(group, -1) {
-					addList(seen, p[1])
-				}
+			joined := sig + " " + withoutLineComment(scan)
+			groups, rest := goFuncGroups(joined)
+			bindFuncGroups(seen, groups)
+			if rest != joined {
+				sigLines = 0 // a new signature opened on the line that closed the last
 			}
 			sig = rest
 			if sigLines >= maxWrappedSigLines {
@@ -185,12 +185,8 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
 		if strings.Contains(scan, "func") {
-			groups, rest := goFuncGroups(scan)
-			for _, group := range groups {
-				for _, p := range reGoParamName.FindAllStringSubmatch(group, -1) {
-					addList(seen, p[1])
-				}
-			}
+			groups, rest := goFuncGroups(withoutLineComment(scan))
+			bindFuncGroups(seen, groups)
 			if rest != "" && sig == "" {
 				sig, sigLines = rest, 0
 			}
@@ -271,6 +267,27 @@ func hasGoDeclKeyword(scan string) bool {
 	}
 	rest := scan[i:]
 	return strings.HasPrefix(rest, "var") || strings.HasPrefix(rest, "const") || strings.HasPrefix(rest, "type")
+}
+
+// bindFuncGroups records the parameter names in each group goFuncGroups returned.
+func bindFuncGroups(seen map[string]struct{}, groups []string) {
+	for _, group := range groups {
+		for _, p := range reGoParamName.FindAllStringSubmatch(group, -1) {
+			addList(seen, p[1])
+		}
+	}
+}
+
+// withoutLineComment cuts a trailing `//` comment from a carried signature line.
+// The stripper only runs on lines with a quote or `/*` (see the pre-filter
+// above), so an unmasked comment survives in scan, and a paren inside it would
+// shift the depth carried to the following lines. Any `//` still in scan is a
+// comment: string content has already been masked whenever a quote is present.
+func withoutLineComment(scan string) string {
+	if i := strings.Index(scan, "//"); i >= 0 {
+		return scan[:i]
+	}
+	return scan
 }
 
 // addList records every identifier in a captured left-hand side, skipping the

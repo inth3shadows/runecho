@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.82.0] — 2026-10-22
+
+### Changed
+- guard: seed MultiEdit blocks from the edits applied in order (#517) (#518)
+
 ## [0.81.0] — 2026-10-21
 
 ### Changed

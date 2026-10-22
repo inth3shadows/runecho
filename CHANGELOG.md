@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.85.0] — 2026-10-22
+
+### Changed
+- guard: pre-commit judges the staged content, not the working tree (#524) (#526)
+
 ## [0.84.0] — 2026-10-22
 
 ### Changed

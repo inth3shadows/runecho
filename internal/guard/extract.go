@@ -2118,11 +2118,21 @@ func stripLiterals(lang Lang, text string) string {
 // member, not a bare call (#519, #522). Neither language ends a statement after
 // a trailing `.` (Go has no continuation character; JS's ASI never applies
 // there). Not a variadic or spread `...`, and not a float literal ending in its
-// dot (`0.`). Python continues a line only inside brackets, so it is left out.
+// dot (`0.`). Python is left out: it continues a line only inside brackets or
+// after a backslash, neither of which this tracks.
 // One predicate for extractRefs, the seed walk and the dropped-import scanner.
 func endsInSelectorDot(lang Lang, trimmed string) bool {
 	if lang != LangGo && lang != LangJS || !strings.HasSuffix(trimmed, ".") || strings.HasSuffix(trimmed, "...") {
 		return false
+	}
+	// A digit run ending the line after a non-ASCII byte ends a name (`变量1.`),
+	// not a float literal; the float patterns' `\w` is ASCII only.
+	i := len(trimmed) - 2
+	for i >= 0 && (trimmed[i] >= '0' && trimmed[i] <= '9' || trimmed[i] == '_') {
+		i--
+	}
+	if i >= 0 && i < len(trimmed)-2 && trimmed[i] >= 0x80 {
+		return true
 	}
 	if lang == LangJS {
 		return !reJSFloatEnd.MatchString(trimmed)
@@ -2142,7 +2152,9 @@ func afterSelectorDot(scan string, at int) bool {
 	for k >= 0 && (scan[k] == ' ' || scan[k] == '\t') {
 		k--
 	}
-	return k >= 0 && scan[k] == '.' && (k == 0 || scan[k-1] != '.')
+	// Only exactly `...` is a spread: `5..toFixed()` is a number's decimal
+	// point followed by a selector.
+	return k >= 0 && scan[k] == '.' && !(k >= 2 && scan[k-2:k+1] == "...")
 }
 
 // scanStripped calls fn for each line with its literal-stripped form (see

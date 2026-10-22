@@ -141,6 +141,7 @@ func FileScopeViolationsWithReason(lang Lang, wholeFile []AddedLine, fd FileDiff
 	// string/comment content, and dedupes by name (first occurrence wins) — so the
 	// extraction surface here is IDENTICAL to the additive check's, seed included.
 	// The only thing this check changes is which set the name is resolved against.
+	// (No dot seed: it is Go/JS only, and this check runs on Python alone.)
 	for _, ref := range extractRefs(lang, addedLines, openSeed, braceSeed, nil) {
 		if _, inRepo := repoKnown[ref.Name]; !inRepo {
 			continue // the firewall: invented symbols belong to the additive check

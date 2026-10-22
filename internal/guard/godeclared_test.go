@@ -807,23 +807,6 @@ func TestRun_GoBlockSeedReachesKnownSet(t *testing.T) {
 	}
 }
 
-// TestRun_SelectorContinuationSeededFromFile pins #522 item 1 on the pre-commit
-// path: a hunk that edits one link of a split chain reads the unchanged `x.`
-// line above it from the file, so the link is a selector, not a bare call.
-func TestRun_SelectorContinuationSeededFromFile(t *testing.T) {
-	src := "package p\n\nfunc f() {\n\tseedsFor(a).\n\t\tapplyTo(&d)\n}\n"
-	p := filepath.Join(t.TempDir(), "a.go")
-	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	hunk := []AddedLine{{LineNo: 5, Text: "\t\tapplyTo(&d)"}}
-	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
-		if v.Symbol == "applyTo" {
-			t.Errorf("one edited chain link flagged as a bare call: the `seedsFor(a).` line above was not seeded")
-		}
-	}
-}
-
 // TestRun_DotSeedNeedsAlignedLine pins #523 round 1 (F1): the pre-commit dot
 // seed is read from the WORKING TREE at the STAGED line number. After
 // `git add -p` an unstaged `x.` chain can sit right above that number in the
@@ -841,5 +824,26 @@ func TestRun_DotSeedNeedsAlignedLine(t *testing.T) {
 	}
 	if !flagged {
 		t.Errorf("a misaligned dot seed hid ghost()")
+	}
+}
+
+// TestRun_DotSeedNotOnPrecommit pins #523 round 2 (R2-1): the pre-commit seed
+// table is the WORKING TREE at STAGED line numbers, so an unstaged edit that
+// ends the line above a staged hunk in `.` would make a dot seed hide the
+// staged call. Pre-commit takes no dot seed; the hook (exact pre-edit file)
+// does.
+func TestRun_DotSeedNotOnPrecommit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	work := "package p\n\nfunc f() {\n\tx.\n\tghost()\n}\n" // staged line 4 is `\ta()`
+	if err := os.WriteFile(p, []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tghost()"}}
+	flagged := false
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		flagged = flagged || v.Symbol == "ghost"
+	}
+	if !flagged {
+		t.Errorf("an unstaged `x.` above the staged hunk hid ghost()")
 	}
 }

@@ -2865,3 +2865,21 @@ func TestExtractRefs_SpreadAndDollarFloat(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractRefs_SelectorRound2 pins #523 round 2: a number's decimal point
+// plus a selector (`5..toFixed`) is not a spread (R2-2), and a non-ASCII name
+// ending in a digit (`变量1.`) is not a float literal (R2-3).
+func TestExtractRefs_SelectorRound2(t *testing.T) {
+	for _, c := range []struct {
+		lang Lang
+		src  string
+	}{
+		{LangJS, "const s = 5..toFixed(2)\n"},
+		{LangGo, "\tx := 变量1.\n\t\tLoad()\n"},
+		{LangJS, "const v = ñ1.\n  compute(x)\n"},
+	} {
+		if got := ExtractRefs(c.lang, TextToAddedLines(c.src)); len(got) != 0 {
+			t.Errorf("%q: got %v, want no refs", c.src, got)
+		}
+	}
+}

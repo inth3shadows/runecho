@@ -336,38 +336,18 @@ func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
 
 // dotSeedFunc returns extractRefs' selector-continuation seed for a diff:
 // whether the code line above each line ends in a selector's `.` (#522), so a
-// hunk that edits one link of a split chain reads it as a member, not a bare
-// call. nil outside Go and JS, or with no file to seed from.
+// hook edit to one link of a split chain reads it as a member, not a bare
+// call. Hook path only: the pre-commit seed table is the WORKING TREE read at
+// STAGED line numbers, and an unstaged edit ending the line above a staged
+// hunk in `.` would make the seed hide that hunk's real call (#523 round 2).
+// Every other seed shares that exposure; seeding from the staged blob would
+// close it for all of them. nil outside Go and JS.
 func dotSeedFunc(lang Lang, fd FileDiff) func(int) bool {
-	if lang != LangGo && lang != LangJS {
+	if lang != LangGo && lang != LangJS || fd.AbsPath != "" || len(fd.DotByLine) == 0 {
 		return nil
 	}
-	if fd.AbsPath != "" {
-		t := fd.seedTable(lang)
-		if t == nil {
-			return nil
-		}
-		// The table is the WORKING TREE at the STAGED diff's line numbers; after
-		// `git add -p` those can name different lines, and a dot seed only ever
-		// hides a call. So it holds only where the working-tree line is the
-		// hunk's own line (#523 round 1).
-		hunk := make(map[int]string, len(fd.AddedLines))
-		for _, l := range fd.AddedLines {
-			hunk[l.LineNo] = l.Text
-		}
-		return func(lineNo int) bool {
-			if !t.at(lineNo).Dot {
-				return false
-			}
-			w, ok := t.lineText(lineNo)
-			return ok && strings.TrimSuffix(w, "\r") == strings.TrimSuffix(hunk[lineNo], "\r")
-		}
-	}
-	if len(fd.DotByLine) > 0 {
-		byLine := fd.DotByLine
-		return func(lineNo int) bool { return byLine[lineNo] }
-	}
-	return nil
+	byLine := fd.DotByLine
+	return func(lineNo int) bool { return byLine[lineNo] }
 }
 
 // matchesIgnoreGlob reports whether name matches any of the guardignore glob

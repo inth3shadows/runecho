@@ -113,7 +113,6 @@ type seedTable struct {
 	depth   []seedDepths   // Python only; nil otherwise
 	goBlock []GoBlockState // Go only; nil otherwise
 	dot     []bool         // Go and JS only; nil otherwise
-	text    []string       // Go and JS only: the lines, to check a dot seed's alignment
 }
 
 type seedDepths struct{ brace, bracket, defSig, paramSig int32 }
@@ -128,7 +127,6 @@ func buildSeedTable(lang Lang, lines []string) *seedTable {
 	}
 	if lang == LangGo || lang == LangJS {
 		t.dot = make([]bool, len(lines)+1)
-		t.text = lines
 	}
 	var st SeedState
 	for i := 0; ; i++ {
@@ -172,15 +170,6 @@ func (t *seedTable) at(lineNo int) SeedState {
 		st.Dot = t.dot[idx]
 	}
 	return st
-}
-
-// lineText returns 1-based line lineNo of the file the table was built from
-// (Go and JS only).
-func (t *seedTable) lineText(lineNo int) (string, bool) {
-	if lineNo < 1 || lineNo > len(t.text) {
-		return "", false
-	}
-	return t.text[lineNo-1], true
 }
 
 // readSeedFile is the seed read, a seam so a test can count reads.

@@ -911,3 +911,63 @@ func TestRun_DotSeedFromStagedContent(t *testing.T) {
 		t.Errorf("staged chain link flagged as a bare call: %v", got)
 	}
 }
+
+// TestRun_BlockSeedIntersectionOnlyWithoutStaged pins #526 round 1: the Go
+// block seed is intersected (may only remove names) when it comes from the
+// working tree, and not when it comes from the staged content, which is exact.
+// A hunk that starts inside a block binds its entry only in the second case.
+func TestRun_BlockSeedIntersectionOnlyWithoutStaged(t *testing.T) {
+	src := "package p\n\nvar (\n\ta = 1\n\tb = func() {}\n)\n\nfunc f() {\n\tb()\n}\n"
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tb = func() {}"}, {LineNo: 9, Text: "\tb()"}}
+	flagged := func(staged []byte) bool {
+		for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, Staged: staged, AddedLines: hunk}}) {
+			if v.Symbol == "b" {
+				return true
+			}
+		}
+		return false
+	}
+	if flagged([]byte(src)) {
+		t.Errorf("staged content: the entry b, inside `var (`, did not bind")
+	}
+	if !flagged(nil) {
+		t.Errorf("working tree: the block seed added b despite the intersection")
+	}
+}
+
+// TestReadStagedBlobs_MissingPathWithSpace pins #526 round 1: a "missing"
+// reply for a path with a space must not stop the read for the files after it.
+func TestReadStagedBlobs_MissingPathWithSpace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "b.py").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	// A file named `0:b.py` must read its own content, not stage 0 of b.py.
+	if err := os.WriteFile(filepath.Join(dir, "0:b.py"), []byte("y = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "0:b.py").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	diffs := []FileDiff{{Path: "gone x.py"}, {Path: "b.py"}, {Path: "0:b.py"}}
+	ReadStagedBlobs(context.Background(), dir, diffs)
+	if string(diffs[1].Staged) != "x = 1\n" {
+		t.Errorf("b.py after a missing spaced path: Staged = %q", diffs[1].Staged)
+	}
+	if string(diffs[2].Staged) != "y = 2\n" {
+		t.Errorf("0:b.py: Staged = %q, want its own content", diffs[2].Staged)
+	}
+}

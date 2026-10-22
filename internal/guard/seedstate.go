@@ -273,9 +273,7 @@ func (fd FileDiff) seedTable(lang Lang) *seedTable {
 // set it (#524), else from the file at AbsPath.
 func (fd FileDiff) loadSeeds(lang Lang) *seedTable {
 	if fd.Staged != nil {
-		if len(fd.Staged) > maxSeedFileBytes {
-			return nil
-		}
+		// ReadStagedBlobs never sets Staged past maxSeedFileBytes.
 		return buildSeedTable(lang, strings.Split(string(fd.Staged), "\n"))
 	}
 	return loadSeedTable(lang, fd.AbsPath)

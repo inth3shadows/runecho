@@ -347,11 +347,23 @@ func runPreCommit(dryRun, verbose bool) int {
 	// Judge the STAGED content, not the working tree (#524): the diff's line
 	// numbers and text are the index's, and an unstaged edit can open a string
 	// above a hunk (masking its calls through the seed) or define the name a
-	// staged call uses (masking it through the whole-file fold). A blob that
-	// can't be read keeps today's working-tree read.
+	// staged call uses (masking it through the whole-file fold). A file whose
+	// staged content can't be read (over 8 MiB, or git failed) is checked with
+	// no seed and no whole-file context rather than against the working tree:
+	// more false positives, never a masked call (#526 round 1).
 	blobCtx, blobCancel := context.WithTimeout(context.Background(), gitutil.Timeout)
 	guard.ReadStagedBlobs(blobCtx, wtRoot, diffs)
 	blobCancel()
+	unread := 0
+	for i := range diffs {
+		if diffs[i].Staged == nil && guard.LangFor(diffs[i].Path) != guard.LangUnknown {
+			diffs[i].AbsPath = ""
+			unread++
+		}
+	}
+	if unread > 0 {
+		warnf("%d staged file(s) could not be read from the index — checked without file context, so expect extra findings", unread)
+	}
 	// One seed read and walk per staged file, shared by guard.Run and the
 	// file-scope check below (#295). The whole-file folds (stagedFileLines) still
 	// read separately.
@@ -792,14 +804,12 @@ func readFileLines(filePath string) []guard.AddedLine {
 	return guard.TextToAddedLines(string(data))
 }
 
-// stagedFileLines is a pre-commit diff's whole file: its staged content when
-// ReadStagedBlobs read it (#524), else the working-tree file, with
-// readFileLines' size cap either way.
+// stagedFileLines is a pre-commit diff's whole file: its staged content
+// (#524), with readFileLines' size cap. nil when it was not read: runPreCommit
+// then checks the file without whole-file context, never against the working
+// tree.
 func stagedFileLines(fd guard.FileDiff) []guard.AddedLine {
-	if fd.Staged == nil {
-		return readFileLines(fd.AbsPath)
-	}
-	if len(fd.Staged) > maxInFileBytes {
+	if fd.Staged == nil || len(fd.Staged) > maxInFileBytes {
 		return nil
 	}
 	return guard.TextToAddedLines(string(fd.Staged))

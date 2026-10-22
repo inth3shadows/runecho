@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -304,5 +305,24 @@ func TestRunPreCommit_UnstagedEditsDoNotChangeTheVerdict(t *testing.T) {
 				t.Fatalf("runPreCommit = %d, want 1: the staged ghost_xyz() call was judged against the working tree", got)
 			}
 		})
+	}
+}
+
+// TestRunPreCommit_UnreadableStagedBlobDoesNotFallBackToWorkingTree pins #526
+// round 1: a staged file too large to read from the index is checked without
+// file context, never against the working tree, where an unstaged definition
+// would mask its staged call.
+func TestRunPreCommit_UnreadableStagedBlobDoesNotFallBackToWorkingTree(t *testing.T) {
+	_, wtA, wtB := bareWorktrees(t)
+	db := storeAt(t)
+	enrollWithSnapshot(t, db, "container-wtA", wtA, "real_helper")
+	big := "def caller():\n    return ghost_xyz()\n" + strings.Repeat("# pad\n", (9<<20)/6)
+	stage(t, wtB, "big.py", big)
+	if err := os.WriteFile(filepath.Join(wtB, "big.py"), []byte("def ghost_xyz():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wtB)
+	if got := runPreCommit(false, false); got != 1 {
+		t.Fatalf("runPreCommit = %d, want 1: the unread staged blob fell back to the working tree's definition", got)
 	}
 }

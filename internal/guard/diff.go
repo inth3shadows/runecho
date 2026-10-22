@@ -171,10 +171,11 @@ func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, pa
 }
 
 // ReadStagedBlobs sets each diff's Staged content from the index with one
-// `git cat-file --batch` over `:<path>` (#524), so pre-commit judges exactly
+// `git cat-file --batch` over `:./<path>` (#524), so pre-commit judges exactly
 // what is being committed rather than the working tree. A file it cannot read,
 // or one over maxSeedFileBytes, keeps a nil Staged; so does every diff when the
-// command fails (fail-open: the AbsPath read stands). The blob is the raw index
+// command fails. The caller decides what a nil Staged means (runPreCommit:
+// no seed and no whole-file context, never the working tree). The blob is the raw index
 // content: no textconv, no smudge filter, the same bytes the diff was made from.
 func ReadStagedBlobs(ctx context.Context, root string, diffs []FileDiff) {
 	var idx []int
@@ -184,7 +185,9 @@ func ReadStagedBlobs(ctx context.Context, root string, diffs []FileDiff) {
 			continue
 		}
 		idx = append(idx, i)
-		in.WriteString(":")
+		// `:./` names the path relative to root; a bare `:` would read a file
+		// named `0:a.go` as stage 0 of `a.go` (#526 round 1).
+		in.WriteString(":./")
 		in.WriteString(fd.Path)
 		in.WriteByte('\n')
 	}
@@ -210,10 +213,14 @@ func ReadStagedBlobs(ctx context.Context, root string, diffs []FileDiff) {
 		if err != nil {
 			return
 		}
-		// "<oid> <type> <size>", or "<name> missing" / "ambiguous".
+		// "<oid> <type> <size>", or "<name> missing" / "<name> ambiguous",
+		// where <name> may hold spaces (#526 round 1).
+		if h := strings.TrimRight(header, "\n"); strings.HasSuffix(h, " missing") || strings.HasSuffix(h, " ambiguous") {
+			continue
+		}
 		f := strings.Fields(header)
 		if len(f) != 3 {
-			continue
+			return
 		}
 		size, err := strconv.ParseInt(f[2], 10, 64)
 		if err != nil || size < 0 {

@@ -140,12 +140,12 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		if lang == LangGo {
 			names := goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], goBlockSeeds[i])
 			if fd.AbsPath != "" && fd.Staged == nil && goBlockSeeds[i] != nil {
-				// Pre-commit, the block seed is read from the WORKING TREE at the
-				// STAGED diff's line numbers, so after `git add -p` it can describe
-				// a different line. It may only remove names here: the whole
-				// working-tree file is folded into the known set anyway, so an
-				// addition buys nothing, and a misaligned one masks a
-				// hallucination (#514 round 2).
+				// A seed table read from the WORKING TREE (AbsPath without the
+				// staged content; runPreCommit itself never does this since #524)
+				// is at the STAGED diff's line numbers, so after `git add -p` it
+				// can describe a different line. It may only remove names then: a
+				// misaligned addition masks a hallucination (#514 round 2). From
+				// the staged content it is exact and stands as is.
 				names = intersectNames(names, goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], nil))
 			}
 			for _, name := range names {

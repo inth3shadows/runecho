@@ -2779,3 +2779,46 @@ func TestStripLiteralsStateful_CarriedBlockCommentCloseIsBlanked(t *testing.T) {
 		t.Errorf("triple-quote close: got %q open %q, want %q open \"\"", got, open, want)
 	}
 }
+
+// TestExtractRefs_GoChainAfterTrailingDot pins #519: Go has no line
+// continuation character, so a line ending in `.` continues a selector, and
+// the identifier that starts the next line is a method, not a bare call. A
+// float literal ending in its dot (`0.`) and a variadic `...` end nothing, and
+// later calls on a continuation line are still checked.
+func TestExtractRefs_GoChainAfterTrailingDot(t *testing.T) {
+	names := func(src string) []string {
+		var out []string
+		for _, r := range ExtractRefs(LangGo, TextToAddedLines(src)) {
+			out = append(out, r.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, c := range []struct {
+		name, src string
+		want      []string
+	}{
+		{"chain", "\tseedsFor(a, b).\n\t\twithoutStale(c).\n\t\tapplyTo(&d)\n", []string{"seedsFor"}},
+		{"chain with a comment line and a trailing comment", "\tx := build(). // first\n\t\t// then\n\t\tfinish()\n", []string{"build"}},
+		{"inner call on a continuation line", "\tseedsFor(a).\n\t\tapplyTo(inner(b))\n", []string{"inner", "seedsFor"}},
+		{"float literal ending in its dot", "\tx := 0.\n\tghost()\n", []string{"ghost"}},
+		{"variadic", "\tf(xs...\n\tghost()\n", []string{"f", "ghost"}},
+		{"gap resets", "", nil},
+	} {
+		if c.src == "" {
+			ls := []AddedLine{{LineNo: 1, Text: "\tseedsFor(a)."}, {LineNo: 9, Text: "\tghost()"}}
+			got := []string{}
+			for _, r := range ExtractRefs(LangGo, ls) {
+				got = append(got, r.Name)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, []string{"ghost", "seedsFor"}) {
+				t.Errorf("%s: got %v", c.name, got)
+			}
+			continue
+		}
+		if got := names(c.src); !slices.Equal(got, c.want) {
+			t.Errorf("%s\n  got  %v\n  want %v", c.name, got, c.want)
+		}
+	}
+}

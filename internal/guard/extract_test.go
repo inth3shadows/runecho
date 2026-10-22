@@ -2842,3 +2842,26 @@ func TestExtractRefs_SelectorContinuationFollowups(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractRefs_SpreadAndDollarFloat pins #523 round 1: an unspaced spread
+// `[...ghost()]` calls ghost (F3), and a JS name ending in `$1.` is not a
+// float literal, so the next line continues it (F4).
+func TestExtractRefs_SpreadAndDollarFloat(t *testing.T) {
+	for _, c := range []struct {
+		src  string
+		want []string
+	}{
+		{"const a = [...ghost()]\n", []string{"ghost"}},
+		{"f(...ghost())\n", []string{"f", "ghost"}},
+		{"const v = a$1.\n  compute(x)\n", nil},
+	} {
+		var got []string
+		for _, r := range ExtractRefs(LangJS, TextToAddedLines(c.src)) {
+			got = append(got, r.Name)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%q: got %v, want %v", c.src, got, c.want)
+		}
+	}
+}

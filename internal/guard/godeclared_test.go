@@ -823,3 +823,23 @@ func TestRun_SelectorContinuationSeededFromFile(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_DotSeedNeedsAlignedLine pins #523 round 1 (F1): the pre-commit dot
+// seed is read from the WORKING TREE at the STAGED line number. After
+// `git add -p` an unstaged `x.` chain can sit right above that number in the
+// working tree; the seed must not hide the staged hunk's real call then.
+func TestRun_DotSeedNeedsAlignedLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	work := "package p\n\nfunc f() {\n\tx.\n\t\tY()\n\ta()\n\tghost()\n}\n"
+	if err := os.WriteFile(p, []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tghost()"}} // staged line 5; working-tree line 5 is `Y()`
+	flagged := false
+	for _, v := range Run(map[string]struct{}{"a": {}}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		flagged = flagged || v.Symbol == "ghost"
+	}
+	if !flagged {
+		t.Errorf("a misaligned dot seed hid ghost()")
+	}
+}

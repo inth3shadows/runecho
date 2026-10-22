@@ -1742,16 +1742,18 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			if nameStart == methodSkip {
 				continue // a method definition's own name (#431)
 			}
-			if fullStart == selectorAt || afterSelectorDot(scan, fullStart) {
-				continue // a selector continued from the line above (#519) or past blanks (#522)
-			}
+
 			// Skip if preceded by '.' (qualified call), or by an identifier byte
 			// (the match is mid-identifier — this emulates the left `\b` the regex
 			// no longer carries, while still allowing a leading `$` in the name).
-			if fullStart > 0 {
-				if prev := scan[fullStart-1]; prev == '.' || isWordByte(prev) {
-					continue
-				}
+			if fullStart > 0 && isWordByte(scan[fullStart-1]) {
+				continue
+			}
+			// A selector: a single `.` before the name, on this line past blanks
+			// (#522) or at the end of the code line above (#519). A spread `...`
+			// before it is a call, `[...items()]` (#523 round 1).
+			if fullStart == selectorAt || afterSelectorDot(scan, fullStart) {
+				continue
 			}
 			// Skip builtins / keywords
 			if _, ok := builtins[name]; ok {
@@ -2111,15 +2113,6 @@ func stripLiterals(lang Lang, text string) string {
 	return s
 }
 
-// scanStripped calls fn for each line with its literal-stripped form (see
-// stripLiteralsStateful), threading multi-line string state across lines and
-// resetting it on a line-number gap — a non-contiguous AddedLine sequence, e.g.
-// unrelated MultiEdit blocks joined by AddedLinesWithGap, whose open-string state
-// must not leak across the boundary. This consolidates the identical
-// state-threading loop the non-comment-aware scanners (firstUnqualifiedUseLines,
-// LocallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
-// their own loops because they inspect state (comment lines / inPyParen) before
-// stripping.
 // endsInSelectorDot reports whether a masked, trimmed Go or JS code line ends
 // in a selector's `.`, so the identifier that starts the next code line is a
 // member, not a bare call (#519, #522). Neither language ends a statement after
@@ -2128,9 +2121,18 @@ func stripLiterals(lang Lang, text string) string {
 // dot (`0.`). Python continues a line only inside brackets, so it is left out.
 // One predicate for extractRefs, the seed walk and the dropped-import scanner.
 func endsInSelectorDot(lang Lang, trimmed string) bool {
-	return (lang == LangGo || lang == LangJS) && strings.HasSuffix(trimmed, ".") &&
-		!strings.HasSuffix(trimmed, "...") && !reGoFloatEnd.MatchString(trimmed)
+	if lang != LangGo && lang != LangJS || !strings.HasSuffix(trimmed, ".") || strings.HasSuffix(trimmed, "...") {
+		return false
+	}
+	if lang == LangJS {
+		return !reJSFloatEnd.MatchString(trimmed)
+	}
+	return !reGoFloatEnd.MatchString(trimmed)
 }
+
+// reJSFloatEnd is reGoFloatEnd for JS, where `$` is an identifier character:
+// `a$1.` ends a name, not a float literal (#523 round 1).
+var reJSFloatEnd = regexp.MustCompile(`(?:^|[^\w.$])\d[\d_]*\.$`)
 
 // afterSelectorDot reports whether the code byte before scan[at], past blanks
 // on the same line, is a single `.`: `cfg. Load()` is a selector (#522). Not a
@@ -2143,6 +2145,15 @@ func afterSelectorDot(scan string, at int) bool {
 	return k >= 0 && scan[k] == '.' && (k == 0 || scan[k-1] != '.')
 }
 
+// scanStripped calls fn for each line with its literal-stripped form (see
+// stripLiteralsStateful), threading multi-line string state across lines and
+// resetting it on a line-number gap — a non-contiguous AddedLine sequence, e.g.
+// unrelated MultiEdit blocks joined by AddedLinesWithGap, whose open-string state
+// must not leak across the boundary. This consolidates the identical
+// state-threading loop the non-comment-aware scanners (firstUnqualifiedUseLines,
+// LocallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
+// their own loops because they inspect state (comment lines / inPyParen) before
+// stripping.
 func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {
 	scanStrippedSeeded(lang, lines, nil, fn)
 }

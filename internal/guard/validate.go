@@ -347,7 +347,21 @@ func dotSeedFunc(lang Lang, fd FileDiff) func(int) bool {
 		if t == nil {
 			return nil
 		}
-		return func(lineNo int) bool { return t.at(lineNo).Dot }
+		// The table is the WORKING TREE at the STAGED diff's line numbers; after
+		// `git add -p` those can name different lines, and a dot seed only ever
+		// hides a call. So it holds only where the working-tree line is the
+		// hunk's own line (#523 round 1).
+		hunk := make(map[int]string, len(fd.AddedLines))
+		for _, l := range fd.AddedLines {
+			hunk[l.LineNo] = l.Text
+		}
+		return func(lineNo int) bool {
+			if !t.at(lineNo).Dot {
+				return false
+			}
+			w, ok := t.lineText(lineNo)
+			return ok && strings.TrimSuffix(w, "\r") == strings.TrimSuffix(hunk[lineNo], "\r")
+		}
 	}
 	if len(fd.DotByLine) > 0 {
 		byLine := fd.DotByLine

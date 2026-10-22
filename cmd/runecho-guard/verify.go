@@ -571,7 +571,9 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 				// apply directly here — reused rather than recomputed via
 				// hookSeedMaps a second time.
 				defSigSeed := func(lineNo int) int { return diffs[0].PyDefSigDepthByLine[lineNo] }
-				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed)
+				// Same keys for the selector-continuation seed (#523 round 1).
+				dotSeed := func(lineNo int) bool { return diffs[0].DotByLine[lineNo] }
+				droppedImps = guard.DroppedImportRefsLinesWithBound(lang, oldLines, newLines, preBound, defSigSeed, dotSeed)
 				// No check-specific reason: every decline inside
 				// DroppedImportRefsLinesWithBound is definitive (the import
 				// survived in the new text, or the name is rebound there), so

@@ -283,7 +283,7 @@ func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T)
 	// `re`), the warning must be suppressed.
 	preBound := LocallyBoundNames(LangPython, TextToAddedLines("re = custom_regex_module()\n"), nil)
 	preBoundFn := func() map[string]struct{} { return preBound }
-	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBoundFn, nil); len(got) != 0 {
+	if got := DroppedImportRefsLinesWithBound(LangPython, oldLines, newLines, preBoundFn, nil, nil); len(got) != 0 {
 		t.Errorf("whole-file rebind of re must suppress the dropped-import warning, got %v", droppedNames(got))
 	}
 }
@@ -298,7 +298,7 @@ func TestDroppedImportRefsLinesWithBound_WholeFileRebindSuppresses(t *testing.T)
 // directly: the trailing import's bound name must NOT appear as a use.
 func TestFirstUnqualifiedUseLines_TrailingImportSegmentBlanked(t *testing.T) {
 	lines := TextToAddedLines("import re; from x import Dropped\n")
-	uses := firstUnqualifiedUseLines(LangPython, lines)
+	uses := firstUnqualifiedUseLines(LangPython, lines, nil)
 	if ln := uses["Dropped"]; ln != 0 {
 		t.Errorf("Dropped is bound by the trailing import segment, must not be recorded as a use (got line %d)", ln)
 	}
@@ -328,7 +328,7 @@ func TestDroppedImport_JS_BareArrowParam_SameLineAsParenArrow(t *testing.T) {
 // (not just the leading run) fixes it.
 func TestFirstUnqualifiedUseLines_NonLeadingImportSegmentBlanked(t *testing.T) {
 	lines := TextToAddedLines("import a; x = 1; from n import Dropped\n")
-	uses := firstUnqualifiedUseLines(LangPython, lines)
+	uses := firstUnqualifiedUseLines(LangPython, lines, nil)
 	if ln := uses["Dropped"]; ln != 0 {
 		t.Errorf("Dropped is bound by a trailing import segment, must not be recorded as a use (got line %d)", ln)
 	}
@@ -448,5 +448,34 @@ func TestDroppedImport_SelectorContinuationIsNotAUse(t *testing.T) {
 	newText := "const v = cfg.\n  parse(x)\n"
 	if got := droppedNames(DroppedImportRefs(LangJS, oldText, newText)); len(got) != 0 {
 		t.Errorf("a continued selector counted as a use of the dropped import: %v", got)
+	}
+}
+
+// TestDroppedImport_SpreadIsAUse pins #523 round 1 (F3): `[...parse(x)]`
+// calls the removed import.
+func TestDroppedImport_SpreadIsAUse(t *testing.T) {
+	oldText := "import { parse } from './p'\nconst v = [...parse(x)]\n"
+	newText := "const v = [...parse(x)]\n"
+	if got := droppedNames(DroppedImportRefs(LangJS, oldText, newText)); len(got) != 1 || got[0] != "parse" {
+		t.Errorf("a spread call was not a use of the dropped import: %v", got)
+	}
+}
+
+// TestDroppedImport_DotSeedOnHookLines pins #523 round 1 (F2): the hook scans
+// only the edited block, so the `cfg.` line above it reaches the dropped-import
+// scanner through dotSeed (the hook's DotByLine).
+func TestDroppedImport_DotSeedOnHookLines(t *testing.T) {
+	oldLines := TextToAddedLines("import { parse } from './p'")
+	newLines := []AddedLine{{LineNo: 1, Text: "  parse(y)"}}
+	for _, c := range []struct {
+		seed func(int) bool
+		want int
+	}{
+		{nil, 1},
+		{func(n int) bool { return n == 1 }, 0},
+	} {
+		if got := DroppedImportRefsLinesWithBound(LangJS, oldLines, newLines, nil, nil, c.seed); len(got) != c.want {
+			t.Errorf("seeded=%v: got %v, want %d dropped", c.seed != nil, droppedNames(got), c.want)
+		}
 	}
 }

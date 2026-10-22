@@ -1585,11 +1585,17 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// a ternary branch — `compute(x) : {}` there is a call followed by the
 	// alternative, not a method with a return type, and must not be read as one.
 	prevEndsTernary := false
+	// prevEndsDot: the previous Go code line ended in a selector's `.`, so the
+	// identifier this line starts with is a method or field, not a bare call
+	// (#519). Go has no line continuation character; a split method chain
+	// (`x.` / `Foo()`) is gofmt-legal.
+	prevEndsDot := false
 	for i, l := range lines {
 		text := l.Text
 		if i == 0 || l.LineNo != prevNo+1 {
 			pendingMethod = nil
 			prevEndsTernary = false
+			prevEndsDot = false
 			// Start of a contiguous run (the first line, or after a hunk gap):
 			// reset carried state. Seed the string state from the file context
 			// above the run when a seed is available, so a run that opens inside a
@@ -1627,8 +1633,18 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		// list runs on past this line, so the verdict waits for the closing `)`.
 		methodSkip, methodHead := -1, -1
 		afterTernary := prevEndsTernary
+		// The offset of this line's first code byte when it continues a selector
+		// from the line above, else -1.
+		selectorAt := -1
+		if prevEndsDot {
+			selectorAt = len(scan) - len(strings.TrimLeft(scan, " \t"))
+		}
 		if trimmed := strings.TrimSpace(scan); trimmed != "" {
 			prevEndsTernary = strings.HasSuffix(trimmed, "?")
+			// Not a variadic `...` or a float literal ending in its dot (`0.`):
+			// neither continues onto the next line as a selector.
+			prevEndsDot = lang == LangGo && strings.HasSuffix(trimmed, ".") &&
+				!strings.HasSuffix(trimmed, "...") && !reGoFloatEnd.MatchString(trimmed)
 		}
 		if lang == LangJS {
 			if pendingMethod != nil {
@@ -1728,6 +1744,9 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 
 			if nameStart == methodSkip {
 				continue // a method definition's own name (#431)
+			}
+			if fullStart == selectorAt {
+				continue // a selector continued from the line above (#519)
 			}
 			// Skip if preceded by '.' (qualified call), or by an identifier byte
 			// (the match is mid-identifier — this emulates the left `\b` the regex

@@ -1,7 +1,9 @@
 package guard
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -845,5 +847,127 @@ func TestRun_DotSeedNotOnPrecommit(t *testing.T) {
 	}
 	if !flagged {
 		t.Errorf("an unstaged `x.` above the staged hunk hid ghost()")
+	}
+}
+
+// TestReadStagedBlobs pins #524's index read: each diff gets the INDEX content
+// (not the working tree's unstaged edit), a path the index lacks keeps nil,
+// and an unknown-language file is skipped.
+func TestReadStagedBlobs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package p\n\nfunc a() {}\n")
+	write("b.py", "x = 1\n")
+	write("c.txt", "text\n")
+	git("add", "a.go", "b.py", "c.txt")
+	write("a.go", "package p\n\nfunc unstaged() {}\n") // not staged
+	diffs := []FileDiff{{Path: "a.go"}, {Path: "b.py"}, {Path: "c.txt"}, {Path: "missing.go"}}
+	ReadStagedBlobs(context.Background(), dir, diffs)
+	if got := string(diffs[0].Staged); got != "package p\n\nfunc a() {}\n" {
+		t.Errorf("a.go Staged = %q, want the index content", got)
+	}
+	if got := string(diffs[1].Staged); got != "x = 1\n" {
+		t.Errorf("b.py Staged = %q", got)
+	}
+	if diffs[2].Staged != nil || diffs[3].Staged != nil {
+		t.Errorf("c.txt / missing.go Staged = %q / %q, want nil", diffs[2].Staged, diffs[3].Staged)
+	}
+}
+
+// TestRun_DotSeedFromStagedContent: with the staged content in hand (#524),
+// pre-commit takes the dot seed from the index, so one edited chain link reads
+// as a member even when the working tree around it is shifted, and an
+// unstaged `x.` in the working tree no longer matters.
+func TestRun_DotSeedFromStagedContent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte("package p\n\nfunc f() {\n\tx.\n\tghost()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := func(staged string, hunk []AddedLine) map[string]bool {
+		out := map[string]bool{}
+		for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, Staged: []byte(staged), AddedLines: hunk}}) {
+			out[v.Symbol] = true
+		}
+		return out
+	}
+	if got := check("package p\n\nfunc f() {\n\ta()\n\tghost()\n}\n", []AddedLine{{LineNo: 5, Text: "\tghost()"}}); !got["ghost"] {
+		t.Errorf("staged `a()` above: ghost() not flagged, got %v", got)
+	}
+	if got := check("package p\n\nfunc f() {\n\tseedsFor(a).\n\t\tapplyTo(&d)\n}\n", []AddedLine{{LineNo: 5, Text: "\t\tapplyTo(&d)"}}); got["applyTo"] {
+		t.Errorf("staged chain link flagged as a bare call: %v", got)
+	}
+}
+
+// TestRun_BlockSeedIntersectionOnlyWithoutStaged pins #526 round 1: the Go
+// block seed is intersected (may only remove names) when it comes from the
+// working tree, and not when it comes from the staged content, which is exact.
+// A hunk that starts inside a block binds its entry only in the second case.
+func TestRun_BlockSeedIntersectionOnlyWithoutStaged(t *testing.T) {
+	src := "package p\n\nvar (\n\ta = 1\n\tb = func() {}\n)\n\nfunc f() {\n\tb()\n}\n"
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tb = func() {}"}, {LineNo: 9, Text: "\tb()"}}
+	flagged := func(staged []byte) bool {
+		for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, Staged: staged, AddedLines: hunk}}) {
+			if v.Symbol == "b" {
+				return true
+			}
+		}
+		return false
+	}
+	if flagged([]byte(src)) {
+		t.Errorf("staged content: the entry b, inside `var (`, did not bind")
+	}
+	if !flagged(nil) {
+		t.Errorf("working tree: the block seed added b despite the intersection")
+	}
+}
+
+// TestReadStagedBlobs_MissingPathWithSpace pins #526 round 1: a "missing"
+// reply for a path with a space must not stop the read for the files after it.
+func TestReadStagedBlobs_MissingPathWithSpace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "b.py").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	// A file named `0:b.py` must read its own content, not stage 0 of b.py.
+	if err := os.WriteFile(filepath.Join(dir, "0:b.py"), []byte("y = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "0:b.py").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	diffs := []FileDiff{{Path: "gone x.py"}, {Path: "b.py"}, {Path: "0:b.py"}}
+	ReadStagedBlobs(context.Background(), dir, diffs)
+	if string(diffs[1].Staged) != "x = 1\n" {
+		t.Errorf("b.py after a missing spaced path: Staged = %q", diffs[1].Staged)
+	}
+	if string(diffs[2].Staged) != "y = 2\n" {
+		t.Errorf("0:b.py: Staged = %q, want its own content", diffs[2].Staged)
 	}
 }

@@ -254,7 +254,7 @@ func PrepareSeeds(diffs []FileDiff) {
 		if lang == LangUnknown {
 			continue
 		}
-		fd.seeds = loadSeedTable(lang, fd.AbsPath)
+		fd.seeds = fd.loadSeeds(lang)
 		fd.seedsPrepared = true
 	}
 }
@@ -265,6 +265,16 @@ func PrepareSeeds(diffs []FileDiff) {
 func (fd FileDiff) seedTable(lang Lang) *seedTable {
 	if fd.seedsPrepared && (fd.seeds == nil || fd.seeds.lang == lang) {
 		return fd.seeds
+	}
+	return fd.loadSeeds(lang)
+}
+
+// loadSeeds builds fd's seed table from its staged content when ReadStagedBlobs
+// set it (#524), else from the file at AbsPath.
+func (fd FileDiff) loadSeeds(lang Lang) *seedTable {
+	if fd.Staged != nil {
+		// ReadStagedBlobs never sets Staged past maxSeedFileBytes.
+		return buildSeedTable(lang, strings.Split(string(fd.Staged), "\n"))
 	}
 	return loadSeedTable(lang, fd.AbsPath)
 }

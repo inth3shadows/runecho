@@ -344,8 +344,28 @@ func runPreCommit(dryRun, verbose bool) int {
 	for i := range diffs {
 		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}
+	// Judge the STAGED content, not the working tree (#524): the diff's line
+	// numbers and text are the index's, and an unstaged edit can open a string
+	// above a hunk (masking its calls through the seed) or define the name a
+	// staged call uses (masking it through the whole-file fold). A file whose
+	// staged content can't be read (over 8 MiB, or git failed) is checked with
+	// no seed and no whole-file context rather than against the working tree:
+	// more false positives, never a masked call (#526 round 1).
+	blobCtx, blobCancel := context.WithTimeout(context.Background(), gitutil.Timeout)
+	guard.ReadStagedBlobs(blobCtx, wtRoot, diffs)
+	blobCancel()
+	unread := 0
+	for i := range diffs {
+		if diffs[i].Staged == nil && guard.LangFor(diffs[i].Path) != guard.LangUnknown {
+			diffs[i].AbsPath = ""
+			unread++
+		}
+	}
+	if unread > 0 {
+		warnf("%d staged file(s) could not be read from the index — checked without file context, so expect extra findings", unread)
+	}
 	// One seed read and walk per staged file, shared by guard.Run and the
-	// file-scope check below (#295). The whole-file folds (readFileLines) still
+	// file-scope check below (#295). The whole-file folds (stagedFileLines) still
 	// read separately.
 	guard.PrepareSeeds(diffs)
 
@@ -364,7 +384,7 @@ func runPreCommit(dryRun, verbose bool) int {
 		if lang == guard.LangUnknown {
 			continue
 		}
-		guard.FoldInFileDefs(symbols, readFileLines(fd.AbsPath), lang)
+		guard.FoldInFileDefs(symbols, stagedFileLines(fd), lang)
 	}
 
 	if verbose {
@@ -405,7 +425,7 @@ func runPreCommit(dryRun, verbose bool) int {
 				if guard.LangFor(fd.Path) != guard.LangGo {
 					continue
 				}
-				whole := readFileLines(fd.AbsPath)
+				whole := stagedFileLines(fd)
 				qv := qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)
 				qualifiedV = append(qualifiedV, qv...)
 			}
@@ -429,7 +449,7 @@ func runPreCommit(dryRun, verbose bool) int {
 			if guard.LangFor(fd.Path) != guard.LangGo {
 				continue
 			}
-			whole := readFileLines(fd.AbsPath)
+			whole := stagedFileLines(fd)
 			dv := goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)
 			depsGoV = append(depsGoV, dv...)
 		}
@@ -448,7 +468,7 @@ func runPreCommit(dryRun, verbose bool) int {
 			if guard.LangFor(fd.Path) != guard.LangPython {
 				continue
 			}
-			whole := readFileLines(fd.AbsPath)
+			whole := stagedFileLines(fd)
 			fv := fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)
 			fileScopeV = append(fileScopeV, fv...)
 		}
@@ -782,6 +802,17 @@ func readFileLines(filePath string) []guard.AddedLine {
 		return nil
 	}
 	return guard.TextToAddedLines(string(data))
+}
+
+// stagedFileLines is a pre-commit diff's whole file: its staged content
+// (#524), with readFileLines' size cap. nil when it was not read: runPreCommit
+// then checks the file without whole-file context, never against the working
+// tree.
+func stagedFileLines(fd guard.FileDiff) []guard.AddedLine {
+	if fd.Staged == nil || len(fd.Staged) > maxInFileBytes {
+		return nil
+	}
+	return guard.TextToAddedLines(string(fd.Staged))
 }
 
 // addInFileDefs folds the current file's own definitions into the known symbol

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inth3shadows/runecho/internal/gitutil"
@@ -269,5 +270,59 @@ func TestDirExists(t *testing.T) {
 		if got := dirExists(tc.path); got != tc.want {
 			t.Errorf("dirExists(%s) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestRunPreCommit_UnstagedEditsDoNotChangeTheVerdict pins #524: pre-commit
+// judges the STAGED content, so an unstaged edit in the working tree can
+// neither open a string above a staged hunk (masking its call through the seed)
+// nor define the called name (masking it through the whole-file fold).
+func TestRunPreCommit_UnstagedEditsDoNotChangeTheVerdict(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		working func(staged string) string
+	}{
+		{"unstaged docstring opener above the hunk", func(s string) string { return "\"\"\"\n" + s }},
+		{"unstaged definition of the called name", func(s string) string { return s + "\n\ndef ghost_xyz():\n    return 1\n" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, wtA, wtB := bareWorktrees(t)
+			db := storeAt(t)
+			enrollWithSnapshot(t, db, "container-wtA", wtA, "real_helper")
+			body := "def caller():\n    return 1\n"
+			stage(t, wtB, "mod.py", body)
+			if out, err := exec.Command("git", "-C", wtB, "-c", "user.email=t@example.com",
+				"-c", "user.name=t", "commit", "-qm", "add mod.py").CombinedOutput(); err != nil {
+				t.Fatalf("commit: %v: %s", err, out)
+			}
+			staged := body + "\n\ndef c2():\n    return ghost_xyz()\n"
+			stage(t, wtB, "mod.py", staged)
+			if err := os.WriteFile(filepath.Join(wtB, "mod.py"), []byte(c.working(staged)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(wtB)
+			if got := runPreCommit(false, false); got != 1 {
+				t.Fatalf("runPreCommit = %d, want 1: the staged ghost_xyz() call was judged against the working tree", got)
+			}
+		})
+	}
+}
+
+// TestRunPreCommit_UnreadableStagedBlobDoesNotFallBackToWorkingTree pins #526
+// round 1: a staged file too large to read from the index is checked without
+// file context, never against the working tree, where an unstaged definition
+// would mask its staged call.
+func TestRunPreCommit_UnreadableStagedBlobDoesNotFallBackToWorkingTree(t *testing.T) {
+	_, wtA, wtB := bareWorktrees(t)
+	db := storeAt(t)
+	enrollWithSnapshot(t, db, "container-wtA", wtA, "real_helper")
+	big := "def caller():\n    return ghost_xyz()\n" + strings.Repeat("# pad\n", (9<<20)/6)
+	stage(t, wtB, "big.py", big)
+	if err := os.WriteFile(filepath.Join(wtB, "big.py"), []byte("def ghost_xyz():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wtB)
+	if got := runPreCommit(false, false); got != 1 {
+		t.Fatalf("runPreCommit = %d, want 1: the unread staged blob fell back to the working tree's definition", got)
 	}
 }

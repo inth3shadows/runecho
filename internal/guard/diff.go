@@ -95,6 +95,13 @@ type FileDiff struct {
 	// block's synthetic start ends in a selector's `.`. Missing entries (and a
 	// nil map) mean it does not. Consulted only when AbsPath is empty.
 	DotByLine map[int]bool
+	// Staged is the file's content in the INDEX, set by ReadStagedBlobs on the
+	// pre-commit path (#524). The diff's line numbers and text are the index's,
+	// so seeds and whole-file reads taken from it describe exactly the lines
+	// the diff names; the working tree at AbsPath can carry unstaged edits that
+	// shift or change them. nil when unavailable: the AbsPath read stands, with
+	// the rules that guard against its misalignment.
+	Staged []byte
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.
@@ -161,6 +168,76 @@ func ParseStagedDiff(ctx context.Context, repoRoot string) (diffs []FileDiff, pa
 
 	diffs, scanPartial, perr := parseDiffOutput(string(out))
 	return diffs, truncated || scanPartial, perr
+}
+
+// ReadStagedBlobs sets each diff's Staged content from the index with one
+// `git cat-file --batch` over `:./<path>` (#524), so pre-commit judges exactly
+// what is being committed rather than the working tree. A file it cannot read,
+// or one over maxSeedFileBytes, keeps a nil Staged; so does every diff when the
+// command fails. The caller decides what a nil Staged means (runPreCommit:
+// no seed and no whole-file context, never the working tree). The blob is the raw index
+// content: no textconv, no smudge filter, the same bytes the diff was made from.
+func ReadStagedBlobs(ctx context.Context, root string, diffs []FileDiff) {
+	var idx []int
+	var in strings.Builder
+	for i, fd := range diffs {
+		if LangFor(fd.Path) == LangUnknown || strings.ContainsAny(fd.Path, "\n\r") {
+			continue
+		}
+		idx = append(idx, i)
+		// `:./` names the path relative to root; a bare `:` would read a file
+		// named `0:a.go` as stage 0 of `a.go` (#526 round 1).
+		in.WriteString(":./")
+		in.WriteString(fd.Path)
+		in.WriteByte('\n')
+	}
+	if len(idx) == 0 {
+		return
+	}
+	cmd := gitutil.Command(ctx, root, "cat-file", "--batch")
+	cmd.Stdin = strings.NewReader(in.String())
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+	}()
+	r := bufio.NewReader(stdout)
+	for _, i := range idx {
+		header, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		// "<oid> <type> <size>", or "<name> missing" / "<name> ambiguous",
+		// where <name> may hold spaces (#526 round 1).
+		if h := strings.TrimRight(header, "\n"); strings.HasSuffix(h, " missing") || strings.HasSuffix(h, " ambiguous") {
+			continue
+		}
+		f := strings.Fields(header)
+		if len(f) != 3 {
+			return
+		}
+		size, err := strconv.ParseInt(f[2], 10, 64)
+		if err != nil || size < 0 {
+			return
+		}
+		if f[1] != "blob" || size > maxSeedFileBytes {
+			if _, err := io.CopyN(io.Discard, r, size+1); err != nil {
+				return
+			}
+			continue
+		}
+		buf := make([]byte, size+1) // content plus the trailing newline
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return
+		}
+		diffs[i].Staged = buf[:size]
+	}
 }
 
 // stagedDiffArgs is the staged-diff invocation. It is plumbing, not porcelain

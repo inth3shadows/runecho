@@ -824,8 +824,9 @@ func wholeFileBoundNames(fileLines []guard.AddedLine, lang guard.Lang) map[strin
 // editOp is one MultiEdit edit. OldString is captured for the E1 dangling-refs
 // check (a removed definition); NewString for the additive hallucination check.
 type editOp struct {
-	OldString string `json:"old_string"`
-	NewString string `json:"new_string"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
 }
 
 // hookText returns the new content to check for the given tool. For MultiEdit it
@@ -897,7 +898,7 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 // behavior, so a bad match degrades to today's noise rather than to a missed
 // hallucination.
 func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
-	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).open
+	return hookSeedsFor(toolName, oldString, edits, fileLines, lang).open
 }
 
 // hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
@@ -907,13 +908,16 @@ func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guar
 type hookSeeds struct {
 	open                             map[int]string
 	brace, bracket, defSig, paramSig map[int]int
-	// goBlock has an entry for every located block, zero included (see
-	// guard.FileDiff.GoBlockByLine); Go only.
+	// goBlock has an entry for every block whose position is known, zero
+	// included, and a missing entry means unknown (see
+	// guard.FileDiff.GoBlockByLine); Go only. hookSeedsFor never leaves it nil
+	// for a Go MultiEdit.
 	goBlock map[int]guard.GoBlockState
 }
 
-// hookSeedMaps builds all of an edit's per-block seeds from one
-// hookBlockIndices result, with ONE walk of fileLines up to the furthest block
+// hookSeedMaps builds all of an edit's per-block seeds from one set of block
+// positions (hookBlockIndices, or simulateMultiEdit's for a MultiEdit, see
+// hookSeedsFor), with ONE walk of fileLines up to the furthest block
 // (guard.SeedStatesAt). It replaced five builders that each re-walked
 // fileLines[:idx] per block (#295), which for an edit near the end of a large
 // file meant five O(file) walks on the hook's latency path.
@@ -965,6 +969,142 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 	return s
 }
 
+// hookSeedsFor is every per-block seed for one hook edit. Edit and Write seed
+// from the pre-edit file as before: a single block sits where its old_string
+// was. A MultiEdit's blocks do not: the edits apply in order, so a seed read at
+// a block's PRE-EDIT position is stale once another edit opens or closes a
+// `var (` block, a raw string or a Python bracket above it (#517, #520). So the
+// edits are replayed on the pre-edit text (simulateMultiEdit) and every block
+// is seeded from where its new_string sits in the RESULT of all of them.
+//
+// A block with no single exact position in the result (a later edit replaced
+// its first characters, it starts mid-line, or replace_all put it in several
+// places) gets no seed: a pre-edit one may be stale and mask calls (round 4 on
+// PR #518). When the edits cannot be replayed at all (an old_string missing, or repeated without
+// replace_all: edits the tool itself refuses), no block is seeded: every
+// pre-edit seed may be stale, and a stale "inside a string" seed masks calls.
+// A Go MultiEdit's block seed is never nil, so a gap is never read with the
+// unseeded #509 carry.
+func hookSeedsFor(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
+	if toolName != "MultiEdit" || lang == guard.LangUnknown {
+		return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
+	}
+	var s hookSeeds
+	if post, starts, _, ok := simulateMultiEdit(fileLines, edits); ok {
+		s = hookSeedMaps(starts, post, lang)
+	}
+	if lang == guard.LangGo && s.goBlock == nil {
+		s.goBlock = map[int]guard.GoBlockState{}
+	}
+	return s
+}
+
+// multiEditBlockStarts returns, per edit, the synthetic LineNo that starts its
+// block in hookAddedLines' output (AddedLinesWithGap's arithmetic: one gap
+// line between blocks), or 0 for an edit with an empty new_string, which adds
+// no block. The one copy of that arithmetic hookBlockIndices and
+// simulateMultiEdit share; drifting from AddedLinesWithGap seeds the wrong
+// block silently.
+func multiEditBlockStarts(edits []editOp) []int {
+	starts := make([]int, len(edits))
+	no, first := 0, true
+	for j, e := range edits {
+		if e.NewString == "" {
+			continue
+		}
+		if !first {
+			no++ // the gap AddedLinesWithGap inserts between blocks
+		}
+		starts[j] = no + 1
+		no += strings.Count(e.NewString, "\n") + 1
+		first = false
+	}
+	return starts
+}
+
+// simulateMultiEdit replays edits in order on the pre-edit file. It returns the
+// result's lines; per block (keyed by multiEditBlockStarts), the 0-based line
+// where its new_string starts in the result; and the blocks a later edit took
+// the first characters of (lost: no position). A block that starts mid-line (a
+// fragment, whose added "line" is not a whole line of the result) or that a
+// replace_all edit added (several positions) gets neither: its seed is unknown.
+// ok is false when an edit cannot apply: an empty or missing old_string, or
+// one that occurs more than once without replace_all.
+func simulateMultiEdit(fileLines []guard.AddedLine, edits []editOp) (post []guard.AddedLine, starts map[int]int, lost map[int]bool, ok bool) {
+	if len(fileLines) == 0 {
+		return nil, nil, nil, false
+	}
+	texts := make([]string, len(fileLines))
+	for i, l := range fileLines {
+		texts[i] = l.Text
+	}
+	content := strings.Join(texts, "\n")
+	type span struct {
+		start, block int
+		lost, many   bool
+	}
+	var spans []span
+	blockAt := multiEditBlockStarts(edits)
+	var b strings.Builder
+	for j, e := range edits {
+		if e.OldString == "" {
+			return nil, nil, nil, false
+		}
+		// Non-overlapping occurrences, left to right: what the tool replaces.
+		var at []int
+		for from := 0; ; {
+			i := strings.Index(content[from:], e.OldString)
+			if i < 0 {
+				break
+			}
+			at = append(at, from+i)
+			from += i + len(e.OldString)
+			if !e.ReplaceAll && len(at) > 1 {
+				return nil, nil, nil, false
+			}
+		}
+		if len(at) == 0 {
+			return nil, nil, nil, false
+		}
+		delta := len(e.NewString) - len(e.OldString)
+		for i := range spans {
+			sp := &spans[i]
+			before := 0
+			for _, a := range at {
+				if a+len(e.OldString) <= sp.start {
+					before++
+				} else if a <= sp.start {
+					sp.lost = true // this occurrence replaced the block's first character
+				}
+			}
+			sp.start += before * delta
+		}
+		b.Reset()
+		prev := 0
+		for _, a := range at {
+			b.WriteString(content[prev:a])
+			b.WriteString(e.NewString)
+			prev = a + len(e.OldString)
+		}
+		b.WriteString(content[prev:])
+		content = b.String()
+		if blockAt[j] != 0 {
+			spans = append(spans, span{start: at[0], block: blockAt[j], many: len(at) > 1})
+		}
+	}
+	starts, lost = make(map[int]int), make(map[int]bool)
+	for _, sp := range spans {
+		switch {
+		case sp.lost:
+			lost[sp.block] = true
+		case sp.many, sp.start > 0 && content[sp.start-1] != '\n':
+		default:
+			starts[sp.block] = strings.Count(content[:sp.start], "\n")
+		}
+	}
+	return guard.TextToAddedLines(content), starts, lost, true
+}
+
 // applyTo sets fd's per-block seed maps.
 func (s hookSeeds) applyTo(fd *guard.FileDiff) {
 	fd.SeedByLine = s.open
@@ -995,22 +1135,11 @@ func hookBlockIndices(toolName, oldString string, edits []editOp, fileLines []gu
 			indices[1] = idx
 		}
 	case "MultiEdit":
-		// Mirror hookAddedLines' block selection AND AddedLinesWithGap's line
-		// arithmetic exactly, so each seed lands on the synthetic LineNo that
-		// actually starts its block. Drifting from either would silently seed the
-		// wrong block.
-		no, first := 0, true
-		for _, e := range edits {
-			if e.NewString == "" {
+		for j, start := range multiEditBlockStarts(edits) {
+			if start == 0 {
 				continue
 			}
-			if !first {
-				no++ // the gap AddedLinesWithGap inserts between blocks
-			}
-			start := no + 1
-			no += len(strings.Split(e.NewString, "\n"))
-			first = false
-			if idx := blockStartLine(fileLines, e.OldString); idx >= 0 {
+			if idx := blockStartLine(fileLines, edits[j].OldString); idx >= 0 {
 				indices[start] = idx
 			}
 		}
@@ -1033,7 +1162,7 @@ func hookBlockIndices(toolName, oldString string, edits []editOp, fileLines []gu
 // two hand-kept-in-sync copies. Python-only: returns nil for every other
 // language, since pyBraceDepth is never consulted there.
 func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).brace
+	return hookSeedsFor(toolName, oldString, edits, fileLines, lang).brace
 }
 
 // blockStartLine returns the 0-based index in fileLines where block's lines
@@ -1044,7 +1173,7 @@ func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines 
 //
 // Ambiguity (two+ matches) returns -1 rather than guessing the first. A plain
 // Edit requires old_string to be unique, so a second match cannot arise there —
-// but a `replace_all` edit (which the hook payload does not parse) applies with a
+// but a `replace_all` edit (outside a MultiEdit's replay, see hookSeedsFor) applies with a
 // NON-unique old_string, and seeding from the wrong occurrence could compute an
 // "open string" state that masks a hallucinated call in the replacement: a false
 // negative, the worst class for this guard. Returning -1 on ambiguity means "no

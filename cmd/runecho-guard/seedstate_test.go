@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,9 +384,9 @@ func TestHookSeedMapsGoBlock(t *testing.T) {
 	edits := []editOp{
 		{OldString: "\tb int", NewString: "\tb int64"}, // inside the block, synthetic line 1
 		{OldString: "\tg()", NewString: "\tg(1)"},      // outside it, line 3
-		{OldString: "\tmissing()", NewString: "\tx()"}, // not located, line 5
+		{OldString: "f()", NewString: "f2()"},          // mid-line fragment, line 5
 	}
-	s := hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo)
+	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
 	if len(s.goBlock) != 2 {
 		t.Fatalf("goBlock = %v, want entries for the two located blocks only", s.goBlock)
 	}
@@ -417,7 +418,7 @@ func TestHookUnlocatedBlockAfterSeededBlock(t *testing.T) {
 		{OldString: "foo()", NewString: "foo()\n\thalluc = other()\n\thalluc()"}, // fragment: not located
 	}
 	fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
-	hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo).applyTo(&fd)
+	hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo).applyTo(&fd)
 	symbols := map[string]struct{}{"other": {}, "foo": {}}
 	guard.FoldInFileDefs(symbols, file, guard.LangGo)
 	flagged := false
@@ -426,6 +427,301 @@ func TestHookUnlocatedBlockAfterSeededBlock(t *testing.T) {
 	}
 	if !flagged {
 		t.Errorf("halluc() after an unlocated block was masked: the block inherited the seeded in-block state")
+	}
+}
+
+// TestHookStructuralEditStalesLaterGoBlockSeeds pins #517: every MultiEdit
+// block is seeded from the PRE-EDIT file, so once an earlier edit closes a
+// `var (` block, a later block seeded "inside the block" is stale. Read that
+// way, `halluc = other()` bound halluc and masked `halluc()`.
+func TestHookStructuralEditStalesLaterGoBlockSeeds(t *testing.T) {
+	flags := func(src string, edits []editOp) bool {
+		file := guard.TextToAddedLines(src)
+		fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+		hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo).applyTo(&fd)
+		symbols := map[string]struct{}{"other": {}}
+		guard.FoldInFileDefs(symbols, file, guard.LangGo)
+		for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+			if v.Symbol == "halluc" {
+				return true
+			}
+		}
+		return false
+	}
+	src := "package p\n\nvar (\n\ta = 1\n\tb = 2\n\tc = 3\n)\n"
+	for _, c := range []struct {
+		name  string
+		edits []editOp
+	}{
+		{"located edit closes the block", []editOp{
+			{OldString: "\ta = 1\n\tb = 2", NewString: "\ta = 1\n)\nfunc g() {\n\tb = 2"},
+			{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"unlocated fragment edit closes the block", []editOp{
+			{OldString: "b = 2", NewString: "b = 2\n)\nfunc g() {"},
+			{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"a deletion (empty new_string) removes the opener", []editOp{
+			{OldString: "var (", NewString: ""},
+			{OldString: "\tc = 3", NewString: "\thalluc = other()\n\thalluc()"},
+		}},
+	} {
+		if !flags(src, c.edits) {
+			t.Errorf("%s: halluc() masked by a stale in-block seed", c.name)
+		}
+	}
+	// Round 1 on PR #518. F1: every seed dropped must not fall back to the
+	// unseeded #509 handling, which carried edit 0's open `var (` into edit 1.
+	// F3: an unlocated edit nested deeper than the block's own depth that
+	// closes the block (a struct type, a composite literal).
+	for _, c := range []struct {
+		name, src string
+		edits     []editOp
+	}{
+		{"all seeds dropped (F1)", "package p\n\nvar (\n\ta = 1\n)\n\nfunc f() {\n\tc := 0\n\t_ = c\n}\n", []editOp{
+			{OldString: "var (\n\ta = 1", NewString: "var (\n\ta = 2"},
+			{OldString: "\tc := 0", NewString: "\thalluc = other()\n\thalluc()"},
+			{OldString: "_ = c", NewString: "_ = c\n}\n\nfunc h() {"},
+		}},
+		{"unlocated close from a struct type (F3)", "package p\n\ntype (\n\tS struct {\n\t\tX int\n\t}\n\tT int\n)\n", []editOp{
+			{OldString: "X int\n\t}", NewString: "X int\n\t}\n)\n\nfunc g() {"},
+			{OldString: "\tT int\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+		}},
+		// Round 2 on PR #518. R2-B: edit 0 closes a raw string, so edit 1's
+		// block is code, not string text. R2-E: no old_string is a whole line,
+		// so no block is located at all.
+		{"raw string closed by an earlier edit (R2-B)", "package p\n\nvar (\n\tq = `\n)\n`\n\tc = 3\n)\n", []editOp{
+			{OldString: "\tq = `", NewString: "\tq = ``"},
+			{OldString: "`\n\tc = 3\n)", NewString: "func g() {\n\thalluc = other()\n\thalluc()\n}"},
+		}},
+		{"no block located (R2-E)", "package p\n\nvar (\n\ta = 1\n\tb = 2\n)\n\nfunc f() {\n\tz := 1\n\t_ = z\n}\n", []editOp{
+			{OldString: "b = 2", NewString: "var (\n\tq = 1"},
+			{OldString: "z := 1", NewString: "halluc = other()\n\thalluc()"},
+		}},
+		{"unlocated close from a composite literal (F3)", "package p\n\nvar (\n\tx = T{\n\t\ta: 1,\n\t}\n\ty = 2\n)\n", []editOp{
+			{OldString: "a: 1,\n\t}", NewString: "a: 1,\n\t})\nfunc g() {"},
+			{OldString: "\ty = 2", NewString: "\thalluc = other()\n\thalluc()"},
+		}},
+	} {
+		if !flags(c.src, c.edits) {
+			t.Errorf("%s: halluc() masked", c.name)
+		}
+	}
+
+	// F2: an unlocated body edit that only changes whether its last line ends
+	// in an operator (`case 1:`) is not structural, and keeps the other seeds.
+	body := "package p\n\nvar (\n\ta = 1\n)\n\nfunc f(x int) {\n\tswitch x {\n\tcase 1:\n\t\treturn\n\t}\n}\n"
+	bodyEdits := []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 2\n\tb = 3"},
+		{OldString: "case 1:", NewString: "case 1:\n\t\tx = 1"},
+	}
+	bf := guard.TextToAddedLines(body)
+	if s := hookSeedsFor("MultiEdit", "", bodyEdits, bf, guard.LangGo); len(s.goBlock) != 1 {
+		t.Errorf("a non-structural body edit dropped the block seed: %v", s.goBlock)
+	}
+
+	// R2-A: wrapping function-body lines in an `if` (an unlocated fragment
+	// edit) must not cost a located block its seed, so a new entry there
+	// still binds and its call is not flagged.
+	wrap := "package p\n\nvar (\n\ta = 1\n)\n\nfunc f(ok bool) {\n\tdoX()\n\tdoX()\n}\n"
+	wrapEdits := []editOp{
+		{OldString: "doX()\n\tdoX()", NewString: "if ok {\n\t\tdoX()\n\t\tdoX()"},
+		{OldString: "\ta = 1", NewString: "\ta = 1\n\tnewv = other()\n\tw = newv()"},
+	}
+	wf := guard.TextToAddedLines(wrap)
+	wfd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", wrapEdits)}
+	hookSeedsFor("MultiEdit", "", wrapEdits, wf, guard.LangGo).applyTo(&wfd)
+	wsyms := map[string]struct{}{"other": {}, "doX": {}}
+	guard.FoldInFileDefs(wsyms, wf, guard.LangGo)
+	for _, v := range guard.Run(wsyms, "", []guard.FileDiff{wfd}) {
+		if v.Symbol == "newv" {
+			t.Errorf("R2-A: a function-body wrap dropped the block seed, so newv() was flagged")
+		}
+	}
+
+	// Control: edits that change no block structure keep their seeds, so an
+	// entry edited in place still binds.
+	edits := []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 10"},
+		{OldString: "\tc = 3", NewString: "\tc = 3\n\td = 4"},
+	}
+	file := guard.TextToAddedLines(src)
+	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
+	if len(s.goBlock) != 2 {
+		t.Errorf("non-structural edits lost their seeds: %v", s.goBlock)
+	}
+}
+
+// TestHookStructuralEditReachesHook pins #517's wiring in the real hook
+// (verify.go): the same structural MultiEdit must ask about halluc.
+func TestHookStructuralEditReachesHook(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	enrolledStore(t, repo, []string{"other"})
+	path := filepath.Join(repo, "a.go")
+	if err := os.WriteFile(path, []byte("package p\n\nvar (\n\ta = 1\n\tb = 2\n\tc = 3\n)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, d := runHook(t, payloadOld(t, "MultiEdit", path, "", "", "", []editOp{
+		{OldString: "\ta = 1\n\tb = 2", NewString: "\ta = 1\n)\nfunc g() {\n\tb = 2"},
+		{OldString: "\tc = 3\n)", NewString: "\thalluc = other()\n\thalluc()\n}"},
+	}))
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "halluc") {
+		t.Fatalf("a stale in-block seed masked halluc(), got %q:\n%s", d.Hook.PermissionDec, raw)
+	}
+}
+
+// TestHookSeedsForFallbacks pins round 3 on PR #518 (#517): what hookSeedsFor
+// does when the edits cannot all be replayed exactly.
+func TestHookSeedsForFallbacks(t *testing.T) {
+	flagged := func(lang guard.Lang, path, src string, edits []editOp, name string) bool {
+		file := guard.TextToAddedLines(src)
+		fd := guard.FileDiff{Path: path, AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+		hookSeedsFor("MultiEdit", "", edits, file, lang).applyTo(&fd)
+		symbols := map[string]struct{}{"other": {}}
+		guard.FoldInFileDefs(symbols, file, lang)
+		for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+			if v.Symbol == name {
+				return true
+			}
+		}
+		return false
+	}
+	// R3-1: an edit the tool would refuse (a non-unique old_string, no
+	// replace_all) leaves no exact replay, and the stale pre-edit "inside a raw
+	// string" seed must not mask the block after edit 0 closed that string.
+	raw := "package p\n\nvar (\n\tq = `\n)\n`\n\tc = 3\n)\n\nfunc f() {\n\tx := 1\n\tx := 1\n}\n"
+	if !flagged(guard.LangGo, "a.go", raw, []editOp{
+		{OldString: "\tq = `", NewString: "\tq = ``"},
+		{OldString: "`\n\tc = 3\n)", NewString: "func g() {\n\thalluc = other()\n\thalluc()\n}"},
+		{OldString: "\tx := 1", NewString: "\tx := 2"},
+	}, "halluc") {
+		t.Errorf("R3-1: an unreplayable MultiEdit kept the stale raw-string seed and masked halluc()")
+	}
+	// R3-2: a replace_all edit with two occurrences is replayed, so the other
+	// blocks keep their exact seeds: a new `var (` entry still binds.
+	ra := "package p\n\nvar (\n\ta = 1\n)\n\nfunc f() {\n\tx := 1\n\t_ = x\n\tx = 1\n}\n"
+	if flagged(guard.LangGo, "a.go", ra, []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 1\n\tnewv = other()\n\tw = newv()"},
+		{OldString: "x", NewString: "y", ReplaceAll: true},
+	}, "newv") {
+		t.Errorf("R3-2: a replace_all edit cost the other blocks their seeds")
+	}
+	// #520 on the Python path: edit 0 closes the module docstring, so edit 1's
+	// block is code; the pre-edit seed read it as docstring text.
+	py := "\"\"\"doc\nline\n\"\"\"\n\n\ndef g():\n    return 1\n"
+	if !flagged(guard.LangPython, "m.py", py, []editOp{
+		{OldString: "\"\"\"doc", NewString: "\"\"\"doc\"\"\""},
+		{OldString: "line\n\"\"\"", NewString: "def h():\n    return halluc()"},
+	}, "halluc") {
+		t.Errorf("#520: a docstring closed by an earlier edit still masked halluc() in a Python MultiEdit")
+	}
+}
+
+// TestSimulateMultiEdit pins the edit application hookSeedsFor seeds from
+// (#517): later edits shift earlier blocks, an overlapped block and a
+// mid-line fragment get no entry, and an old_string that is missing or not
+// unique fails the whole simulation.
+func TestSimulateMultiEdit(t *testing.T) {
+	file := guard.TextToAddedLines("a\nb\nc\nd\ne")
+	post, starts, lost, ok := simulateMultiEdit(file, []editOp{
+		{OldString: "d", NewString: "d1\nd2"}, // block at synthetic 1
+		{OldString: "a", NewString: "a1\na2"}, // block at synthetic 4, shifts block 1 down
+		{OldString: "c", NewString: ""},       // deletion: no block, shifts block 1 up
+	})
+	if !ok {
+		t.Fatal("simulation failed")
+	}
+	var got []string
+	for _, l := range post {
+		got = append(got, l.Text)
+	}
+	if strings.Join(got, "|") != "a1|a2|b||d1|d2|e" {
+		t.Errorf("post = %q", got)
+	}
+	if len(starts) != 2 || starts[1] != 4 || starts[4] != 0 || len(lost) != 0 {
+		t.Errorf("starts = %v lost = %v, want map[1:4 4:0] and none lost", starts, lost)
+	}
+
+	_, starts, lost, ok = simulateMultiEdit(file, []editOp{
+		{OldString: "b", NewString: "b1\nb2"}, // a later edit takes only its tail: keeps its start
+		{OldString: "b2", NewString: "x"},     // block at 4
+		{OldString: "c", NewString: "c?"},     // block at 6; its first character is replaced next: lost
+		{OldString: "c?", NewString: "!"},     // block at 8
+		{OldString: "e", NewString: "e;"},     // block at 10
+		{OldString: ";", NewString: "."},      // mid-line fragment at 12: unknown
+	})
+	if !ok {
+		t.Fatal("simulation failed")
+	}
+	if want := map[int]int{1: 1, 4: 2, 8: 3, 10: 5}; !maps.Equal(starts, want) {
+		t.Errorf("starts = %v, want %v", starts, want)
+	}
+	if !maps.Equal(lost, map[int]bool{6: true}) {
+		t.Errorf("lost = %v, want map[6:true]", lost)
+	}
+
+	// replace_all: every occurrence is replaced and later blocks shift by all of
+	// them; its own block has several positions, so it gets none.
+	two := guard.TextToAddedLines("x\ny\nx\nz")
+	post, starts, _, ok = simulateMultiEdit(two, []editOp{
+		{OldString: "x", NewString: "x1\nx2", ReplaceAll: true}, // block at 1
+		{OldString: "z", NewString: "z1"},                       // block at 4
+	})
+	got = got[:0]
+	for _, l := range post {
+		got = append(got, l.Text)
+	}
+	if !ok || strings.Join(got, "|") != "x1|x2|y|x1|x2|z1" || !maps.Equal(starts, map[int]int{4: 5}) {
+		t.Errorf("replace_all: ok=%v post=%q starts=%v", ok, got, starts)
+	}
+
+	for _, edits := range [][]editOp{
+		{{OldString: "zz", NewString: "y"}},                                  // missing
+		{{OldString: "a", NewString: "b"}, {OldString: "b", NewString: "q"}}, // no longer unique
+		{{OldString: "", NewString: "q"}},                                    // empty
+	} {
+		if _, _, _, ok := simulateMultiEdit(file, edits); ok {
+			t.Errorf("%v: simulated, want failure", edits)
+		}
+	}
+}
+
+// TestHookSeedsForLostBlockIsUnknown: a block whose first characters a later
+// edit replaced has no position in the result, so it gets no seed at all — not
+// its pre-edit one, which round 4 on PR #518 showed can be stale and mask a
+// call (edit 0 closes the raw string the block sat in).
+func TestHookSeedsForLostBlockIsUnknown(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar s = `\nx := 1\n`\n\nfunc f() {\n}\n")
+	edits := []editOp{
+		{OldString: "var s = `", NewString: "var s = 1 //"},
+		{OldString: "x := 1", NewString: "y := halluc()"}, // block 2 (synthetic 3)
+		{OldString: "y := ", NewString: "z := "},          // replaces block 2's start
+	}
+	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
+	if v, has := s.open[3]; has {
+		t.Errorf("lost block 2 seeded open=%q, want no seed", v)
+	}
+	if _, has := s.goBlock[3]; has || s.goBlock == nil {
+		t.Errorf("goBlock = %v, want a non-nil map without block 2", s.goBlock)
+	}
+}
+
+// TestHookSeedsForSingleEditTrailingNewline pins round 4 on PR #518 (R4-2): a
+// one-edit MultiEdit is replayed like any other, so an old_string ending in
+// "\n" (which the whole-line locator never matches) is still seeded and a new
+// `var (` entry binds.
+func TestHookSeedsForSingleEditTrailingNewline(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar (\n\ta = 1\n\tb = 2\n)\n\nfunc f() {\n}\n")
+	edits := []editOp{{OldString: "\tb = 2\n", NewString: "\tb = 2\n\tnewv = other()\n\tw = newv()\n"}}
+	fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+	hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo).applyTo(&fd)
+	symbols := map[string]struct{}{"other": {}}
+	guard.FoldInFileDefs(symbols, file, guard.LangGo)
+	for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+		if v.Symbol == "newv" {
+			t.Errorf("newv() flagged: the single edit's block was not seeded inside `var (`")
+		}
 	}
 }
 

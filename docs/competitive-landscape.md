@@ -1,6 +1,6 @@
 # Competitive landscape — keeping the moat claim defensible
 
-**Last verified 2026-08-06.** Next re-verification due: 2026-10-22 (quarterly).
+**Last verified 2026-10-22.** Next re-verification due: 2027-01-22 (quarterly).
 
 > The due date tracks the **22nd** of Jan/Apr/Jul/Oct because that is when the
 > scheduled job actually fires (local cron, `~/.local/bin/runecho-moat-reverify`).
@@ -63,28 +63,41 @@ A rival falsifies it only by satisfying **all four** conjuncts at once:
 Anything that misses one of the four is *adjacent*, not a rival, and belongs in
 the watch list rather than in the positioning.
 
-## Survey — 2026-08-06
+## Survey — 2026-10-22
 
 | Tool | What it actually does | Fires | Falsifies the claim? |
 |---|---|---|---|
-| **anti-halu** (`emilyoprog`, Python, 0★, no license, single commit 2026-07-10) | **The tool that falsified the old claim.** A `PreToolUse` hook (`Write\|Edit\|MultiEdit\|apply_patch`) that parses the *pending* Python content with `ast`, resolves each name bound by an import, then **imports the module and checks `hasattr`** — `math.square_root` is denied before the write lands. Second check: every non-stdlib top-level import is looked up on PyPI (import-root → distribution metadata, so `cv2`→`opencv-python`). Fails open on any verifier exception, 800 ms budget per distribution. Conservative by construction: skips `import *`, dynamic `importlib`/`getattr`, relative imports, and any name that is reassigned, shadowed by a parameter, or monkeypatched. | **Pre-write (PreToolUse), denies** — `pre_write_check.py` exits 2 with the reason on stderr | **YES for the old claim — the first tool on record to satisfy all four conjuncts.** 1: PreToolUse. 2: exit 2 is a deny, not a warning. 3: it decides on symbol existence. 4: `ast` + `importlib`, no model anywhere. **No for the narrowed claim:** it resolves only names reaching the file through an import, so it cannot see a symbol the repo itself is supposed to define — relative imports are explicitly skipped, and a bare call to an undefined local function is invisible to it. Python-only. **Not a momentum story** (one commit, dormant since), but substance is the test here, not stars — see the packaging note below, which is the part worth stealing. |
-| **Gortex** (`zzet/gortex`, 1090★, Apache-2.0, 257 languages) | **The largest actor in this space by three orders of magnitude of reach, and the shortest path to falsification on record.** A code-intelligence engine (CLI + MCP + API, local) that already owns a full symbol graph with reference resolution. Critically, `internal/mcp/parse_gate.go` **already holds candidate bytes pre-write and parses them with tree-sitter before the atomic swap** — the hard part of the architecture is built and shipped. | Pre-write, on its own MCP write tools | **No — today, and only on a technicality.** Its gate's predicate is `parseErrorCount`: it asks whether the pending bytes *parse*, never whether the symbols they reference *resolve* — so conjunct 3 fails. But it already has the graph to answer that, and swapping the predicate is a contained change. Two further concessions that will not last: it guards only its own MCP write tools (its PreToolUse hook predicate is file-path-only, so edits made with the agent's native tools bypass it), and it is bypassable via `allow_parse_errors=true`. **Reach makes this the one to watch** — 1090★ and pushed the day of this survey. |
-| **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. Now at v0.5.0 (PyPI, released 2026-04-24; up from v0.4.1) — adds condensed fact-force denials for long sessions on top of the earlier opt-in bughunt gate. Behavior re-confirmed this pass directly from the PyPI project page: it still demands evidence-gathering (importers, schemas, instruction quotes via grep/read), never symbol existence. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails, unchanged by the version bump. |
-| **Anti-Hallucination-MCP** (`Akunimal`) | The nearest neighbour on *substance* — and the first tool found that checks the same thing RunEcho checks. Deterministic, model-free symbol existence: AST extraction via `@ast-grep/napi` for JS/TS/TSX, regex fallback for ~15 more languages, symbols persisted to `.wisdom/symbols.json`, confidence-scored with fuzzy typo matching. Ships a Claude Code hook that its own setup script installs. Also bundles command-output compression (dedup/grouping) — so one repo overlaps both RunEcho *and* terse. | **Post-write** — the installed hook is `PostToolUse` on `Write`/`Edit`; it "warns after every edit", writing to stderr *after* the write has landed | **No — but it is the closest miss on record.** Satisfies conjuncts 3 (symbol existence) and 4 (deterministic, no LLM) outright. Fails 1 and 2: the edit is already on disk when it fires, so it advises rather than denies. Two further concessions RunEcho does not make: a persisted registry that *can* go stale (mitigated by an opt-in `watch_project` watcher, not by re-parsing), and an `ANTIHALL_AUTOFIX=1` mode that rewrites the identifier in place — a repair posture, not a gate. **Its falsification path is one line of JSON** (see watch list). |
-| **Cursor hooks** | Hook surface enumerated in the docs: `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` can allow/deny; `afterFileEdit` / `afterTabFileEdit` are observational only. Re-checked this pass against <https://cursor.com/docs/hooks.md> directly: still no `beforeFileEdit` or equivalent pre-edit-for-native-edits event. | `beforeReadFile` pre-read; native edits **post-write only** | **No — and structurally can't today.** There is no `beforeFileEdit` event, so an edit made with Cursor's *native* edit tool cannot be gated before it lands. (Also relevant to issue #174: a Cursor port could only cover edits routed through shell or an MCP filesystem server, via `beforeShellExecution` / `beforeMCPExecution` — that is partial coverage of the thing agents actually do, not a port.) |
+| **anti-halu** (`emilyoprog`, Python, 0★, no license, single commit 2026-07-10) | **The tool that falsified the old claim.** A `PreToolUse` hook (`Write\|Edit\|MultiEdit\|apply_patch`) that parses the *pending* Python content with `ast`, resolves each name bound by an import, then **imports the module and checks `hasattr`** — `math.square_root` is denied before the write lands. Second check: every non-stdlib top-level import is looked up on PyPI (import-root → distribution metadata, so `cv2`→`opencv-python`). Fails open on any verifier exception, 800 ms budget per distribution. Conservative by construction: skips `import *`, dynamic `importlib`/`getattr`, relative imports, and any name that is reassigned, shadowed by a parameter, or monkeypatched. **Reconfirmed 2026-10-22 via `gh api repos/emilyoprog/anti-halu` and its tree: still 0★, still the single 2026-07-10 commit, `verifiers/` still holds only `symbol_verifier.py` and `package_verifier.py` — no project-scanning module added.** | **Pre-write (PreToolUse), denies** — `pre_write_check.py` exits 2 with the reason on stderr | **YES for the old claim — the first tool on record to satisfy all four conjuncts.** 1: PreToolUse. 2: exit 2 is a deny, not a warning. 3: it decides on symbol existence. 4: `ast` + `importlib`, no model anywhere. **No for the narrowed claim:** it resolves only names reaching the file through an import, so it cannot see a symbol the repo itself is supposed to define — relative imports are explicitly skipped, and a bare call to an undefined local function is invisible to it. Python-only. **Not a momentum story** (one commit, dormant over three months now), but substance is the test here, not stars — see the packaging note below, which is the part worth stealing. |
+| **Gortex** (`zzet/gortex`, 1913★ as of 2026-10-22 — up from 1090★, Apache-2.0, 257 languages) | **The largest actor in this space by three orders of magnitude of reach, and the shortest path to falsification on record.** A code-intelligence engine (CLI + MCP + API, local) that already owns a full symbol graph with reference resolution. Critically, `internal/mcp/parse_gate.go` **already holds candidate bytes pre-write and parses them with tree-sitter before the atomic swap** — the hard part of the architecture is built and shipped. **Re-fetched from current `main` (pushed 2026-10-21) this pass: unchanged.** | Pre-write, on its own MCP write tools | **No — today, and only on a technicality.** Its gate's predicate is still `parseErrorCount`, confirmed by direct source read this pass: it asks whether the pending bytes *parse*, never whether the symbols they reference *resolve* — so conjunct 3 fails. But it already has the graph to answer that, and swapping the predicate is a contained change. Two further concessions that will not last: it guards only its own MCP write tools (its PreToolUse hook predicate is file-path-only, so edits made with the agent's native tools bypass it), and it is bypassable via `allow_parse_errors=true`. **Reach makes this the one to watch** — nearly doubled (1090★ → 1913★) since last pass. |
+| **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. Now at **v0.6.0** (PyPI — up from v0.5.0 last pass): adds a `PostToolUse` hook on `Read`/`Grep`/`Glob`/`Bash` that records observed investigation into an evidence ledger, so the gate opens on what the agent actually did rather than on what it claims. Re-confirmed this pass directly from the PyPI v0.6.0 project page: it still demands evidence-gathering (importers, schemas, instruction quotes via grep/read), never symbol existence. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails, unchanged by the version bump. |
+| **Anti-Hallucination-MCP** (`Akunimal`) | The nearest neighbour on *substance* — and the first tool found that checks the same thing RunEcho checks. Deterministic, model-free symbol existence: AST extraction via `@ast-grep/napi` for JS/TS/TSX, regex fallback for ~15 more languages, symbols persisted to `.wisdom/symbols.json`, confidence-scored with fuzzy typo matching. Ships a Claude Code hook that its own setup script installs. Also bundles command-output compression (dedup/grouping) — so one repo overlaps both RunEcho *and* terse. **Could not be re-located this pass:** a GitHub repo-name search, a search of Akunimal's own repos, and a code search for its `ANTIHALL_AUTOFIX` signature all returned nothing on 2026-10-22. No URL was ever recorded for this row — the resolvable-identifier rule below postdates it — so this verdict is **carried forward unverified, not reconfirmed.** | **Post-write** (as last verified) — the installed hook is `PostToolUse` on `Write`/`Edit`; it "warns after every edit", writing to stderr *after* the write has landed | **No — but it was the closest miss on record.** Satisfies conjuncts 3 (symbol existence) and 4 (deterministic, no LLM) outright. Fails 1 and 2: the edit is already on disk when it fires, so it advises rather than denies. Two further concessions RunEcho does not make: a persisted registry that *can* go stale (mitigated by an opt-in `watch_project` watcher, not by re-parsing), and an `ANTIHALL_AUTOFIX=1` mode that rewrites the identifier in place — a repair posture, not a gate. **Its falsification path is one line of JSON** (see watch list) — unverifiable this pass whether that line has been written. |
+| **Cursor hooks** | **Changed since last pass.** The hook surface now documents a generic `preToolUse` hook — "called before any tool execution... fires for all tool types (Shell, Read, Write, MCP, Task, etc.)" — whose matcher explicitly covers `Write`, and which can return `"permission": "deny"` to block the call. Verified directly against <https://cursor.com/docs/hooks.md> on 2026-10-22 (both the exit-code-behavior table and the `#### preToolUse` reference section confirm it). `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeSubmitPrompt` remain allow/deny as before; `afterFileEdit` / `afterTabFileEdit` remain observational only — but `preToolUse` is a distinct, broader event this file had not previously checked for by name. | `preToolUse` fires pre-write, for `Write` among other tools, and can deny | **No — but the "structurally can't" framing from the last two passes is retracted as false.** Cursor's native edit tool *can* be gated pre-write today via `preToolUse`. What's missing is substance, not architecture: no rival is known to run a symbol-existence check inside a `preToolUse` hook on Cursor. That is now the same shape of gap as Gortex (architecture built, predicate missing), not the structural impossibility previously asserted. (Issue #174 should be revisited on the same basis — a Cursor port is no longer limited to `beforeShellExecution` / `beforeMCPExecution` coverage.) |
+| **Cline SDK hooks** | **New row this pass.** Cline's SDK plugin docs describe a `beforeTool` hook — "before a tool runs, with the `tool`, `toolCall`, and `input`" — that can return `{ skip: true, reason }` to block the call before it executes, with the reason surfaced back to the model. Verified directly against <https://docs.cline.bot/sdk/plugins.md> on 2026-10-22. This tool was previously folded into the "Cline / Continue / Cody" catch-all row below without being checked on its own, which is how its hook docs were missed until this pass. | `beforeTool` fires pre-write, generic across tool types | **No — same shape as Cursor/Gortex.** The hook can block a write before it lands (conjuncts 1 and 2). No shipped plugin was found that uses it to check symbol existence deterministically; Cline ships the mechanism, not the gate. |
 | **pyright-lsp** (official Anthropic Claude Code plugin) | Runs Pyright and surfaces LSP diagnostics into the conversation as `<new-diagnostics>`. New first-party entrant since the last positioning pass. | After the edit | **No.** Advisory, post-write, Python-only, needs a language server — every one of these is something the moat sentence already concedes to LSPs. Worth watching: it makes "just use an LSP" cheaper inside Claude Code itself. |
 | **Serena** (oraios) | LSP-backed semantic MCP: find-references, rename, symbol-level edits, 40+ languages. | On request, during the loop | **No.** Deeper than RunEcho on every axis except timing and setup; it is a tool the agent *chooses* to call, not a gate that fires whether or not the agent cooperates. |
 | **Aider repo map** | Tree-sitter + PageRank ranking of important symbols, packed into the context budget. | Context supply, pre-generation | **No.** Supplies context; validates nothing. Fails conjuncts 2 and 3 by design — the repo map's job is to make the model *better informed*, never to overrule it. |
-| **Cline / Continue / Cody** | No pre-write symbol-validation gate found this round. | — | **No.** Note the evidence here is weaker than for Cursor: Cursor publishes an exhaustive hook list, so its negative is documented; for these the negative is only "not found". |
+| **Continue / Cody** | No pre-write symbol-validation gate found this round. Continue has pivoted toward a CLI-first platform with `.continue/checks/` running as GitHub status checks on PRs — merge-time, not pre-write. | — | **No.** Note the evidence here is weaker than for Cursor or Cline above: those tools publish an exhaustive hook/event list, so a negative there is documented; for Continue and Cody the negative is only "not found". |
 | **Shipmoor** | Described as a local deterministic verification layer producing a binding merge verdict. | Merge time | **No.** Wrong end of the pipeline entirely. *Secondary source only — not primary-verified.* |
 
-**Verdict 2026-08-06: the old claim is FALSIFIED. The narrowed claim holds.**
-Last pass predicted the square would be closed by someone merging GateGuard's
-timing with Anti-Hallucination-MCP's substance. That is exactly what happened,
-except it was neither of them and it had already shipped: `anti-halu` was pushed
-2026-07-10, thirteen days *before* the pass that declared the claim safe.
+**Verdict 2026-10-22: no new falsification. The narrowed claim still holds.**
+`anti-halu` and Gortex are both unchanged this pass (reconfirmed directly against
+current source, see table). Anti-Hallucination-MCP could not be re-located and is
+carried forward unverified. The one real move this pass is architectural, not a
+new rival: **Cursor and Cline have each shipped a generic pre-write blocking hook**
+(`preToolUse` and `beforeTool` respectively) that closes the specific gap this
+file previously cited — "Cursor's hook surface can't host such a gate for its
+native edit tool" is now false and has been corrected in both files. No rival is
+known to run a symbol-existence predicate inside either hook, so the four-conjunct
+claim does not fall; it is the same shape of gap as Gortex (architecture built,
+predicate missing), now three-for-three across the field's largest harnesses.
 
-So the position moved twice at once:
+The prior (August) pass's finding, unchanged since and preserved here because it
+is still why the narrowed claim reads the way it does: last pass predicted the
+square would be closed by someone merging GateGuard's timing with
+Anti-Hallucination-MCP's substance. That is exactly what happened, except it was
+neither of them and it had already shipped: `anti-halu` was pushed 2026-07-10,
+thirteen days *before* the pass that declared the claim safe. So the position
+moved twice at once, that pass:
 
 - **The general pre-write symbol gate is no longer unclaimed.** One tool holds
   all four conjuncts. It is dormant and Python-only, but the square is occupied
@@ -199,7 +212,8 @@ repository under edit is supposed to define.
 
 - **Gortex swapping its `parse_gate` predicate from "does it parse" to "does it
   resolve".** The highest-impact path by a wide margin, because it is the only
-  candidate with real reach (1090★ and climbing during this survey). It already
+  candidate with real reach (1913★ and still climbing — up from 1090★ last pass).
+  It already
   holds candidate bytes pre-write, already parses them before the atomic swap,
   and already owns a symbol graph with reference resolution — the three
   expensive pieces. What stands between it and all four conjuncts is the
@@ -246,12 +260,32 @@ repository under edit is supposed to define.
   future-work section still only envisions a VS Code semantic-linter integration
   ("as the LLM generates code, the analyzer would validate each call in real
   time") — no shipped hook, no pre-write blocking. Unchanged since the last pass.
-- **Cursor shipping a `beforeFileEdit` event.** The moment that exists, the empty
-  square becomes buildable in the largest agent harness.
+- **RESOLVED this pass, watch what's built on it: Cursor's `preToolUse` and
+  Cline's `beforeTool`.** The bullet that used to read "Cursor shipping a
+  `beforeFileEdit` event" is overtaken — Cursor now documents a generic
+  `preToolUse` hook (matcher covers `Write`, can return `permission: "deny"`)
+  and Cline's SDK docs a `beforeTool` hook (`skip: true` blocks the call), both
+  verified directly against each tool's current docs on 2026-10-22. The empty
+  square is now buildable in both of the largest agent harnesses outside Claude
+  Code. **Check whether any plugin wires a deterministic symbol-existence check
+  into either hook every pass** — that is now the single highest-leverage path
+  to falsification on the board, ahead of Gortex, because it requires no new
+  infrastructure, only a predicate.
 - **A first-party LSP-backed pre-write gate.** `pyright-lsp` today only injects
   diagnostics after the fact; wiring the same language server into a blocking
   PreToolUse decision would satisfy all four conjuncts for one language at a time,
   at the cost of the setup and staleness RunEcho trades away.
+- **tribunal-kit** (`Harmitx7/tribunal-kit`, 5★, MIT, npm `tribunal-kit`,
+  pushed 2026-10-22 — new this pass, found via the raw repo sweep). Its own
+  README describes "31 domain-specific reviewers" analyzing generated code
+  "before writing to disk," gated by a Rust core doing sub-10ms AST/graph
+  extraction. Timing (1) and blocking (2) look plausible from the architecture
+  diagram (Human Gate / Inner-Loop Auto-Correct before "Safe Commit to Disk").
+  **Fails conjunct 4 on the README's own words**: "Backend Intelligence Trust
+  Boundary: LLMs can no longer self-authorize findings" directly implies the 31
+  reviewers *are* LLMs that previously could self-authorize — the gate's verdict
+  comes from model judgment, not parsing. Not re-checked against source (no
+  source code read, README only); watch for a reviewer-free deterministic mode.
 
 ## Deciding what to add
 
@@ -277,6 +311,28 @@ them from scratch:
   runtime threat detection (prompt injection, data exfiltration, OWASP Agentic
   Top 10). Governs what an agent is *allowed* to do; has no notion of whether a
   symbol exists. Fails conjunct 3 outright and is not even adjacent.
+- **vouch** (`sunnyadn/vouch`, surfaced in the October 2026 pass — written
+  without a full date for the same reason as above) — a Stop-hook reviewer that
+  checks an agent's *claims* ("there's no library for X", "all tests pass")
+  against its recorded trace of tool calls. Explicitly passive and end-of-turn
+  by its own README, not pre-write. Fails conjunct 1 outright, and conjunct 3 —
+  it grades truthfulness of statements, not symbol existence. Different lane
+  entirely; author's own numbers describe it as an unreleased research prototype
+  with an LLM reviewer that currently false-positives too often to run.
+- **DCGP** (`addicted2crypto/DCGP`, surfaced in the October 2026 pass) — a
+  context/entropy governance layer that predicts conversational drift and prunes
+  stale context; ships a separate static-analysis add-on (`@dcgp/vibe-audit`)
+  for AI-code-smell patterns (stub markers, hardcoded credentials, etc.), which
+  is lint-time, not pre-write. Neither half checks whether a referenced symbol
+  exists. Fails conjunct 3; wrong lane.
+- **nio-xs** (`nio-labs/nio-xs`, surfaced in the October 2026 pass) — an
+  OpenAI-compatible gateway/companion whose `--code guard` directive "verifies
+  generated code against Rust, TypeScript, Python, and Go AST symbols" and
+  "prompts to reroute" on a miss. The one candidate this pass with a plausible
+  conjunct-3 claim, but it is an explicit, on-demand directive the agent must
+  choose to invoke (fails conjunct 1 as a *gate*) and "prompts to reroute" reads
+  as advisory rather than a hard deny (conjunct 2 unconfirmed). Not re-checked
+  against source; worth a source-level look next pass rather than dismissal.
 
 ## Re-verification procedure
 

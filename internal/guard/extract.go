@@ -1519,7 +1519,7 @@ type Ref struct {
 // ExtractRefs extracts bare function call targets from the added lines for the
 // given language. Qualified calls (pkg.Foo / obj.Method) are skipped.
 func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
-	return extractRefs(lang, lines, nil, nil)
+	return extractRefs(lang, lines, nil, nil, nil)
 }
 
 // extractRefs is ExtractRefs with optional openSeed/braceDepthSeed. openSeed(lineNo)
@@ -1535,7 +1535,7 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 // unchanged context, not part of the diff). A nil seed preserves the full-file /
 // unseeded behavior for either: every contiguous run starts outside any string /
 // at depth 0.
-func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []Ref {
+func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, dotSeed func(lineNo int) bool) []Ref {
 	if lang == LangUnknown {
 		return nil
 	}
@@ -1585,17 +1585,17 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// a ternary branch — `compute(x) : {}` there is a call followed by the
 	// alternative, not a method with a return type, and must not be read as one.
 	prevEndsTernary := false
-	// prevEndsDot: the previous Go code line ended in a selector's `.`, so the
-	// identifier this line starts with is a method or field, not a bare call
-	// (#519). Go has no line continuation character; a split method chain
-	// (`x.` / `Foo()`) is gofmt-legal.
+	// prevEndsDot: the previous Go or JS code line ended in a selector's `.`, so
+	// the identifier this line starts with is a method or field, not a bare call
+	// (#519, #522; see endsInSelectorDot). dotSeed carries it into a run from the
+	// unchanged line above, as openSeed does the string state.
 	prevEndsDot := false
 	for i, l := range lines {
 		text := l.Text
 		if i == 0 || l.LineNo != prevNo+1 {
 			pendingMethod = nil
 			prevEndsTernary = false
-			prevEndsDot = false
+			prevEndsDot = dotSeed != nil && dotSeed(l.LineNo)
 			// Start of a contiguous run (the first line, or after a hunk gap):
 			// reset carried state. Seed the string state from the file context
 			// above the run when a seed is available, so a run that opens inside a
@@ -1641,10 +1641,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		}
 		if trimmed := strings.TrimSpace(scan); trimmed != "" {
 			prevEndsTernary = strings.HasSuffix(trimmed, "?")
-			// Not a variadic `...` or a float literal ending in its dot (`0.`):
-			// neither continues onto the next line as a selector.
-			prevEndsDot = lang == LangGo && strings.HasSuffix(trimmed, ".") &&
-				!strings.HasSuffix(trimmed, "...") && !reGoFloatEnd.MatchString(trimmed)
+			prevEndsDot = endsInSelectorDot(lang, trimmed)
 		}
 		if lang == LangJS {
 			if pendingMethod != nil {
@@ -1745,8 +1742,8 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			if nameStart == methodSkip {
 				continue // a method definition's own name (#431)
 			}
-			if fullStart == selectorAt {
-				continue // a selector continued from the line above (#519)
+			if fullStart == selectorAt || afterSelectorDot(scan, fullStart) {
+				continue // a selector continued from the line above (#519) or past blanks (#522)
 			}
 			// Skip if preceded by '.' (qualified call), or by an identifier byte
 			// (the match is mid-identifier — this emulates the left `\b` the regex
@@ -2123,6 +2120,29 @@ func stripLiterals(lang Lang, text string) string {
 // LocallyBoundNames) would otherwise each copy; ExtractRefs/ExtractImports keep
 // their own loops because they inspect state (comment lines / inPyParen) before
 // stripping.
+// endsInSelectorDot reports whether a masked, trimmed Go or JS code line ends
+// in a selector's `.`, so the identifier that starts the next code line is a
+// member, not a bare call (#519, #522). Neither language ends a statement after
+// a trailing `.` (Go has no continuation character; JS's ASI never applies
+// there). Not a variadic or spread `...`, and not a float literal ending in its
+// dot (`0.`). Python continues a line only inside brackets, so it is left out.
+// One predicate for extractRefs, the seed walk and the dropped-import scanner.
+func endsInSelectorDot(lang Lang, trimmed string) bool {
+	return (lang == LangGo || lang == LangJS) && strings.HasSuffix(trimmed, ".") &&
+		!strings.HasSuffix(trimmed, "...") && !reGoFloatEnd.MatchString(trimmed)
+}
+
+// afterSelectorDot reports whether the code byte before scan[at], past blanks
+// on the same line, is a single `.`: `cfg. Load()` is a selector (#522). Not a
+// spread `...` (`[... items()]` calls items).
+func afterSelectorDot(scan string, at int) bool {
+	k := at - 1
+	for k >= 0 && (scan[k] == ' ' || scan[k] == '\t') {
+		k--
+	}
+	return k >= 0 && scan[k] == '.' && (k == 0 || scan[k-1] != '.')
+}
+
 func scanStripped(lang Lang, lines []AddedLine, fn func(scan string, l AddedLine)) {
 	scanStrippedSeeded(lang, lines, nil, fn)
 }

@@ -725,6 +725,31 @@ func TestHookSeedsForSingleEditTrailingNewline(t *testing.T) {
 	}
 }
 
+// TestHookSeedsSelectorContinuation pins #522 item 1 on the hook path: an Edit
+// to one link of a split chain is seeded with the `x.` line above it, so the
+// link is a member, not a bare call. Edit and MultiEdit both.
+func TestHookSeedsSelectorContinuation(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nfunc f() {\n\tseedsFor(a).\n\t\tapplyTo(&d)\n\tg()\n}\n")
+	for _, c := range []struct {
+		tool, old, new string
+		edits          []editOp
+	}{
+		{tool: "Edit", old: "\t\tapplyTo(&d)", new: "\t\tapplyTo(&e)"},
+		{tool: "MultiEdit", edits: []editOp{
+			{OldString: "\t\tapplyTo(&d)", NewString: "\t\tapplyTo(&e)"},
+			{OldString: "\tg()", NewString: "\tg(1)"},
+		}},
+	} {
+		fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines(c.tool, c.new, "", c.edits)}
+		hookSeedsFor(c.tool, c.old, c.edits, file, guard.LangGo).applyTo(&fd)
+		for _, v := range guard.Run(map[string]struct{}{"g": {}}, "", []guard.FileDiff{fd}) {
+			if v.Symbol == "applyTo" {
+				t.Errorf("%s: the edited chain link was flagged as a bare call", c.tool)
+			}
+		}
+	}
+}
+
 // TestHookSeedsReachGuardRun pins the hook path's seed wiring end to end
 // (verify.go's hookSeedMaps(...).applyTo): the unit tests above check what
 // hookSeedMaps computes, but without this nothing failed when its result never

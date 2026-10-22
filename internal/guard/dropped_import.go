@@ -177,7 +177,21 @@ func nameSet(names []string) map[string]struct{} {
 // `x.Name`) — semantics identical to the former containsUnqualifiedWord.
 func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 	uses := make(map[string]int)
+	// The previous code line ended in a selector's `.`, so this line's first
+	// identifier is a member, not a use (#522; extractRefs' rule).
+	prevEndsDot, prevNo := false, 0
 	scanStripped(lang, lines, func(scan string, l AddedLine) {
+		if l.LineNo != prevNo+1 {
+			prevEndsDot = false
+		}
+		prevNo = l.LineNo
+		selectorAt := -1
+		if prevEndsDot {
+			selectorAt = len(scan) - len(strings.TrimLeft(scan, " \t"))
+		}
+		if t := strings.TrimSpace(scan); t != "" {
+			prevEndsDot = endsInSelectorDot(lang, t)
+		}
 		if isImportLine(lang, l.Text) {
 			// A single physical line can pack import clauses and real statements,
 			// ';'-separated (`import re; x = Foo()`), and isImportLine classifies
@@ -227,6 +241,9 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 			}
 			if start > 0 && scan[start-1] == '.' {
 				continue // qualified attribute, e.g. x.Name
+			}
+			if start == selectorAt || afterSelectorDot(scan, start) {
+				continue // a selector continued from the line above, or past blanks
 			}
 			if id := scan[start:j]; uses[id] == 0 {
 				uses[id] = l.LineNo

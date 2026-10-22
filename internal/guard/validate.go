@@ -64,6 +64,8 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	paramSigSeeds := make([]func(lineNo int) int, len(diffs))
 	// goBlockSeeds is GoDeclaredNames' block-state seed (#514).
 	goBlockSeeds := make([]func(lineNo int) (GoBlockState, bool), len(diffs))
+	// dotSeeds is extractRefs' selector-continuation seed (#522).
+	dotSeeds := make([]func(lineNo int) bool, len(diffs))
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
 		fd = fd.withSeeds()
@@ -72,6 +74,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		bracketSeeds[i] = bracketDepthSeedFunc(lang, fd)
 		paramSigSeeds[i] = paramSigDepthSeedFunc(lang, fd)
 		goBlockSeeds[i] = goBlockSeedFunc(lang, fd)
+		dotSeeds[i] = dotSeedFunc(lang, fd)
 	}
 
 	// Pass 1: collect all new definitions AND imported names across the entire
@@ -190,7 +193,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
-		for _, ref := range extractRefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i]) {
+		for _, ref := range extractRefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i], dotSeeds[i]) {
 			if _, ok := known[ref.Name]; ok {
 				continue
 			}
@@ -327,6 +330,28 @@ func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
 			b, ok := byLine[lineNo]
 			return b, ok
 		}
+	}
+	return nil
+}
+
+// dotSeedFunc returns extractRefs' selector-continuation seed for a diff:
+// whether the code line above each line ends in a selector's `.` (#522), so a
+// hunk that edits one link of a split chain reads it as a member, not a bare
+// call. nil outside Go and JS, or with no file to seed from.
+func dotSeedFunc(lang Lang, fd FileDiff) func(int) bool {
+	if lang != LangGo && lang != LangJS {
+		return nil
+	}
+	if fd.AbsPath != "" {
+		t := fd.seedTable(lang)
+		if t == nil {
+			return nil
+		}
+		return func(lineNo int) bool { return t.at(lineNo).Dot }
+	}
+	if len(fd.DotByLine) > 0 {
+		byLine := fd.DotByLine
+		return func(lineNo int) bool { return byLine[lineNo] }
 	}
 	return nil
 }

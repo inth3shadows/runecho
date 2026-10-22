@@ -2803,13 +2803,42 @@ func TestExtractRefs_GoChainAfterTrailingDot(t *testing.T) {
 		// string) must agree.
 		for _, seed := range []func(int) string{nil, func(int) string { return "" }} {
 			var got []string
-			for _, r := range extractRefs(LangGo, c.lines, seed, nil) {
+			for _, r := range extractRefs(LangGo, c.lines, seed, nil, nil) {
 				got = append(got, r.Name)
 			}
 			slices.Sort(got)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("%s (seeded %v)\n  got  %v\n  want %v", c.name, seed != nil, got, c.want)
 			}
+		}
+	}
+}
+
+// TestExtractRefs_SelectorContinuationFollowups pins #522 items 2 and 3: a
+// selector separated from its dot by blanks on the same line, and JS chains
+// split after a trailing dot, are not bare calls. A JS spread (`...`) before a
+// call, on its line or the line above, still is.
+func TestExtractRefs_SelectorContinuationFollowups(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		lang Lang
+		src  string
+		want []string
+	}{
+		{"Go same-line space", LangGo, "\tx := cfg. Load()\n\ty := cfg.\tSave()\n", nil},
+		{"JS chain", LangJS, "const v = promise.\n  withRetry(x).\n  andLog(y)\n", nil},
+		{"JS optional-chain continuation", LangJS, "const v = obj?.\n  compute(x)\n", nil},
+		{"JS spread on the line", LangJS, "const a = [... items()]\n", []string{"items"}},
+		{"JS spread ending the line above", LangJS, "f(...\n  items())\n", []string{"f", "items"}},
+		{"JS float ending the line above", LangJS, "const x = 1.\nghost()\n", []string{"ghost"}},
+	} {
+		var got []string
+		for _, r := range ExtractRefs(c.lang, TextToAddedLines(c.src)) {
+			got = append(got, r.Name)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s\n  got  %v\n  want %v", c.name, got, c.want)
 		}
 	}
 }

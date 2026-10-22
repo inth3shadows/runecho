@@ -439,3 +439,14 @@ func TestLocallyBoundNames_SeededMidSignature(t *testing.T) {
 		t.Errorf("seeded LocallyBoundNames = %v, want {timeout}", bound)
 	}
 }
+
+// TestDroppedImport_SelectorContinuationIsNotAUse pins #522 item 4: a name
+// that only survives as a selector continued from the line above (`cfg.` /
+// `parse(x)`) is not a use of the removed import.
+func TestDroppedImport_SelectorContinuationIsNotAUse(t *testing.T) {
+	oldText := "import { parse } from './p'\nconst v = cfg.\n  parse(x)\n"
+	newText := "const v = cfg.\n  parse(x)\n"
+	if got := droppedNames(DroppedImportRefs(LangJS, oldText, newText)); len(got) != 0 {
+		t.Errorf("a continued selector counted as a use of the dropped import: %v", got)
+	}
+}

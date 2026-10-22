@@ -806,3 +806,20 @@ func TestRun_GoBlockSeedReachesKnownSet(t *testing.T) {
 		t.Errorf("hook map: ghost bound despite a located block outside any var block")
 	}
 }
+
+// TestRun_SelectorContinuationSeededFromFile pins #522 item 1 on the pre-commit
+// path: a hunk that edits one link of a split chain reads the unchanged `x.`
+// line above it from the file, so the link is a selector, not a bare call.
+func TestRun_SelectorContinuationSeededFromFile(t *testing.T) {
+	src := "package p\n\nfunc f() {\n\tseedsFor(a).\n\t\tapplyTo(&d)\n}\n"
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\t\tapplyTo(&d)"}}
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		if v.Symbol == "applyTo" {
+			t.Errorf("one edited chain link flagged as a bare call: the `seedsFor(a).` line above was not seeded")
+		}
+	}
+}

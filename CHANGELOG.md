@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.83.0] — 2026-10-22
+
+### Changed
+- guard(go): a call that starts the line after a trailing '.' is a selector (#519) (#521)
+
 ## [0.82.0] — 2026-10-22
 
 ### Changed

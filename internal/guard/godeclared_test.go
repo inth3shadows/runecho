@@ -1,7 +1,9 @@
 package guard
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -845,5 +847,67 @@ func TestRun_DotSeedNotOnPrecommit(t *testing.T) {
 	}
 	if !flagged {
 		t.Errorf("an unstaged `x.` above the staged hunk hid ghost()")
+	}
+}
+
+// TestReadStagedBlobs pins #524's index read: each diff gets the INDEX content
+// (not the working tree's unstaged edit), a path the index lacks keeps nil,
+// and an unknown-language file is skipped.
+func TestReadStagedBlobs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package p\n\nfunc a() {}\n")
+	write("b.py", "x = 1\n")
+	write("c.txt", "text\n")
+	git("add", "a.go", "b.py", "c.txt")
+	write("a.go", "package p\n\nfunc unstaged() {}\n") // not staged
+	diffs := []FileDiff{{Path: "a.go"}, {Path: "b.py"}, {Path: "c.txt"}, {Path: "missing.go"}}
+	ReadStagedBlobs(context.Background(), dir, diffs)
+	if got := string(diffs[0].Staged); got != "package p\n\nfunc a() {}\n" {
+		t.Errorf("a.go Staged = %q, want the index content", got)
+	}
+	if got := string(diffs[1].Staged); got != "x = 1\n" {
+		t.Errorf("b.py Staged = %q", got)
+	}
+	if diffs[2].Staged != nil || diffs[3].Staged != nil {
+		t.Errorf("c.txt / missing.go Staged = %q / %q, want nil", diffs[2].Staged, diffs[3].Staged)
+	}
+}
+
+// TestRun_DotSeedFromStagedContent: with the staged content in hand (#524),
+// pre-commit takes the dot seed from the index, so one edited chain link reads
+// as a member even when the working tree around it is shifted, and an
+// unstaged `x.` in the working tree no longer matters.
+func TestRun_DotSeedFromStagedContent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	if err := os.WriteFile(p, []byte("package p\n\nfunc f() {\n\tx.\n\tghost()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := func(staged string, hunk []AddedLine) map[string]bool {
+		out := map[string]bool{}
+		for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, Staged: []byte(staged), AddedLines: hunk}}) {
+			out[v.Symbol] = true
+		}
+		return out
+	}
+	if got := check("package p\n\nfunc f() {\n\ta()\n\tghost()\n}\n", []AddedLine{{LineNo: 5, Text: "\tghost()"}}); !got["ghost"] {
+		t.Errorf("staged `a()` above: ghost() not flagged, got %v", got)
+	}
+	if got := check("package p\n\nfunc f() {\n\tseedsFor(a).\n\t\tapplyTo(&d)\n}\n", []AddedLine{{LineNo: 5, Text: "\t\tapplyTo(&d)"}}); got["applyTo"] {
+		t.Errorf("staged chain link flagged as a bare call: %v", got)
 	}
 }

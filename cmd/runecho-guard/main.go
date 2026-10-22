@@ -344,8 +344,16 @@ func runPreCommit(dryRun, verbose bool) int {
 	for i := range diffs {
 		diffs[i].AbsPath = filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path))
 	}
+	// Judge the STAGED content, not the working tree (#524): the diff's line
+	// numbers and text are the index's, and an unstaged edit can open a string
+	// above a hunk (masking its calls through the seed) or define the name a
+	// staged call uses (masking it through the whole-file fold). A blob that
+	// can't be read keeps today's working-tree read.
+	blobCtx, blobCancel := context.WithTimeout(context.Background(), gitutil.Timeout)
+	guard.ReadStagedBlobs(blobCtx, wtRoot, diffs)
+	blobCancel()
 	// One seed read and walk per staged file, shared by guard.Run and the
-	// file-scope check below (#295). The whole-file folds (readFileLines) still
+	// file-scope check below (#295). The whole-file folds (stagedFileLines) still
 	// read separately.
 	guard.PrepareSeeds(diffs)
 
@@ -364,7 +372,7 @@ func runPreCommit(dryRun, verbose bool) int {
 		if lang == guard.LangUnknown {
 			continue
 		}
-		guard.FoldInFileDefs(symbols, readFileLines(fd.AbsPath), lang)
+		guard.FoldInFileDefs(symbols, stagedFileLines(fd), lang)
 	}
 
 	if verbose {
@@ -405,7 +413,7 @@ func runPreCommit(dryRun, verbose bool) int {
 				if guard.LangFor(fd.Path) != guard.LangGo {
 					continue
 				}
-				whole := readFileLines(fd.AbsPath)
+				whole := stagedFileLines(fd)
 				qv := qualifiedViolations(guard.LangGo, whole, fd.AddedLines, symbols, modulePath, fd.Path)
 				qualifiedV = append(qualifiedV, qv...)
 			}
@@ -429,7 +437,7 @@ func runPreCommit(dryRun, verbose bool) int {
 			if guard.LangFor(fd.Path) != guard.LangGo {
 				continue
 			}
-			whole := readFileLines(fd.AbsPath)
+			whole := stagedFileLines(fd)
 			dv := goDepQualifiedViolations(guard.LangGo, whole, fd.AddedLines, modulePath, goDepIdx, fd.Path)
 			depsGoV = append(depsGoV, dv...)
 		}
@@ -448,7 +456,7 @@ func runPreCommit(dryRun, verbose bool) int {
 			if guard.LangFor(fd.Path) != guard.LangPython {
 				continue
 			}
-			whole := readFileLines(fd.AbsPath)
+			whole := stagedFileLines(fd)
 			fv := fileScopeViolations(guard.LangPython, whole, fd, symbols, fd.Path)
 			fileScopeV = append(fileScopeV, fv...)
 		}
@@ -782,6 +790,19 @@ func readFileLines(filePath string) []guard.AddedLine {
 		return nil
 	}
 	return guard.TextToAddedLines(string(data))
+}
+
+// stagedFileLines is a pre-commit diff's whole file: its staged content when
+// ReadStagedBlobs read it (#524), else the working-tree file, with
+// readFileLines' size cap either way.
+func stagedFileLines(fd guard.FileDiff) []guard.AddedLine {
+	if fd.Staged == nil {
+		return readFileLines(fd.AbsPath)
+	}
+	if len(fd.Staged) > maxInFileBytes {
+		return nil
+	}
+	return guard.TextToAddedLines(string(fd.Staged))
 }
 
 // addInFileDefs folds the current file's own definitions into the known symbol

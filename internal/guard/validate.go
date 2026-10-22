@@ -139,7 +139,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// (where readFileLines returns nil and nothing is folded at all).
 		if lang == LangGo {
 			names := goDeclaredNamesSeeded(fd.AddedLines, openSeeds[i], goBlockSeeds[i])
-			if fd.AbsPath != "" && goBlockSeeds[i] != nil {
+			if fd.AbsPath != "" && fd.Staged == nil && goBlockSeeds[i] != nil {
 				// Pre-commit, the block seed is read from the WORKING TREE at the
 				// STAGED diff's line numbers, so after `git add -p` it can describe
 				// a different line. It may only remove names here: the whole
@@ -335,15 +335,26 @@ func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
 }
 
 // dotSeedFunc returns extractRefs' selector-continuation seed for a diff:
-// whether the code line above each line ends in a selector's `.` (#522), so a
-// hook edit to one link of a split chain reads it as a member, not a bare
-// call. Hook path only: the pre-commit seed table is the WORKING TREE read at
-// STAGED line numbers, and an unstaged edit ending the line above a staged
-// hunk in `.` would make the seed hide that hunk's real call (#523 round 2).
-// Every other seed shares that exposure; seeding from the staged blob would
-// close it for all of them. nil outside Go and JS.
+// whether the code line above each line ends in a selector's `.` (#522), so an
+// edit to one link of a split chain reads it as a member, not a bare call. On
+// the pre-commit path only from the staged content (#524): a table read from
+// the WORKING TREE at STAGED line numbers can carry an unstaged `x.` above a
+// staged hunk and hide its real call (#523 round 2). nil outside Go and JS.
 func dotSeedFunc(lang Lang, fd FileDiff) func(int) bool {
-	if lang != LangGo && lang != LangJS || fd.AbsPath != "" || len(fd.DotByLine) == 0 {
+	if lang != LangGo && lang != LangJS {
+		return nil
+	}
+	if fd.AbsPath != "" {
+		if fd.Staged == nil {
+			return nil
+		}
+		t := fd.seedTable(lang)
+		if t == nil {
+			return nil
+		}
+		return func(lineNo int) bool { return t.at(lineNo).Dot }
+	}
+	if len(fd.DotByLine) == 0 {
 		return nil
 	}
 	byLine := fd.DotByLine

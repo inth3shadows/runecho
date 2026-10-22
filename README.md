@@ -49,14 +49,20 @@ unflattering ones, is in [bench/TOKEN-COST.md](bench/TOKEN-COST.md).
 
 **How often it's wrong, measured against git history, not approvals.** A
 user's approve-anyway rate turned out to have no variance to measure — 308 of
-308 ask-gated edits approved, zero denied, across 30 days of dogfood traffic.
+308 ask-gated edits approved, zero denied, across 30 days of dogfood traffic
+(the 30 days to 2026-08-07).
 So `fpaudit` judges each flagged symbol against **dated git history** instead:
-was it defined at ask time, and is it defined now. Live reading across this
-project's own dogfood corpus: **15.3% false-positive, 33.7% premature** (the
-guard was *correct*, just fired before the symbol it flagged existed — an
-agent writing a caller before its callee), **51.0% stands** (a real unbacked
-reference). The full method, and what NOT to conclude from the 51%, is in
-[bench/FPAUDIT.md](bench/FPAUDIT.md).
+was it defined at ask time, and is it defined now. Reading for the 30 days to
+2026-10-22 across this project's own dogfood corpus, 16 rated flags: **1 wrong
+(6.2%)** — 0 `fp` plus 1 `not-an-identifier`, which fpaudit also counts as the
+guard being wrong — **68.8% premature** (the guard was *correct*, just fired
+before the symbol it flagged existed — an agent writing a caller before its
+callee), and **25.0% stands** (a real unbacked reference). Volume is low: 30
+asks in 30 days, and 61 of the 77 flagged symbols had no rateable claim or no
+answer from the oracle, so a 16-flag window is weak evidence on its own. The
+dated history (15.3% fp in the 30 days to 2026-08-07, 1.8% by 2026-09-09) and
+the method are in [bench/FPAUDIT.md](bench/FPAUDIT.md) and
+[docs/check-worthiness.md](docs/check-worthiness.md).
 
 **The scope, stated up front.** RunEcho reads *unqualified* references — bare
 calls, constant references, and type annotations. Measured against its own
@@ -148,8 +154,9 @@ full semantic analysis.
    ```bash
    # example: macOS arm64 — adjust the asset name for your platform.
    # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
-   TAG=v0.17.1; NUM=0.17.1
-   curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
+   TAG=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/inth3shadows/runecho/releases/latest); TAG=${TAG##*/}; NUM=${TAG#v}
+   : "${NUM:?could not resolve the latest release tag}"
+   curl -fsSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```
    …or **build from source** (needs Go 1.26+). This installs the binaries only; the hooks come from `--hook` / `--hook-pre-push` (below) or `runecho-ir install`:

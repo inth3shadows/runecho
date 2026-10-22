@@ -272,8 +272,8 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		AddedLines: newLines,
 	}}
 	// Seed each block from where it sits in the pre-edit file (fileLines is the
-	// read already done above) — for a MultiEdit, in that file as the edits
-	// before the block leave it (hookSeedsFor, #517): its open-string state, so
+	// read already done above) — for a MultiEdit, in that file with all of its
+	// edits applied (hookSeedsFor, #517): its open-string state, so
 	// an Edit landing inside a docstring or string literal is masked instead of
 	// scanned as code (#178),
 	// and for Python the dict/bracket/def-signature depths (#289, #294), so a

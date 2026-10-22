@@ -72,7 +72,7 @@ func BenchmarkHookSeedBuild(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				var fd guard.FileDiff
-				hookSeedMaps(hookBlockIndices(tc.tool, tc.old, tc.edits, fileLines), fileLines, guard.LangPython).applyTo(&fd)
+				hookSeedsFor(tc.tool, tc.old, tc.edits, fileLines, guard.LangPython).applyTo(&fd)
 			}
 		})
 	}

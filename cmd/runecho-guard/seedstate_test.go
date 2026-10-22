@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,9 +384,9 @@ func TestHookSeedMapsGoBlock(t *testing.T) {
 	edits := []editOp{
 		{OldString: "\tb int", NewString: "\tb int64"}, // inside the block, synthetic line 1
 		{OldString: "\tg()", NewString: "\tg(1)"},      // outside it, line 3
-		{OldString: "\tmissing()", NewString: "\tx()"}, // not located, line 5
+		{OldString: "f()", NewString: "f2()"},          // mid-line fragment, line 5
 	}
-	s := hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo)
+	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
 	if len(s.goBlock) != 2 {
 		t.Fatalf("goBlock = %v, want entries for the two located blocks only", s.goBlock)
 	}
@@ -417,7 +418,7 @@ func TestHookUnlocatedBlockAfterSeededBlock(t *testing.T) {
 		{OldString: "foo()", NewString: "foo()\n\thalluc = other()\n\thalluc()"}, // fragment: not located
 	}
 	fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
-	hookSeedMaps(hookBlockIndices("MultiEdit", "", edits, file), file, guard.LangGo).applyTo(&fd)
+	hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo).applyTo(&fd)
 	symbols := map[string]struct{}{"other": {}, "foo": {}}
 	guard.FoldInFileDefs(symbols, file, guard.LangGo)
 	flagged := false
@@ -570,13 +571,60 @@ func TestHookStructuralEditReachesHook(t *testing.T) {
 	}
 }
 
+// TestHookSeedsForFallbacks pins round 3 on PR #518 (#517): what hookSeedsFor
+// does when the edits cannot all be replayed exactly.
+func TestHookSeedsForFallbacks(t *testing.T) {
+	flagged := func(lang guard.Lang, path, src string, edits []editOp, name string) bool {
+		file := guard.TextToAddedLines(src)
+		fd := guard.FileDiff{Path: path, AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+		hookSeedsFor("MultiEdit", "", edits, file, lang).applyTo(&fd)
+		symbols := map[string]struct{}{"other": {}}
+		guard.FoldInFileDefs(symbols, file, lang)
+		for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+			if v.Symbol == name {
+				return true
+			}
+		}
+		return false
+	}
+	// R3-1: an edit the tool would refuse (a non-unique old_string, no
+	// replace_all) leaves no exact replay, and the stale pre-edit "inside a raw
+	// string" seed must not mask the block after edit 0 closed that string.
+	raw := "package p\n\nvar (\n\tq = `\n)\n`\n\tc = 3\n)\n\nfunc f() {\n\tx := 1\n\tx := 1\n}\n"
+	if !flagged(guard.LangGo, "a.go", raw, []editOp{
+		{OldString: "\tq = `", NewString: "\tq = ``"},
+		{OldString: "`\n\tc = 3\n)", NewString: "func g() {\n\thalluc = other()\n\thalluc()\n}"},
+		{OldString: "\tx := 1", NewString: "\tx := 2"},
+	}, "halluc") {
+		t.Errorf("R3-1: an unreplayable MultiEdit kept the stale raw-string seed and masked halluc()")
+	}
+	// R3-2: a replace_all edit with two occurrences is replayed, so the other
+	// blocks keep their exact seeds: a new `var (` entry still binds.
+	ra := "package p\n\nvar (\n\ta = 1\n)\n\nfunc f() {\n\tx := 1\n\t_ = x\n\tx = 1\n}\n"
+	if flagged(guard.LangGo, "a.go", ra, []editOp{
+		{OldString: "\ta = 1", NewString: "\ta = 1\n\tnewv = other()\n\tw = newv()"},
+		{OldString: "x", NewString: "y", ReplaceAll: true},
+	}, "newv") {
+		t.Errorf("R3-2: a replace_all edit cost the other blocks their seeds")
+	}
+	// #520 on the Python path: edit 0 closes the module docstring, so edit 1's
+	// block is code; the pre-edit seed read it as docstring text.
+	py := "\"\"\"doc\nline\n\"\"\"\n\n\ndef g():\n    return 1\n"
+	if !flagged(guard.LangPython, "m.py", py, []editOp{
+		{OldString: "\"\"\"doc", NewString: "\"\"\"doc\"\"\""},
+		{OldString: "line\n\"\"\"", NewString: "def h():\n    return halluc()"},
+	}, "halluc") {
+		t.Errorf("#520: a docstring closed by an earlier edit still masked halluc() in a Python MultiEdit")
+	}
+}
+
 // TestSimulateMultiEdit pins the edit application hookSeedsFor seeds from
 // (#517): later edits shift earlier blocks, an overlapped block and a
 // mid-line fragment get no entry, and an old_string that is missing or not
 // unique fails the whole simulation.
 func TestSimulateMultiEdit(t *testing.T) {
 	file := guard.TextToAddedLines("a\nb\nc\nd\ne")
-	post, starts, ok := simulateMultiEdit(file, []editOp{
+	post, starts, lost, ok := simulateMultiEdit(file, []editOp{
 		{OldString: "d", NewString: "d1\nd2"}, // block at synthetic 1
 		{OldString: "a", NewString: "a1\na2"}, // block at synthetic 4, shifts block 1 down
 		{OldString: "c", NewString: ""},       // deletion: no block, shifts block 1 up
@@ -591,30 +639,69 @@ func TestSimulateMultiEdit(t *testing.T) {
 	if strings.Join(got, "|") != "a1|a2|b||d1|d2|e" {
 		t.Errorf("post = %q", got)
 	}
-	if len(starts) != 2 || starts[1] != 4 || starts[4] != 0 {
-		t.Errorf("starts = %v, want map[1:4 4:0]", starts)
+	if len(starts) != 2 || starts[1] != 4 || starts[4] != 0 || len(lost) != 0 {
+		t.Errorf("starts = %v lost = %v, want map[1:4 4:0] and none lost", starts, lost)
 	}
 
-	_, starts, ok = simulateMultiEdit(file, []editOp{
-		{OldString: "b", NewString: "b1\nb2"}, // overlapped by the next edit
-		{OldString: "b2", NewString: "x"},
-		{OldString: "e", NewString: "e?"}, // overlapped by the fragment below
-		{OldString: "?", NewString: "!"},  // a mid-line fragment
+	_, starts, lost, ok = simulateMultiEdit(file, []editOp{
+		{OldString: "b", NewString: "b1\nb2"}, // a later edit takes only its tail: keeps its start
+		{OldString: "b2", NewString: "x"},     // block at 4
+		{OldString: "c", NewString: "c?"},     // block at 6; its first character is replaced next: lost
+		{OldString: "c?", NewString: "!"},     // block at 8
+		{OldString: "e", NewString: "e;"},     // block at 10
+		{OldString: ";", NewString: "."},      // mid-line fragment at 12: unknown
 	})
 	if !ok {
 		t.Fatal("simulation failed")
 	}
-	if len(starts) != 1 || starts[4] != 2 {
-		t.Errorf("starts = %v, want map[4:2]: only `x` survives and starts a whole line", starts)
+	if want := map[int]int{1: 1, 4: 2, 8: 3, 10: 5}; !maps.Equal(starts, want) {
+		t.Errorf("starts = %v, want %v", starts, want)
+	}
+	if !maps.Equal(lost, map[int]bool{6: true}) {
+		t.Errorf("lost = %v, want map[6:true]", lost)
+	}
+
+	// replace_all: every occurrence is replaced and later blocks shift by all of
+	// them; its own block has several positions, so it gets none.
+	two := guard.TextToAddedLines("x\ny\nx\nz")
+	post, starts, _, ok = simulateMultiEdit(two, []editOp{
+		{OldString: "x", NewString: "x1\nx2", ReplaceAll: true}, // block at 1
+		{OldString: "z", NewString: "z1"},                       // block at 4
+	})
+	got = got[:0]
+	for _, l := range post {
+		got = append(got, l.Text)
+	}
+	if !ok || strings.Join(got, "|") != "x1|x2|y|x1|x2|z1" || !maps.Equal(starts, map[int]int{4: 5}) {
+		t.Errorf("replace_all: ok=%v post=%q starts=%v", ok, got, starts)
 	}
 
 	for _, edits := range [][]editOp{
 		{{OldString: "zz", NewString: "y"}},                                  // missing
 		{{OldString: "a", NewString: "b"}, {OldString: "b", NewString: "q"}}, // no longer unique
+		{{OldString: "", NewString: "q"}},                                    // empty
 	} {
-		if _, _, ok := simulateMultiEdit(file, edits); ok {
+		if _, _, _, ok := simulateMultiEdit(file, edits); ok {
 			t.Errorf("%v: simulated, want failure", edits)
 		}
+	}
+}
+
+// TestHookSeedsForKeepsPreEditSeedsForLostBlock: a block whose first
+// characters a later edit replaced has no position in the result, so it keeps
+// its pre-edit open-string seed (as before #517) and no Go block seed.
+func TestHookSeedsForKeepsPreEditSeedsForLostBlock(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar s = `\nb\n`\n")
+	edits := []editOp{
+		{OldString: "b", NewString: "b1"}, // synthetic 1, inside the raw string
+		{OldString: "b1", NewString: "q"}, // replaces block 1's start
+	}
+	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
+	if s.open[1] != "`" {
+		t.Errorf("open = %v, want block 1 kept inside the raw string", s.open)
+	}
+	if _, has := s.goBlock[1]; has || s.goBlock == nil {
+		t.Errorf("goBlock = %v, want a non-nil map without block 1", s.goBlock)
 	}
 }
 

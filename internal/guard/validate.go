@@ -303,8 +303,9 @@ func paramSigDepthSeedFunc(lang Lang, fd FileDiff) func(int) int {
 // var/const/type block state at the START of each line (#514), so a hunk that
 // begins inside a block, or follows a gap in which one closed or opened, is
 // read in the file's real state rather than a guess from its own lines. ok is
-// false where no state is known (a hook block that was not located), and the
-// scan falls back to its unseeded gap handling there. nil outside Go.
+// false where no state is known (a hook block without an exact position), and
+// the scan then starts that run outside any block; only a nil func (no seed at
+// all) keeps the unseeded #509 gap handling. nil outside Go.
 func goBlockSeedFunc(lang Lang, fd FileDiff) func(int) (GoBlockState, bool) {
 	if lang != LangGo {
 		return nil

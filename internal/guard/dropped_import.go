@@ -46,7 +46,7 @@ func DroppedImportRefs(lang Lang, oldText, newText string) []DroppedImport {
 // edit boundary. All of its scans (ExtractImports' inPyParen state,
 // firstUnqualifiedUseLines, LocallyBoundNames) honor those gaps.
 func DroppedImportRefsLines(lang Lang, oldLines, newLines []AddedLine) []DroppedImport {
-	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil, nil)
+	return DroppedImportRefsLinesWithBound(lang, oldLines, newLines, nil, nil, nil)
 }
 
 // DroppedImportSupportedLang reports whether the dropped-import check has any
@@ -80,7 +80,7 @@ func DroppedImportSupportedLang(lang Lang) bool {
 // hunk-only newLines caller (the guard hook) should pass its real seed
 // (#294), or a parameter added mid-signature in a hunk whose opener sits in
 // unchanged context is never recognized as a rebind of the dropped import.
-func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound func() map[string]struct{}, defSigDepthSeed func(lineNo int) int) []DroppedImport {
+func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, preBound func() map[string]struct{}, defSigDepthSeed func(lineNo int) int, dotSeed func(lineNo int) bool) []DroppedImport {
 	if !DroppedImportSupportedLang(lang) {
 		return nil
 	}
@@ -144,7 +144,7 @@ func DroppedImportRefsLinesWithBound(lang Lang, oldLines, newLines []AddedLine, 
 	// Index every unqualified identifier use in one pass so each dropped name is an
 	// O(1) lookup below. Rescanning the whole new text per dropped import was
 	// O(distinct-imports × text-length) — quadratic on a crafted diff.
-	uses := firstUnqualifiedUseLines(lang, newLines)
+	uses := firstUnqualifiedUseLines(lang, newLines, dotSeed)
 	var out []DroppedImport
 	for _, name := range dropped {
 		if ln := uses[name]; ln > 0 {
@@ -175,9 +175,25 @@ func nameSet(names []string) map[string]struct{} {
 // conditions the old per-name check enforced, so the only extra test is that the
 // run is not preceded by '.' (which would make it a qualified attribute, e.g.
 // `x.Name`) — semantics identical to the former containsUnqualifiedWord.
-func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
+func firstUnqualifiedUseLines(lang Lang, lines []AddedLine, dotSeed func(lineNo int) bool) map[string]int {
 	uses := make(map[string]int)
+	// The previous code line ended in a selector's `.`, so this line's first
+	// identifier is a member, not a use (#522; extractRefs' rule). dotSeed
+	// carries it into each run from the line above (the hook's DotByLine).
+	prevEndsDot, prevNo, first := false, 0, true
 	scanStripped(lang, lines, func(scan string, l AddedLine) {
+		if first || l.LineNo != prevNo+1 {
+			prevEndsDot = dotSeed != nil && dotSeed(l.LineNo)
+		}
+		first = false
+		prevNo = l.LineNo
+		selectorAt := -1
+		if prevEndsDot {
+			selectorAt = len(scan) - len(strings.TrimLeft(scan, " \t"))
+		}
+		if t := strings.TrimSpace(scan); t != "" {
+			prevEndsDot = endsInSelectorDot(lang, t)
+		}
 		if isImportLine(lang, l.Text) {
 			// A single physical line can pack import clauses and real statements,
 			// ';'-separated (`import re; x = Foo()`), and isImportLine classifies
@@ -225,8 +241,8 @@ func firstUnqualifiedUseLines(lang Lang, lines []AddedLine) map[string]int {
 			for j < len(scan) && isWordByte(scan[j]) {
 				j++
 			}
-			if start > 0 && scan[start-1] == '.' {
-				continue // qualified attribute, e.g. x.Name
+			if start == selectorAt || afterSelectorDot(scan, start) {
+				continue // qualified attribute (x.Name, `x. Name`, `x.` / `Name`); not a `...` spread
 			}
 			if id := scan[start:j]; uses[id] == 0 {
 				uses[id] = l.LineNo

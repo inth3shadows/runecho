@@ -806,3 +806,44 @@ func TestRun_GoBlockSeedReachesKnownSet(t *testing.T) {
 		t.Errorf("hook map: ghost bound despite a located block outside any var block")
 	}
 }
+
+// TestRun_DotSeedNeedsAlignedLine pins #523 round 1 (F1): the pre-commit dot
+// seed is read from the WORKING TREE at the STAGED line number. After
+// `git add -p` an unstaged `x.` chain can sit right above that number in the
+// working tree; the seed must not hide the staged hunk's real call then.
+func TestRun_DotSeedNeedsAlignedLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	work := "package p\n\nfunc f() {\n\tx.\n\t\tY()\n\ta()\n\tghost()\n}\n"
+	if err := os.WriteFile(p, []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tghost()"}} // staged line 5; working-tree line 5 is `Y()`
+	flagged := false
+	for _, v := range Run(map[string]struct{}{"a": {}}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		flagged = flagged || v.Symbol == "ghost"
+	}
+	if !flagged {
+		t.Errorf("a misaligned dot seed hid ghost()")
+	}
+}
+
+// TestRun_DotSeedNotOnPrecommit pins #523 round 2 (R2-1): the pre-commit seed
+// table is the WORKING TREE at STAGED line numbers, so an unstaged edit that
+// ends the line above a staged hunk in `.` would make a dot seed hide the
+// staged call. Pre-commit takes no dot seed; the hook (exact pre-edit file)
+// does.
+func TestRun_DotSeedNotOnPrecommit(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "a.go")
+	work := "package p\n\nfunc f() {\n\tx.\n\tghost()\n}\n" // staged line 4 is `\ta()`
+	if err := os.WriteFile(p, []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hunk := []AddedLine{{LineNo: 5, Text: "\tghost()"}}
+	flagged := false
+	for _, v := range Run(map[string]struct{}{}, "", []FileDiff{{Path: "a.go", AbsPath: p, AddedLines: hunk}}) {
+		flagged = flagged || v.Symbol == "ghost"
+	}
+	if !flagged {
+		t.Errorf("an unstaged `x.` above the staged hunk hid ghost()")
+	}
+}

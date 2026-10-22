@@ -23,6 +23,8 @@ type SeedState struct {
 	Open                             string
 	Brace, Bracket, DefSig, ParamSig int
 	GoBlock                          GoBlockState
+	// Dot: the code line above ends in a selector's `.` (Go and JS, #522).
+	Dot bool
 }
 
 // advanceSeed threads st through one line and returns the state at the start
@@ -32,6 +34,16 @@ type SeedState struct {
 func advanceSeed(lang Lang, st SeedState, line string) SeedState {
 	scan, braceScan, open := stripLiteralsBraces(lang, line, st.Open)
 	next := SeedState{Open: open}
+	if lang == LangGo || lang == LangJS {
+		// extractRefs' own rule: a whole-line comment (outside a string) and a
+		// blank line leave it as it was.
+		next.Dot = st.Dot
+		if st.Open != "" || !isCommentLine(lang, line) {
+			if t := strings.TrimSpace(scan); t != "" {
+				next.Dot = endsInSelectorDot(lang, t)
+			}
+		}
+	}
 	if lang == LangGo {
 		// The comment-line skip goDeclaredNamesScan applies, on a scan the
 		// tracker reads the same way: where that scan cuts a trailing `//`
@@ -100,6 +112,7 @@ type seedTable struct {
 	open    []string
 	depth   []seedDepths   // Python only; nil otherwise
 	goBlock []GoBlockState // Go only; nil otherwise
+	dot     []bool         // Go and JS only; nil otherwise
 }
 
 type seedDepths struct{ brace, bracket, defSig, paramSig int32 }
@@ -112,11 +125,17 @@ func buildSeedTable(lang Lang, lines []string) *seedTable {
 	if lang == LangGo {
 		t.goBlock = make([]GoBlockState, len(lines)+1)
 	}
+	if lang == LangGo || lang == LangJS {
+		t.dot = make([]bool, len(lines)+1)
+	}
 	var st SeedState
 	for i := 0; ; i++ {
 		t.open[i] = st.Open
 		if t.goBlock != nil {
 			t.goBlock[i] = st.GoBlock
+		}
+		if t.dot != nil {
+			t.dot[i] = st.Dot
 		}
 		if t.depth != nil {
 			t.depth[i] = seedDepths{int32(st.Brace), int32(st.Bracket), int32(st.DefSig), int32(st.ParamSig)}
@@ -146,6 +165,9 @@ func (t *seedTable) at(lineNo int) SeedState {
 	}
 	if t.goBlock != nil {
 		st.GoBlock = t.goBlock[idx]
+	}
+	if t.dot != nil {
+		st.Dot = t.dot[idx]
 	}
 	return st
 }

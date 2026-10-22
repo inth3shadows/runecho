@@ -2803,13 +2803,83 @@ func TestExtractRefs_GoChainAfterTrailingDot(t *testing.T) {
 		// string) must agree.
 		for _, seed := range []func(int) string{nil, func(int) string { return "" }} {
 			var got []string
-			for _, r := range extractRefs(LangGo, c.lines, seed, nil) {
+			for _, r := range extractRefs(LangGo, c.lines, seed, nil, nil) {
 				got = append(got, r.Name)
 			}
 			slices.Sort(got)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("%s (seeded %v)\n  got  %v\n  want %v", c.name, seed != nil, got, c.want)
 			}
+		}
+	}
+}
+
+// TestExtractRefs_SelectorContinuationFollowups pins #522 items 2 and 3: a
+// selector separated from its dot by blanks on the same line, and JS chains
+// split after a trailing dot, are not bare calls. A JS spread (`...`) before a
+// call, on its line or the line above, still is.
+func TestExtractRefs_SelectorContinuationFollowups(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		lang Lang
+		src  string
+		want []string
+	}{
+		{"Go same-line space", LangGo, "\tx := cfg. Load()\n\ty := cfg.\tSave()\n", nil},
+		{"JS chain", LangJS, "const v = promise.\n  withRetry(x).\n  andLog(y)\n", nil},
+		{"JS optional-chain continuation", LangJS, "const v = obj?.\n  compute(x)\n", nil},
+		{"JS spread on the line", LangJS, "const a = [... items()]\n", []string{"items"}},
+		{"JS spread ending the line above", LangJS, "f(...\n  items())\n", []string{"f", "items"}},
+		{"JS float ending the line above", LangJS, "const x = 1.\nghost()\n", []string{"ghost"}},
+	} {
+		var got []string
+		for _, r := range ExtractRefs(c.lang, TextToAddedLines(c.src)) {
+			got = append(got, r.Name)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s\n  got  %v\n  want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestExtractRefs_SpreadAndDollarFloat pins #523 round 1: an unspaced spread
+// `[...ghost()]` calls ghost (F3), and a JS name ending in `$1.` is not a
+// float literal, so the next line continues it (F4).
+func TestExtractRefs_SpreadAndDollarFloat(t *testing.T) {
+	for _, c := range []struct {
+		src  string
+		want []string
+	}{
+		{"const a = [...ghost()]\n", []string{"ghost"}},
+		{"f(...ghost())\n", []string{"f", "ghost"}},
+		{"const v = a$1.\n  compute(x)\n", nil},
+	} {
+		var got []string
+		for _, r := range ExtractRefs(LangJS, TextToAddedLines(c.src)) {
+			got = append(got, r.Name)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%q: got %v, want %v", c.src, got, c.want)
+		}
+	}
+}
+
+// TestExtractRefs_SelectorRound2 pins #523 round 2: a number's decimal point
+// plus a selector (`5..toFixed`) is not a spread (R2-2), and a non-ASCII name
+// ending in a digit (`变量1.`) is not a float literal (R2-3).
+func TestExtractRefs_SelectorRound2(t *testing.T) {
+	for _, c := range []struct {
+		lang Lang
+		src  string
+	}{
+		{LangJS, "const s = 5..toFixed(2)\n"},
+		{LangGo, "\tx := 变量1.\n\t\tLoad()\n"},
+		{LangJS, "const v = ñ1.\n  compute(x)\n"},
+	} {
+		if got := ExtractRefs(c.lang, TextToAddedLines(c.src)); len(got) != 0 {
+			t.Errorf("%q: got %v, want no refs", c.src, got)
 		}
 	}
 }

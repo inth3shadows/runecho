@@ -1519,7 +1519,7 @@ type Ref struct {
 // ExtractRefs extracts bare function call targets from the added lines for the
 // given language. Qualified calls (pkg.Foo / obj.Method) are skipped.
 func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
-	return extractRefs(lang, lines, nil, nil)
+	return extractRefs(lang, lines, nil, nil, nil)
 }
 
 // extractRefs is ExtractRefs with optional openSeed/braceDepthSeed. openSeed(lineNo)
@@ -1535,7 +1535,7 @@ func ExtractRefs(lang Lang, lines []AddedLine) []Ref {
 // unchanged context, not part of the diff). A nil seed preserves the full-file /
 // unseeded behavior for either: every contiguous run starts outside any string /
 // at depth 0.
-func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int) []Ref {
+func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string, braceDepthSeed func(lineNo int) int, dotSeed func(lineNo int) bool) []Ref {
 	if lang == LangUnknown {
 		return nil
 	}
@@ -1585,17 +1585,17 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// a ternary branch — `compute(x) : {}` there is a call followed by the
 	// alternative, not a method with a return type, and must not be read as one.
 	prevEndsTernary := false
-	// prevEndsDot: the previous Go code line ended in a selector's `.`, so the
-	// identifier this line starts with is a method or field, not a bare call
-	// (#519). Go has no line continuation character; a split method chain
-	// (`x.` / `Foo()`) is gofmt-legal.
+	// prevEndsDot: the previous Go or JS code line ended in a selector's `.`, so
+	// the identifier this line starts with is a method or field, not a bare call
+	// (#519, #522; see endsInSelectorDot). dotSeed carries it into a run from the
+	// unchanged line above, as openSeed does the string state.
 	prevEndsDot := false
 	for i, l := range lines {
 		text := l.Text
 		if i == 0 || l.LineNo != prevNo+1 {
 			pendingMethod = nil
 			prevEndsTernary = false
-			prevEndsDot = false
+			prevEndsDot = dotSeed != nil && dotSeed(l.LineNo)
 			// Start of a contiguous run (the first line, or after a hunk gap):
 			// reset carried state. Seed the string state from the file context
 			// above the run when a seed is available, so a run that opens inside a
@@ -1641,10 +1641,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 		}
 		if trimmed := strings.TrimSpace(scan); trimmed != "" {
 			prevEndsTernary = strings.HasSuffix(trimmed, "?")
-			// Not a variadic `...` or a float literal ending in its dot (`0.`):
-			// neither continues onto the next line as a selector.
-			prevEndsDot = lang == LangGo && strings.HasSuffix(trimmed, ".") &&
-				!strings.HasSuffix(trimmed, "...") && !reGoFloatEnd.MatchString(trimmed)
+			prevEndsDot = endsInSelectorDot(lang, trimmed)
 		}
 		if lang == LangJS {
 			if pendingMethod != nil {
@@ -1745,16 +1742,18 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			if nameStart == methodSkip {
 				continue // a method definition's own name (#431)
 			}
-			if fullStart == selectorAt {
-				continue // a selector continued from the line above (#519)
-			}
+
 			// Skip if preceded by '.' (qualified call), or by an identifier byte
 			// (the match is mid-identifier — this emulates the left `\b` the regex
 			// no longer carries, while still allowing a leading `$` in the name).
-			if fullStart > 0 {
-				if prev := scan[fullStart-1]; prev == '.' || isWordByte(prev) {
-					continue
-				}
+			if fullStart > 0 && isWordByte(scan[fullStart-1]) {
+				continue
+			}
+			// A selector: a single `.` before the name, on this line past blanks
+			// (#522) or at the end of the code line above (#519). A spread `...`
+			// before it is a call, `[...items()]` (#523 round 1).
+			if fullStart == selectorAt || afterSelectorDot(scan, fullStart) {
+				continue
 			}
 			// Skip builtins / keywords
 			if _, ok := builtins[name]; ok {
@@ -2112,6 +2111,50 @@ func isCommentLine(lang Lang, text string) bool {
 func stripLiterals(lang Lang, text string) string {
 	s, _ := stripLiteralsStateful(lang, text, "")
 	return s
+}
+
+// endsInSelectorDot reports whether a masked, trimmed Go or JS code line ends
+// in a selector's `.`, so the identifier that starts the next code line is a
+// member, not a bare call (#519, #522). Neither language ends a statement after
+// a trailing `.` (Go has no continuation character; JS's ASI never applies
+// there). Not a variadic or spread `...`, and not a float literal ending in its
+// dot (`0.`). Python is left out: it continues a line only inside brackets or
+// after a backslash, neither of which this tracks.
+// One predicate for extractRefs, the seed walk and the dropped-import scanner.
+func endsInSelectorDot(lang Lang, trimmed string) bool {
+	if lang != LangGo && lang != LangJS || !strings.HasSuffix(trimmed, ".") || strings.HasSuffix(trimmed, "...") {
+		return false
+	}
+	// A digit run ending the line after a non-ASCII byte ends a name (`变量1.`),
+	// not a float literal; the float patterns' `\w` is ASCII only.
+	i := len(trimmed) - 2
+	for i >= 0 && (trimmed[i] >= '0' && trimmed[i] <= '9' || trimmed[i] == '_') {
+		i--
+	}
+	if i >= 0 && i < len(trimmed)-2 && trimmed[i] >= 0x80 {
+		return true
+	}
+	if lang == LangJS {
+		return !reJSFloatEnd.MatchString(trimmed)
+	}
+	return !reGoFloatEnd.MatchString(trimmed)
+}
+
+// reJSFloatEnd is reGoFloatEnd for JS, where `$` is an identifier character:
+// `a$1.` ends a name, not a float literal (#523 round 1).
+var reJSFloatEnd = regexp.MustCompile(`(?:^|[^\w.$])\d[\d_]*\.$`)
+
+// afterSelectorDot reports whether the code byte before scan[at], past blanks
+// on the same line, is a single `.`: `cfg. Load()` is a selector (#522). Not a
+// spread `...` (`[... items()]` calls items).
+func afterSelectorDot(scan string, at int) bool {
+	k := at - 1
+	for k >= 0 && (scan[k] == ' ' || scan[k] == '\t') {
+		k--
+	}
+	// Only exactly `...` is a spread: `5..toFixed()` is a number's decimal
+	// point followed by a selector.
+	return k >= 0 && scan[k] == '.' && !(k >= 2 && scan[k-2:k+1] == "...")
 }
 
 // scanStripped calls fn for each line with its literal-stripped form (see

@@ -90,6 +90,11 @@ type FileDiff struct {
 	// only when AbsPath is empty. A non-nil empty map means "seeded, every block
 	// unknown"; only nil means no seed at all (#517).
 	GoBlockByLine map[int]GoBlockState
+	// DotByLine is SeedByLine's counterpart for extractRefs' selector
+	// continuation (#522), Go and JS only: true where the code line above a
+	// block's synthetic start ends in a selector's `.`. Missing entries (and a
+	// nil map) mean it does not. Consulted only when AbsPath is empty.
+	DotByLine map[int]bool
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

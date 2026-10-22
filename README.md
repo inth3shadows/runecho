@@ -49,13 +49,17 @@ unflattering ones, is in [bench/TOKEN-COST.md](bench/TOKEN-COST.md).
 
 **How often it's wrong, measured against git history, not approvals.** A
 user's approve-anyway rate turned out to have no variance to measure — 308 of
-308 ask-gated edits approved, zero denied, across 30 days of dogfood traffic.
+308 ask-gated edits approved, zero denied, across 30 days of dogfood traffic
+(measured 2026-10-08).
 So `fpaudit` judges each flagged symbol against **dated git history** instead:
-was it defined at ask time, and is it defined now. Live reading across this
-project's own dogfood corpus: **15.3% false-positive, 33.7% premature** (the
-guard was *correct*, just fired before the symbol it flagged existed — an
-agent writing a caller before its callee), **51.0% stands** (a real unbacked
-reference). The full method, and what NOT to conclude from the 51%, is in
+was it defined at ask time, and is it defined now. Reading for the 30 days to
+2026-10-22 across this project's own dogfood corpus, 16 rated flags: **0%
+false-positive** (down from 15.3% on 2026-08-07), **68.8% premature** (the
+guard was *correct*, just fired before the symbol it flagged existed — an agent
+writing a caller before its callee), **25.0% stands** (a real unbacked
+reference), and one masking gap. Volume is low: 30 asks in 30 days, and 61 of
+the 77 flagged symbols had no rateable claim or no answer from the oracle. The
+full method, and what NOT to conclude from these shares, is in
 [bench/FPAUDIT.md](bench/FPAUDIT.md).
 
 **The scope, stated up front.** RunEcho reads *unqualified* references — bare
@@ -148,7 +152,7 @@ full semantic analysis.
    ```bash
    # example: macOS arm64 — adjust the asset name for your platform.
    # NOTE: the tag in the URL path is v-prefixed; the asset filename is not.
-   TAG=v0.17.1; NUM=0.17.1
+   TAG=$(curl -sSL https://api.github.com/repos/inth3shadows/runecho/releases/latest | sed -n 's/.*"tag_name": *"\(v[^"]*\)".*/\1/p'); NUM=${TAG#v}
    curl -sSL "https://github.com/inth3shadows/runecho/releases/download/${TAG}/runecho_${NUM}_darwin_arm64.tar.gz" | tar -xz
    install -m755 runecho-ir runecho-mcp runecho-guard ~/.local/bin/
    ```

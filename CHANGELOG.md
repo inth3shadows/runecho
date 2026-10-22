@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.84.0] — 2026-10-22
+
+### Changed
+- guard: selector continuation follow-ups — seeded, same-line, JS, dropped-import (#522) (#523)
+
 ## [0.83.0] — 2026-10-22
 
 ### Changed

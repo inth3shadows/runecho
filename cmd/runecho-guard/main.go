@@ -898,7 +898,7 @@ func hookAddedLines(toolName, newString, content string, edits []editOp) []guard
 // behavior, so a bad match degrades to today's noise rather than to a missed
 // hallucination.
 func hookSeedByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]string {
-	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).open
+	return hookSeedsFor(toolName, oldString, edits, fileLines, lang).open
 }
 
 // hookSeeds is every per-block seed the hook path hands guard.Run, keyed by
@@ -915,8 +915,9 @@ type hookSeeds struct {
 	goBlock map[int]guard.GoBlockState
 }
 
-// hookSeedMaps builds all of an edit's per-block seeds from one
-// hookBlockIndices result, with ONE walk of fileLines up to the furthest block
+// hookSeedMaps builds all of an edit's per-block seeds from one set of block
+// positions (hookBlockIndices, or simulateMultiEdit's for a MultiEdit, see
+// hookSeedsFor), with ONE walk of fileLines up to the furthest block
 // (guard.SeedStatesAt). It replaced five builders that each re-walked
 // fileLines[:idx] per block (#295), which for an edit near the end of a large
 // file meant five O(file) walks on the hook's latency path.
@@ -976,68 +977,26 @@ func hookSeedMaps(indices map[int]int, fileLines []guard.AddedLine, lang guard.L
 // edits are replayed on the pre-edit text (simulateMultiEdit) and every block
 // is seeded from where its new_string sits in the RESULT of all of them.
 //
-// A block whose first characters a later edit replaced has no position in the
-// result; it keeps its pre-edit seeds for the open string and the Python
-// depths, as before #517, and an unknown Go block seed. When the edits cannot
-// be replayed at all (an old_string missing, or repeated without
+// A block with no single exact position in the result (a later edit replaced
+// its first characters, it starts mid-line, or replace_all put it in several
+// places) gets no seed: a pre-edit one may be stale and mask calls (round 4 on
+// PR #518). When the edits cannot be replayed at all (an old_string missing, or repeated without
 // replace_all: edits the tool itself refuses), no block is seeded: every
 // pre-edit seed may be stale, and a stale "inside a string" seed masks calls.
 // A Go MultiEdit's block seed is never nil, so a gap is never read with the
 // unseeded #509 carry.
 func hookSeedsFor(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) hookSeeds {
-	single := len(edits) == 1 && !edits[0].ReplaceAll
-	if toolName != "MultiEdit" || single || lang == guard.LangUnknown {
-		// One plain edit applies to the pre-edit file: its position there is its
-		// position in the result, and the replay would cost a copy for nothing.
-		s := hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
-		if toolName == "MultiEdit" && lang == guard.LangGo && s.goBlock == nil {
-			s.goBlock = map[int]guard.GoBlockState{}
-		}
-		return s
+	if toolName != "MultiEdit" || lang == guard.LangUnknown {
+		return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
 	}
 	var s hookSeeds
-	if post, starts, lost, ok := simulateMultiEdit(fileLines, edits); ok {
+	if post, starts, _, ok := simulateMultiEdit(fileLines, edits); ok {
 		s = hookSeedMaps(starts, post, lang)
-		if len(lost) > 0 {
-			pre := hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang)
-			s.keepPreEditSeeds(pre, lost)
-		}
 	}
 	if lang == guard.LangGo && s.goBlock == nil {
 		s.goBlock = map[int]guard.GoBlockState{}
 	}
 	return s
-}
-
-// keepPreEditSeeds copies pre's open-string and Python depth seeds for the
-// given blocks into s. Not the Go block seed: that one can add names, so a
-// block without an exact position stays unknown.
-func (s *hookSeeds) keepPreEditSeeds(pre hookSeeds, blocks map[int]bool) {
-	copyStr := func(dst *map[int]string, src map[int]string) {
-		for start := range blocks {
-			if v, ok := src[start]; ok {
-				if *dst == nil {
-					*dst = make(map[int]string)
-				}
-				(*dst)[start] = v
-			}
-		}
-	}
-	copyInt := func(dst *map[int]int, src map[int]int) {
-		for start := range blocks {
-			if v, ok := src[start]; ok {
-				if *dst == nil {
-					*dst = make(map[int]int)
-				}
-				(*dst)[start] = v
-			}
-		}
-	}
-	copyStr(&s.open, pre.open)
-	copyInt(&s.brace, pre.brace)
-	copyInt(&s.bracket, pre.bracket)
-	copyInt(&s.defSig, pre.defSig)
-	copyInt(&s.paramSig, pre.paramSig)
 }
 
 // multiEditBlockStarts returns, per edit, the synthetic LineNo that starts its
@@ -1203,7 +1162,7 @@ func hookBlockIndices(toolName, oldString string, edits []editOp, fileLines []gu
 // two hand-kept-in-sync copies. Python-only: returns nil for every other
 // language, since pyBraceDepth is never consulted there.
 func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines []guard.AddedLine, lang guard.Lang) map[int]int {
-	return hookSeedMaps(hookBlockIndices(toolName, oldString, edits, fileLines), fileLines, lang).brace
+	return hookSeedsFor(toolName, oldString, edits, fileLines, lang).brace
 }
 
 // blockStartLine returns the 0-based index in fileLines where block's lines
@@ -1214,7 +1173,7 @@ func hookBraceDepthByLine(toolName, oldString string, edits []editOp, fileLines 
 //
 // Ambiguity (two+ matches) returns -1 rather than guessing the first. A plain
 // Edit requires old_string to be unique, so a second match cannot arise there —
-// but a `replace_all` edit (which the hook payload does not parse) applies with a
+// but a `replace_all` edit (outside a MultiEdit's replay, see hookSeedsFor) applies with a
 // NON-unique old_string, and seeding from the wrong occurrence could compute an
 // "open string" state that masks a hallucinated call in the replacement: a false
 // negative, the worst class for this guard. Returning -1 on ambiguity means "no

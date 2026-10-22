@@ -687,21 +687,41 @@ func TestSimulateMultiEdit(t *testing.T) {
 	}
 }
 
-// TestHookSeedsForKeepsPreEditSeedsForLostBlock: a block whose first
-// characters a later edit replaced has no position in the result, so it keeps
-// its pre-edit open-string seed (as before #517) and no Go block seed.
-func TestHookSeedsForKeepsPreEditSeedsForLostBlock(t *testing.T) {
-	file := guard.TextToAddedLines("package p\n\nvar s = `\nb\n`\n")
+// TestHookSeedsForLostBlockIsUnknown: a block whose first characters a later
+// edit replaced has no position in the result, so it gets no seed at all — not
+// its pre-edit one, which round 4 on PR #518 showed can be stale and mask a
+// call (edit 0 closes the raw string the block sat in).
+func TestHookSeedsForLostBlockIsUnknown(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar s = `\nx := 1\n`\n\nfunc f() {\n}\n")
 	edits := []editOp{
-		{OldString: "b", NewString: "b1"}, // synthetic 1, inside the raw string
-		{OldString: "b1", NewString: "q"}, // replaces block 1's start
+		{OldString: "var s = `", NewString: "var s = 1 //"},
+		{OldString: "x := 1", NewString: "y := halluc()"}, // block 2 (synthetic 3)
+		{OldString: "y := ", NewString: "z := "},          // replaces block 2's start
 	}
 	s := hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo)
-	if s.open[1] != "`" {
-		t.Errorf("open = %v, want block 1 kept inside the raw string", s.open)
+	if v, has := s.open[3]; has {
+		t.Errorf("lost block 2 seeded open=%q, want no seed", v)
 	}
-	if _, has := s.goBlock[1]; has || s.goBlock == nil {
-		t.Errorf("goBlock = %v, want a non-nil map without block 1", s.goBlock)
+	if _, has := s.goBlock[3]; has || s.goBlock == nil {
+		t.Errorf("goBlock = %v, want a non-nil map without block 2", s.goBlock)
+	}
+}
+
+// TestHookSeedsForSingleEditTrailingNewline pins round 4 on PR #518 (R4-2): a
+// one-edit MultiEdit is replayed like any other, so an old_string ending in
+// "\n" (which the whole-line locator never matches) is still seeded and a new
+// `var (` entry binds.
+func TestHookSeedsForSingleEditTrailingNewline(t *testing.T) {
+	file := guard.TextToAddedLines("package p\n\nvar (\n\ta = 1\n\tb = 2\n)\n\nfunc f() {\n}\n")
+	edits := []editOp{{OldString: "\tb = 2\n", NewString: "\tb = 2\n\tnewv = other()\n\tw = newv()\n"}}
+	fd := guard.FileDiff{Path: "a.go", AddedLines: hookAddedLines("MultiEdit", "", "", edits)}
+	hookSeedsFor("MultiEdit", "", edits, file, guard.LangGo).applyTo(&fd)
+	symbols := map[string]struct{}{"other": {}}
+	guard.FoldInFileDefs(symbols, file, guard.LangGo)
+	for _, v := range guard.Run(symbols, "", []guard.FileDiff{fd}) {
+		if v.Symbol == "newv" {
+			t.Errorf("newv() flagged: the single edit's block was not seeded inside `var (`")
+		}
 	}
 }
 

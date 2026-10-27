@@ -522,3 +522,51 @@ func TestRatedIncludesNotIdent(t *testing.T) {
 		t.Errorf("Counts[VerdictNotIdent] = %d, want 1", s.Counts[VerdictNotIdent])
 	}
 }
+
+// #529: verdicts split by the model that issued the edit. Records without a
+// model (pre-#529 guards, unreadable transcripts) pool under one explicit
+// label rather than vanishing from the table.
+func TestAuditByModel(t *testing.T) {
+	o := &fakeOracle{
+		head:    "HEAD",
+		revAt:   map[string]string{"": "OLD"},
+		defined: map[[2]string]bool{{"OLD", "there"}: true, {"HEAD", "there"}: true},
+	}
+	opus := auditAsk("2026-07-10T10:00:00Z", "/wt/a.py", "violations", []string{"there"}, []string{"there"})
+	opus.Model = "claude-opus-5-5"
+	haiku := auditAsk("2026-07-10T10:01:00Z", "/wt/b.py", "violations", []string{"missing"}, []string{"missing"})
+	haiku.Model = "claude-haiku-5-5"
+	legacy := auditAsk("2026-07-10T10:02:00Z", "/wt/c.py", "violations", []string{"gone"}, []string{"gone"})
+
+	s := Audit([]Decision{opus, haiku, legacy}, auditTS("2026-07-01T00:00:00Z"), o)
+	if got := s.ByModel["claude-opus-5-5"][VerdictFP]; got != 1 {
+		t.Errorf("ByModel[opus][fp] = %d, want 1 (%v)", got, s.ByModel)
+	}
+	if got := s.ByModel["claude-haiku-5-5"][VerdictStands]; got != 1 {
+		t.Errorf("ByModel[haiku][stands] = %d, want 1 (%v)", got, s.ByModel)
+	}
+	if got := s.ByModel[modelUnrecorded][VerdictStands]; got != 1 {
+		t.Errorf("ByModel[%s][stands] = %d, want 1 (%v)", modelUnrecorded, got, s.ByModel)
+	}
+	for _, f := range s.Findings {
+		if f.Symbol == "missing" && f.Model != "claude-haiku-5-5" {
+			t.Errorf("finding model = %q, want claude-haiku-5-5", f.Model)
+		}
+	}
+
+	out := FormatAudit(s)
+	if !strings.Contains(out, "\nBy model:\n") || !strings.Contains(out, "claude-haiku-5-5") ||
+		!strings.Contains(out, modelUnrecorded) {
+		t.Errorf("FormatAudit lacks the By model table:\n%s", out)
+	}
+	p := PayloadAudit(s)
+	bm, ok := p["by_model"].(map[string]map[string]int)
+	if !ok || bm["claude-opus-5-5"]["fp"] != 1 {
+		t.Errorf("payload by_model = %#v", p["by_model"])
+	}
+	for _, f := range p["findings"].([]map[string]any) {
+		if f["symbol"] == "there" && f["model"] != "claude-opus-5-5" {
+			t.Errorf("payload finding model = %v", f["model"])
+		}
+	}
+}

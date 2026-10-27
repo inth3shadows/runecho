@@ -505,6 +505,11 @@ runecho-ir fpaudit --days 30             # trailing-30-day audit
 runecho-ir fpaudit --gv v0.29.1 --json   # one build, machine-readable per-symbol verdicts
 ```
 
+Verdicts are also broken down by check, by language and by model. The model is
+the one that issued the edit, read from the Claude Code transcript (a subagent's
+own transcript for a subagent's edit). Records written before #529 show
+`(unrecorded)`.
+
 It is read-only — `rev-list`, `rev-parse` and `grep` against commits. Nothing is
 checked out and nothing is written. Its oracle is regex-over-source, chosen to be
 *independent* of the guard's own extractors rather than better than them, and it

@@ -133,7 +133,7 @@ is fully finished.
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
 | `cmd/runecho-guard/main.go` | Guard entrypoint: pre-commit mode + `--hook-mode`, 3-tier repo resolution | `guard`, `snapshot`, `gitutil` |
 | `cmd/runecho-guard/{dangling,filescope,qualified,depqualified,contract}.go` | The opt-in extra checks (default OFF except `qualified`, default ON since #314 — see Configuration) | `guard` |
-| `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) | — |
+| `cmd/runecho-guard/declog.go` | Appends `decisions.jsonl`; records the guard binary version (`gv`) and the model that issued the edit (`model`, via `transcriptmodel.go`) | — |
 | `cmd/runecho-guard/learnedallow.go` | C3 learned-allow store with count threshold + TTL decay | `store` |
 | `cmd/runecho-guard/contractonce.go` | Once-per-binding memo for repeat contract asks (#209): written from an approved outcome, read on the would-ask path | `store` |
 

@@ -360,6 +360,7 @@ type AuditFinding struct {
 	Lang    string
 	Reason  string
 	GV      string
+	Model   string
 	Symbol  string
 	Verdict AuditVerdict
 	// Scope is the dated question this pair WOULD be judged by (#393). Set
@@ -386,6 +387,10 @@ type AuditStats struct {
 	Counts   map[AuditVerdict]int
 	ByReason map[string]map[AuditVerdict]int
 	ByLang   map[string]map[AuditVerdict]int
+	// ByModel splits verdicts by the model that issued the edit (#529), so a
+	// small model's stands/premature/fp is not pooled with a large one's.
+	// Records carrying no model bucket under modelUnrecorded.
+	ByModel map[string]map[AuditVerdict]int
 	// NAReasons counts the n/a pairs by NAReason* (#393). Reported separately
 	// from Counts[VerdictNA] because the two kinds mean opposite things:
 	// not-a-resolution-claim is correct and permanent, no-oracle-question is
@@ -434,6 +439,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		Counts:    map[AuditVerdict]int{},
 		ByReason:  map[string]map[AuditVerdict]int{},
 		ByLang:    map[string]map[AuditVerdict]int{},
+		ByModel:   map[string]map[AuditVerdict]int{},
 		NAReasons: map[string]int{},
 	}
 
@@ -498,7 +504,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		for _, sym := range dedupeStrings(d.Symbols) {
 			f := AuditFinding{
 				TS: d.TS, Repo: d.Repo, File: d.File, Lang: d.Lang,
-				Reason: d.Reason, GV: d.GV, Symbol: sym,
+				Reason: d.Reason, GV: d.GV, Model: d.Model, Symbol: sym,
 			}
 			scope, rateable := judgeable[sym]
 			if rateable {
@@ -525,6 +531,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 			}
 			bump(stats.ByReason, d.Reason, f.Verdict)
 			bump(stats.ByLang, langLabel(d.Lang), f.Verdict)
+			bump(stats.ByModel, modelLabel(d.Model), f.Verdict)
 			stats.Findings = append(stats.Findings, f)
 		}
 	}
@@ -747,6 +754,18 @@ func langLabel(l string) string {
 }
 
 // FormatAudit renders the audit for a terminal.
+// modelUnrecorded labels asks whose record names no model: written before #529,
+// or the guard could not read the transcript. Kept as a row of its own so the
+// By model table still sums to the totals above it.
+const modelUnrecorded = "(unrecorded)"
+
+func modelLabel(m string) string {
+	if m == "" {
+		return modelUnrecorded
+	}
+	return m
+}
+
 func FormatAudit(s AuditStats) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Guard verdict audit (%s → %s)\n\n",
@@ -795,6 +814,8 @@ func FormatAudit(s AuditStats) string {
 	writeVerdictTable(&b, s.ByReason)
 	b.WriteString("\nBy language:\n")
 	writeVerdictTable(&b, s.ByLang)
+	b.WriteString("\nBy model:\n")
+	writeVerdictTable(&b, s.ByModel)
 
 	if len(s.NAReasons) > 0 {
 		b.WriteString("\nn/a by reason:\n")
@@ -874,7 +895,7 @@ func PayloadAudit(s AuditStats) map[string]any {
 	for _, f := range s.Findings {
 		m := map[string]any{
 			"ts": f.TS.UTC().Format(time.RFC3339), "repo": f.Repo, "file": f.File,
-			"lang": f.Lang, "reason": f.Reason, "gv": f.GV,
+			"lang": f.Lang, "reason": f.Reason, "gv": f.GV, "model": f.Model,
 			"symbol": f.Symbol, "verdict": string(f.Verdict),
 		}
 		if f.Note != "" {
@@ -904,6 +925,7 @@ func PayloadAudit(s AuditStats) map[string]any {
 		"na_reasons": naReasons,
 		"by_reason":  nestedPayload(s.ByReason),
 		"by_lang":    nestedPayload(s.ByLang),
+		"by_model":   nestedPayload(s.ByModel),
 		"findings":   findings,
 	}
 }

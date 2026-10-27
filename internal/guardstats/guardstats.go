@@ -95,6 +95,10 @@ type Decision struct {
 	// enough to write it. "" on pre-commit records and on older records, so ""
 	// means "not reported", never "no session". No report aggregates it yet.
 	Session string
+	// Model is decisionRecord.Model (#529): the model that issued the tool call.
+	// "" on pre-commit records, when the guard could not read it, and on every
+	// record older than the field — so "" means "unrecorded", never "no model".
+	Model string
 	// AskEdit is decisionRecord.AskEdit: on an "unjoined" record (#464), the
 	// fingerprint of the ask the outcome was not joined to. "" on every other
 	// record. No report reads it yet.
@@ -122,6 +126,7 @@ type rawDecision struct {
 	Suppressed   []string            `json:"suppressed,omitempty"`
 	Session      string              `json:"session,omitempty"`
 	AskEdit      string              `json:"ask_edit,omitempty"`
+	Model        string              `json:"model,omitempty"`
 }
 
 // LoadReader streams JSONL decision records from r. A malformed line, one
@@ -163,6 +168,7 @@ func LoadReader(r io.Reader) ([]Decision, error) {
 						Suppressed:   raw.Suppressed,
 						Session:      raw.Session,
 						AskEdit:      raw.AskEdit,
+						Model:        raw.Model,
 					})
 				}
 			}

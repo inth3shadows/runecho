@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.87.0] — 2026-10-28
+
+### Changed
+- guard: RUNECHO_GUARD_POSTURE=deny blocks instead of asking (#528) (#540)
+
 ## [0.86.0] — 2026-10-28
 
 ### Changed

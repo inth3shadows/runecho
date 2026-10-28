@@ -74,6 +74,12 @@ type FPBucket struct {
 	// Total() — so the would-have-asked volume is Total() + Suppressed. Deduped
 	// against hook re-invocation like asks are (#252: defers re-fire at 1.27x).
 	Suppressed int `json:"suppressed"`
+	// Denied counts hook fires the guard blocked under RUNECHO_GUARD_POSTURE=deny
+	// (#528). Like Suppressed it is outside Asks, Unrated and Total(): a deny
+	// cannot be overridden and no outcome follows it, so counting it as an
+	// unapproved ask would drive Rate() toward 0 and bias the --max-rate gate
+	// toward passing. Deduped against hook re-invocation like asks are.
+	Denied int `json:"denied"`
 	// Latency is ask→approval latency over this bucket's MATCHED asks only
 	// (the Approved count, not Asks — an ask with no approved outcome
 	// contributes no sample). See LatencyStats.
@@ -494,6 +500,21 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			}
 		}
 		switch d.Decision {
+		case "deny":
+			if _, isDup := dup[i]; d.Mode != "hook" || isDup {
+				continue
+			}
+			s.Window.Denied++
+			bumpDenied(s.ByReason, d.Reason)
+			for _, c := range splitChecks(d.Reason) {
+				bumpDenied(s.ByCheck, c)
+			}
+			bumpDenied(s.ByLang, d.Lang)
+			gv := version.Canonical(d.GV)
+			if gv == "" {
+				gv = UnknownVersion
+			}
+			bumpDenied(s.ByVersion, gv)
 		case "ask":
 			if d.Mode != "hook" {
 				continue // pre-commit asks block; no outcome to join
@@ -879,6 +900,12 @@ func topRepoCounts(rated, unrated map[string]int, topN int) []RepoCount {
 }
 
 // FormatFP renders an FPStats as a human-readable report.
+func bumpDenied(m map[string]FPBucket, key string) {
+	b := m[key]
+	b.Denied++
+	m[key] = b
+}
+
 func FormatFP(s FPStats) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Guard false-positive report (%s → %s)\n",
@@ -899,6 +926,9 @@ func FormatFP(s FPStats) string {
 			fmt.Fprintf(&b, "         median time to decision: %s (n=%d)\n",
 				formatLatency(s.Window.Latency.MedianS), s.Window.Latency.N)
 		}
+	}
+	if s.Window.Denied > 0 {
+		fmt.Fprintf(&b, "         + %d denied (RUNECHO_GUARD_POSTURE=deny; blocked, not rateable)\n", s.Window.Denied)
 	}
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists

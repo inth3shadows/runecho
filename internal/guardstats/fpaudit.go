@@ -481,7 +481,9 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 	dup := duplicateAskFires(decisions, since)
 	for i := range decisions {
 		d := &decisions[i]
-		if d.Decision != "ask" || d.Mode != "hook" || d.TS.Before(since) {
+		// A deny (RUNECHO_GUARD_POSTURE=deny, #528) made the same claim an ask
+		// would have, so it is judged the same way.
+		if (d.Decision != "ask" && d.Decision != "deny") || d.Mode != "hook" || d.TS.Before(since) {
 			continue
 		}
 		if d.TS.After(stats.Until) {

@@ -1714,28 +1714,52 @@ const strictStoreDegradedAdvisory = "[runecho-guard] store unavailable or no sna
 // object carries both keys, so an ask does not have to cost the advisory that
 // would otherwise have been emitted by the defer path it pre-empts.
 func hookAskContext(out io.Writer, reason, ctx string) {
-	if ctx == "" {
-		hookAsk(out, reason)
-		return
+	decision := guardPosture()
+	if decision == "deny" {
+		reason = denyReason(reason)
 	}
-	_ = json.NewEncoder(out).Encode(map[string]any{
-		"hookSpecificOutput": map[string]string{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "ask",
-			"permissionDecisionReason": reason,
-			"additionalContext":        ctx,
-		},
-	})
+	o := map[string]string{
+		"hookEventName":            "PreToolUse",
+		"permissionDecision":       decision,
+		"permissionDecisionReason": reason,
+	}
+	if ctx != "" {
+		o["additionalContext"] = ctx
+	}
+	_ = json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": o})
 }
 
-func hookAsk(out io.Writer, reason string) {
-	_ = json.NewEncoder(out).Encode(map[string]any{
-		"hookSpecificOutput": map[string]string{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "ask",
-			"permissionDecisionReason": reason,
-		},
-	})
+func hookAsk(out io.Writer, reason string) { hookAskContext(out, reason, "") }
+
+// guardPosture is "deny" when RUNECHO_GUARD_POSTURE=deny (case and surrounding
+// space ignored) and "ask" otherwise — the #528 experiment's deny arm. Under
+// deny every hook-mode finding blocks the tool call and its reason goes to the
+// model instead of the user; the default ask is unchanged byte for byte.
+// logDecision records such a fire as decision "deny" (see there).
+func guardPosture() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RUNECHO_GUARD_POSTURE")), "deny") {
+		return "deny"
+	}
+	return "ask"
+}
+
+// denyHint closes every deny reason. The model cannot approve a blocked call,
+// so it is told what to do instead.
+const denyHint = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny): if a flagged symbol is new, define it first or in this same edit; otherwise fix the reference and retry."
+
+// denyReason turns an ask reason into a deny reason: everything from the first
+// line that offers approval ("Approve if …", and what an approval would buy
+// after it) is cut, and denyHint is appended.
+func denyReason(reason string) string {
+	if strings.HasPrefix(reason, "Approve if") {
+		reason = ""
+	} else if i := strings.Index(reason, "\nApprove if"); i >= 0 {
+		reason = reason[:i+1]
+	}
+	if reason != "" && !strings.HasSuffix(reason, "\n") {
+		reason += "\n"
+	}
+	return reason + denyHint
 }
 
 // runechoDir is the package-local alias to the shared store helper.

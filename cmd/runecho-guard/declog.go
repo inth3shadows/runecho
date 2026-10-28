@@ -312,7 +312,13 @@ func logDecision(rec decisionRecord) {
 	// oracle method: a site can forget, one funnel cannot. Restricted to hook-mode
 	// asks because that is the only shape fpaudit judges — stamping a defer or a
 	// pre-commit record would add a field no reader consults.
-	if rec.Mode == "hook" && rec.Decision == "ask" && rec.ClaimSymbols == nil {
+	// Under RUNECHO_GUARD_POSTURE=deny the hook emitted deny, not ask (#528), so
+	// the record says so: a deny has no PostToolUse outcome, and the outcome
+	// join and the reports treat it differently. One funnel, as above.
+	if rec.Mode == "hook" && rec.Decision == "ask" && guardPosture() == "deny" {
+		rec.Decision = "deny"
+	}
+	if rec.Mode == "hook" && (rec.Decision == "ask" || rec.Decision == "deny") && rec.ClaimSymbols == nil {
 		rec.ClaimSymbols = map[string][]string{}
 	}
 	// Always overwrite: the writing binary's own version is the only value that
@@ -668,7 +674,11 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 						passedFound = cur.Edit != "" && editHash != "" && cur.Edit != editHash
 					}
 				}
-			case "defer":
+			case "defer", "deny":
+				// A deny is never a join candidate: its tool call never ran, so no
+				// PostToolUse belongs to it, and admitting it would let a later edit's
+				// approval train learned-allow on the very symbols it blocked (#528).
+				// Like a defer it is a later PreToolUse on the file that did not ask.
 				// A later PreToolUse on this file that did not ask. The outcome being
 				// joined belongs to that call (or a later one), not to the ask before
 				// it: a clean edit after a denied ask, not a fingerprint mismatch. A

@@ -157,14 +157,14 @@ func TestGitOracleIsDated(t *testing.T) {
 	}
 
 	// RevAt must pick the commit that was current at the ask, not HEAD.
-	rev, err := g.RevAt(root, early.Add(time.Hour))
+	rev, err := g.RevAt(root, "HEAD", early.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rev != revEarly {
 		t.Errorf("RevAt(mid) = %s, want the earlier commit %s", rev, revEarly)
 	}
-	if _, err := g.RevAt(root, early.Add(-time.Hour)); err == nil {
+	if _, err := g.RevAt(root, "HEAD", early.Add(-time.Hour)); err == nil {
 		t.Error("RevAt before the first commit returned no error; the audit must mark that unknown")
 	}
 }

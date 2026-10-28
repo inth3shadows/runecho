@@ -232,8 +232,10 @@ type Oracle interface {
 	// to a sibling worktree of the same repository rather than give up, and MUST
 	// prove the candidate is that repository before doing so.
 	Worktree(file string) (root, rel string, err error)
-	// RevAt returns the newest commit in worktree at or before ts.
-	RevAt(worktree string, ts time.Time) (string, error)
+	// RevAt returns the newest commit at or before ts reachable from ref in
+	// worktree. Audit passes "HEAD" for the worktree the edit was recorded in,
+	// and the commit Head chose when Worktree adopted a sibling (#494).
+	RevAt(worktree, ref string, ts time.Time) (string, error)
 	// Head returns the current HEAD commit of worktree.
 	Head(worktree string) (string, error)
 	// Defined reports whether sym was resolvable at rev under scope — see
@@ -451,15 +453,22 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		root string
 		rel  string
 		head string
-		err  error
+		// ref is what "defined at ask time" walks back from (#494). The
+		// recorded worktree walks its own HEAD: the agent saw that tree, and a
+		// symbol its branch defined before the ask, never merged, is a false
+		// positive. An ADOPTED sibling's HEAD is some other session's branch,
+		// possibly cut before mainline defined the symbol, so it walks mainline
+		// — the commit Head chose — instead.
+		ref string
+		err error
 	}
 	wts := map[string]*wtState{}
-	// RevAt is per (root, ask timestamp), not per symbol. Without this every
+	// RevAt is per (root, ref, ask timestamp), not per symbol. Without this every
 	// symbol on an ask spawned its own `git rev-list` — ~150 redundant processes
 	// on the reference window, each carrying the full git timeout.
 	type revKey struct {
-		root string
-		ts   time.Time
+		root, ref string
+		ts        time.Time
 	}
 	revs := map[revKey]struct {
 		rev string
@@ -491,6 +500,10 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 			st = &wtState{}
 			if st.root, st.rel, st.err = o.Worktree(d.File); st.err == nil {
 				st.head, st.err = o.Head(st.root)
+				st.ref = "HEAD"
+				if !underRoot(d.File, st.root) {
+					st.ref = st.head
+				}
 			}
 			wts[d.File] = st
 		}
@@ -517,10 +530,10 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 			case st.err != nil:
 				f.Verdict, f.Note = VerdictUnknown, st.err.Error()
 			default:
-				rk := revKey{st.root, d.TS}
+				rk := revKey{st.root, st.ref, d.TS}
 				r, seen := revs[rk]
 				if !seen {
-					r.rev, r.err = o.RevAt(st.root, d.TS)
+					r.rev, r.err = o.RevAt(st.root, st.ref, d.TS)
 					revs[rk] = r
 				}
 				f.Verdict, f.Note = classify(o, st.root, st.rel, st.head, r.rev, r.err, d, sym, scope, defs)

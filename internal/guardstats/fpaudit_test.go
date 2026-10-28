@@ -20,6 +20,7 @@ type fakeOracle struct {
 	revErr        error
 	defErr        error
 	calls         int
+	refs          []string // every ref RevAt was asked to walk
 }
 
 func (f *fakeOracle) Worktree(file string) (string, string, error) {
@@ -29,7 +30,8 @@ func (f *fakeOracle) Worktree(file string) (string, string, error) {
 	return "/wt", strings.TrimPrefix(file, "/wt/"), nil
 }
 func (f *fakeOracle) Head(string) (string, error) { return f.head, nil }
-func (f *fakeOracle) RevAt(_ string, ts time.Time) (string, error) {
+func (f *fakeOracle) RevAt(_, ref string, ts time.Time) (string, error) {
+	f.refs = append(f.refs, ref)
 	if f.revErr != nil {
 		return "", f.revErr
 	}

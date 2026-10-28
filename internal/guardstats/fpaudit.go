@@ -428,7 +428,9 @@ func (s AuditStats) Share(v AuditVerdict) float64 {
 // window are precommit, and counting them anywhere but their own line would
 // repeat exactly the denominator error this audit exists to correct.
 //
-// Duplicate PreToolUse fires are collapsed first. Claude Code merges hooks from
+// Duplicate PreToolUse fires are collapsed first (duplicateAskFires, shared
+// with FPReport and Aggregate since #493; the figures below were measured with
+// the earlier previous-record rule). Claude Code merges hooks from
 // the plugin, user settings and project settings and runs every match, so one
 // edit routinely writes the same ask two or three times within a second; 103 of
 // those same 648 records are duplicates. Counting them would weight a verdict by
@@ -467,7 +469,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 	// session (hashToSeed alone accounts for eight records in one morning).
 	defs := map[defKey]bool{}
 
-	var prev *Decision
+	dup := duplicateAskFires(decisions, since)
 	for i := range decisions {
 		d := &decisions[i]
 		if d.Decision != "ask" || d.Mode != "hook" || d.TS.Before(since) {
@@ -476,10 +478,9 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		if d.TS.After(stats.Until) {
 			stats.Until = d.TS
 		}
-		if prev != nil && isDuplicateFire(*prev, *d) {
+		if _, isDup := dup[i]; isDup {
 			continue
 		}
-		prev = d
 		stats.Asks++
 		if len(d.Symbols) == 0 {
 			continue
@@ -706,37 +707,6 @@ func isNotIdentifier(lang, sym string) bool {
 	}
 	_, isReserved := set[sym]
 	return isReserved
-}
-
-// duplicateFireWindow is how close two identical ask records must be to be read
-// as one edit seen by several hook wirings rather than two edits. Measured on
-// the reference window, every duplicate pair landed within 2s (99 of 103 within
-// the same second); the nearest genuine re-ask on an unchanged symbol set was
-// 61s away, so the gap this sits in is two orders of magnitude wide.
-const duplicateFireWindow = 5 * time.Second
-
-// isDuplicateFire reports whether cur is the same ask as prev, re-logged by
-// another hook wiring. Deliberately strict — same file, same reason, same symbol
-// list, within the window — so a genuine repeat ask after an unsuccessful fix is
-// still counted.
-func isDuplicateFire(prev, cur Decision) bool {
-	return prev.File == cur.File &&
-		prev.Reason == cur.Reason &&
-		sameSymbols(prev.Symbols, cur.Symbols) &&
-		cur.TS.Sub(prev.TS) >= 0 &&
-		cur.TS.Sub(prev.TS) <= duplicateFireWindow
-}
-
-func sameSymbols(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func bump(m map[string]map[AuditVerdict]int, key string, v AuditVerdict) {

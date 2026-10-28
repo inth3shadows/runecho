@@ -317,17 +317,17 @@ func TestFPReport_CollapsesRepeatedAskRecords(t *testing.T) {
 func TestFPReport_KeepsDistinctAsks(t *testing.T) {
 	base := ask("violations", "py", "r1", "a.py", 0, "foo")
 	vary := map[string]func(Decision) Decision{
-		// ONE SECOND, not ts(1) — ts counts minutes. A minute-resolution key would
-		// survive a whole-minute delta and still collapse two distinct asks 30s
-		// apart, so the mutation has to be as fine as the claim the doc comment makes.
-		"different second": func(d Decision) Decision { d.TS = d.TS.Add(time.Second); return d },
-		"different minute": func(d Decision) Decision { d.TS = ts(1); return d },
-		"different repo":   func(d Decision) Decision { d.Repo = "r2"; return d },
-		"different file":   func(d Decision) Decision { d.File = "b.py"; return d },
-		"different lang":   func(d Decision) Decision { d.Lang = "go"; return d },
-		"different reason": func(d Decision) Decision { d.Reason = "dangling"; return d },
-		"different symbol": func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
-		"different gv":     func(d Decision) Decision { d.GV = "v9.9.9"; return d },
+		// Just past duplicateFireWindow, not ts(1) — ts counts minutes. A
+		// coarser mutation would not pin the window edge (#493: a 1s delta is
+		// now the same event, see TestDedupe_SecondBoundaryStraddle).
+		"outside the window": func(d Decision) Decision { d.TS = d.TS.Add(duplicateFireWindow + time.Second); return d },
+		"different minute":   func(d Decision) Decision { d.TS = ts(1); return d },
+		"different repo":     func(d Decision) Decision { d.Repo = "r2"; return d },
+		"different file":     func(d Decision) Decision { d.File = "b.py"; return d },
+		"different lang":     func(d Decision) Decision { d.Lang = "go"; return d },
+		"different reason":   func(d Decision) Decision { d.Reason = "dangling"; return d },
+		"different symbol":   func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
+		"different gv":       func(d Decision) Decision { d.GV = "v9.9.9"; return d },
 	}
 	for name, mutate := range vary {
 		t.Run(name, func(t *testing.T) {
@@ -491,12 +491,14 @@ func TestFPReport_ContractAskTriplicationCollapses(t *testing.T) {
 		t.Errorf("three records for one tool call = 1 unrated event, got %d", s.Window.Unrated)
 	}
 
-	// One second apart is a DIFFERENT event and must survive. A minute-resolution
-	// key would pass the case above and fail here.
-	distinct := []Decision{contractAsk("a.go", 0), contractAsk("a.go", 1)}
+	// Just outside duplicateFireWindow is a DIFFERENT event and must survive.
+	// (Before #493 the boundary was one second, which split duplicate fires
+	// straddling it.) A minute-resolution key would pass the case above and
+	// fail here.
+	distinct := []Decision{contractAsk("a.go", 0), contractAsk("a.go", 6)}
 	s = FPReport(distinct, ts(-1000), 10)
 	if s.Window.Unrated != 2 {
-		t.Errorf("asks one second apart are distinct events, got unrated=%d, want 2", s.Window.Unrated)
+		t.Errorf("asks 6s apart are distinct events, got unrated=%d, want 2", s.Window.Unrated)
 	}
 
 	// Same second, different file: also distinct.

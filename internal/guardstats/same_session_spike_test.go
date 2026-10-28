@@ -490,40 +490,46 @@ func keyOf(ts time.Time, file, reason string) askKey {
 }
 
 // askSessions maps each ask Audit would keep to its session tag. It collapses
-// duplicate hook fires exactly as Audit does (same filter, same prev, same
-// isDuplicateFire) and keeps the FIRST fire's stamp, which is the stamp the
-// finding carries. Only a true duplicate fire may lend its session to the kept
-// ask that lacks one; two fires of one ask naming different sessions make that
-// ask ambiguous. Then, per key, kept asks that disagree (including one with a
-// session and one without) make the key ambiguous, which resolves to "" and so
-// to no-session. asks equals Audit's stats.Asks; withSession counts kept asks
-// (not keys) that resolved to a session.
+// duplicate hook fires exactly as Audit does (duplicateAskFires, #493) and
+// keeps the FIRST fire's stamp, which is the stamp the finding carries. Only a
+// true duplicate fire may lend its session to the kept ask that lacks one; two
+// fires of one ask naming different sessions make that ask ambiguous. Then,
+// per key, kept asks that disagree (including one with a session and one
+// without) make the key ambiguous, which resolves to "" and so to no-session.
+// asks equals Audit's stats.Asks; withSession counts kept asks (not keys) that
+// resolved to a session.
 func askSessions(decisions []Decision, since time.Time) (m map[askKey]string, asks, withSession int) {
 	type kept struct {
 		key      askKey
 		session  string
 		conflict bool
 	}
+	dup := duplicateAskFires(decisions, since)
 	var list []kept
-	var prev *Decision
+	keptAt := map[int]int{} // decisions index of a kept ask -> its index in list
 	for i := range decisions {
 		d := &decisions[i]
 		if d.Decision != "ask" || d.Mode != "hook" || d.TS.Before(since) {
 			continue
 		}
-		if prev != nil && isDuplicateFire(*prev, *d) {
-			last := &list[len(list)-1]
-			switch {
-			case d.Session == "":
-			case last.session == "":
-				last.session = d.Session
-			case last.session != d.Session:
-				last.conflict = true
-			}
+		if _, isDup := dup[i]; isDup {
 			continue
 		}
-		prev = d
+		keptAt[i] = len(list)
 		list = append(list, kept{key: keyOf(d.TS, d.File, d.Reason), session: d.Session})
+	}
+	// Second pass: a duplicate lends its session to its kept ask, whatever the
+	// log order of the two.
+	for i, anchor := range dup {
+		d := decisions[i]
+		last := &list[keptAt[anchor]]
+		switch {
+		case d.Session == "":
+		case last.session == "":
+			last.session = d.Session
+		case last.session != d.Session:
+			last.conflict = true
+		}
 	}
 	m = map[askKey]string{}
 	// An ambiguous key is stored as "", which differs from every real session,

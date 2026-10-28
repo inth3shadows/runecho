@@ -359,7 +359,9 @@ func symbolKey(file string, symbols []string) string {
 }
 
 // askEventKey identifies the tool call an ask record describes, so repeated
-// records written for one call collapse to one event (#252).
+// records written for one call collapse to one event (#252). Since #493 it
+// keys only the #209 suppression-marker dedupe; asks are collapsed by
+// duplicateAskFires, which has no second-boundary edge.
 //
 // Every field that could differ between two genuinely distinct asks is in the
 // key. Timestamps are second-resolution as logged, which is what makes this work
@@ -439,12 +441,12 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	// counted, joined nowhere. Kept in a second slice rather than flagged in
 	// `asks` so no later change can accidentally hand one to matchOutcome.
 	var unratedAsks []Decision
-	eventSeen := map[string]bool{}
-	// suppressedSeen dedupes #209 suppression markers the way eventSeen dedupes
-	// asks. Its own map, and keyed with the decision type too: a suppressed
-	// marker usually rides on a DEFER, which eventSeen never sees.
+	// suppressedSeen dedupes #209 suppression markers, keyed on askEventKey and
+	// the decision type: a suppressed marker usually rides on a DEFER, which
+	// duplicateAskFires (asks only) never sees.
 	suppressedSeen := map[string]bool{}
-	for _, d := range decisions {
+	dup := duplicateAskFires(decisions, since)
+	for i, d := range decisions {
 		if d.TS.Before(since) {
 			continue
 		}
@@ -456,7 +458,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		// below, because it answers a different question (did the check run at
 		// all) than the rest of this function (what's its approve-anyway rate).
 		// Deliberately not deduped against hook re-invocations the way asks are
-		// (eventSeen below): a re-fired hook still means the check genuinely ran
+		// (duplicateAskFires below): a re-fired hook still means the check genuinely ran
 		// again, and this field is read qualitatively (zero vs. nonzero, rare
 		// vs. common), not as a rate a small duplication bias would distort.
 		for check, verdict := range d.Checks {
@@ -556,22 +558,24 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// gateMinAsks can drop below it and skip the gate (with the stderr note, not
 			// silently). On this log `--days=3` goes 33 asks to 20 — right at the floor.
 			//
-			// Two genuine edits to the same file inside one second collapse too when
-			// they cannot be told from a re-invocation: byte-identical edits, or
-			// records with no fingerprint. That is the right trade: it moves counts
-			// slightly, whereas the alternative moves the rate the report exists to
-			// state. Two edits with different fingerprints stay distinct (#465, see
-			// askEventKey).
+			// Two genuine edits to the same file within duplicateFireWindow collapse
+			// too when they cannot be told from a re-invocation: byte-identical edits
+			// (from any session), or records with no fingerprint. That is the right
+			// trade: it moves counts slightly, whereas the alternative moves the rate
+			// the report exists to state. Two edits with different fingerprints stay
+			// distinct (#465).
+			//
+			// duplicateAskFires (#493) replaced a key on the second-truncated
+			// timestamp, which split a duplicate pair straddling a second boundary (4
+			// of 103 pairs) and read its second fire as a denial.
 			// Symbol-less asks collapse on the same key and for the same reason.
-			// #254 is what makes that observable: askEventKey never ran on them
+			// #254 is what makes that observable: the collapse never ran on them
 			// before, because the drop above `continue`d first. It is exactly the
 			// duplication that matters most here — the reference log has one Write
 			// producing three identical contract asks, so an uncollapsed volume
 			// figure would treble the contract check's apparent noise.
-			if k := askEventKey(d); eventSeen[k] {
+			if _, isDup := dup[i]; isDup {
 				continue
-			} else {
-				eventSeen[k] = true
 			}
 			if unrated {
 				unratedAsks = append(unratedAsks, d)

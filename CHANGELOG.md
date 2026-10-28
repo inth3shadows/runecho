@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.85.1] — 2026-10-28
+
+### Changed
+- declog: record which model made the edit; fpaudit splits verdicts by model (#529) (#531)
+
 ## [0.85.0] — 2026-10-22
 
 ### Changed

@@ -317,3 +317,14 @@ func TestLoadReaderReadsModel(t *testing.T) {
 		t.Errorf("Model = %q, want claude-haiku-5-5", ds[0].Model)
 	}
 }
+
+func TestLoadReaderReadsCall(t *testing.T) {
+	ds, err := LoadReader(strings.NewReader(
+		`{"v":1,"ts":"2026-10-27T10:00:00Z","mode":"hook","decision":"ask","reason":"violations","call":"0123456789ab"}` + "\n"))
+	if err != nil || len(ds) != 1 {
+		t.Fatalf("LoadReader = %v, %v", ds, err)
+	}
+	if ds[0].Call != "0123456789ab" {
+		t.Errorf("Call = %q, want 0123456789ab", ds[0].Call)
+	}
+}

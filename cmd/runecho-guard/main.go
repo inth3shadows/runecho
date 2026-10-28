@@ -546,7 +546,9 @@ func runOutcomeMode(in io.Reader) int {
 		// TranscriptPath and AgentID locate the model that made the edit (#529).
 		TranscriptPath string `json:"transcript_path"`
 		AgentID        string `json:"agent_id"`
-		ToolInput      struct {
+		// ToolUseID identifies the tool call (#467, decisionRecord.Call).
+		ToolUseID string `json:"tool_use_id"`
+		ToolInput struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"`
 			NewString string   `json:"new_string"`
@@ -556,11 +558,13 @@ func runOutcomeMode(in io.Reader) int {
 	}
 	setDecisionSession("")
 	setDecisionModel("", "")
+	setDecisionCall("")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		return 0
 	}
 	setDecisionSession(payload.SessionID)
 	setDecisionModel(payload.TranscriptPath, payload.AgentID)
+	setDecisionCall(payload.ToolUseID)
 	if payload.ToolInput.FilePath == "" {
 		return 0
 	}
@@ -766,8 +770,10 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// call (#529, decisionRecord.Model).
 		TranscriptPath string `json:"transcript_path"`
 		AgentID        string `json:"agent_id"`
-		ToolName       string `json:"tool_name"`
-		ToolInput      struct {
+		// ToolUseID identifies the tool call (#467, decisionRecord.Call).
+		ToolUseID string `json:"tool_use_id"`
+		ToolName  string `json:"tool_name"`
+		ToolInput struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"` // Edit tool (E1 dangling-refs)
 			NewString string   `json:"new_string"` // Edit tool
@@ -777,6 +783,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	setDecisionSession("")
 	setDecisionModel("", "")
+	setDecisionCall("")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
@@ -784,6 +791,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	}
 	setDecisionSession(payload.SessionID)
 	setDecisionModel(payload.TranscriptPath, payload.AgentID)
+	setDecisionCall(payload.ToolUseID)
 
 	// One value for the tool call, so the checks below and the extracted phases
 	// read the same five fields by name instead of re-spelling the payload path.

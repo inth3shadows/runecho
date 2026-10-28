@@ -176,7 +176,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		}
 	}
 
-	res := lookupSymbolsFor(filepath.Dir(filePath), filePath, sessionID)
+	res := lookupSymbolsFor(existingDir(filePath), filePath, sessionID)
 	cw := res.Contract
 	if !res.OK {
 		return verification{

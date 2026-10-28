@@ -162,7 +162,7 @@ func contractWarningFor(filePath, sessionID string) *contractWarning {
 	}
 	defer db.Close()
 
-	repo, _, ok := db.ResolveRepo(filepath.Dir(filePath))
+	repo, _, ok := db.ResolveRepo(existingDir(filePath))
 	if !ok {
 		return nil
 	}
@@ -255,13 +255,20 @@ func relWithinRoot(root, filePath string) (string, bool) {
 	// to exist, and the edited file frequently does not yet — a Write creating a
 	// new file is the whole point of a PreToolUse hook. Resolving the full path
 	// fails there and abstains, which is the same silent miss this retry exists
-	// to close. The parent directory does exist: repo resolution already ran git
-	// inside it to get here.
-	dir, err := filepath.EvalSymlinks(filepath.Dir(filePath))
+	// to close. Nor need the parent directory exist: a Write can create a new
+	// package (#472). So resolve the nearest existing ancestor — repo
+	// resolution already ran git inside it to get here — and re-attach the
+	// not-yet-created tail.
+	anc := existingDir(filePath)
+	dir, err := filepath.EvalSymlinks(anc)
 	if err != nil {
 		return "", false
 	}
-	rel, err := filepath.Rel(root, filepath.Join(dir, filepath.Base(filePath)))
+	tail, err := filepath.Rel(anc, filepath.Clean(filePath))
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, filepath.Join(dir, tail))
 	if err != nil || escapes(rel) {
 		return "", false
 	}

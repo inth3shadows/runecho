@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -23,30 +25,89 @@ func TestRunHookMode_WriteIntoNewDirectoryIsChecked(t *testing.T) {
 				t.Fatalf("precondition: %s must not exist", filepath.Dir(target))
 			}
 			_, _, d := runHook(t, payload(t, "Write", target, "", "package pkg\n\nfunc X() { HallucinatedFn() }\n", nil))
-			if d.Hook.PermissionDec != "ask" {
+			if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "HallucinatedFn") {
 				rec := readLastDecisionLog(t)
-				t.Fatalf("permissionDecision = %q, want ask; log: %v", d.Hook.PermissionDec, rec)
+				t.Fatalf("decision = %q (%q), want an ask naming HallucinatedFn; log: %v",
+					d.Hook.PermissionDec, d.Hook.PermissionReason, rec)
 			}
 		})
 	}
 }
 
-// The ancestor walk must not reach past the repository: a new directory
-// outside any repo is still unenrolled.
-func TestExistingDir(t *testing.T) {
+// lookupDir walks up only through directories that definitively do not exist.
+// A path component that is a file, or a directory that exists but cannot be
+// read, stops the walk: resolution then runs in the original (missing)
+// directory and misses, as it did before #472, instead of climbing into an
+// enclosing repository.
+func TestLookupDir(t *testing.T) {
 	root := t.TempDir()
+	gitInit(t, root)
 	if err := os.WriteFile(filepath.Join(root, "f.go"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ file, want string }{
 		{filepath.Join(root, "a.go"), root},
 		{filepath.Join(root, "x", "y", "a.go"), root},
-		// A path component that is a FILE is not a directory to resolve from.
-		{filepath.Join(root, "f.go", "a.go"), root},
+		{filepath.Join(root, "f.go", "a.go"), filepath.Join(root, "f.go")},
 	} {
-		if got := existingDir(tc.file); got != tc.want {
-			t.Errorf("existingDir(%q) = %q, want %q", tc.file, got, tc.want)
+		if got := lookupDir(tc.file); got != tc.want {
+			t.Errorf("lookupDir(%q) = %q, want %q", tc.file, got, tc.want)
 		}
+	}
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(root, "locked")
+		if err := os.Mkdir(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		want := filepath.Join(locked, "new")
+		if got := lookupDir(filepath.Join(want, "a.go")); got != want {
+			t.Errorf("lookupDir past an unreadable dir = %q, want %q (no climb)", got, want)
+		}
+	}
+}
+
+// #538 review F1: in a claudew-style bare container (<C>/.bare plus a .git
+// pointer file, worktrees beneath), a new path that is in NO worktree must not
+// be attributed to an enrolled one. The nearest existing ancestor is the
+// container, where git finds the common dir but no work tree.
+func TestRunHookMode_NewDirInBareContainerIsNotAdopted(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	c := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@e", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(c, "init", "-q", "--bare", ".bare")
+	if err := os.WriteFile(filepath.Join(c, ".git"), []byte("gitdir: ./.bare\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(c, "worktree", "add", "-q", "--orphan", "-b", "main", "main-wt")
+	wt := filepath.Join(c, "main-wt")
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(wt, "add", "-A")
+	run(wt, "commit", "-q", "-m", "init")
+	goModRepo(t, wt, []string{"KnownFunc"})
+	t.Setenv("RUNECHO_GUARD_STRICT", "1")
+
+	// Control: a new directory INSIDE the enrolled worktree is checked.
+	_, _, d := runHook(t, payload(t, "Write", filepath.Join(wt, "newpkg", "x.go"), "", "package pkg\n\nfunc X() { HallucinatedFn() }\n", nil))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("control: new dir inside the worktree = %q, want ask", d.Hook.PermissionDec)
+	}
+	_, _, d = runHook(t, payload(t, "Write", filepath.Join(c, "claude-new", "x.go"), "", "package pkg\n\nfunc X() { HallucinatedFn() }\n", nil))
+	if d.Hook.PermissionDec == "ask" {
+		t.Fatalf("a path in no worktree was checked against an enrolled one: %q", d.Hook.PermissionReason)
+	}
+	if rec := readLastDecisionLog(t); rec["reason"] != "no-repo" {
+		t.Errorf("reason = %v, want no-repo", rec["reason"])
 	}
 }
 
@@ -55,6 +116,7 @@ func TestExistingDir(t *testing.T) {
 // under a symlinked repo path is still placed inside the repo (#472).
 func TestRelWithinRoot_SymlinkedNewDirectory(t *testing.T) {
 	real := t.TempDir()
+	gitInit(t, real) // relWithinRoot runs only after the path resolved to a repo
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlink: %v", err)

@@ -162,7 +162,7 @@ func contractWarningFor(filePath, sessionID string) *contractWarning {
 	}
 	defer db.Close()
 
-	repo, _, ok := db.ResolveRepo(existingDir(filePath))
+	repo, _, ok := db.ResolveRepo(lookupDir(filePath))
 	if !ok {
 		return nil
 	}
@@ -258,8 +258,9 @@ func relWithinRoot(root, filePath string) (string, bool) {
 	// to close. Nor need the parent directory exist: a Write can create a new
 	// package (#472). So resolve the nearest existing ancestor — repo
 	// resolution already ran git inside it to get here — and re-attach the
-	// not-yet-created tail.
-	anc := existingDir(filePath)
+	// not-yet-created tail. lookupDir returns the original directory when it
+	// cannot walk safely; EvalSymlinks then fails and this abstains.
+	anc := lookupDir(filePath)
 	dir, err := filepath.EvalSymlinks(anc)
 	if err != nil {
 		return "", false

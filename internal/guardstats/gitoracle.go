@@ -440,7 +440,7 @@ func (g GitOracle) Head(worktree string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// RevAt returns the newest commit at or before ts.
+// RevAt returns the newest commit at or before ts reachable from ref.
 //
 // --before matches on COMMITTER date, which lags the working tree: code exists
 // in a file for some minutes-to-hours before it is committed. So a symbol
@@ -448,9 +448,12 @@ func (g GitOracle) Head(worktree string) (string, error) {
 // genuine false positive as premature. That bias is one-directional and is
 // reported rather than corrected — correcting it would require reconstructing
 // working-tree state that was never recorded.
-func (g GitOracle) RevAt(worktree string, ts time.Time) (string, error) {
+func (g GitOracle) RevAt(worktree, ref string, ts time.Time) (string, error) {
+	if ref == "" || strings.HasPrefix(ref, "-") {
+		return "", fmt.Errorf("bad ref %q", ref)
+	}
 	out, err := g.git(worktree, "rev-list", "-1",
-		"--before="+ts.UTC().Format(time.RFC3339), "HEAD")
+		"--before="+ts.UTC().Format(time.RFC3339), ref, "--")
 	if err != nil {
 		return "", fmt.Errorf("rev-list in %s: %w", worktree, err)
 	}

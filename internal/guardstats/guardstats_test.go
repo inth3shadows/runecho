@@ -306,3 +306,14 @@ func TestLoadReader_AskEdit(t *testing.T) {
 		t.Errorf("got %+v, want AskEdit 111111111111 and Edit 222222222222", got)
 	}
 }
+
+func TestLoadReaderReadsModel(t *testing.T) {
+	ds, err := LoadReader(strings.NewReader(
+		`{"v":1,"ts":"2026-10-27T10:00:00Z","mode":"hook","decision":"ask","reason":"violations","model":"claude-haiku-5-5"}` + "\n"))
+	if err != nil || len(ds) != 1 {
+		t.Fatalf("LoadReader = %v, %v", ds, err)
+	}
+	if ds[0].Model != "claude-haiku-5-5" {
+		t.Errorf("Model = %q, want claude-haiku-5-5", ds[0].Model)
+	}
+}

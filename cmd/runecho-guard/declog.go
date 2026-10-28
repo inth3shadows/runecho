@@ -214,6 +214,15 @@ type decisionRecord struct {
 	// a parse-fail record, on a timeout or panic record written before the
 	// payload was decoded, and on every record from an older guard.
 	Session string `json:"session,omitempty"`
+	// Model is the model that issued the tool call (#529), read from the
+	// newest assistant entry of the session's transcript — or, for a subagent's
+	// call, the subagent's own transcript (see modelTranscriptPath). Stamped by
+	// logDecision on every record a hook process writes, like Session, so
+	// fpaudit can split verdicts by model. Absent on pre-commit records (no
+	// model is involved), when the transcript or its model could not be read,
+	// and on every record from an older guard: absent means "unrecorded",
+	// never "no model".
+	Model string `json:"model,omitempty"`
 }
 
 // decisionSession is the session tag logDecision stamps on records that do not
@@ -295,6 +304,15 @@ func logDecision(rec decisionRecord) {
 	if rec.Session == "" {
 		if tag := decisionSession.Load(); tag != nil {
 			rec.Session = *tag
+		}
+	}
+	if rec.Model == "" {
+		if m := decisionModel.Load(); m != nil {
+			if modelAbandoned.Load() {
+				rec.Model = m.peek()
+			} else {
+				rec.Model = m.get()
+			}
 		}
 	}
 	if rec.TS == "" {

@@ -543,6 +543,9 @@ func runOutcomeMode(in io.Reader) int {
 		// id records no memo, so the next out-of-scope edit asks again.
 		SessionID      string `json:"session_id"`
 		PermissionMode string `json:"permission_mode"`
+		// TranscriptPath and AgentID locate the model that made the edit (#529).
+		TranscriptPath string `json:"transcript_path"`
+		AgentID        string `json:"agent_id"`
 		ToolInput      struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"`
@@ -552,10 +555,12 @@ func runOutcomeMode(in io.Reader) int {
 		} `json:"tool_input"`
 	}
 	setDecisionSession("")
+	setDecisionModel("", "")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		return 0
 	}
 	setDecisionSession(payload.SessionID)
+	setDecisionModel(payload.TranscriptPath, payload.AgentID)
 	if payload.ToolInput.FilePath == "" {
 		return 0
 	}
@@ -757,8 +762,12 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		// (#12 D2) and tags every decision record this fire writes
 		// (decisionRecord.Session). It is never logged in full.
 		SessionID string `json:"session_id"`
-		ToolName  string `json:"tool_name"`
-		ToolInput struct {
+		// TranscriptPath and AgentID locate the model that issued the tool
+		// call (#529, decisionRecord.Model).
+		TranscriptPath string `json:"transcript_path"`
+		AgentID        string `json:"agent_id"`
+		ToolName       string `json:"tool_name"`
+		ToolInput      struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"` // Edit tool (E1 dangling-refs)
 			NewString string   `json:"new_string"` // Edit tool
@@ -767,12 +776,14 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		} `json:"tool_input"`
 	}
 	setDecisionSession("")
+	setDecisionModel("", "")
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
 		return 0
 	}
 	setDecisionSession(payload.SessionID)
+	setDecisionModel(payload.TranscriptPath, payload.AgentID)
 
 	// One value for the tool call, so the checks below and the extracted phases
 	// read the same five fields by name instead of re-spelling the payload path.
@@ -1637,6 +1648,7 @@ func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int)
 		// on the os.Exit that follows main()'s return, so there is nothing to
 		// clean up and no data race to guard against.
 		warnf("%s exceeded %s — edit deferred, NOT blocked (timeout)", name, guardTimeout)
+		abandonDecisionModel()
 		logDecision(decisionRecord{Mode: hookModeLabel(name), Decision: "defer", Reason: "timeout"})
 		return 0
 	}

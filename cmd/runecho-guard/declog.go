@@ -20,7 +20,9 @@ import (
 // mode distinguishes Claude Code hook fires ("hook") from git pre-commit fires
 // ("precommit"). decision is "ask" or "defer" in both modes — pre-commit blocks
 // instead of asking, but keeping the same two-value enum lets log consumers
-// correlate ask-rate across surfaces without schema forks.
+// correlate ask-rate across surfaces without schema forks. Hook mode also writes
+// "deny" under RUNECHO_GUARD_POSTURE=deny (#528); a reader that handles only
+// ask/defer silently drops those.
 // symbols is only populated on ask (the flagged symbol names, across all ask
 // categories: hallucination violations, dangling, dropped-import, and before
 // #414 duplicate-symbol).
@@ -678,8 +680,7 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 				// A deny is never a join candidate: its tool call never ran, so no
 				// PostToolUse belongs to it, and admitting it would let a later edit's
 				// approval train learned-allow on the very symbols it blocked (#528).
-				// Like a defer it is a later PreToolUse on the file that did not ask.
-				// A later PreToolUse on this file that did not ask. The outcome being
+				// Like a defer it is a later PreToolUse on the file that did not ask. The outcome being
 				// joined belongs to that call (or a later one), not to the ask before
 				// it: a clean edit after a denied ask, not a fingerprint mismatch. A
 				// genuine mismatch has nothing between its ask and its outcome.

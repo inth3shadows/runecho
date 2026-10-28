@@ -81,6 +81,9 @@ func gateClause(gates []string) string {
 // guidance is its own change with its own review (#267's own framing). Only the
 // remedy half varies, which is the half that was wrong.
 func askTrailer(f firedChecks) string {
+	if guardPosture() == "deny" {
+		return denyTrailer(f)
+	}
 	const lead = "Approve if these are legitimate (new/local/dynamic, or an intended removal). "
 	gates := firedGates(f)
 	switch {
@@ -129,4 +132,37 @@ func precommitRemedyLine(f firedChecks) string {
 		// for the same reason.
 		return "Bypass with RUNECHO_GUARD_SKIP=1."
 	}
+}
+
+// denyPrefix opens every deny remedy (#528).
+const denyPrefix = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny)."
+
+// denyTrailer is askTrailer under RUNECHO_GUARD_POSTURE=deny. The model, not a
+// user, reads it and it cannot approve the call, so it gets one remedy per kind
+// of finding that fired instead of "Approve if…" and the switches that silence
+// a check. Fixed order, so a merged deny reads the same every time.
+func denyTrailer(f firedChecks) string {
+	var parts []string
+	if f.Violations || f.FileScope || f.Qualified || f.RecvMethod || f.VarType {
+		parts = append(parts, "If a flagged name is new, define it first or in this same edit; otherwise correct the reference.")
+	}
+	if f.DepsGo {
+		parts = append(parts, "Use only what the dependency actually exports.")
+	}
+	if f.Dangling {
+		parts = append(parts, "Update the callers listed above first, or in this same edit, before removing what they use.")
+	}
+	if f.Dropped {
+		parts = append(parts, "Keep the import, or remove its remaining uses in this same edit.")
+	}
+	if f.CallShape {
+		parts = append(parts, "Make the call match the signature shown.")
+	}
+	if f.Lint {
+		parts = append(parts, "Define or correct the name the linter reports.")
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "Fix the findings above and retry.")
+	}
+	return denyPrefix + " " + strings.Join(parts, " ")
 }

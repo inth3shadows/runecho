@@ -94,8 +94,15 @@ func (cw *contractWarning) section() string {
 		fmt.Fprintf(&sb, "  note: %s changed after activation (%s → %s) — this check used the CURRENT file.\n",
 			cw.ContractPath, shortHash(cw.ActivatedHash), shortHash(cw.CurrentHash))
 	}
-	sb.WriteString("Approve if the edit is legitimate — an out-of-scope edit often is.")
-	if contractOnceEnabled() {
+	deny := guardPosture() == "deny"
+	if deny {
+		// #528: the model reads a deny and cannot approve it, so it is told the
+		// two ways forward that exist — stay in scope, or change the scope.
+		sb.WriteString(denyPrefix + " Keep this edit inside the declared scope, or change the scope.")
+	} else {
+		sb.WriteString("Approve if the edit is legitimate — an out-of-scope edit often is.")
+	}
+	if contractOnceEnabled() && !deny {
 		// #209: say what an approval buys, so the user is not left wondering
 		// whether approving once has quietly widened the scope. It has not. The
 		// dependency is named because the guard cannot see it from here: with no

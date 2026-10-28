@@ -899,13 +899,14 @@ func topRepoCounts(rated, unrated map[string]int, topN int) []RepoCount {
 	return out
 }
 
-// FormatFP renders an FPStats as a human-readable report.
+// bumpDenied counts one deny (#528) in a per-key bucket.
 func bumpDenied(m map[string]FPBucket, key string) {
 	b := m[key]
 	b.Denied++
 	m[key] = b
 }
 
+// FormatFP renders an FPStats as a human-readable report.
 func FormatFP(s FPStats) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Guard false-positive report (%s → %s)\n",
@@ -933,7 +934,9 @@ func FormatFP(s FPStats) string {
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists
 	// entirely of them must not report itself as empty (#254).
-	if s.Window.Total() == 0 {
+	// Denies count too (#540 review): a window of only denies is the #528 deny
+	// arm, and its per-check breakdown is the data the arm exists to collect.
+	if s.Window.Total() == 0 && s.Window.Denied == 0 {
 		fmt.Fprintf(&b, "\nNo hook-mode asks in window.\n")
 		// A window whose only contract fires were suppressed repeats (#209) is
 		// not an idle one; say so rather than let the early return hide it.
@@ -1043,9 +1046,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 	fmt.Fprintf(b, "  %-*s %4d ask  ", width, name, bkt.Asks)
 	switch {
 	case bkt.Total() == 0:
-		// Only reachable on a ByCheck row whose every fire was a suppressed
-		// repeat (#209). "No ask carries a join key" would be false — there is
-		// no ask at all.
+		// Reachable on a row whose every fire was a suppressed repeat (#209) or a
+		// deny (#528). "No ask carries a join key" would be false — there is no
+		// ask at all; the +N suffixes below say what there was instead.
 		fmt.Fprintf(b, "  no asks")
 	case bkt.Asks == 0:
 		fmt.Fprintf(b, "  no rate (no ask here carries a join key)")
@@ -1065,6 +1068,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 	}
 	if bkt.Suppressed > 0 {
 		fmt.Fprintf(b, "  +%d suppressed", bkt.Suppressed)
+	}
+	if bkt.Denied > 0 {
+		fmt.Fprintf(b, "  +%d denied", bkt.Denied)
 	}
 	fmt.Fprint(b, "\n")
 }
@@ -1149,6 +1155,7 @@ func PayloadFP(s FPStats) map[string]any {
 		return map[string]any{
 			"asks": b.Asks, "approved": b.Approved, "rate": rate,
 			"unrated": b.Unrated, "total": b.Total(), "coverage": coverage,
+			"denied":  b.Denied,
 			"latency": latencyPayload(b.Latency),
 		}
 	}

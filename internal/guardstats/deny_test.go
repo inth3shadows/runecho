@@ -49,3 +49,27 @@ func TestDenyAndAskDoNotCollapse(t *testing.T) {
 		t.Errorf("an ask and a deny collapsed into one event")
 	}
 }
+
+// #540 review F3: a window of only denies (the #528 deny arm) is not empty —
+// its per-check rows and its JSON carry the denies.
+func TestDenyOnlyWindowIsReported(t *testing.T) {
+	var decs []Decision
+	for m := 0; m < 3; m++ {
+		d := ask("violations", "go", "r1", "a.go", m, "ghost")
+		d.Decision = "deny"
+		decs = append(decs, d)
+	}
+	s := FPReport(decs, ts(-1000), 10)
+	out := FormatFP(s)
+	if strings.Contains(out, "No hook-mode asks in window.") {
+		t.Errorf("a deny-only window reported itself as empty:\n%s", out)
+	}
+	if !strings.Contains(out, "+3 denied") {
+		t.Errorf("per-bucket rows do not show the denies:\n%s", out)
+	}
+	p := PayloadFP(s)
+	ov, _ := p["overall"].(map[string]any)
+	if ov["denied"] != 3 {
+		t.Errorf("JSON overall.denied = %v, want 3", ov["denied"])
+	}
+}

@@ -18,8 +18,8 @@ func assertDeny(t *testing.T, d decision, raw string) map[string]any {
 	if strings.Contains(d.Hook.PermissionReason, "Approve if") {
 		t.Errorf("deny reason still offers approval:\n%s", d.Hook.PermissionReason)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(d.Hook.PermissionReason), denyHint) {
-		t.Errorf("deny reason does not end with the hint:\n%s", d.Hook.PermissionReason)
+	if !strings.Contains(d.Hook.PermissionReason, denyPrefix) {
+		t.Errorf("deny reason carries no deny remedy:\n%s", d.Hook.PermissionReason)
 	}
 	rec := readLastDecisionLog(t)
 	if rec == nil || rec["decision"] != "deny" {
@@ -64,6 +64,56 @@ func TestPosture_DenyContractOnly(t *testing.T) {
 	top := contractRepo(t, "sess", inScopeBody)
 	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "docs", "README.md"), "# hi\n"))
 	assertDeny(t, d, raw)
+	// The only ways forward must survive: change the scope, or drop it.
+	for _, want := range []string{"widen it there", "contract deactivate", "inside the declared scope"} {
+		if !strings.Contains(d.Hook.PermissionReason, want) {
+			t.Errorf("contract deny lost %q:\n%s", want, d.Hook.PermissionReason)
+		}
+	}
+	if strings.Contains(d.Hook.PermissionReason, "flagged name") {
+		t.Errorf("contract-only deny carries a symbol remedy:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+// #540 review F1: a merged contract + symbol deny keeps BOTH findings — the
+// contract section's own text must not swallow the symbol section after it.
+func TestPosture_DenyMergedContractAndSymbolKeepsBoth(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	t.Setenv("RUNECHO_GUARD_POSTURE", "deny")
+	top := contractRepo(t, "sess", inScopeBody)
+	if err := os.WriteFile(filepath.Join(top, "go.mod"), []byte("module example.com/m\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "a.go"), "package m\n\nfunc F() { HallucinatedFn() }\n"))
+	assertDeny(t, d, raw)
+	for _, want := range []string{"HallucinatedFn", "contract deactivate", "define it first"} {
+		if !strings.Contains(d.Hook.PermissionReason, want) {
+			t.Errorf("merged deny lost %q:\n%s", want, d.Hook.PermissionReason)
+		}
+	}
+}
+
+func TestDenyTrailerPerCheck(t *testing.T) {
+	for name, tc := range map[string]struct {
+		f    firedChecks
+		want string
+	}{
+		"violations": {firedChecks{Violations: true}, "define it first"},
+		"dangling":   {firedChecks{Dangling: true}, "Update the callers"},
+		"dropped":    {firedChecks{Dropped: true}, "Keep the import"},
+		"callshape":  {firedChecks{CallShape: true}, "match the signature"},
+		"lint":       {firedChecks{Lint: true}, "the linter reports"},
+		"deps":       {firedChecks{DepsGo: true}, "dependency actually exports"},
+		"none":       {firedChecks{}, "Fix the findings"},
+	} {
+		got := denyTrailer(tc.f)
+		if !strings.HasPrefix(got, denyPrefix) || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: denyTrailer = %q, want prefix %q and %q", name, got, denyPrefix, tc.want)
+		}
+		if name != "violations" && name != "none" && strings.Contains(got, "define it first") {
+			t.Errorf("%s: denyTrailer carries the symbol remedy: %q", name, got)
+		}
+	}
 }
 
 // The default, and anything that is not "deny", keeps today's ask byte for byte.
@@ -83,7 +133,7 @@ func TestPosture_DefaultAskUnchanged(t *testing.T) {
 	gitInit(t, repoRoot)
 	goModRepo(t, repoRoot, []string{"KnownFunc"})
 	_, _, d := runHook(t, payload(t, "Write", filepath.Join(repoRoot, "a.go"), "", "package m\n\nfunc F() { HallucinatedFn() }\n", nil))
-	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "Approve if") || strings.Contains(d.Hook.PermissionReason, denyHint) {
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "Approve if") || strings.Contains(d.Hook.PermissionReason, denyPrefix) {
 		t.Errorf("default posture changed:\n%q %q", d.Hook.PermissionDec, d.Hook.PermissionReason)
 	}
 	if rec := readLastDecisionLog(t); rec["decision"] != "ask" {
@@ -119,19 +169,5 @@ func TestPosture_DenyIsNeverJoinedToAnOutcome(t *testing.T) {
 	runOutcomeMode(strings.NewReader(`{"tool_name":"Edit","tool_input":{"file_path":` + jsonQuote(file) + `}}`))
 	if after := countDecisionLogLines(t); after != before {
 		t.Errorf("an outcome was recorded against a deny: %v", readLastDecisionLog(t))
-	}
-}
-
-func TestDenyReason(t *testing.T) {
-	for in, want := range map[string]string{
-		"x\nApprove if ok.\nmore": "x\n" + denyHint,
-		"Approve if ok.":          denyHint,
-		"no trailer":              "no trailer\n" + denyHint,
-		"ends with newline\n":     "ends with newline\n" + denyHint,
-		"":                        denyHint,
-	} {
-		if got := denyReason(in); got != want {
-			t.Errorf("denyReason(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

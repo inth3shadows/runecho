@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.86.0] — 2026-10-28
+
+### Changed
+- guard: a Write into a directory that doesn't exist yet is checked (#472) (#538)
+
 ## [0.85.4] — 2026-10-28
 
 ### Changed

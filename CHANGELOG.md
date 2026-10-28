@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.85.3] — 2026-10-28
+
+### Changed
+- guardstats: one duplicate-fire collapse for all three reports (#493) (#534)
+
 ## [0.85.2] — 2026-10-28
 
 ### Changed

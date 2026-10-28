@@ -1440,3 +1440,31 @@ func TestResolveFinding(t *testing.T) {
 		})
 	}
 }
+
+// isDuplicateFire is the pre-#493 previous-record dedupe this spike was
+// measured with, kept here so its numbers stay reproducible. Reports use
+// duplicateAskFires.
+//
+// It reports whether cur is the same ask as prev, re-logged by
+// another hook wiring. Deliberately strict — same file, same reason, same symbol
+// list, within the window — so a genuine repeat ask after an unsuccessful fix is
+// still counted.
+func isDuplicateFire(prev, cur Decision) bool {
+	return prev.File == cur.File &&
+		prev.Reason == cur.Reason &&
+		sameSymbols(prev.Symbols, cur.Symbols) &&
+		cur.TS.Sub(prev.TS) >= 0 &&
+		cur.TS.Sub(prev.TS) <= duplicateFireWindow
+}
+
+func sameSymbols(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -242,12 +242,14 @@ func Aggregate(decisions []Decision, since time.Time, topN int) Stats {
 	}
 
 	symbolCounts := make(map[string]int)
+	// Repeat hook fires of one ask count once, as in FPReport and Audit (#493).
+	dup := duplicateAskFires(decisions, since)
 
-	for _, d := range decisions {
+	for i, d := range decisions {
 		if d.Decision != "ask" && d.Decision != "defer" {
 			continue
 		}
-		if d.TS.Before(since) {
+		if d.TS.Before(since) || dup[i] {
 			continue
 		}
 

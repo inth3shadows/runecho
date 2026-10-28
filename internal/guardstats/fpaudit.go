@@ -429,7 +429,8 @@ func (s AuditStats) Share(v AuditVerdict) float64 {
 // repeat exactly the denominator error this audit exists to correct.
 //
 // Duplicate PreToolUse fires are collapsed first (duplicateAskFires, shared
-// with FPReport and Aggregate since #493). Claude Code merges hooks from
+// with FPReport and Aggregate since #493; the figures below were measured with
+// the earlier previous-record rule). Claude Code merges hooks from
 // the plugin, user settings and project settings and runs every match, so one
 // edit routinely writes the same ask two or three times within a second; 103 of
 // those same 648 records are duplicates. Counting them would weight a verdict by
@@ -477,7 +478,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		if d.TS.After(stats.Until) {
 			stats.Until = d.TS
 		}
-		if dup[i] {
+		if _, isDup := dup[i]; isDup {
 			continue
 		}
 		stats.Asks++

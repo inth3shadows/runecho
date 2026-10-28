@@ -76,16 +76,15 @@ func TestDedupe_InterleavedAndOutOfOrder(t *testing.T) {
 // Fields that tell two asks apart keep them apart in every report.
 func TestDedupe_DistinguishingFieldsInEveryReport(t *testing.T) {
 	base := ask("violations", "py", "r1", "a.py", 0, "foo")
-	base.Edit, base.Session = "e1", "s1"
+	base.Edit = "e1"
 	vary := map[string]func(Decision) Decision{
-		"file":    func(d Decision) Decision { d.File = "b.py"; return d },
-		"reason":  func(d Decision) Decision { d.Reason = "dangling"; return d },
-		"symbol":  func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
-		"repo":    func(d Decision) Decision { d.Repo = "r2"; return d },
-		"lang":    func(d Decision) Decision { d.Lang = "go"; return d },
-		"gv":      func(d Decision) Decision { d.GV = "v9.9.9"; return d },
-		"edit":    func(d Decision) Decision { d.Edit = "e2"; return d },
-		"session": func(d Decision) Decision { d.Session = "s2"; return d },
+		"file":   func(d Decision) Decision { d.File = "b.py"; return d },
+		"reason": func(d Decision) Decision { d.Reason = "dangling"; return d },
+		"symbol": func(d Decision) Decision { d.Symbols = []string{"bar"}; return d },
+		"repo":   func(d Decision) Decision { d.Repo = "r2"; return d },
+		"lang":   func(d Decision) Decision { d.Lang = "go"; return d },
+		"gv":     func(d Decision) Decision { d.GV = "v9.9.9"; return d },
+		"edit":   func(d Decision) Decision { d.Edit = "e2"; return d },
 	}
 	for name, mutate := range vary {
 		t.Run(name, func(t *testing.T) {
@@ -105,25 +104,6 @@ func TestDedupe_PrecommitNotCollapsed(t *testing.T) {
 	}
 }
 
-// #493 case 3: a denied ask, then an identical retry approved 2s after it.
-// The outcome belongs to the retry; pairing it with the first ask reported
-// 602s of decision latency.
-func TestFPReport_RetryLatencyPairsLatestAsk(t *testing.T) {
-	first := ask("violations", "py", "r1", "a.py", 0, "foo")
-	first.Edit = "E"
-	retry := at(first, 600*time.Second)
-	out := outcome("a.py", 0, "foo")
-	out.Edit = "E"
-	out = at(out, 602*time.Second)
-	s := FPReport([]Decision{first, retry, out}, ts(-1000), 10)
-	if s.Window.Asks != 2 || s.Window.Approved != 1 {
-		t.Fatalf("asks/approved = %d/%d, want 2/1", s.Window.Asks, s.Window.Approved)
-	}
-	if got := s.Window.Latency.MedianS; got != 2 {
-		t.Errorf("latency median = %vs, want 2s (the retry's own decision time)", got)
-	}
-}
-
 // A fire before the window does not swallow its duplicate inside it: every
 // report sees only the window, so the in-window fire is the event.
 func TestDedupe_WindowEdgeKeepsInWindowFire(t *testing.T) {
@@ -135,5 +115,27 @@ func TestDedupe_WindowEdgeKeepsInWindowFire(t *testing.T) {
 	g := Aggregate(decs, since, 10)
 	if got := s.Window.Asks + s.Window.Unrated; got != 1 || au.Asks != 1 || g.TotalAsk != 1 {
 		t.Errorf("asks fp/audit/agg = %d/%d/%d, want 1/1/1", got, au.Asks, g.TotalAsk)
+	}
+}
+
+// #534 review F5: one wiring's fire can lack the session another's carries
+// (TestAskSessions encodes it). Session is not part of the key, so they are
+// still one event in every report.
+func TestDedupe_FireWithoutSessionStillCollapses(t *testing.T) {
+	a := ask("violations", "py", "r1", "a.py", 0, "foo")
+	b := at(a, time.Second)
+	b.Session = "s1"
+	if fp, audit, agg := askCounts(t, []Decision{a, b}); fp != 1 || audit != 1 || agg != 1 {
+		t.Errorf("asks fp/audit/agg = %d/%d/%d, want 1/1/1", fp, audit, agg)
+	}
+}
+
+// A record past the window starts a new cluster, and that cluster collapses
+// its own repeat fires.
+func TestDedupe_NewClusterCollapsesItsDuplicates(t *testing.T) {
+	a := ask("violations", "py", "r1", "a.py", 0, "foo")
+	decs := []Decision{a, at(a, 6*time.Second), at(a, 7*time.Second)}
+	if fp, audit, agg := askCounts(t, decs); fp != 2 || audit != 2 || agg != 2 {
+		t.Errorf("asks fp/audit/agg = %d/%d/%d, want 2/2/2", fp, audit, agg)
 	}
 }

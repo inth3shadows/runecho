@@ -560,10 +560,10 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			//
 			// Two genuine edits to the same file within duplicateFireWindow collapse
 			// too when they cannot be told from a re-invocation: byte-identical edits
-			// in one session, or records with no fingerprint. That is the right
+			// (from any session), or records with no fingerprint. That is the right
 			// trade: it moves counts slightly, whereas the alternative moves the rate
 			// the report exists to state. Two edits with different fingerprints stay
-			// distinct (#465), and so do two sessions' asks.
+			// distinct (#465).
 			//
 			// duplicateAskFires (#493) replaced a key on the second-truncated
 			// timestamp, which split a duplicate pair straddling a second boundary (4
@@ -574,7 +574,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			// duplication that matters most here — the reference log has one Write
 			// producing three identical contract asks, so an uncollapsed volume
 			// figure would treble the contract check's apparent noise.
-			if dup[i] {
+			if _, isDup := dup[i]; isDup {
 				continue
 			}
 			if unrated {
@@ -656,25 +656,7 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 	langLatency := map[string][]time.Duration{}
 	verLatency := map[string][]time.Duration{}
 
-	// nextSameEdit[i] is when the next ask of the SAME edit content on the same
-	// file was raised, if any (#493). A retry of an identical edit re-asks with
-	// the same fingerprint, so an outcome after the retry is the retry's
-	// approval: pairing it with the earlier ask counted the time the first
-	// prompt sat denied as decision latency (602s for a 2s decision).
-	nextSameEdit := make([]time.Time, len(asks))
-	lastByEdit := map[string]int{}
-	for i, a := range asks {
-		if a.Edit == "" {
-			continue
-		}
-		ek := a.File + "\x00" + a.Edit
-		if j, ok := lastByEdit[ek]; ok {
-			nextSameEdit[j] = a.TS
-		}
-		lastByEdit[ek] = i
-	}
-
-	for ai, a := range asks {
+	for _, a := range asks {
 		s.Window.Asks++
 		reasonBucket := s.ByReason[a.Reason]
 		reasonBucket.Asks++
@@ -709,17 +691,10 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 		// followed it (same file, same symbols), and the retry's own ask, matched
 		// second, read as unapproved.
 		matchIdx := -1
-		superseded := false
 		if a.Edit != "" {
 			matchIdx = matchOutcome(allApproved, approvedByEdit[a.File+"\x00"+a.Edit], consumed, a.TS, KeyedOutcomeJoinWindow, "")
-			// The outcome came after this edit was asked again: it is the later
-			// ask's. Leave this ask unmatched, and skip the symbol fallback too,
-			// which would hand it the same outcome back.
-			if n := nextSameEdit[ai]; matchIdx >= 0 && !n.IsZero() && !n.After(allApproved[matchIdx].ts) {
-				matchIdx, superseded = -1, true
-			}
 		}
-		if matchIdx < 0 && !superseded {
+		if matchIdx < 0 {
 			matchIdx = matchOutcome(allApproved, approvedByKey[k], consumed, a.TS, OutcomeJoinWindow, a.Edit)
 		}
 		if matchIdx >= 0 {

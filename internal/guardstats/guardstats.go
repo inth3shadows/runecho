@@ -249,7 +249,7 @@ func Aggregate(decisions []Decision, since time.Time, topN int) Stats {
 		if d.Decision != "ask" && d.Decision != "defer" {
 			continue
 		}
-		if d.TS.Before(since) || dup[i] {
+		if _, isDup := dup[i]; d.TS.Before(since) || isDup {
 			continue
 		}
 

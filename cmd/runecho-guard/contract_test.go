@@ -61,9 +61,8 @@ func contractRepo(t *testing.T, sessionID, body string) string {
 
 // contractPayload renders a PreToolUse Write body carrying a session_id, which
 // the shared payload() helper does not emit. It also creates the target's parent
-// directory: repo resolution runs git in filepath.Dir(file_path), so a path
-// under a directory that does not exist yet resolves to no repo and every check
-// — not just this one — abstains. Real edits land in directories that exist.
+// directory, so these cases exercise an existing tree; a Write into a directory
+// that does not exist yet is covered by TestContract_NewDirectoryStillAsks (#472).
 func contractPayload(t *testing.T, sessionID, filePath, content string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -267,6 +266,26 @@ func TestContract_FiresOnNonCodeFile(t *testing.T) {
 	_, _, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "docs", "README.md"), "# hi\n"))
 	if d.Hook.PermissionDec != "ask" {
 		t.Fatalf("an out-of-scope Markdown edit must ask; got %q", d.Hook.PermissionDec)
+	}
+}
+
+// #472: a Write creating a new directory outside the scope is resolved from
+// its nearest existing ancestor, so the contract still asks. Before the fix
+// the hook deferred "no-repo" on exactly these.
+func TestContract_NewDirectoryStillAsks(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_CONTRACT", "1")
+	top := contractRepo(t, "sess", inScopeBody)
+	b, err := json.Marshal(map[string]any{
+		"session_id": "sess",
+		"tool_name":  "Write",
+		"tool_input": map[string]any{"file_path": filepath.Join(top, "newdocs", "deep", "README.md"), "content": "# hi\n"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, d := runHook(t, string(b))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("an out-of-scope Write into a new directory must ask; got %q", d.Hook.PermissionDec)
 	}
 }
 

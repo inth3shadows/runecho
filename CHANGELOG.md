@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.85.4] — 2026-10-28
+
+### Changed
+- guardstats: an adopted sibling's "defined at ask time" walks mainline's first-parent chain (#494) (#536)
+
 ## [0.85.3] — 2026-10-28
 
 ### Changed

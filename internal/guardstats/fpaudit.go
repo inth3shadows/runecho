@@ -753,7 +753,6 @@ func langLabel(l string) string {
 	return l
 }
 
-// FormatAudit renders the audit for a terminal.
 // modelUnrecorded labels asks whose record names no model: written before #529,
 // or the guard could not read the transcript. Kept as a row of its own so the
 // By model table still sums to the totals above it.
@@ -766,6 +765,7 @@ func modelLabel(m string) string {
 	return m
 }
 
+// FormatAudit renders the audit for a terminal.
 func FormatAudit(s AuditStats) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Guard verdict audit (%s → %s)\n\n",
@@ -895,7 +895,7 @@ func PayloadAudit(s AuditStats) map[string]any {
 	for _, f := range s.Findings {
 		m := map[string]any{
 			"ts": f.TS.UTC().Format(time.RFC3339), "repo": f.Repo, "file": f.File,
-			"lang": f.Lang, "reason": f.Reason, "gv": f.GV, "model": f.Model,
+			"lang": f.Lang, "reason": f.Reason, "gv": f.GV, "model": modelLabel(f.Model),
 			"symbol": f.Symbol, "verdict": string(f.Verdict),
 		}
 		if f.Note != "" {

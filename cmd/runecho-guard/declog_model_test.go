@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // transcriptLine is one Claude Code transcript entry of the given type; an
@@ -139,15 +142,15 @@ func TestModelTranscriptPath(t *testing.T) {
 func hookModelJSON(transcript, agent string) string {
 	s := `{"tool_name":"Write","tool_input":{"file_path":"/some/repo/notes.md","content":"x"},"session_id":"s1"`
 	if transcript != "" {
-		s += `,"transcript_path":` + strconvQuote(transcript)
+		s += `,"transcript_path":` + jsonQuote(transcript)
 	}
 	if agent != "" {
-		s += `,"agent_id":` + strconvQuote(agent)
+		s += `,"agent_id":` + jsonQuote(agent)
 	}
 	return s + `}`
 }
 
-func strconvQuote(s string) string {
+func jsonQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
@@ -234,8 +237,95 @@ func TestOutcomeMode_StampsModel(t *testing.T) {
 	}
 
 	runOutcomeMode(strings.NewReader(`{"tool_name":"Write","session_id":"s1","transcript_path":` +
-		strconvQuote(p) + `}`))
+		jsonQuote(p) + `}`))
 	if m := decisionModel.Load(); m == nil || m.path != p {
 		t.Errorf("runOutcomeMode did not set the model source from transcript_path: %+v", m)
+	}
+}
+
+// F2 (#531 review): when the hook body is stuck resolving the model (a hung
+// filesystem), the timeout branch must still return within its budget and
+// write its record — it may not wait on the same resolution.
+func TestDeferOnPanic_TimeoutDoesNotWaitOnModelRead(t *testing.T) {
+	isolateDecisionSession(t)
+	isolateDecisionModel(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+	old := guardTimeout
+	guardTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { guardTimeout = old })
+
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	m := &modelSource{path: "/stuck"}
+	started := make(chan struct{})
+	go m.once.Do(func() { close(started); <-block }) // a read that never returns
+	<-started
+	decisionModel.Store(m)
+
+	ret := make(chan int, 1)
+	var out bytes.Buffer
+	go func() {
+		ret <- deferOnPanic("hook-mode", &out, func(w io.Writer) int {
+			<-block
+			return 0
+		})
+	}()
+	select {
+	case <-ret:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deferOnPanic's timeout branch blocked on the in-flight model read")
+	}
+	rec := readLastDecisionLog(t)
+	if rec == nil || rec["reason"] != "timeout" {
+		t.Fatalf("timeout record not written: %v", rec)
+	}
+	if _, ok := rec["model"]; ok {
+		t.Errorf("timeout record carries model %v from an unfinished read", rec["model"])
+	}
+}
+
+// F7 (#531 review): the PostToolUse outcome record itself carries the model.
+func TestOutcomeMode_OutcomeRecordCarriesModel(t *testing.T) {
+	isolateDecisionSession(t)
+	isolateDecisionModel(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	p := filepath.Join(t.TempDir(), "sess.jsonl")
+	writeTranscript(t, p, transcriptLine("assistant", "claude-sonnet-5-5"))
+	file := "/some/repo/main.go"
+	writeAskEntry(t, file)
+	b, _ := json.Marshal(map[string]any{
+		"tool_name": "Edit", "transcript_path": p,
+		"tool_input": map[string]string{"file_path": file},
+	})
+	runOutcomeMode(strings.NewReader(string(b)))
+	rec := readLastDecisionLog(t)
+	if rec == nil || rec["decision"] != "outcome" {
+		t.Fatalf("no outcome record: %v", rec)
+	}
+	if got, _ := rec["model"].(string); got != "claude-sonnet-5-5" {
+		t.Errorf("outcome model = %q, want claude-sonnet-5-5", got)
+	}
+}
+
+// F8 (#531 review): workflow subagents write under
+// subagents/workflows/<wf>/agent-<id>.jsonl, not directly under subagents/.
+func TestLogDecision_WorkflowSubagentModel(t *testing.T) {
+	isolateDecisionSession(t)
+	isolateDecisionModel(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeTranscript(t, parent, transcriptLine("assistant", "claude-opus-5-5"))
+	writeTranscript(t, filepath.Join(dir, "sess", "subagents", "workflows", "wf_1", "agent-w1.jsonl"),
+		transcriptLine("assistant", "claude-haiku-5-5"))
+
+	runHook(t, hookModelJSON(parent, "w1"))
+	if got, _ := readLastDecisionLog(t)["model"].(string); got != "claude-haiku-5-5" {
+		t.Errorf("workflow subagent model = %q, want claude-haiku-5-5", got)
 	}
 }

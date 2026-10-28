@@ -1648,6 +1648,7 @@ func deferOnPanic(name string, out io.Writer, fn func(io.Writer) int) (code int)
 		// on the os.Exit that follows main()'s return, so there is nothing to
 		// clean up and no data race to guard against.
 		warnf("%s exceeded %s — edit deferred, NOT blocked (timeout)", name, guardTimeout)
+		abandonDecisionModel()
 		logDecision(decisionRecord{Mode: hookModeLabel(name), Decision: "defer", Reason: "timeout"})
 		return 0
 	}

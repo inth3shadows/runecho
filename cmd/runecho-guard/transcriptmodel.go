@@ -30,12 +30,12 @@ func transcriptModel(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
+	f, err := openTranscript(path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
-	// Regular files only: a FIFO or device at this path would block the read.
+	// Regular files only: a device or FIFO at this path would block the read.
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
 		return ""
@@ -45,21 +45,36 @@ func transcriptModel(path string) string {
 		off = 0
 	}
 	buf := make([]byte, fi.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+	n, err := f.ReadAt(buf, off)
+	if err != nil && err != io.EOF {
 		return ""
 	}
-	// When the window starts mid-line, that first fragment is skipped by the
-	// Unmarshal below: a proper suffix of one JSON object always carries the
-	// object's unmatched closing brace, so it never parses.
-	lines := bytes.Split(buf, []byte{'\n'})
-	for i := len(lines) - 1; i >= 0; i-- {
+	// A file truncated since Stat reads short; only n bytes are real.
+	buf = buf[:n]
+	// Newest line first. When the window starts mid-line, that first fragment
+	// is skipped by the Unmarshal below: a proper suffix of one JSON object
+	// always carries the object's unmatched closing brace, so it never parses.
+	for len(buf) > 0 {
+		var line []byte
+		if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+			line, buf = buf[i+1:], buf[:i]
+		} else {
+			line, buf = buf, nil
+		}
+		// Cheap pre-filter: the tail is mostly large tool results, and fully
+		// decoding each one to read its type is most of the cost of this scan.
+		// Claude Code writes compact JSON; a spelling this misses records no
+		// model, never a wrong one.
+		if !bytes.Contains(line, []byte(`"type":"assistant"`)) {
+			continue
+		}
 		var e struct {
 			Type    string `json:"type"`
 			Message struct {
 				Model string `json:"model"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(lines[i], &e) != nil || e.Type != "assistant" {
+		if json.Unmarshal(line, &e) != nil || e.Type != "assistant" {
 			continue
 		}
 		// "<synthetic>" marks an entry the harness wrote itself (an API error,
@@ -91,7 +106,19 @@ func modelTranscriptPath(transcriptPath, agentID string) string {
 	if filepath.Base(transcriptPath) == name {
 		return transcriptPath
 	}
-	return filepath.Join(strings.TrimSuffix(transcriptPath, ".jsonl"), "subagents", name)
+	subagents := filepath.Join(strings.TrimSuffix(transcriptPath, ".jsonl"), "subagents")
+	direct := filepath.Join(subagents, name)
+	if _, err := os.Stat(direct); err == nil {
+		return direct
+	}
+	// A workflow's subagents write one level down, under
+	// workflows/<workflow id>/ (#531 review: ~26% of subagent transcripts).
+	// Agent ids are unique per session, so at most one match is expected;
+	// more than one is ambiguous and records none.
+	if m, _ := filepath.Glob(filepath.Join(subagents, "workflows", "*", name)); len(m) == 1 {
+		return m[0]
+	}
+	return direct
 }
 
 // modelSource is the transcript a hook process's records take their model
@@ -100,10 +127,14 @@ type modelSource struct {
 	path  string
 	once  sync.Once
 	model string
+	done  atomic.Bool // set after model is written, so a reader that sees it may read model
 }
 
 func (m *modelSource) get() string {
-	m.once.Do(func() { m.model = transcriptModel(m.path) })
+	m.once.Do(func() {
+		m.model = transcriptModel(m.path)
+		m.done.Store(true)
+	})
 	return m.model
 }
 
@@ -118,4 +149,20 @@ var decisionModel atomic.Pointer[modelSource]
 // so no record inherits an earlier payload's model.
 func setDecisionModel(transcriptPath, agentID string) {
 	decisionModel.Store(&modelSource{path: modelTranscriptPath(transcriptPath, agentID)})
+}
+
+// abandonDecisionModel stops later records from waiting on the transcript read.
+// deferOnPanic's timeout branch calls it before logging: the hook body may be
+// stuck inside that very read (a hung filesystem), and get() would block the
+// timeout record behind sync.Once — defeating the timeout (#531 review). A read
+// that already finished is kept; an unfinished one records no model.
+func abandonDecisionModel() {
+	model := ""
+	if m := decisionModel.Load(); m != nil && m.done.Load() {
+		model = m.model
+	}
+	r := &modelSource{model: model}
+	r.once.Do(func() {})
+	r.done.Store(true)
+	decisionModel.Store(r)
 }

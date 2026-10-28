@@ -568,5 +568,10 @@ func TestAuditByModel(t *testing.T) {
 		if f["symbol"] == "there" && f["model"] != "claude-opus-5-5" {
 			t.Errorf("payload finding model = %v", f["model"])
 		}
+		// F5 (#531 review): one spelling for the unrecorded bucket across
+		// findings and by_model, so a consumer can join them.
+		if f["symbol"] == "gone" && f["model"] != modelUnrecorded {
+			t.Errorf("payload finding model for a legacy ask = %v, want %q", f["model"], modelUnrecorded)
+		}
 	}
 }

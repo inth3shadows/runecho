@@ -64,10 +64,14 @@ func TestPosture_DenyContractOnly(t *testing.T) {
 	top := contractRepo(t, "sess", inScopeBody)
 	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "docs", "README.md"), "# hi\n"))
 	assertDeny(t, d, raw)
-	// The only ways forward must survive: change the scope, or drop it.
-	for _, want := range []string{"widen it there", "contract deactivate", "inside the declared scope"} {
-		if !strings.Contains(d.Hook.PermissionReason, want) {
-			t.Errorf("contract deny lost %q:\n%s", want, d.Hook.PermissionReason)
+	// The model is told to stay in scope, and is never handed the means to drop
+	// the user's guardrail itself (#540 review).
+	if !strings.Contains(d.Hook.PermissionReason, "Only the user can change that scope") {
+		t.Errorf("contract deny does not tell the model to stay in scope:\n%s", d.Hook.PermissionReason)
+	}
+	for _, banned := range []string{"contract deactivate", "widen it there"} {
+		if strings.Contains(d.Hook.PermissionReason, banned) {
+			t.Errorf("contract deny hands the model %q:\n%s", banned, d.Hook.PermissionReason)
 		}
 	}
 	if strings.Contains(d.Hook.PermissionReason, "flagged name") {
@@ -86,7 +90,7 @@ func TestPosture_DenyMergedContractAndSymbolKeepsBoth(t *testing.T) {
 	}
 	_, raw, d := runHook(t, contractPayload(t, "sess", filepath.Join(top, "a.go"), "package m\n\nfunc F() { HallucinatedFn() }\n"))
 	assertDeny(t, d, raw)
-	for _, want := range []string{"HallucinatedFn", "contract deactivate", "define it first"} {
+	for _, want := range []string{"HallucinatedFn", "Only the user can change that scope", "define it first"} {
 		if !strings.Contains(d.Hook.PermissionReason, want) {
 			t.Errorf("merged deny lost %q:\n%s", want, d.Hook.PermissionReason)
 		}
@@ -99,6 +103,8 @@ func TestDenyTrailerPerCheck(t *testing.T) {
 		want string
 	}{
 		"violations": {firedChecks{Violations: true}, "define it first"},
+		"filescope":  {firedChecks{FileScope: true}, "import or qualify"},
+		"qualified":  {firedChecks{Qualified: true}, "package actually declares"},
 		"dangling":   {firedChecks{Dangling: true}, "Update the callers"},
 		"dropped":    {firedChecks{Dropped: true}, "Keep the import"},
 		"callshape":  {firedChecks{CallShape: true}, "match the signature"},

@@ -143,8 +143,16 @@ const denyPrefix = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny)."
 // a check. Fixed order, so a merged deny reads the same every time.
 func denyTrailer(f firedChecks) string {
 	var parts []string
-	if f.Violations || f.FileScope || f.Qualified || f.RecvMethod || f.VarType {
+	if f.Violations || f.RecvMethod || f.VarType {
 		parts = append(parts, "If a flagged name is new, define it first or in this same edit; otherwise correct the reference.")
+	}
+	if f.FileScope {
+		// File-scope found the name declared elsewhere, just not reachable here:
+		// redefining it would add a duplicate.
+		parts = append(parts, "A flagged name exists elsewhere but is not reachable here: import or qualify it rather than redefining it.")
+	}
+	if f.Qualified {
+		parts = append(parts, "Use only names the referenced package actually declares.")
 	}
 	if f.DepsGo {
 		parts = append(parts, "Use only what the dependency actually exports.")

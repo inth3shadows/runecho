@@ -63,8 +63,9 @@ func transcriptModel(path string) string {
 		}
 		// Cheap pre-filter: the tail is mostly large tool results, and fully
 		// decoding each one to read its type is most of the cost of this scan.
-		// Claude Code writes compact JSON; a spelling this misses records no
-		// model, never a wrong one.
+		// Claude Code writes compact JSON (all 27,546 assistant lines in a
+		// local sample, #531 review). A spelling this missed on the newest
+		// entry would surface an OLDER assistant's model, not none.
 		if !bytes.Contains(line, []byte(`"type":"assistant"`)) {
 			continue
 		}
@@ -90,16 +91,21 @@ func transcriptModel(path string) string {
 // modelTranscriptPath picks the transcript holding the model that issued a tool
 // call. A subagent's fire carries the PARENT session's transcript_path (see
 // decisionRecord.Session), but the subagent runs its own model and writes its
-// own transcript at <parent without .jsonl>/subagents/agent-<id>.jsonl.
+// own transcript: <parent without .jsonl>/subagents/agent-<id>.jsonl, or one
+// level down under subagents/workflows/<workflow id>/ for a workflow's agents.
 // Reading the parent's would label a Haiku subagent's edit with the session's
 // Opus — a silent mislabel, which is worse than no label, so a subagent whose
 // transcript is missing records none rather than falling back. An agent id
-// that is not a plain file-name component records none either.
+// that is not a plain file-name component, or that holds a glob metacharacter,
+// records none either.
+//
+// It touches the filesystem, so it runs only inside modelSource.get — never
+// while the payload is decoded.
 func modelTranscriptPath(transcriptPath, agentID string) string {
 	if transcriptPath == "" || agentID == "" {
 		return transcriptPath
 	}
-	if agentID == "." || agentID == ".." || strings.ContainsAny(agentID, `/\`) {
+	if agentID == "." || agentID == ".." || strings.ContainsAny(agentID, `/\*?[`) {
 		return ""
 	}
 	name := "agent-" + agentID + ".jsonl"
@@ -111,44 +117,73 @@ func modelTranscriptPath(transcriptPath, agentID string) string {
 	if _, err := os.Stat(direct); err == nil {
 		return direct
 	}
-	// A workflow's subagents write one level down, under
-	// workflows/<workflow id>/ (#531 review: ~26% of subagent transcripts).
-	// Agent ids are unique per session, so at most one match is expected;
-	// more than one is ambiguous and records none.
-	if m, _ := filepath.Glob(filepath.Join(subagents, "workflows", "*", name)); len(m) == 1 {
-		return m[0]
+	// A workflow's agents (~26% of subagent transcripts, #531 review). Agent
+	// ids are unique per session, so at most one match is expected; more than
+	// one is ambiguous and records none. Exact names via ReadDir, not Glob, so
+	// nothing in either path is read as a pattern.
+	workflows := filepath.Join(subagents, "workflows")
+	entries, _ := os.ReadDir(workflows)
+	match := ""
+	for _, e := range entries {
+		p := filepath.Join(workflows, e.Name(), name)
+		if _, err := os.Stat(p); err == nil {
+			if match != "" {
+				return ""
+			}
+			match = p
+		}
+	}
+	if match != "" {
+		return match
 	}
 	return direct
 }
 
-// modelSource is the transcript a hook process's records take their model
-// from, resolved at most once and only when a record is written.
+// modelSource is the payload fields a hook process's records take their model
+// from. Both the path resolution and the read happen at most once, and only
+// when a record is written.
 type modelSource struct {
-	path  string
-	once  sync.Once
-	model string
-	done  atomic.Bool // set after model is written, so a reader that sees it may read model
+	transcriptPath string
+	agentID        string
+	once           sync.Once
+	model          string
+	done           atomic.Bool // set after model is written, so a reader that sees it may read model
 }
 
 func (m *modelSource) get() string {
 	m.once.Do(func() {
-		m.model = transcriptModel(m.path)
+		m.model = transcriptModel(modelTranscriptPath(m.transcriptPath, m.agentID))
 		m.done.Store(true)
 	})
 	return m.model
 }
 
+// peek returns the model if the read has finished, else "" — never waits.
+func (m *modelSource) peek() string {
+	if m.done.Load() {
+		return m.model
+	}
+	return ""
+}
+
 // decisionModel is decisionSession's counterpart for the model (#529): one
 // funnel in logDecision, process-wide, atomic for deferOnPanic's timeout
-// branch. Resolution is lazy so the transcript read happens in logDecision —
-// after the decision is written — and never on the decision's latency path.
+// branch. Resolution is lazy: the path lookup and the read happen in
+// logDecision, after the decision is written to deferOnPanic's buffer (not yet
+// to stdout — the ~1ms read is inside the hook's budget, an accepted cost).
 var decisionModel atomic.Pointer[modelSource]
+
+// modelAbandoned is set by deferOnPanic's timeout branch. Once set, records
+// take a model only from a read that already finished. A flag rather than a
+// swapped-in source because the hook body may still be running and can store
+// a fresh source after the timeout (#531 round 2).
+var modelAbandoned atomic.Bool
 
 // setDecisionModel records where the model of the payload being served lives.
 // Called with ("", "") before the payload is decoded, like setDecisionSession,
 // so no record inherits an earlier payload's model.
 func setDecisionModel(transcriptPath, agentID string) {
-	decisionModel.Store(&modelSource{path: modelTranscriptPath(transcriptPath, agentID)})
+	decisionModel.Store(&modelSource{transcriptPath: transcriptPath, agentID: agentID})
 }
 
 // abandonDecisionModel stops later records from waiting on the transcript read.
@@ -157,12 +192,5 @@ func setDecisionModel(transcriptPath, agentID string) {
 // timeout record behind sync.Once — defeating the timeout (#531 review). A read
 // that already finished is kept; an unfinished one records no model.
 func abandonDecisionModel() {
-	model := ""
-	if m := decisionModel.Load(); m != nil && m.done.Load() {
-		model = m.model
-	}
-	r := &modelSource{model: model}
-	r.once.Do(func() {})
-	r.done.Store(true)
-	decisionModel.Store(r)
+	modelAbandoned.Store(true)
 }

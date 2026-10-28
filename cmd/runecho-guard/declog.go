@@ -308,7 +308,11 @@ func logDecision(rec decisionRecord) {
 	}
 	if rec.Model == "" {
 		if m := decisionModel.Load(); m != nil {
-			rec.Model = m.get()
+			if modelAbandoned.Load() {
+				rec.Model = m.peek()
+			} else {
+				rec.Model = m.get()
+			}
 		}
 	}
 	if rec.TS == "" {

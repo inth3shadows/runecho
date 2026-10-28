@@ -37,7 +37,11 @@ func writeTranscript(t *testing.T, path string, lines ...string) {
 func isolateDecisionModel(t *testing.T) {
 	t.Helper()
 	decisionModel.Store(nil)
-	t.Cleanup(func() { decisionModel.Store(nil) })
+	modelAbandoned.Store(false)
+	t.Cleanup(func() {
+		decisionModel.Store(nil)
+		modelAbandoned.Store(false)
+	})
 }
 
 func TestTranscriptModel_LatestAssistantWins(t *testing.T) {
@@ -131,6 +135,11 @@ func TestModelTranscriptPath(t *testing.T) {
 		// reading some other file.
 		{"agent id with separator", main, "../x", ""},
 		{"agent id dot-dot", main, "..", ""},
+		// Glob metacharacters would let the workflows lookup match another
+		// agent's transcript (#531 round 2).
+		{"agent id star", main, "*", ""},
+		{"agent id question", main, "a?", ""},
+		{"agent id bracket", main, "[a]", ""},
 	} {
 		if got := modelTranscriptPath(tc.path, tc.agent); got != tc.want {
 			t.Errorf("%s: modelTranscriptPath(%q, %q) = %q, want %q", tc.name, tc.path, tc.agent, got, tc.want)
@@ -238,7 +247,7 @@ func TestOutcomeMode_StampsModel(t *testing.T) {
 
 	runOutcomeMode(strings.NewReader(`{"tool_name":"Write","session_id":"s1","transcript_path":` +
 		jsonQuote(p) + `}`))
-	if m := decisionModel.Load(); m == nil || m.path != p {
+	if m := decisionModel.Load(); m == nil || m.transcriptPath != p {
 		t.Errorf("runOutcomeMode did not set the model source from transcript_path: %+v", m)
 	}
 }
@@ -257,7 +266,7 @@ func TestDeferOnPanic_TimeoutDoesNotWaitOnModelRead(t *testing.T) {
 
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
-	m := &modelSource{path: "/stuck"}
+	m := &modelSource{transcriptPath: "/stuck"}
 	started := make(chan struct{})
 	go m.once.Do(func() { close(started); <-block }) // a read that never returns
 	<-started
@@ -327,5 +336,84 @@ func TestLogDecision_WorkflowSubagentModel(t *testing.T) {
 	runHook(t, hookModelJSON(parent, "w1"))
 	if got, _ := readLastDecisionLog(t)["model"].(string); got != "claude-haiku-5-5" {
 		t.Errorf("workflow subagent model = %q, want claude-haiku-5-5", got)
+	}
+}
+
+// #531 round 2: glob metacharacters in agent_id must not select another
+// workflow subagent's transcript.
+func TestLogDecision_GlobAgentIDRecordsNoModel(t *testing.T) {
+	isolateDecisionSession(t)
+	isolateDecisionModel(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	writeTranscript(t, parent, transcriptLine("assistant", "claude-opus-5-5"))
+	writeTranscript(t, filepath.Join(dir, "sess", "subagents", "workflows", "wf_1", "agent-w1.jsonl"),
+		transcriptLine("assistant", "claude-haiku-5-5"))
+	for _, id := range []string{"*", "w?", "w[1]", "w1*"} {
+		runHook(t, hookModelJSON(parent, id))
+		if got, ok := readLastDecisionLog(t)["model"]; ok {
+			t.Errorf("agent_id %q recorded model %v, want none", id, got)
+		}
+	}
+}
+
+// #531 round 2: setDecisionModel does no filesystem work — the subagent path
+// is resolved inside the lazy read, after the decision is buffered. A
+// transcript that appears only after setDecisionModel is still found.
+func TestSetDecisionModel_ResolvesPathLazily(t *testing.T) {
+	isolateDecisionModel(t)
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	setDecisionModel(parent, "w1")
+	writeTranscript(t, filepath.Join(dir, "sess", "subagents", "workflows", "wf_1", "agent-w1.jsonl"),
+		transcriptLine("assistant", "claude-haiku-5-5"))
+	if got := decisionModel.Load().get(); got != "claude-haiku-5-5" {
+		t.Errorf("get() = %q, want claude-haiku-5-5 (path resolved eagerly at set time?)", got)
+	}
+}
+
+// #531 round 2: after a timeout, the still-running hook body can store a fresh
+// source (setDecisionModel) behind abandonDecisionModel's back. The timeout
+// record must still not wait on that source's read.
+func TestLogDecision_AbandonHoldsAgainstLaterStore(t *testing.T) {
+	isolateDecisionSession(t)
+	isolateDecisionModel(t)
+	t.Setenv("RUNECHO_HOME", t.TempDir())
+	t.Setenv("RUNECHO_DEBUG", "")
+
+	abandonDecisionModel()
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	m := &modelSource{transcriptPath: "/stuck"}
+	started := make(chan struct{})
+	go m.once.Do(func() { close(started); <-block })
+	<-started
+	decisionModel.Store(m)
+
+	done := make(chan struct{})
+	go func() {
+		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "timeout"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("logDecision waited on a read stored after abandonDecisionModel")
+	}
+}
+
+// Two workflow transcripts for one agent id is ambiguous: record none.
+func TestModelTranscriptPath_AmbiguousWorkflowRecordsNone(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "sess.jsonl")
+	for _, wf := range []string{"wf_1", "wf_2"} {
+		writeTranscript(t, filepath.Join(dir, "sess", "subagents", "workflows", wf, "agent-w1.jsonl"),
+			transcriptLine("assistant", "claude-haiku-5-5"))
+	}
+	if got := modelTranscriptPath(parent, "w1"); got != "" {
+		t.Errorf("modelTranscriptPath with two workflow matches = %q, want \"\"", got)
 	}
 }

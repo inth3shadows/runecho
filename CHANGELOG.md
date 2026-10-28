@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.85.2] — 2026-10-28
+
+### Changed
+- declog: stamp a hashed tool_use_id as `call` on every hook record (#467 step 1) (#533)
+
 ## [0.85.1] — 2026-10-28
 
 ### Changed

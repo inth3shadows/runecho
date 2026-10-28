@@ -20,7 +20,9 @@ import (
 // mode distinguishes Claude Code hook fires ("hook") from git pre-commit fires
 // ("precommit"). decision is "ask" or "defer" in both modes — pre-commit blocks
 // instead of asking, but keeping the same two-value enum lets log consumers
-// correlate ask-rate across surfaces without schema forks.
+// correlate ask-rate across surfaces without schema forks. Hook mode also writes
+// "deny" under RUNECHO_GUARD_POSTURE=deny (#528); a reader that handles only
+// ask/defer silently drops those.
 // symbols is only populated on ask (the flagged symbol names, across all ask
 // categories: hallucination violations, dangling, dropped-import, and before
 // #414 duplicate-symbol).
@@ -312,7 +314,13 @@ func logDecision(rec decisionRecord) {
 	// oracle method: a site can forget, one funnel cannot. Restricted to hook-mode
 	// asks because that is the only shape fpaudit judges — stamping a defer or a
 	// pre-commit record would add a field no reader consults.
-	if rec.Mode == "hook" && rec.Decision == "ask" && rec.ClaimSymbols == nil {
+	// Under RUNECHO_GUARD_POSTURE=deny the hook emitted deny, not ask (#528), so
+	// the record says so: a deny has no PostToolUse outcome, and the outcome
+	// join and the reports treat it differently. One funnel, as above.
+	if rec.Mode == "hook" && rec.Decision == "ask" && guardPosture() == "deny" {
+		rec.Decision = "deny"
+	}
+	if rec.Mode == "hook" && (rec.Decision == "ask" || rec.Decision == "deny") && rec.ClaimSymbols == nil {
 		rec.ClaimSymbols = map[string][]string{}
 	}
 	// Always overwrite: the writing binary's own version is the only value that
@@ -668,8 +676,11 @@ func scanRecentAsk(path, file, editHash, session string) (res askScan) {
 						passedFound = cur.Edit != "" && editHash != "" && cur.Edit != editHash
 					}
 				}
-			case "defer":
-				// A later PreToolUse on this file that did not ask. The outcome being
+			case "defer", "deny":
+				// A deny is never a join candidate: its tool call never ran, so no
+				// PostToolUse belongs to it, and admitting it would let a later edit's
+				// approval train learned-allow on the very symbols it blocked (#528).
+				// Like a defer it is a later PreToolUse on the file that did not ask. The outcome being
 				// joined belongs to that call (or a later one), not to the ask before
 				// it: a clean edit after a denied ask, not a fingerprint mismatch. A
 				// genuine mismatch has nothing between its ask and its outcome.

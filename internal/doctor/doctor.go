@@ -56,7 +56,7 @@ type Result struct {
 var knownGateFlags = []string{
 	"CALLSHAPE", "CONTRACT", "DANGLING", "DEPS_GO", "DROPPED_IMPORT",
 	"ENROLL_NOTICE", "FILESCOPE", "LEARN", "LEARN_N",
-	"LEARN_TTL_DAYS", "LINT", "MAX_AGE", "QUALIFIED", "RECVMETHOD", "SKIP",
+	"LEARN_TTL_DAYS", "LINT", "MAX_AGE", "POSTURE", "QUALIFIED", "RECVMETHOD", "SKIP",
 	"STRICT", "VARTYPE",
 }
 
@@ -606,7 +606,7 @@ func countRecentDecisions(path string, window time.Duration) (asks, outcomes int
 			continue
 		}
 		switch r.Decision {
-		case "ask":
+		case "ask", "deny": // a deny is RUNECHO_GUARD_POSTURE=deny's ask (#528)
 			asks++
 		case "outcome":
 			outcomes++

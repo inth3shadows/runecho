@@ -76,6 +76,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -1714,29 +1715,42 @@ const strictStoreDegradedAdvisory = "[runecho-guard] store unavailable or no sna
 // object carries both keys, so an ask does not have to cost the advisory that
 // would otherwise have been emitted by the defer path it pre-empts.
 func hookAskContext(out io.Writer, reason, ctx string) {
-	if ctx == "" {
-		hookAsk(out, reason)
-		return
+	o := map[string]string{
+		"hookEventName":            "PreToolUse",
+		"permissionDecision":       guardPosture(),
+		"permissionDecisionReason": reason,
 	}
-	_ = json.NewEncoder(out).Encode(map[string]any{
-		"hookSpecificOutput": map[string]string{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "ask",
-			"permissionDecisionReason": reason,
-			"additionalContext":        ctx,
-		},
-	})
+	if ctx != "" {
+		o["additionalContext"] = ctx
+	}
+	_ = json.NewEncoder(out).Encode(map[string]any{"hookSpecificOutput": o})
 }
 
-func hookAsk(out io.Writer, reason string) {
-	_ = json.NewEncoder(out).Encode(map[string]any{
-		"hookSpecificOutput": map[string]string{
-			"hookEventName":            "PreToolUse",
-			"permissionDecision":       "ask",
-			"permissionDecisionReason": reason,
-		},
-	})
+func hookAsk(out io.Writer, reason string) { hookAskContext(out, reason, "") }
+
+// guardPosture is "deny" when RUNECHO_GUARD_POSTURE=deny (case and surrounding
+// space ignored) and "ask" otherwise — the #528 experiment's deny arm. Under
+// deny every hook-mode finding blocks the tool call and its reason, rendered
+// for the model by each trailer builder (denyTrailer, contractWarning.section),
+// goes to the model instead of the user; the default ask is unchanged byte for
+// byte. logDecision records such a fire as decision "deny".
+//
+// Any other non-empty value is a typo that would silently run the deny arm as
+// the control, so it is reported on stderr once per process.
+func guardPosture() string {
+	v := strings.TrimSpace(os.Getenv("RUNECHO_GUARD_POSTURE"))
+	switch {
+	case strings.EqualFold(v, "deny"):
+		return "deny"
+	case v != "" && !strings.EqualFold(v, "ask"):
+		postureWarnOnce.Do(func() {
+			warnf("RUNECHO_GUARD_POSTURE=%q is not ask or deny — using ask", v)
+		})
+	}
+	return "ask"
 }
+
+var postureWarnOnce sync.Once
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }

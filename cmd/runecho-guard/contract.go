@@ -94,6 +94,16 @@ func (cw *contractWarning) section() string {
 		fmt.Fprintf(&sb, "  note: %s changed after activation (%s → %s) — this check used the CURRENT file.\n",
 			cw.ContractPath, shortHash(cw.ActivatedHash), shortHash(cw.CurrentHash))
 	}
+	if guardPosture() == "deny" {
+		// #528: under deny the MODEL is the only reader, and it is the party the
+		// contract constrains. So it is told to stay in scope and is NOT handed
+		// the deactivate command or invited to widen the scope: with those it
+		// could drop the user's guardrail through Bash without the user ever
+		// seeing a prompt (#540 review). Changing the scope stays the user's call.
+		fmt.Fprintf(&sb, "%s Keep this edit inside the scope declared in %s. Only the user can change that scope; do not edit or deactivate the contract.\n",
+			denyPrefix, cw.ContractPath)
+		return sb.String()
+	}
 	sb.WriteString("Approve if the edit is legitimate — an out-of-scope edit often is.")
 	if contractOnceEnabled() {
 		// #209: say what an approval buys, so the user is not left wondering

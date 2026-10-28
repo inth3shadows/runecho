@@ -90,6 +90,9 @@ func callShapeSection(sb *strings.Builder, ms []guard.CallShapeMismatch) []strin
 // user to a switch that changes nothing, which is the same "remedy that
 // cannot work" failure the call-shape trailer's own comment warns about.
 func askWithoutIndexTrailer(hasShapes, hasLints bool) string {
+	if guardPosture() == "deny" {
+		return denyTrailer(firedChecks{CallShape: hasShapes, Lint: hasLints})
+	}
 	switch {
 	case hasShapes && hasLints:
 		return "Approve if these are legitimate (a dynamic or re-bound callee, a signature this edit does not show, or a name defined at runtime). RUNECHO_GUARD_CALLSHAPE=0 / RUNECHO_GUARD_LINT=0 disable the individual checks; RUNECHO_GUARD_SKIP=1 disables the guard."

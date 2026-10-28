@@ -44,11 +44,11 @@ const duplicateFireWindow = 5 * time.Second
 func duplicateAskFires(ds []Decision, since time.Time) map[int]int {
 	groups := map[string][]int{}
 	for i, d := range ds {
-		if d.Decision != "ask" || d.Mode != "hook" || d.TS.Before(since) {
+		if (d.Decision != "ask" && d.Decision != "deny") || d.Mode != "hook" || d.TS.Before(since) {
 			continue
 		}
 		k := strings.Join([]string{
-			symbolKey(d.File, d.Symbols), d.Reason, d.Repo, d.Lang, d.GV, d.Edit,
+			symbolKey(d.File, d.Symbols), d.Reason, d.Repo, d.Lang, d.GV, d.Edit, d.Decision,
 		}, "\x02")
 		groups[k] = append(groups[k], i)
 	}

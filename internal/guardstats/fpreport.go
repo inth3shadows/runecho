@@ -74,6 +74,12 @@ type FPBucket struct {
 	// Total() — so the would-have-asked volume is Total() + Suppressed. Deduped
 	// against hook re-invocation like asks are (#252: defers re-fire at 1.27x).
 	Suppressed int `json:"suppressed"`
+	// Denied counts hook fires the guard blocked under RUNECHO_GUARD_POSTURE=deny
+	// (#528). Like Suppressed it is outside Asks, Unrated and Total(): a deny
+	// cannot be overridden and no outcome follows it, so counting it as an
+	// unapproved ask would drive Rate() toward 0 and bias the --max-rate gate
+	// toward passing. Deduped against hook re-invocation like asks are.
+	Denied int `json:"denied"`
 	// Latency is ask→approval latency over this bucket's MATCHED asks only
 	// (the Approved count, not Asks — an ask with no approved outcome
 	// contributes no sample). See LatencyStats.
@@ -494,6 +500,21 @@ func FPReport(decisions []Decision, since time.Time, topN int) FPStats {
 			}
 		}
 		switch d.Decision {
+		case "deny":
+			if _, isDup := dup[i]; d.Mode != "hook" || isDup {
+				continue
+			}
+			s.Window.Denied++
+			bumpDenied(s.ByReason, d.Reason)
+			for _, c := range splitChecks(d.Reason) {
+				bumpDenied(s.ByCheck, c)
+			}
+			bumpDenied(s.ByLang, d.Lang)
+			gv := version.Canonical(d.GV)
+			if gv == "" {
+				gv = UnknownVersion
+			}
+			bumpDenied(s.ByVersion, gv)
 		case "ask":
 			if d.Mode != "hook" {
 				continue // pre-commit asks block; no outcome to join
@@ -878,6 +899,13 @@ func topRepoCounts(rated, unrated map[string]int, topN int) []RepoCount {
 	return out
 }
 
+// bumpDenied counts one deny (#528) in a per-key bucket.
+func bumpDenied(m map[string]FPBucket, key string) {
+	b := m[key]
+	b.Denied++
+	m[key] = b
+}
+
 // FormatFP renders an FPStats as a human-readable report.
 func FormatFP(s FPStats) string {
 	var b strings.Builder
@@ -900,10 +928,15 @@ func FormatFP(s FPStats) string {
 				formatLatency(s.Window.Latency.MedianS), s.Window.Latency.N)
 		}
 	}
+	if s.Window.Denied > 0 {
+		fmt.Fprintf(&b, "         + %d denied (RUNECHO_GUARD_POSTURE=deny; blocked, not rateable)\n", s.Window.Denied)
+	}
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists
 	// entirely of them must not report itself as empty (#254).
-	if s.Window.Total() == 0 {
+	// Denies count too (#540 review): a window of only denies is the #528 deny
+	// arm, and its per-check breakdown is the data the arm exists to collect.
+	if s.Window.Total() == 0 && s.Window.Denied == 0 {
 		fmt.Fprintf(&b, "\nNo hook-mode asks in window.\n")
 		// A window whose only contract fires were suppressed repeats (#209) is
 		// not an idle one; say so rather than let the early return hide it.
@@ -1013,9 +1046,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 	fmt.Fprintf(b, "  %-*s %4d ask  ", width, name, bkt.Asks)
 	switch {
 	case bkt.Total() == 0:
-		// Only reachable on a ByCheck row whose every fire was a suppressed
-		// repeat (#209). "No ask carries a join key" would be false — there is
-		// no ask at all.
+		// Reachable on a row whose every fire was a suppressed repeat (#209) or a
+		// deny (#528). "No ask carries a join key" would be false — there is no
+		// ask at all; the +N suffixes below say what there was instead.
 		fmt.Fprintf(b, "  no asks")
 	case bkt.Asks == 0:
 		fmt.Fprintf(b, "  no rate (no ask here carries a join key)")
@@ -1035,6 +1068,9 @@ func fpRow(b *strings.Builder, name string, width int, bkt FPBucket) {
 	}
 	if bkt.Suppressed > 0 {
 		fmt.Fprintf(b, "  +%d suppressed", bkt.Suppressed)
+	}
+	if bkt.Denied > 0 {
+		fmt.Fprintf(b, "  +%d denied", bkt.Denied)
 	}
 	fmt.Fprint(b, "\n")
 }
@@ -1119,6 +1155,7 @@ func PayloadFP(s FPStats) map[string]any {
 		return map[string]any{
 			"asks": b.Asks, "approved": b.Approved, "rate": rate,
 			"unrated": b.Unrated, "total": b.Total(), "coverage": coverage,
+			"denied":  b.Denied,
 			"latency": latencyPayload(b.Latency),
 		}
 	}

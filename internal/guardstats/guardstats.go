@@ -246,7 +246,7 @@ func Aggregate(decisions []Decision, since time.Time, topN int) Stats {
 	dup := duplicateAskFires(decisions, since)
 
 	for i, d := range decisions {
-		if d.Decision != "ask" && d.Decision != "defer" {
+		if d.Decision != "ask" && d.Decision != "deny" && d.Decision != "defer" {
 			continue
 		}
 		if _, isDup := dup[i]; d.TS.Before(since) || isDup {
@@ -254,7 +254,7 @@ func Aggregate(decisions []Decision, since time.Time, topN int) Stats {
 		}
 
 		switch d.Decision {
-		case "ask":
+		case "ask", "deny": // a deny (#528) is the guard flagging the edit, as an ask is
 			s.TotalAsk++
 			if d.Repo != "" {
 				c := s.ByRepo[d.Repo]

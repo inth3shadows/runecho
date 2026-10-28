@@ -223,6 +223,15 @@ type decisionRecord struct {
 	// and on every record from an older guard: absent means "unrecorded",
 	// never "no model".
 	Model string `json:"model,omitempty"`
+	// Call is contractSessionTag of the payload's tool_use_id (#467): the
+	// identity of the tool call that wrote the record, stamped by logDecision
+	// on every record a hook process writes, like Session. Telemetry only for
+	// now — nothing joins on it until a live install shows the PreToolUse and
+	// PostToolUse fires of one call carry the same id. Hashed for Session's
+	// reason: the tag joins, the raw id is of no use to a report. Absent on
+	// pre-commit records, on a payload without tool_use_id, on parse-fail and
+	// pre-decode timeout records, and on every record from an older guard.
+	Call string `json:"call,omitempty"`
 }
 
 // decisionSession is the session tag logDecision stamps on records that do not
@@ -232,6 +241,16 @@ type decisionRecord struct {
 // Atomic because deferOnPanic's timeout branch logs from the parent goroutine
 // while the hook body, which sets this, may still be running.
 var decisionSession atomic.Pointer[string]
+
+// decisionCall is decisionSession's counterpart for the tool-call tag (#467).
+var decisionCall atomic.Pointer[string]
+
+// setDecisionCall records the tool call of the hook payload being served.
+// Called with "" before the payload is decoded, like setDecisionSession.
+func setDecisionCall(toolUseID string) {
+	tag := contractSessionTag(toolUseID)
+	decisionCall.Store(&tag)
+}
 
 // setDecisionSession records the session of the hook payload being served.
 // Called with "" before the payload is decoded so a parse-fail record (and, in
@@ -304,6 +323,11 @@ func logDecision(rec decisionRecord) {
 	if rec.Session == "" {
 		if tag := decisionSession.Load(); tag != nil {
 			rec.Session = *tag
+		}
+	}
+	if rec.Call == "" {
+		if tag := decisionCall.Load(); tag != nil {
+			rec.Call = *tag
 		}
 	}
 	if rec.Model == "" {

@@ -317,10 +317,10 @@ func (g GitOracle) Worktree(file string) (root, rel string, err error) {
 	}
 	if out, gitErr := g.git(dir, "rev-parse", "--show-toplevel"); gitErr == nil {
 		if r := strings.TrimSpace(out); r != "" {
-			sub, relErr := filepath.Rel(r, file)
-			if relErr != nil || strings.HasPrefix(sub, "..") {
+			if !underRoot(file, r) {
 				return "", "", fmt.Errorf("%s is not under its own worktree %s", file, r)
 			}
+			sub, _ := filepath.Rel(r, file)
 			return r, filepath.ToSlash(sub), nil
 		}
 	}
@@ -388,6 +388,15 @@ func (g GitOracle) Worktree(file string) (root, rel string, err error) {
 	return "", "", fmt.Errorf("worktree gone, no repo under %s holds any of %v", dir, candidates)
 }
 
+// underRoot reports whether file lies inside root. Worktree uses it to check a
+// live path against its own toplevel, and Audit to tell the recorded worktree
+// (file under the resolved root) from an adopted sibling (#494) — one rule for
+// both.
+func underRoot(file, root string) bool {
+	rel, err := filepath.Rel(root, file)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // knowsPath reports whether rel has ever existed anywhere in worktree's history.
 // This is the proof that a candidate sibling is the SAME repository the decision
 // was recorded against, not merely a git repo that happens to sit next to it.
@@ -452,7 +461,10 @@ func (g GitOracle) RevAt(worktree, ref string, ts time.Time) (string, error) {
 	if ref == "" || strings.HasPrefix(ref, "-") {
 		return "", fmt.Errorf("bad ref %q", ref)
 	}
-	out, err := g.git(worktree, "rev-list", "-1",
+	// --first-parent: the state of ref's line at ts is its first-parent chain.
+	// Without it a side-branch commit dated before ts but merged after it is
+	// the newest by date, and its tree lacks what the line had then (#536).
+	out, err := g.git(worktree, "rev-list", "-1", "--first-parent",
 		"--before="+ts.UTC().Format(time.RFC3339), ref, "--")
 	if err != nil {
 		return "", fmt.Errorf("rev-list in %s: %w", worktree, err)

@@ -2,7 +2,6 @@ package guardstats
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -464,7 +463,7 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		err error
 	}
 	wts := map[string]*wtState{}
-	// RevAt is per (root, ask timestamp), not per symbol. Without this every
+	// RevAt is per (root, ref, ask timestamp), not per symbol. Without this every
 	// symbol on an ask spawned its own `git rev-list` — ~150 redundant processes
 	// on the reference window, each carrying the full git timeout.
 	type revKey struct {
@@ -557,13 +556,6 @@ func Audit(decisions []Decision, since time.Time, o Oracle) AuditStats {
 		stats.Until = time.Now().UTC()
 	}
 	return stats
-}
-
-// underRoot reports whether file lies inside root — i.e. Worktree resolved
-// the recorded worktree itself rather than adopting a sibling.
-func underRoot(file, root string) bool {
-	rel, err := filepath.Rel(root, file)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // dedupeStrings returns in order, without repeats.

@@ -68,7 +68,7 @@ the watch list rather than in the positioning.
 | Tool | What it actually does | Fires | Falsifies the claim? |
 |---|---|---|---|
 | **anti-halu** (`emilyoprog`, Python, 0★, no license, single commit 2026-07-10) | **The tool that falsified the old claim.** A `PreToolUse` hook (`Write\|Edit\|MultiEdit\|apply_patch`) that parses the *pending* Python content with `ast`, resolves each name bound by an import, then **imports the module and checks `hasattr`** — `math.square_root` is denied before the write lands. Second check: every non-stdlib top-level import is looked up on PyPI (import-root → distribution metadata, so `cv2`→`opencv-python`). Fails open on any verifier exception, 800 ms budget per distribution. Conservative by construction: skips `import *`, dynamic `importlib`/`getattr`, relative imports, and any name that is reassigned, shadowed by a parameter, or monkeypatched. **Reconfirmed this pass via `gh api repos/emilyoprog/anti-halu` and its tree: still 0★, still the single 2026-07-10 commit, `verifiers/` still holds only `symbol_verifier.py` and `package_verifier.py` — no project-scanning module added.** | **Pre-write (PreToolUse), denies** — `pre_write_check.py` exits 2 with the reason on stderr | **YES for the old claim — the first tool on record to satisfy all four conjuncts.** 1: PreToolUse. 2: exit 2 is a deny, not a warning. 3: it decides on symbol existence. 4: `ast` + `importlib`, no model anywhere. **No for the narrowed claim:** it resolves only names reaching the file through an import, so it cannot see a symbol the repo itself is supposed to define — relative imports are explicitly skipped, and a bare call to an undefined local function is invisible to it. Python-only. **Not a momentum story** (one commit, dormant over three months now), but substance is the test here, not stars — see the packaging note below, which is the part worth stealing. |
-| **Gortex** (`zzet/gortex`, 1913★ as of this pass — up from 1090★, Apache-2.0, 257 languages) | **The largest standalone code-intelligence tool in this space (Cursor and Cline, below, are harnesses, not gates), and the shortest path to falsification on record.** A code-intelligence engine (CLI + MCP + API, local) that already owns a full symbol graph with reference resolution. Critically, `internal/mcp/parse_gate.go` **already holds candidate bytes pre-write and parses them with tree-sitter before the atomic swap** — the hard part of the architecture is built and shipped. **Re-fetched from current `main` (pushed the day before this pass) this pass: unchanged.** | Pre-write, on its own MCP write tools | **No — today, and only on a technicality.** Its gate's predicate is still `parseErrorCount`, confirmed by direct source read this pass: it asks whether the pending bytes *parse*, never whether the symbols they reference *resolve* — so conjunct 3 fails. But it already has the graph to answer that, and swapping the predicate is a contained change. Two further concessions that will not last: it guards only its own MCP write tools (its PreToolUse hook predicate is file-path-only, so edits made with the agent's native tools bypass it), and it is bypassable via `allow_parse_errors=true`. **Reach makes this the one to watch** — nearly doubled (1090★ → 1913★) since last pass. |
+| **Gortex** (`zzet/gortex`, 1913★ as of this pass — up from 1090★, Apache-2.0, 257 languages) | **The largest standalone code-intelligence tool in this space (Cursor and Cline, below, are harnesses, not gates), and the shortest path to falsification among standalone tools.** A code-intelligence engine (CLI + MCP + API, local) that already owns a full symbol graph with reference resolution. Critically, `internal/mcp/parse_gate.go` **already holds candidate bytes pre-write and parses them with tree-sitter before the atomic swap** — the hard part of the architecture is built and shipped. **Re-fetched from current `main` (pushed the day before this pass) this pass: unchanged.** | Pre-write, on its own MCP write tools | **No — today, and only on a technicality.** Its gate's predicate is still `parseErrorCount`, confirmed by direct source read this pass: it asks whether the pending bytes *parse*, never whether the symbols they reference *resolve* — so conjunct 3 fails. But it already has the graph to answer that, and swapping the predicate is a contained change. Two further concessions that will not last: it guards only its own MCP write tools (its PreToolUse hook predicate is file-path-only, so edits made with the agent's native tools bypass it), and it is bypassable via `allow_parse_errors=true`. **Reach makes this the standalone tool to watch** — nearly doubled (1090★ → 1913★) since last pass. |
 | **GateGuard** (`gateguard-ai`, zunoworks) | "deny + force investigation + demand evidence" — blocks the first write attempt and makes the agent produce facts (importers, data schemas, quoted instruction) before allowing a retry. Now at **v0.6.2** (PyPI; the 0.6 line has been out since late July 2026, so the August pass's v0.5.0 was already stale): 0.6 adds a `PostToolUse` hook on `Read`/`Grep`/`Glob`/`Bash` that records observed investigation into an evidence ledger, so the gate opens on what the agent actually did rather than on what it claims. Re-confirmed this pass against the current PyPI release (`pypi.org/pypi/gateguard-ai/json`): it still demands evidence-gathering (importers, schemas, instruction quotes via grep/read), never symbol existence. | Pre-write (PreToolUse) | **No.** Nearest neighbour on *timing*, but it never evaluates symbol existence — it evaluates whether the agent looked. Conjunct 3 fails, unchanged by the version bump. |
 | ⚠️ **Anti-Hallucination-MCP** (`Akunimal`) | The nearest neighbour on *substance* — and the first tool found that checks the same thing RunEcho checks. Deterministic, model-free symbol existence: AST extraction via `@ast-grep/napi` for JS/TS/TSX, regex fallback for ~15 more languages, symbols persisted to `.wisdom/symbols.json`, confidence-scored with fuzzy typo matching. Ships a Claude Code hook that its own setup script installs. Also bundles command-output compression (dedup/grouping) — so one repo overlaps both RunEcho *and* terse. **Could not be re-located this pass:** a GitHub repo-name search, a search of Akunimal's own repos, and a code search for its `ANTIHALL_AUTOFIX` signature all returned nothing this pass, and `gh api repos/Akunimal/Anti-Hallucination-MCP` is a 404. No URL was ever recorded for this row — the resolvable-identifier rule below postdates it — so this verdict is **carried forward unverified, not reconfirmed.** It is kept one more pass only because it is the historical half of the three-way split below; **if the next pass cannot re-locate it either, remove it** under the same rule that removed the early-August names. | **Post-write** (as last verified) — the installed hook is `PostToolUse` on `Write`/`Edit`; it "warns after every edit", writing to stderr *after* the write has landed | **No — but it was the closest miss on record.** Satisfies conjuncts 3 (symbol existence) and 4 (deterministic, no LLM) outright. Fails 1 and 2: the edit is already on disk when it fires, so it advises rather than denies. Two further concessions RunEcho does not make: a persisted registry that *can* go stale (mitigated by an opt-in `watch_project` watcher, not by re-parsing), and an `ANTIHALL_AUTOFIX=1` mode that rewrites the identifier in place — a repair posture, not a gate. **Its falsification path is one line of JSON** (see watch list) — unverifiable this pass whether that line has been written. |
 | **Cursor hooks** | **Changed since last pass.** The hook surface now documents a generic `preToolUse` hook — "called before any tool execution... fires for all tool types (Shell, Read, Write, MCP, Task, etc.)" — which can return `"permission": "deny"` to block the call. Its matcher values are `Shell`, `Read`, `Write`, `Grep`, `Delete`, `Task` and `MCP:<tool>`; `Write` is the value the docs also give for agent file edits (`afterFileEdit` is "matched against the value `Write`"), so agent edits are covered. **Tab edits are not**: they have only the observational `afterTabFileEdit`. Two limits on conjunct 2: `failClosed` defaults to `false` (a hook that crashes or times out lets the write through), and `"ask"` is "accepted by the schema but not enforced for `preToolUse` today" — only an explicit deny blocks. **And Cursor loads Claude Code hooks**: with *Include Third-Party Plugins, Skills, and Other Configs* (on by default) it reads `.claude/settings.json`, maps `PreToolUse` → `preToolUse` and both `Write` and `Edit` → `Write`, and treats exit 2 as a deny "for compatibility". Source: <https://cursor.com/docs/hooks.md> and <https://cursor.com/docs/reference/third-party-hooks.md>, read this pass. Documented, not exercised: no Claude Code hook was run under Cursor. | `preToolUse` fires before agent writes (not Tab edits) and can deny | **No — but the "structurally can't" framing from the last two passes is retracted as false.** Cursor's agent edit tool *can* be gated pre-write today. What's missing is substance, not architecture: no tool is known to run an in-repo symbol-existence check inside `preToolUse`. Because Claude Code `PreToolUse` gates are imported by default, **any Claude Code gate is, per the docs, also a Cursor gate** — so the first in-repo Claude Code gate by anyone would contest the claim on both harnesses at once. (Issue #174, now closed, was scoped on the old premise that a Cursor port could only cover `beforeShellExecution` / `beforeMCPExecution`; the follow-up is #543.) |
@@ -76,15 +76,16 @@ the watch list rather than in the positioning.
 | **pyright-lsp** (official Anthropic Claude Code plugin) | Runs Pyright and surfaces LSP diagnostics into the conversation as `<new-diagnostics>`. New first-party entrant since the last positioning pass. | After the edit | **No.** Advisory, post-write, Python-only, needs a language server — every one of these is something the moat sentence already concedes to LSPs. Worth watching: it makes "just use an LSP" cheaper inside Claude Code itself. |
 | **Serena** (oraios) | LSP-backed semantic MCP: find-references, rename, symbol-level edits, 40+ languages. | On request, during the loop | **No.** Deeper than RunEcho on every axis except timing and setup; it is a tool the agent *chooses* to call, not a gate that fires whether or not the agent cooperates. |
 | **Aider repo map** | Tree-sitter + PageRank ranking of important symbols, packed into the context budget. | Context supply, pre-generation | **No.** Supplies context; validates nothing. Fails conjuncts 2 and 3 by design — the repo map's job is to make the model *better informed*, never to overrule it. |
-| **Continue / Cody** | No pre-write symbol-validation gate found this round. Continue has pivoted toward a CLI-first platform with `.continue/checks/` running as GitHub status checks on PRs — merge-time, not pre-write. | — | **No.** Note the evidence here is weaker than for Cursor or Cline above: those tools publish an exhaustive hook/event list, so a negative there is documented; for Continue and Cody the negative is only "not found". |
+| **Continue / Cody** | No pre-write symbol-validation gate found this round. Continue has pivoted toward a CLI-first platform with `.continue/checks/` running as GitHub status checks on PRs — merge-time, not pre-write. | — | **No.** Note the evidence here is weaker than for Cursor or Cline above: Cursor publishes an exhaustive hook/event list, so a negative there is documented (Cline's is only partly documented — see its row); for Continue and Cody the negative is only "not found". |
 | **Shipmoor** | Described as a local deterministic verification layer producing a binding merge verdict. | Merge time | **No.** Wrong end of the pipeline entirely. *Secondary source only — not primary-verified.* |
 
 **Verdict 2026-10-22: no new falsification. The narrowed claim still holds.**
 `anti-halu` and Gortex are both unchanged this pass (reconfirmed directly against
 current source, see table). Anti-Hallucination-MCP could not be re-located and is
 carried forward unverified. The one real move this pass is architectural, not a
-new rival: **Cursor and Cline have each shipped a generic pre-write blocking hook**
-(`preToolUse` and `beforeTool` respectively) that closes the specific gap this
+new rival: **Cursor and Cline have each shipped a generic pre-tool blocking hook**
+(`preToolUse` and `beforeTool` respectively; Cursor's is documented to cover
+agent edits, Cline's edit routing is undocumented) that closes the specific gap this
 file previously cited — "Cursor's hook surface can't host such a gate for its
 native edit tool" is now false for agent edits (Tab edits remain ungated) and
 has been corrected in both files. No rival is
@@ -98,7 +99,7 @@ ships for Claude Code would, per Cursor's docs, contest the claim on both harnes
 at once. The falsification no longer needs a port — only a predicate.
 
 The prior (August) pass's finding, unchanged since and preserved here because it
-is still why the narrowed claim reads the way it does: last pass predicted the
+is still why the narrowed claim reads the way it does: the July pass predicted the
 square would be closed by someone merging GateGuard's timing with
 Anti-Hallucination-MCP's substance. That is exactly what happened, except it was
 neither of them and it had already shipped: `anti-halu` was pushed 2026-07-10,
@@ -132,9 +133,9 @@ independently built three different faces of this gate inside one quarter. The
 technique is not scarce; what is still scarce is doing it for the user's own
 codebase, across languages, without a persisted index that can lag.
 
-### Why the August pass missed it — and what fixed it
+### Why anti-halu was missed — and what fixed it
 
-The July pass found Anti-Hallucination-MCP only via a raw GitHub repo-search, and
+An earlier pass found Anti-Hallucination-MCP only via a raw GitHub repo-search, and
 correctly wrote down that the procedure needed one. That bullet was added to the
 procedure but the sweep was never actually run as a distinct step, so the *same*
 failure repeated one pass later: `anti-halu` has no stars, no license, no
@@ -145,15 +146,16 @@ single query found it immediately:
 gh api -X GET search/repositories -f q='pre-write hallucination gate' -f sort=updated
 ```
 
-The August pass therefore did two things: recorded the falsification, and promotes the
+The August pass therefore did two things: recorded the falsification, and promoted the
 raw sweep from a note inside step 1 into its own numbered, multi-query step
 (closed issue #203). **A survey pass that does not run the sweep has not run.**
 
 ### The harder finding: three surveys, three disjoint sets
 
-Fixing the sweep is necessary and not sufficient. There have now been **three
-competent surveys of this niche inside three weeks, and they share essentially
-zero entries**:
+Fixing the sweep is necessary and not sufficient. By the August pass there had been **three
+competent surveys of this niche inside three weeks, and they shared essentially
+zero entries**. The October pass, a fourth, found four more entrants none of
+them had seen:
 
 (Pass labels below are written without full dates on purpose — they are fixed
 provenance and must not move with the survey stamps.)
@@ -162,7 +164,8 @@ provenance and must not move with the survey stamps.)
 |---|---|---|
 | July 2026 | product docs, changelogs, web, one repo query | GateGuard, Anti-Hallucination-MCP, Cursor hooks, pyright-lsp, Serena, Aider, Cline/Continue/Cody, Shipmoor |
 | Early August 2026 | separate strategy pass | **Gortex** — plus ten further products reported as verified but recorded only by bare product name, none of which resolves today (see note below). **None overlapped the row above.** |
-| Later August 2026 | six-query raw repo sweep | `anti-halu` — **overlapping neither**, and the one that falsified the claim |
+| August 2026 | one raw repo query (this pass then created the six-query sweep) | `anti-halu` — **overlapping neither**, and the one that falsified the claim |
+| October 2026 | six-query sweep plus harness docs | tribunal-kit, vouch, DCGP, nio-xs — **overlapping none of the above** — plus the Cursor and Cline hook changes |
 
 The intuitive reading is "the search protocol is unstable, so search harder."
 That is probably too comfortable. Three different methods, run by different
@@ -182,7 +185,7 @@ it happens to be true.
 > purpose — fixed provenance, not a survey stamp). The early-August pass
 > reported eleven verified competitors, but recorded them **by bare product name
 > only**. Just one, Gortex, could be re-verified; it was checked directly for
-> this pass (stars, licence, and the presence of `internal/mcp/parse_gate.go`)
+> the August pass (stars, licence, and the presence of `internal/mcp/parse_gate.go`)
 > and has a full row above.
 >
 > The rest were **removed rather than carried**. Their names do not resolve to
@@ -219,8 +222,8 @@ repository under edit is supposed to define.
 - **Gortex swapping its `parse_gate` predicate from "does it parse" to "does it
   resolve".** The highest-impact path among standalone tools, because it has
   the most reach of any of them (1913★ and still climbing — up from 1090★ last
-  pass). It already holds candidate bytes pre-write, already parses them before the atomic swap,
-  and already owns a symbol graph with reference resolution — the three
+  pass). It already holds candidate bytes pre-write, already parses them
+  before the atomic swap, and already owns a symbol graph with reference resolution — the three
   expensive pieces. What stands between it and all four conjuncts is the
   predicate itself, plus widening the gate beyond its own MCP write tools.
   **Check `internal/mcp/parse_gate.go` every pass**, specifically what
@@ -240,8 +243,8 @@ repository under edit is supposed to define.
   push, and this one needs one file.
 - **Anti-Hallucination-MCP moving its hook from `PostToolUse` to `PreToolUse`**
   (⚠️ unverifiable while the repo cannot be re-located — see its row). If it
-  resurfaces, this is a one-line path: the analysis is already deterministic and already symbol-existence-based,
-  so the remaining work is changing the event name in the settings block its
+  resurfaces, this is a one-line path: the analysis is already deterministic
+  and already symbol-existence-based, so the remaining work is changing the event name in the settings block its
   setup script writes, and returning a deny decision instead of a stderr warning.
   Everything the four-conjunct test asks for would then be satisfied. Weigh that
   against the two things it would still concede — a persisted registry that can
@@ -271,7 +274,8 @@ repository under edit is supposed to define.
   `preToolUse` hook (matcher covers `Write`, can return `permission: "deny"`)
   and Cline's SDK docs a `beforeTool` hook (`skip: true` blocks the call), both
   read directly from each tool's current docs this pass. The empty square is
-  now buildable in Cursor and Cline, and on Cursor it needs not even a port:
+  now buildable in Cursor (for agent edits) and, if its edit tools route through
+  `beforeTool`, in Cline; on Cursor it needs not even a port:
   Cursor imports Claude Code `PreToolUse` hooks by default, so a Claude Code
   in-repo gate is a Cursor gate. **Check whether any plugin or Claude Code hook
   wires a deterministic in-repo symbol-existence check into either surface every
@@ -282,22 +286,6 @@ repository under edit is supposed to define.
   diagnostics after the fact; wiring the same language server into a blocking
   PreToolUse decision would satisfy all four conjuncts for one language at a time,
   at the cost of the setup and staleness RunEcho trades away.
-- **tribunal-kit** (`Harmitx7/tribunal-kit`, 5★, MIT, npm `tribunal-kit`,
-  new in the October 2026 pass, found via the raw repo sweep). Its README
-  describes "31 domain-specific reviewers" analyzing generated code "before
-  writing to disk," gated by a Rust core doing AST/graph extraction, and calls
-  the swarm deterministic. **Read from its hook wiring this pass, not its
-  README:** both `.claude/hooks.json` and `hooks/hooks.json` register only
-  `SessionStart`. Its blocking exists only on its own MCP write path
-  (`tribunal_request_write` / `tribunal_commit_write`) and a git pre-push hook,
-  so edits through the agent's native tools are never gated — conjuncts 1 and 2
-  fail for native edits, the same concession as Gortex. Its AST check is
-  imports against package manifests (phantom packages), not in-repo symbol
-  existence, so the narrowed conjunct 3 fails too. (An earlier draft of this
-  entry dismissed it on conjunct 4 from a CHANGELOG line about LLMs not
-  self-authorizing findings; that line actually says an *engine* grants the
-  verdict, so it was the wrong basis and is withdrawn.) Watch for its native
-  hooks gaining a `PreToolUse` entry.
 - **nio-xs** (`nio-labs/nio-xs`, new in the October 2026 pass) — an
   OpenAI-compatible gateway/companion whose `--code guard` directive, per the
   README at commit `3c613965`, "verifies generated code against Rust,
@@ -333,6 +321,23 @@ them from scratch:
   runtime threat detection (prompt injection, data exfiltration, OWASP Agentic
   Top 10). Governs what an agent is *allowed* to do; has no notion of whether a
   symbol exists. Fails conjunct 3 outright and is not even adjacent.
+- **tribunal-kit** (`Harmitx7/tribunal-kit`, 5★, MIT, npm `tribunal-kit`,
+  new in the October 2026 pass, found via the raw repo sweep). Its README
+  describes "31 domain-specific reviewers" analyzing generated code "before
+  writing to disk," gated by a Rust core doing AST/graph extraction, and calls
+  the swarm deterministic. **Read from its hook wiring this pass, not its
+  README:** both `hooks/hooks.json` and `hooks/hooks-cursor.json` register
+  only `SessionStart`. Its blocking exists only on its own MCP write path
+  (`tribunal_request_write` / `tribunal_commit_write`) and a git pre-push hook,
+  so edits through the agent's native tools are never gated — conjuncts 1 and 2
+  fail for native edits, the same concession as Gortex. Its AST check is
+  imports against package manifests (phantom packages), not in-repo symbol
+  existence, so the narrowed conjunct 3 fails too. (An earlier draft of this
+  entry dismissed it on conjunct 4 from a CHANGELOG line about LLMs not
+  self-authorizing findings; that line actually says an *engine* grants the
+  verdict, so it was the wrong basis and is withdrawn.) Fails three of four for
+  the narrowed claim, so it is recorded here rather than on the watch list;
+  re-score it if its native hooks gain a `PreToolUse` entry.
 - **vouch** (`sunnyadn/vouch`, surfaced in the October 2026 pass — written
   without a full date for the same reason as above) — a Stop-hook reviewer that
   checks an agent's *claims* ("there's no library for X", "all tests pass")

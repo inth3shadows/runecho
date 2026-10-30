@@ -791,6 +791,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	setDecisionModel("", "")
 	setDecisionCall("")
 	hookPosture.Store(nil)
+	// Cleared on return. A panic's defer record, logged by deferOnPanic after
+	// this frame unwinds, therefore carries no host: accepted, as a defer's
+	// posture changes nothing.
 	defer hookPosture.Store(nil)
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
@@ -811,11 +814,6 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		OldString: payload.ToolInput.OldString,
 		Content:   payload.ToolInput.Content,
 		Edits:     payload.ToolInput.Edits,
-	}
-	if cursor && edit.ToolName == "Write" {
-		if o, n, ok := cursorWriteAsEdit(payload.ToolInput.FilePath, edit.Content); ok {
-			edit = hookEdit{ToolName: "Edit", OldString: o, NewString: n, CursorWrite: true}
-		}
 	}
 	return renderHookDecision(out, verifyEdit(edit, payload.ToolInput.FilePath, payload.SessionID))
 }

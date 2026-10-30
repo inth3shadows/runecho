@@ -262,23 +262,14 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		}
 	}
 
-	// A Cursor Write rebuilt as an Edit (#543) carries unchanged lines in
-	// new_string: the context that makes old_string unique, which can be the
-	// very line holding a name the guard cannot resolve. A name already in the
-	// replaced text is not one this edit introduces, so it is treated as known,
-	// as learned-allow does above; otherwise that line would block every edit
-	// next to it under Cursor's default deny.
-	if edit.CursorWrite {
-		for _, id := range identRE.FindAllString(edit.OldString, -1) {
-			symbols[id] = struct{}{}
-		}
-	}
-
 	// newLines is the added text as AddedLines — gap-separated per edit for a
 	// MultiEdit so stateful scanners reset open-string state at each boundary.
 	// Shared by the additive check and the dropped-import check below so both see
 	// the same (leak-free) view of a MultiEdit rather than a flat "\n"-join.
 	newLines := hookAddedLines(edit.ToolName, edit.NewString, edit.Content, edit.Edits)
+	// unchanged drops findings on lines a Cursor whole-file Write left as they
+	// were (#543); nil keeps every finding. See cursorUnchangedLines.
+	unchanged := cursorUnchangedLines(currentPosture().cursor, edit.ToolName, fileLines, newLines)
 	diffs := []guard.FileDiff{{
 		Path:       filePath,
 		AddedLines: newLines,
@@ -293,7 +284,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
 
-	violations := guard.Run(symbols, ignorePath, diffs)
+	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
 	// status — OK/Violation/Unknown/Skipped, replacing firedChecks/degraded's
 	// untyped bools+counter), in checkOrder's canonical order. firedChecksFrom
@@ -337,6 +328,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		if modulePath := guard.GoModulePath(filepath.Dir(filePath)); modulePath != "" {
 			var reason string
 			qualifiedV, reason = qualifiedViolationsWithReason(lang, fileLines, newLines, symbols, modulePath, filePath)
+			qualifiedV = dropUnchanged(qualifiedV, violationLine, unchanged)
 			qualifiedResult = classifyResult("qualified", len(qualifiedV) > 0, foldAbstainReason(reason, preEditReason))
 		} else {
 			// No go.mod anywhere upward: this check validates a call against
@@ -357,6 +349,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	recvMethodResult := CheckResult{Check: "recv-method", Verdict: VerdictSkipped}
 	if recvMethodEnabled() && lang == guard.LangGo {
 		rv, reason := recvMethodViolationsWithReason(lang, fileLines, newLines, symbols, filePath)
+		rv = dropUnchanged(rv, violationLine, unchanged)
 		recvMethodResult = classifyResult("recv-method", len(rv) > 0, foldAbstainReason(reason, preEditReason))
 		violations = append(violations, rv...)
 	}
@@ -369,6 +362,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	varTypeResult := CheckResult{Check: "var-type", Verdict: VerdictSkipped}
 	if varTypeEnabled() && lang == guard.LangGo {
 		vv, reason := varTypeViolationsWithReason(lang, fileLines, newLines, symbols, filePath)
+		vv = dropUnchanged(vv, violationLine, unchanged)
 		varTypeResult = classifyResult("var-type", len(vv) > 0, foldAbstainReason(reason, preEditReason))
 		violations = append(violations, vv...)
 	}
@@ -389,6 +383,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 			modulePath := guard.GoModulePath(filepath.Dir(filePath))
 			var reason string
 			depsGoV, reason = goDepQualifiedViolationsWithReason(lang, fileLines, newLines, modulePath, goDepIdx, filePath)
+			depsGoV = dropUnchanged(depsGoV, violationLine, unchanged)
 			// preEditReason folds in here for the same reason it does for
 			// qualified/recv-method/var-type: this check builds its context by
 			// concatenating fileLines with newLines, so an unreadable pre-edit
@@ -412,6 +407,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// in this file's scope — the opposite of "not found in the indexed code".
 	// Own section below.
 	fsv, fsReason := fileScopeViolationsWithReason(lang, fileLines, diffs[0], repoSymbols, filePath)
+	fsv = dropUnchanged(fsv, violationLine, unchanged)
 	if fsReason == "oversized-pre-edit-file" {
 		// readFileLines (unlike wholeFileText, dangling.go) collapses "file
 		// doesn't exist yet" and "file exists but is oversized/unreadable"
@@ -439,6 +435,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// declarations, so nothing here touches the index or the ~12 ms budget beyond one
 	// tree-sitter parse, and only when the diff has a kwarg-bearing candidate call.
 	callShapes, callShapeReason := callShapeMismatchesWithReason(lang, fileLines, diffs[0], edit.ToolName, removedText)
+	callShapes = dropUnchanged(callShapes, callShapeLine, unchanged)
 	callShapeResult := CheckResult{Check: "call-shape", Verdict: VerdictSkipped}
 	if callShapeEnabled() && lang == guard.LangPython {
 		// preEditReason is NOT folded in here: this check reads its own
@@ -478,6 +475,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		} else {
 			var reason string
 			lintFindingsList, reason = lintFindingsWithReason(filePath, text)
+			lintFindingsList = dropUnchanged(lintFindingsList, lintLine, unchanged)
 			// Firewall against the additive check, the same shape file-scope
 			// got in #269 and for the same reason: lint and guard.Run ask
 			// overlapping questions (F821 IS "this name does not resolve"), so

@@ -3,9 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os"
-	"regexp"
-	"strings"
+
+	"github.com/inth3shadows/runecho/internal/guard"
 )
 
 // isCursorPayload reports whether a hook payload's cursor_version field is
@@ -16,68 +15,53 @@ func isCursorPayload(raw json.RawMessage) bool {
 	return len(v) > 0 && !bytes.Equal(v, []byte("null")) && !bytes.Equal(v, []byte(`""`))
 }
 
-// cursorWriteAsEdit turns Cursor's whole-file Write of an existing file into
-// the single Edit it amounts to (#543). Cursor sends every agent edit as a
-// Write carrying the full new file, and a Write is checked whole, so a name in
-// the file the guard cannot resolve would be flagged again on every later
-// edit to that file — under Cursor's default deny, a block nobody can dismiss.
-// As an Edit, only the changed lines are checked, and every check sees the
-// same shapes it sees for a Claude Code Edit, removed text included.
+// cursorUnchangedLines reports, for a Cursor Write over an existing file, which
+// lines of the new file the Write left exactly as they were: those in the
+// common prefix and suffix of the pre-edit and proposed files (#543). Cursor
+// sends every agent edit as a whole-file Write, and a Write is checked whole,
+// so a name in the file the guard cannot resolve would be flagged again on
+// every later edit to it: under Cursor's default deny, a block nobody can
+// dismiss. Dropping findings on those lines gives the edit the same reach as
+// a Claude Code Edit of the changed span, while every check still scans the
+// whole file, so string and bracket state, lint, and the edit fingerprint are
+// those of the Write.
 //
-// old_string is the changed span of whole lines, widened by a line of context
-// until it is non-empty and occurs once in the file, which is what an Edit
-// requires. ok is false, and the Write is checked whole as before, when the
-// file is absent, unreadable, not a regular file, over maxInFileBytes,
-// unchanged, or when replacing the span does not reproduce content exactly.
-func cursorWriteAsEdit(filePath, content string) (oldString, newString string, ok bool) {
-	if filePath == "" || strings.ContainsRune(filePath, 0) || len(filePath) > 4096 {
-		return "", "", false
+// nil (keep every finding) unless the payload is Cursor's and a Write, and the
+// pre-edit file was read: a new, empty, unreadable or oversized file is checked
+// whole, as before. Hook-mode Write line numbers are the file's own (the
+// AddedLines are 1..N over content), which is what makes this sound.
+func cursorUnchangedLines(cursor bool, toolName string, fileLines, newLines []guard.AddedLine) func(line int) bool {
+	if !cursor || toolName != "Write" || len(fileLines) == 0 {
+		return nil
 	}
-	fi, err := os.Stat(filePath)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxInFileBytes {
-		return "", "", false
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil || len(data) > maxInFileBytes {
-		return "", "", false
-	}
-	old := string(data)
-	if old == content {
-		return "", "", false
-	}
-	ol, nl := strings.SplitAfter(old, "\n"), strings.SplitAfter(content, "\n")
 	p := 0
-	for p < len(ol) && p < len(nl) && ol[p] == nl[p] {
+	for p < len(fileLines) && p < len(newLines) && fileLines[p].Text == newLines[p].Text {
 		p++
 	}
 	s := 0
-	for s < len(ol)-p && s < len(nl)-p && ol[len(ol)-1-s] == nl[len(nl)-1-s] {
+	for s < len(fileLines)-p && s < len(newLines)-p &&
+		fileLines[len(fileLines)-1-s].Text == newLines[len(newLines)-1-s].Text {
 		s++
 	}
-	for {
-		oldString = strings.Join(ol[p:len(ol)-s], "")
-		newString = strings.Join(nl[p:len(nl)-s], "")
-		if oldString != "" && strings.Count(old, oldString) == 1 {
-			break
-		}
-		switch {
-		case p > 0:
-			p--
-		case s > 0:
-			s--
-		default:
-			return "", "", false
-		}
-	}
-	// Unreachable by construction (a unique whole-line span between equal
-	// prefix and suffix rebuilds content), kept so a future change to the span
-	// logic falls back to the whole-file check instead of checking the wrong text.
-	if strings.Replace(old, oldString, newString, 1) != content {
-		return "", "", false
-	}
-	return oldString, newString, true
+	last := len(newLines) - s
+	return func(line int) bool { return line <= p || line > last }
 }
 
-// identRE matches identifier-shaped words; verifyEdit treats every one in a
-// Cursor Edit's old_string as known.
-var identRE = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+// dropUnchanged removes the findings unchanged reports as on an unchanged
+// line; a nil unchanged returns xs as is.
+func dropUnchanged[T any](xs []T, lineOf func(T) int, unchanged func(int) bool) []T {
+	if unchanged == nil || len(xs) == 0 {
+		return xs
+	}
+	var out []T
+	for _, x := range xs {
+		if !unchanged(lineOf(x)) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func violationLine(v guard.Violation) int         { return v.Line }
+func callShapeLine(m guard.CallShapeMismatch) int { return m.LineNo }
+func lintLine(f lintFinding) int                  { return f.Line }

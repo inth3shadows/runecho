@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/inth3shadows/runecho/internal/guard"
 )
 
 // assertDeny checks one hook run under RUNECHO_GUARD_POSTURE=deny: the call is
@@ -19,10 +21,15 @@ func assertDeny(t *testing.T, d decision, raw string) map[string]any {
 	if strings.Contains(d.Hook.PermissionReason, "Approve if") {
 		t.Errorf("deny reason still offers approval:\n%s", d.Hook.PermissionReason)
 	}
-	// Either prefix: the fire's posture is cleared once runHook returns, so
-	// denyPrefix() here would always name the environment variable.
-	if !strings.Contains(d.Hook.PermissionReason, "[runecho-guard] Blocked (") {
-		t.Errorf("deny reason carries no deny remedy:\n%s", d.Hook.PermissionReason)
+	// The fire's posture is cleared once runHook returns, so the expected
+	// prefix is derived from the environment: an explicit deny names the
+	// variable, anything else here is Cursor's default.
+	want := strings.TrimSuffix(cursorDenyPrefix, ").") // ")." or "; …)." follows
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RUNECHO_GUARD_POSTURE")), "deny") {
+		want = envDenyPrefix
+	}
+	if !strings.Contains(d.Hook.PermissionReason, want) {
+		t.Errorf("deny reason lacks %q:\n%s", want, d.Hook.PermissionReason)
 	}
 	rec := readLastDecisionLog(t)
 	if rec == nil || rec["decision"] != "deny" {
@@ -341,43 +348,76 @@ func TestPosture_CursorWriteChecksOnlyChangedLines(t *testing.T) {
 	}
 }
 
-func TestCursorWriteAsEdit(t *testing.T) {
-	dir := t.TempDir()
+// Every check still scans the whole file, so a block that sits inside a
+// multi-line string is masked as it is for a Claude Code Write, and only the
+// changed lines can block (#544 round 2: the Edit conversion lost this).
+func TestPosture_CursorWriteKeepsStringState(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	path := halluRepo(t)
+	const onDisk = "package m\n\nconst q = `\nSELECT a\nFROM t\n`\n\nfunc F() int { return 1 }\n"
+	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inString := strings.Replace(onDisk, "FROM t\n", "FROM t\nVALUES (1)\n", 1)
+	if _, raw, d := runHook(t, cursorPayload(t, "Write", path, inString)); d.Hook.PermissionDec != "" {
+		t.Errorf("an edit inside a raw string was blocked:\n%s", raw)
+	}
+	both := strings.Replace(inString, "return 1", "return HallucinatedZZ()", 1)
+	_, raw, d := runHook(t, cursorPayload(t, "Write", path, both))
+	assertDeny(t, d, raw)
+	if r := d.Hook.PermissionReason; !strings.Contains(r, "HallucinatedZZ") || strings.Contains(r, "VALUES") {
+		t.Errorf("string edit plus a bad call flagged the wrong names:\n%s", r)
+	}
+}
+
+// A name that was only mentioned in the replaced text (a comment here) is
+// still new when the edit calls it (#544 round 2: the identifier fold let it
+// through).
+func TestPosture_CursorWriteCommentNameStillNew(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	path := halluRepo(t)
+	const onDisk = "package m\n\nfunc F() {\n\t// TODO: call SyncAllUsers here\n}\n"
+	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	impl := strings.Replace(onDisk, "\t// TODO: call SyncAllUsers here\n", "\tSyncAllUsers()\n", 1)
+	_, raw, d := runHook(t, cursorPayload(t, "Write", path, impl))
+	assertDeny(t, d, raw)
+	if !strings.Contains(d.Hook.PermissionReason, "SyncAllUsers") {
+		t.Errorf("implementing a TODO's hallucinated name was not flagged:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+func TestCursorUnchangedLines(t *testing.T) {
+	lines := func(s string) []guard.AddedLine { return guard.TextToAddedLines(s) }
+	if cursorUnchangedLines(false, "Write", lines("a\n"), lines("b\n")) != nil ||
+		cursorUnchangedLines(true, "Edit", lines("a\n"), lines("b\n")) != nil ||
+		cursorUnchangedLines(true, "Write", nil, lines("b\n")) != nil {
+		t.Fatal("a non-Cursor, non-Write or new-file fire filters findings")
+	}
 	for name, tc := range map[string]struct {
-		old, content string
-		ok           bool
+		old, new string
+		changed  []int // 1-based lines of new that must be kept
+		same     []int // lines that must be dropped
 	}{
-		"replace":    {"a\nb\nc\n", "a\nB\nc\n", true},
-		"insert":     {"a\nc\n", "a\nb\nc\n", true},
-		"insert-top": {"a\n", "z\na\n", true},
-		"append-eof": {"a\nb", "a\nb\nc", true},
-		"delete":     {"a\nb\nc\n", "a\nc\n", true},
-		"repeated":   {"x\nx\nx\n", "x\nx\ny\nx\n", true},
-		"all-new":    {"a\n", "b\n", true},
-		"to-empty":   {"a\n", "", true},
-		"unchanged":  {"a\n", "a\n", false},
-		"from-empty": {"", "a\n", false},
+		"replace":    {"a\nb\nc\n", "a\nB\nc\n", []int{2}, []int{1, 3}},
+		"insert":     {"a\nc\n", "a\nb\nc\n", []int{2}, []int{1, 3}},
+		"insert-top": {"a\n", "z\na\n", []int{1}, []int{2}},
+		"append-eof": {"a\nb", "a\nb\nc", []int{3}, []int{1, 2}},
+		"repeated":   {"x\nx\nx\n", "x\nx\ny\nx\n", []int{3}, []int{1, 2, 4}},
+		"all-new":    {"a\n", "b\n", []int{1}, nil},
+		"delete":     {"a\nb\nc\n", "a\nc\n", nil, []int{1, 2}},
 	} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(tc.old), 0o644); err != nil {
-			t.Fatal(err)
+		u := cursorUnchangedLines(true, "Write", lines(tc.old), lines(tc.new))
+		for _, n := range tc.changed {
+			if u(n) {
+				t.Errorf("%s: changed line %d dropped", name, n)
+			}
 		}
-		o, n, ok := cursorWriteAsEdit(path, tc.content)
-		if ok != tc.ok {
-			t.Errorf("%s: ok = %v, want %v", name, ok, tc.ok)
-			continue
+		for _, n := range tc.same {
+			if !u(n) {
+				t.Errorf("%s: unchanged line %d kept", name, n)
+			}
 		}
-		if !ok {
-			continue
-		}
-		if strings.Count(tc.old, o) != 1 || strings.Replace(tc.old, o, n, 1) != tc.content {
-			t.Errorf("%s: Edit{%q -> %q} does not reproduce the Write", name, o, n)
-		}
-	}
-	if _, _, ok := cursorWriteAsEdit(filepath.Join(dir, "missing"), "a\n"); ok {
-		t.Error("a Write creating a file became an Edit")
-	}
-	if _, _, ok := cursorWriteAsEdit(dir, "a\n"); ok {
-		t.Error("a directory became an Edit")
 	}
 }

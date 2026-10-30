@@ -134,8 +134,19 @@ func precommitRemedyLine(f firedChecks) string {
 	}
 }
 
-// denyPrefix opens every deny remedy (#528).
-const denyPrefix = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny)."
+// denyPrefix opens every deny remedy (#528). Under Cursor's default deny
+// (#543) it names that cause instead of a variable the user never set.
+func denyPrefix() string {
+	if _, cursorDefault := postureSetting(); cursorDefault {
+		return cursorDenyPrefix
+	}
+	return envDenyPrefix
+}
+
+const (
+	envDenyPrefix    = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny)."
+	cursorDenyPrefix = "[runecho-guard] Blocked (Cursor does not enforce ask, so the guard denies)."
+)
 
 // denyTrailer is askTrailer under RUNECHO_GUARD_POSTURE=deny. The model, not a
 // user, reads it and it cannot approve the call, so it gets one remedy per kind
@@ -172,5 +183,5 @@ func denyTrailer(f firedChecks) string {
 	if len(parts) == 0 {
 		parts = append(parts, "Fix the findings above and retry.")
 	}
-	return denyPrefix + " " + strings.Join(parts, " ")
+	return denyPrefix() + " " + strings.Join(parts, " ")
 }

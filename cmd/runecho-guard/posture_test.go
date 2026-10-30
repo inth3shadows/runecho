@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func assertDeny(t *testing.T, d decision, raw string) map[string]any {
 	if strings.Contains(d.Hook.PermissionReason, "Approve if") {
 		t.Errorf("deny reason still offers approval:\n%s", d.Hook.PermissionReason)
 	}
-	if !strings.Contains(d.Hook.PermissionReason, denyPrefix) {
+	if !strings.Contains(d.Hook.PermissionReason, denyPrefix()) {
 		t.Errorf("deny reason carries no deny remedy:\n%s", d.Hook.PermissionReason)
 	}
 	rec := readLastDecisionLog(t)
@@ -113,8 +114,8 @@ func TestDenyTrailerPerCheck(t *testing.T) {
 		"none":       {firedChecks{}, "Fix the findings"},
 	} {
 		got := denyTrailer(tc.f)
-		if !strings.HasPrefix(got, denyPrefix) || !strings.Contains(got, tc.want) {
-			t.Errorf("%s: denyTrailer = %q, want prefix %q and %q", name, got, denyPrefix, tc.want)
+		if !strings.HasPrefix(got, denyPrefix()) || !strings.Contains(got, tc.want) {
+			t.Errorf("%s: denyTrailer = %q, want prefix %q and %q", name, got, denyPrefix(), tc.want)
 		}
 		if name != "violations" && name != "none" && strings.Contains(got, "define it first") {
 			t.Errorf("%s: denyTrailer carries the symbol remedy: %q", name, got)
@@ -139,7 +140,7 @@ func TestPosture_DefaultAskUnchanged(t *testing.T) {
 	gitInit(t, repoRoot)
 	goModRepo(t, repoRoot, []string{"KnownFunc"})
 	_, _, d := runHook(t, payload(t, "Write", filepath.Join(repoRoot, "a.go"), "", "package m\n\nfunc F() { HallucinatedFn() }\n", nil))
-	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "Approve if") || strings.Contains(d.Hook.PermissionReason, denyPrefix) {
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "Approve if") || strings.Contains(d.Hook.PermissionReason, denyPrefix()) {
 		t.Errorf("default posture changed:\n%q %q", d.Hook.PermissionDec, d.Hook.PermissionReason)
 	}
 	if rec := readLastDecisionLog(t); rec["decision"] != "ask" {
@@ -175,5 +176,88 @@ func TestPosture_DenyIsNeverJoinedToAnOutcome(t *testing.T) {
 	runOutcomeMode(strings.NewReader(`{"tool_name":"Edit","tool_input":{"file_path":` + jsonQuote(file) + `}}`))
 	if after := countDecisionLogLines(t); after != before {
 		t.Errorf("an outcome was recorded against a deny: %v", readLastDecisionLog(t))
+	}
+}
+
+// cursorPayload is payload as Cursor sends it through its Claude Code hook
+// import (#543): the same shape plus cursor_version, which Claude Code never
+// sends. Captured live from cursor-agent 2026.10.22.
+func cursorPayload(t *testing.T, tool, filePath, content string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload(t, tool, filePath, "", content, nil)), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["cursor_version"] = "2026.10.22-27dcf5f"
+	m["hook_event_name"] = "preToolUse"
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hookHostCursor = false })
+	return string(b)
+}
+
+const halluSrc = "package m\n\nfunc F() { HallucinatedFn() }\n"
+
+func halluRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	return filepath.Join(repoRoot, "a.go")
+}
+
+// Cursor does not enforce ask for preToolUse, so with no posture set the guard
+// denies there, and says why without naming a variable the user never set.
+func TestPosture_CursorDefaultsToDeny(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	_, raw, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	assertDeny(t, d, raw)
+	if !strings.Contains(d.Hook.PermissionReason, cursorDenyPrefix) || strings.Contains(d.Hook.PermissionReason, envDenyPrefix) {
+		t.Errorf("Cursor default deny names the wrong cause:\n%s", d.Hook.PermissionReason)
+	}
+	if !strings.Contains(d.Hook.PermissionReason, "HallucinatedFn") {
+		t.Errorf("deny reason lost the finding:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+// An explicit posture wins over the Cursor default, either way.
+func TestPosture_CursorExplicitPostureWins(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "ask")
+	_, _, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	if d.Hook.PermissionDec != "ask" {
+		t.Errorf("explicit ask under Cursor = %q, want ask", d.Hook.PermissionDec)
+	}
+	t.Setenv("RUNECHO_GUARD_POSTURE", "deny")
+	_, raw, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	assertDeny(t, d, raw)
+	if !strings.Contains(d.Hook.PermissionReason, envDenyPrefix) {
+		t.Errorf("explicit deny under Cursor does not name the variable:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+// The Cursor flag belongs to one fire: a Claude Code payload after it asks.
+func TestPosture_CursorFlagResetsPerFire(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	_, _, d := runHook(t, payload(t, "Write", halluRepo(t), "", halluSrc, nil))
+	if d.Hook.PermissionDec != "ask" {
+		t.Errorf("Claude Code fire after a Cursor fire = %q, want ask", d.Hook.PermissionDec)
+	}
+	runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	runHook(t, "not json")
+	if hookHostCursor {
+		t.Error("a parse-fail fire kept the previous fire's Cursor flag")
+	}
+}
+
+// A typo falls back to the host's default: deny under Cursor, ask elsewhere.
+func TestPosture_CursorTypoFallsBackToDeny(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "block")
+	hookHostCursor = true
+	t.Cleanup(func() { hookHostCursor = false })
+	if p, cd := postureSetting(); p != "deny" || !cd {
+		t.Errorf("postureSetting() under Cursor with a typo = %q, %v; want deny, true", p, cd)
 	}
 }

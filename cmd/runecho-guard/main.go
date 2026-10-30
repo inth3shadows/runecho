@@ -773,8 +773,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		AgentID        string `json:"agent_id"`
 		// ToolUseID identifies the tool call (#467, decisionRecord.Call).
 		ToolUseID string `json:"tool_use_id"`
-		ToolName  string `json:"tool_name"`
-		ToolInput struct {
+		// CursorVersion is set only when Cursor runs this hook through its
+		// Claude Code import (#543); it switches the default posture to deny.
+		CursorVersion string `json:"cursor_version"`
+		ToolName      string `json:"tool_name"`
+		ToolInput     struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"` // Edit tool (E1 dangling-refs)
 			NewString string   `json:"new_string"` // Edit tool
@@ -785,6 +788,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	setDecisionSession("")
 	setDecisionModel("", "")
 	setDecisionCall("")
+	hookHostCursor = false
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
@@ -793,6 +797,7 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	setDecisionSession(payload.SessionID)
 	setDecisionModel(payload.TranscriptPath, payload.AgentID)
 	setDecisionCall(payload.ToolUseID)
+	hookHostCursor = payload.CursorVersion != ""
 
 	// One value for the tool call, so the checks below and the extracted phases
 	// read the same five fields by name instead of re-spelling the payload path.
@@ -1737,20 +1742,44 @@ func hookAsk(out io.Writer, reason string) { hookAskContext(out, reason, "") }
 //
 // Any other non-empty value is a typo that would silently run the deny arm as
 // the control, so it is reported on stderr once per process.
+//
+// Under Cursor (#543) the default is deny instead: Cursor runs this hook
+// through its Claude Code import but does not enforce "ask" for preToolUse, so
+// an ask is a silent pass there (verified live with cursor-agent 2026.10.22).
+// An explicit ask or deny still wins.
 func guardPosture() string {
+	p, _ := postureSetting()
+	return p
+}
+
+// postureSetting is guardPosture plus whether the value came from the Cursor
+// default rather than RUNECHO_GUARD_POSTURE, so the deny remedy can say why
+// the call was blocked (denyPrefix).
+func postureSetting() (posture string, cursorDefault bool) {
 	v := strings.TrimSpace(os.Getenv("RUNECHO_GUARD_POSTURE"))
 	switch {
 	case strings.EqualFold(v, "deny"):
-		return "deny"
-	case v != "" && !strings.EqualFold(v, "ask"):
+		return "deny", false
+	case strings.EqualFold(v, "ask"):
+		return "ask", false
+	}
+	def := "ask"
+	if hookHostCursor {
+		def = "deny"
+	}
+	if v != "" {
 		postureWarnOnce.Do(func() {
-			warnf("RUNECHO_GUARD_POSTURE=%q is not ask or deny — using ask", v)
+			warnf("RUNECHO_GUARD_POSTURE=%q is not ask or deny — using %s", v, def)
 		})
 	}
-	return "ask"
+	return def, hookHostCursor
 }
 
 var postureWarnOnce sync.Once
+
+// hookHostCursor is true while runHookMode handles a payload carrying
+// cursor_version, a field Claude Code never sends (#543). Reset on every fire.
+var hookHostCursor bool
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }

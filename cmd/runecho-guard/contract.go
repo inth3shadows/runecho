@@ -101,7 +101,7 @@ func (cw *contractWarning) section() string {
 		// could drop the user's guardrail through Bash without the user ever
 		// seeing a prompt (#540 review). Changing the scope stays the user's call.
 		fmt.Fprintf(&sb, "%s Keep this edit inside the scope declared in %s. Only the user can change that scope; do not edit or deactivate the contract.\n",
-			denyPrefix, cw.ContractPath)
+			denyPrefix(), cw.ContractPath)
 		return sb.String()
 	}
 	sb.WriteString("Approve if the edit is legitimate — an out-of-scope edit often is.")

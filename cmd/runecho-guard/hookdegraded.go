@@ -18,6 +18,9 @@ type hookEdit struct {
 	OldString string // Edit
 	Content   string // Write
 	Edits     []editOp
+	// CursorWrite: this Edit was built from a Cursor whole-file Write
+	// (cursorWriteAsEdit, #543), so OldString is text already on disk.
+	CursorWrite bool
 }
 
 // answerDegradedStore handles every case where the symbol index could not be

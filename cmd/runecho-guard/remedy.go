@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // remedy.go — naming only the escape hatches that can actually work (#267).
 //
@@ -135,18 +138,37 @@ func precommitRemedyLine(f firedChecks) string {
 }
 
 // denyPrefix opens every deny remedy (#528). Under Cursor's default deny
-// (#543) it names that cause instead of a variable the user never set.
+// (#543) it names that cause instead of a variable the user never set, and
+// names an ignored RUNECHO_GUARD_POSTURE value rather than hiding it.
 func denyPrefix() string {
-	if _, cursorDefault := postureSetting(); cursorDefault {
+	st := currentPosture()
+	switch {
+	case !st.cursorDefault:
+		return envDenyPrefix
+	case st.invalid != "":
+		return fmt.Sprintf("[runecho-guard] Blocked (Cursor does not enforce ask, so the guard denies; RUNECHO_GUARD_POSTURE=%q is not ask or deny).", st.invalid)
+	default:
 		return cursorDenyPrefix
 	}
-	return envDenyPrefix
 }
 
 const (
 	envDenyPrefix    = "[runecho-guard] Blocked (RUNECHO_GUARD_POSTURE=deny)."
 	cursorDenyPrefix = "[runecho-guard] Blocked (Cursor does not enforce ask, so the guard denies)."
 )
+
+// cursorDenyWayOut closes a Cursor-default deny. The user never opted into
+// deny, and Cursor shows them the reason too, so it names their way out; the
+// model is told not to take it, or to rewrite working code to pass. As in
+// askTrailer (#267), .runechoguardignore is named only when the check it
+// reaches, the unresolved-symbol one, fired.
+func cursorDenyWayOut(f firedChecks) string {
+	out := "If a flagged reference is correct (dynamic, generated, or outside the index), do not rewrite working code to get past this: stop and tell the user. Only the user may turn blocking off (RUNECHO_GUARD_POSTURE=ask)"
+	if f.Violations {
+		out += " or silence an unresolved name (.runechoguardignore)"
+	}
+	return out + "."
+}
 
 // denyTrailer is askTrailer under RUNECHO_GUARD_POSTURE=deny. The model, not a
 // user, reads it and it cannot approve the call, so it gets one remedy per kind
@@ -182,6 +204,9 @@ func denyTrailer(f firedChecks) string {
 	}
 	if len(parts) == 0 {
 		parts = append(parts, "Fix the findings above and retry.")
+	}
+	if currentPosture().cursorDefault {
+		parts = append(parts, cursorDenyWayOut(f))
 	}
 	return denyPrefix() + " " + strings.Join(parts, " ")
 }

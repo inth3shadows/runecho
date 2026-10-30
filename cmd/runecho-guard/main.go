@@ -77,6 +77,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -775,8 +776,9 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		ToolUseID string `json:"tool_use_id"`
 		// CursorVersion is set only when Cursor runs this hook through its
 		// Claude Code import (#543); it switches the default posture to deny.
-		CursorVersion string `json:"cursor_version"`
-		ToolName      string `json:"tool_name"`
+		// Raw, so an unexpected type cannot fail the whole decode.
+		CursorVersion json.RawMessage `json:"cursor_version"`
+		ToolName      string          `json:"tool_name"`
 		ToolInput     struct {
 			FilePath  string   `json:"file_path"`
 			OldString string   `json:"old_string"` // Edit tool (E1 dangling-refs)
@@ -788,7 +790,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	setDecisionSession("")
 	setDecisionModel("", "")
 	setDecisionCall("")
-	hookHostCursor = false
+	hookPosture.Store(nil)
+	defer hookPosture.Store(nil)
 	if err := json.NewDecoder(in).Decode(&payload); err != nil {
 		hookDefer()
 		logDecision(decisionRecord{Mode: "hook", Decision: "defer", Reason: "parse-fail"})
@@ -797,7 +800,8 @@ func runHookMode(in io.Reader, out io.Writer) int {
 	setDecisionSession(payload.SessionID)
 	setDecisionModel(payload.TranscriptPath, payload.AgentID)
 	setDecisionCall(payload.ToolUseID)
-	hookHostCursor = payload.CursorVersion != ""
+	cursor := isCursorPayload(payload.CursorVersion)
+	setHookPosture(cursor)
 
 	// One value for the tool call, so the checks below and the extracted phases
 	// read the same five fields by name instead of re-spelling the payload path.
@@ -807,6 +811,11 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		OldString: payload.ToolInput.OldString,
 		Content:   payload.ToolInput.Content,
 		Edits:     payload.ToolInput.Edits,
+	}
+	if cursor && edit.ToolName == "Write" {
+		if o, n, ok := cursorWriteAsEdit(payload.ToolInput.FilePath, edit.Content); ok {
+			edit = hookEdit{ToolName: "Edit", OldString: o, NewString: n, CursorWrite: true}
+		}
 	}
 	return renderHookDecision(out, verifyEdit(edit, payload.ToolInput.FilePath, payload.SessionID))
 }
@@ -1705,10 +1714,13 @@ func hookDeferContext(out io.Writer, ctx string) {
 // env-var/ignorefile override — which is what keeps the user reading the reason
 // instead of training a reflexive bypass. The guard still never auto-allows.
 //
-// Posture note: this is the soft posture for every language. The plan's graduation
-// rule (see runecho-guard-fp-precision-and-p5.md) is to move a language to a hard
-// "deny" only after it has fired correctly ~20 times with zero false blocks in live
-// use, reverting to "ask" on any confirmed false block.
+// Posture note: under Claude Code this is the soft posture for every language. The
+// plan's graduation rule (see runecho-guard-fp-precision-and-p5.md) is to move a
+// language to a hard "deny" only after it has fired correctly ~20 times with zero
+// false blocks in live use, reverting to "ask" on any confirmed false block. Two
+// exceptions skip graduation: RUNECHO_GUARD_POSTURE=deny (#528), and Cursor
+// (#543), which does not enforce ask, so there deny is the only posture that does
+// anything (guardPosture).
 // strictStoreDegradedAdvisory is the strict-mode notice that this edit ran with
 // symbol validation off. Shared because it is emitted from two shapes now — as a
 // standalone defer context, and as additionalContext alongside a call-shape ask
@@ -1747,39 +1759,59 @@ func hookAsk(out io.Writer, reason string) { hookAskContext(out, reason, "") }
 // through its Claude Code import but does not enforce "ask" for preToolUse, so
 // an ask is a silent pass there (verified live with cursor-agent 2026.10.22).
 // An explicit ask or deny still wins.
-func guardPosture() string {
-	p, _ := postureSetting()
-	return p
+func guardPosture() string { return currentPosture().posture }
+
+// postureState is the posture a hook fire runs under, resolved once per fire
+// (setHookPosture) so the emitted decision, the reason's trailer and the
+// logged record cannot disagree.
+type postureState struct {
+	posture string
+	// cursor: the payload came from Cursor (it carried cursor_version).
+	cursor bool
+	// cursorDefault: posture is Cursor's default, not RUNECHO_GUARD_POSTURE.
+	cursorDefault bool
+	// invalid is a RUNECHO_GUARD_POSTURE value that is neither ask nor deny.
+	invalid string
 }
 
-// postureSetting is guardPosture plus whether the value came from the Cursor
-// default rather than RUNECHO_GUARD_POSTURE, so the deny remedy can say why
-// the call was blocked (denyPrefix).
-func postureSetting() (posture string, cursorDefault bool) {
+func resolvePosture(cursor bool) postureState {
 	v := strings.TrimSpace(os.Getenv("RUNECHO_GUARD_POSTURE"))
 	switch {
 	case strings.EqualFold(v, "deny"):
-		return "deny", false
+		return postureState{posture: "deny", cursor: cursor}
 	case strings.EqualFold(v, "ask"):
-		return "ask", false
+		return postureState{posture: "ask", cursor: cursor}
 	}
-	def := "ask"
-	if hookHostCursor {
-		def = "deny"
+	st := postureState{posture: "ask", cursor: cursor, cursorDefault: cursor, invalid: v}
+	if cursor {
+		st.posture = "deny"
 	}
 	if v != "" {
 		postureWarnOnce.Do(func() {
-			warnf("RUNECHO_GUARD_POSTURE=%q is not ask or deny — using %s", v, def)
+			warnf("RUNECHO_GUARD_POSTURE=%q is not ask or deny — using %s", v, st.posture)
 		})
 	}
-	return def, hookHostCursor
+	return st
 }
 
 var postureWarnOnce sync.Once
 
-// hookHostCursor is true while runHookMode handles a payload carrying
-// cursor_version, a field Claude Code never sends (#543). Reset on every fire.
-var hookHostCursor bool
+// hookPosture is the current fire's postureState; nil outside runHookMode,
+// where currentPosture reads the environment as a non-Cursor caller. Atomic for
+// decisionSession's reason: a timeout path may log from another goroutine.
+var hookPosture atomic.Pointer[postureState]
+
+func setHookPosture(cursor bool) {
+	st := resolvePosture(cursor)
+	hookPosture.Store(&st)
+}
+
+func currentPosture() postureState {
+	if st := hookPosture.Load(); st != nil {
+		return *st
+	}
+	return resolvePosture(false)
+}
 
 // runechoDir is the package-local alias to the shared store helper.
 func runechoDir() (string, error) { return store.RunechoDir() }

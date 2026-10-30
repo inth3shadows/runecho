@@ -19,7 +19,9 @@ func assertDeny(t *testing.T, d decision, raw string) map[string]any {
 	if strings.Contains(d.Hook.PermissionReason, "Approve if") {
 		t.Errorf("deny reason still offers approval:\n%s", d.Hook.PermissionReason)
 	}
-	if !strings.Contains(d.Hook.PermissionReason, denyPrefix()) {
+	// Either prefix: the fire's posture is cleared once runHook returns, so
+	// denyPrefix() here would always name the environment variable.
+	if !strings.Contains(d.Hook.PermissionReason, "[runecho-guard] Blocked (") {
 		t.Errorf("deny reason carries no deny remedy:\n%s", d.Hook.PermissionReason)
 	}
 	rec := readLastDecisionLog(t)
@@ -184,17 +186,21 @@ func TestPosture_DenyIsNeverJoinedToAnOutcome(t *testing.T) {
 // sends. Captured live from cursor-agent 2026.10.22.
 func cursorPayload(t *testing.T, tool, filePath, content string) string {
 	t.Helper()
+	return withField(t, payload(t, tool, filePath, "", content, nil), "cursor_version", "2026.10.22-27dcf5f")
+}
+
+func withField(t *testing.T, raw, key string, v any) string {
+	t.Helper()
 	var m map[string]any
-	if err := json.Unmarshal([]byte(payload(t, tool, filePath, "", content, nil)), &m); err != nil {
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatal(err)
 	}
-	m["cursor_version"] = "2026.10.22-27dcf5f"
+	m[key] = v
 	m["hook_event_name"] = "preToolUse"
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { hookHostCursor = false })
 	return string(b)
 }
 
@@ -209,55 +215,169 @@ func halluRepo(t *testing.T) string {
 }
 
 // Cursor does not enforce ask for preToolUse, so with no posture set the guard
-// denies there, and says why without naming a variable the user never set.
+// denies there, says why without naming a variable the user never set, tells
+// the model not to work around a false positive, names the user's way out,
+// and stamps the record so these denies are not mistaken for chosen ones.
 func TestPosture_CursorDefaultsToDeny(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_POSTURE", "")
 	_, raw, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
-	assertDeny(t, d, raw)
-	if !strings.Contains(d.Hook.PermissionReason, cursorDenyPrefix) || strings.Contains(d.Hook.PermissionReason, envDenyPrefix) {
-		t.Errorf("Cursor default deny names the wrong cause:\n%s", d.Hook.PermissionReason)
+	rec := assertDeny(t, d, raw)
+	r := d.Hook.PermissionReason
+	if !strings.Contains(r, cursorDenyPrefix) || strings.Contains(r, envDenyPrefix) {
+		t.Errorf("Cursor default deny names the wrong cause:\n%s", r)
 	}
-	if !strings.Contains(d.Hook.PermissionReason, "HallucinatedFn") {
-		t.Errorf("deny reason lost the finding:\n%s", d.Hook.PermissionReason)
+	for _, want := range []string{"HallucinatedFn", "do not rewrite working code", "RUNECHO_GUARD_POSTURE=ask", ".runechoguardignore"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("Cursor deny reason lacks %q:\n%s", want, r)
+		}
+	}
+	if rec["host"] != "cursor" {
+		t.Errorf("record host = %v, want cursor", rec["host"])
 	}
 }
 
-// An explicit posture wins over the Cursor default, either way.
+// .runechoguardignore reaches only the unresolved-symbol check (#267), so the
+// way out names it only when that check fired.
+func TestPosture_CursorWayOutNamesIgnoreOnlyForViolations(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	hookPosture.Store(&postureState{posture: "deny", cursor: true, cursorDefault: true})
+	t.Cleanup(func() { hookPosture.Store(nil) })
+	if got := denyTrailer(firedChecks{Dropped: true}); strings.Contains(got, ".runechoguardignore") || !strings.Contains(got, "RUNECHO_GUARD_POSTURE=ask") {
+		t.Errorf("dropped-import Cursor deny trailer = %q", got)
+	}
+}
+
+// An explicit posture wins over the Cursor default, either way, and an
+// explicit deny reads exactly as it does under Claude Code.
 func TestPosture_CursorExplicitPostureWins(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_POSTURE", "ask")
 	_, _, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
 	if d.Hook.PermissionDec != "ask" {
 		t.Errorf("explicit ask under Cursor = %q, want ask", d.Hook.PermissionDec)
 	}
+	if rec := readLastDecisionLog(t); rec["decision"] != "ask" || rec["host"] != "cursor" {
+		t.Errorf("explicit-ask Cursor record = %v", rec)
+	}
 	t.Setenv("RUNECHO_GUARD_POSTURE", "deny")
 	_, raw, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
 	assertDeny(t, d, raw)
-	if !strings.Contains(d.Hook.PermissionReason, envDenyPrefix) {
-		t.Errorf("explicit deny under Cursor does not name the variable:\n%s", d.Hook.PermissionReason)
+	if r := d.Hook.PermissionReason; !strings.Contains(r, envDenyPrefix) || strings.Contains(r, "do not rewrite working code") {
+		t.Errorf("explicit deny under Cursor differs from Claude Code's:\n%s", r)
 	}
 }
 
-// The Cursor flag belongs to one fire: a Claude Code payload after it asks.
+// The posture belongs to one fire: cleared when it returns, so a Claude Code
+// payload after a Cursor one asks and carries no host, and a parse failure
+// never runs under the previous fire's posture.
 func TestPosture_CursorFlagResetsPerFire(t *testing.T) {
 	t.Setenv("RUNECHO_GUARD_POSTURE", "")
 	runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	if hookPosture.Load() != nil {
+		t.Fatal("the fire's posture outlived runHookMode")
+	}
 	_, _, d := runHook(t, payload(t, "Write", halluRepo(t), "", halluSrc, nil))
 	if d.Hook.PermissionDec != "ask" {
 		t.Errorf("Claude Code fire after a Cursor fire = %q, want ask", d.Hook.PermissionDec)
 	}
-	runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
-	runHook(t, "not json")
-	if hookHostCursor {
-		t.Error("a parse-fail fire kept the previous fire's Cursor flag")
+	if rec := readLastDecisionLog(t); rec["host"] != nil {
+		t.Errorf("Claude Code record carries host %v", rec["host"])
 	}
 }
 
-// A typo falls back to the host's default: deny under Cursor, ask elsewhere.
-func TestPosture_CursorTypoFallsBackToDeny(t *testing.T) {
-	t.Setenv("RUNECHO_GUARD_POSTURE", "block")
-	hookHostCursor = true
-	t.Cleanup(func() { hookHostCursor = false })
-	if p, cd := postureSetting(); p != "deny" || !cd {
-		t.Errorf("postureSetting() under Cursor with a typo = %q, %v; want deny, true", p, cd)
+// A typo falls back to Cursor's default deny, and the reason names the
+// ignored value instead of implying the user set nothing.
+func TestPosture_CursorTypoNamedInReason(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "off")
+	_, raw, d := runHook(t, cursorPayload(t, "Write", halluRepo(t), halluSrc))
+	assertDeny(t, d, raw)
+	if !strings.Contains(d.Hook.PermissionReason, `RUNECHO_GUARD_POSTURE="off" is not ask or deny`) {
+		t.Errorf("typo under Cursor is hidden:\n%s", d.Hook.PermissionReason)
+	}
+}
+
+// A cursor_version of an unexpected type still marks a Cursor payload instead
+// of failing the decode, which would skip the guard entirely.
+func TestPosture_CursorVersionNonString(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	raw0 := withField(t, payload(t, "Write", halluRepo(t), "", halluSrc, nil), "cursor_version", 2026)
+	_, raw, d := runHook(t, raw0)
+	assertDeny(t, d, raw)
+	for _, v := range []string{``, `null`, `""`, ` "" `} {
+		if isCursorPayload(json.RawMessage(v)) {
+			t.Errorf("isCursorPayload(%q) = true", v)
+		}
+	}
+}
+
+// Cursor sends every agent edit as a whole-file Write. A name already in the
+// file that the guard cannot resolve must not block an edit elsewhere in it,
+// or under the Cursor default no later edit to that file could land (#543 F1).
+// The same Write from Claude Code is still checked whole, as before.
+func TestPosture_CursorWriteChecksOnlyChangedLines(t *testing.T) {
+	t.Setenv("RUNECHO_GUARD_POSTURE", "")
+	path := halluRepo(t)
+	const onDisk = "package m\n\nfunc F() { LegacyDynamic() }\n\nfunc G() {}\n"
+	if err := os.WriteFile(path, []byte(onDisk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := strings.Replace(onDisk, "func G() {}", "func G() { _ = 1 }", 1)
+	// An insertion right after the pre-existing line: its unique context is
+	// that line, which must not be flagged (live-run finding).
+	nextTo := strings.Replace(onDisk, "{ LegacyDynamic() }\n", "{ LegacyDynamic() }\n\nvar _ = 2\n", 1)
+	if _, raw, d := runHook(t, cursorPayload(t, "Write", path, nextTo)); d.Hook.PermissionDec != "" {
+		t.Errorf("an insertion next to a pre-existing name was blocked:\n%s", raw)
+	}
+	if _, raw, d := runHook(t, cursorPayload(t, "Write", path, unrelated)); d.Hook.PermissionDec != "" {
+		t.Errorf("an unrelated Cursor edit was blocked by a pre-existing name:\n%s", raw)
+	}
+	added := strings.Replace(onDisk, "func G() {}", "func G() { HallucinatedNew() }", 1)
+	_, raw, d := runHook(t, cursorPayload(t, "Write", path, added))
+	assertDeny(t, d, raw)
+	if r := d.Hook.PermissionReason; !strings.Contains(r, "HallucinatedNew") || strings.Contains(r, "LegacyDynamic") {
+		t.Errorf("Cursor edit flagged the wrong names:\n%s", r)
+	}
+	if _, _, d := runHook(t, payload(t, "Write", path, "", unrelated, nil)); !strings.Contains(d.Hook.PermissionReason, "LegacyDynamic") {
+		t.Errorf("a Claude Code Write is no longer checked whole: %q", d.Hook.PermissionReason)
+	}
+}
+
+func TestCursorWriteAsEdit(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		old, content string
+		ok           bool
+	}{
+		"replace":    {"a\nb\nc\n", "a\nB\nc\n", true},
+		"insert":     {"a\nc\n", "a\nb\nc\n", true},
+		"insert-top": {"a\n", "z\na\n", true},
+		"append-eof": {"a\nb", "a\nb\nc", true},
+		"delete":     {"a\nb\nc\n", "a\nc\n", true},
+		"repeated":   {"x\nx\nx\n", "x\nx\ny\nx\n", true},
+		"all-new":    {"a\n", "b\n", true},
+		"to-empty":   {"a\n", "", true},
+		"unchanged":  {"a\n", "a\n", false},
+		"from-empty": {"", "a\n", false},
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(tc.old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		o, n, ok := cursorWriteAsEdit(path, tc.content)
+		if ok != tc.ok {
+			t.Errorf("%s: ok = %v, want %v", name, ok, tc.ok)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if strings.Count(tc.old, o) != 1 || strings.Replace(tc.old, o, n, 1) != tc.content {
+			t.Errorf("%s: Edit{%q -> %q} does not reproduce the Write", name, o, n)
+		}
+	}
+	if _, _, ok := cursorWriteAsEdit(filepath.Join(dir, "missing"), "a\n"); ok {
+		t.Error("a Write creating a file became an Edit")
+	}
+	if _, _, ok := cursorWriteAsEdit(dir, "a\n"); ok {
+		t.Error("a directory became an Edit")
 	}
 }

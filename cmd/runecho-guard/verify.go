@@ -262,6 +262,18 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		}
 	}
 
+	// A Cursor Write rebuilt as an Edit (#543) carries unchanged lines in
+	// new_string: the context that makes old_string unique, which can be the
+	// very line holding a name the guard cannot resolve. A name already in the
+	// replaced text is not one this edit introduces, so it is treated as known,
+	// as learned-allow does above; otherwise that line would block every edit
+	// next to it under Cursor's default deny.
+	if edit.CursorWrite {
+		for _, id := range identRE.FindAllString(edit.OldString, -1) {
+			symbols[id] = struct{}{}
+		}
+	}
+
 	// newLines is the added text as AddedLines — gap-separated per edit for a
 	// MultiEdit so stateful scanners reset open-string state at each boundary.
 	// Shared by the additive check and the dropped-import check below so both see

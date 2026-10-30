@@ -929,7 +929,7 @@ func FormatFP(s FPStats) string {
 		}
 	}
 	if s.Window.Denied > 0 {
-		fmt.Fprintf(&b, "         + %d denied (RUNECHO_GUARD_POSTURE=deny; blocked, not rateable)\n", s.Window.Denied)
+		fmt.Fprintf(&b, "         + %d denied (RUNECHO_GUARD_POSTURE=deny or Cursor's default; blocked, not rateable)\n", s.Window.Denied)
 	}
 
 	// Total, not Asks: an unrated ask is still an ask, and a window that consists

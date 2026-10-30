@@ -234,6 +234,10 @@ type decisionRecord struct {
 	// pre-commit records, on a payload without tool_use_id, on parse-fail and
 	// pre-decode timeout records, and on every record from an older guard.
 	Call string `json:"call,omitempty"`
+	// Host is "cursor" on a hook record written while serving a Cursor
+	// payload (#543), so its default denies can be told apart from a chosen
+	// RUNECHO_GUARD_POSTURE=deny. Absent for Claude Code and pre-commit.
+	Host string `json:"host,omitempty"`
 }
 
 // decisionSession is the session tag logDecision stamps on records that do not
@@ -317,8 +321,14 @@ func logDecision(rec decisionRecord) {
 	// Under RUNECHO_GUARD_POSTURE=deny the hook emitted deny, not ask (#528), so
 	// the record says so: a deny has no PostToolUse outcome, and the outcome
 	// join and the reports treat it differently. One funnel, as above.
-	if rec.Mode == "hook" && rec.Decision == "ask" && guardPosture() == "deny" {
-		rec.Decision = "deny"
+	if rec.Mode == "hook" {
+		st := currentPosture()
+		if rec.Decision == "ask" && st.posture == "deny" {
+			rec.Decision = "deny"
+		}
+		if st.cursor {
+			rec.Host = "cursor"
+		}
 	}
 	if rec.Mode == "hook" && (rec.Decision == "ask" || rec.Decision == "deny") && rec.ClaimSymbols == nil {
 		rec.ClaimSymbols = map[string][]string{}

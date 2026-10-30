@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.88.0] — 2026-10-30
+
+### Changed
+- guard: deny by default under Cursor, which does not enforce ask (#543) (#544)
+
 ## [0.87.0] — 2026-10-28
 
 ### Changed

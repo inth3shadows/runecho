@@ -127,7 +127,7 @@ is fully finished.
 | `cmd/runecho-ir/contract.go` | `contract list\|show\|activate\|deactivate\|check` | `contract`, `snapshot` |
 | `cmd/runecho-ir/fpreport.go` | `fpreport` — approval rate (see the caveat in USAGE.md; approvals carry no variance on the reference log) | `guardstats` |
 | `cmd/runecho-ir/fpaudit.go` | `fpaudit` — three-way verdict (fp / premature / stands) judged against git history, no human in the loop | `guardstats` |
-| `cmd/runecho-ir/doctor.go`, `internal/doctor/` | `doctor` — "is this install actually wired and answering?": binaries on PATH vs source tag, Claude Code hook wiring, git-hook-body-vs-resolved-binary, enrollment/snapshot staleness, store health + recent activity, active `RUNECHO_GUARD_*` flags. Read-only (#331) | `hookwiring`, `snapshot`, `version` |
+| `cmd/runecho-ir/doctor.go`, `internal/doctor/` | `doctor` — "is this install actually wired and answering?": binaries on PATH vs source tag, Claude Code hook wiring, git-hook-body-vs-resolved-binary, enrollment/snapshot staleness, store health + recent activity, whether the periodic job actually runs (freshen log age; launchd state on macOS, #553), active `RUNECHO_GUARD_*` flags. Read-only (#331) | `hookwiring`, `snapshot`, `version` |
 | `internal/hookwiring/contract.go` | The `PreToolUse`/`PostToolUse` hook contract table + JSON-channel check, shared by `hookwiring_test.go` and `doctor` so both read one table instead of two | — |
 | `cmd/runecho-ir/mapcmd.go` | `map` — symbol inventory / `locate`'s CLI counterpart | `ir` |
 | `cmd/runecho-mcp/main.go` | Opens the store, registers the oracle, serves stdio | `mcp`, `snapshot` |
@@ -695,6 +695,22 @@ works for interactive runs). `runecho-ir doctor` reports whether the schedule
 freshens, without warning — it only applies to from-source installs. An existing
 schedule gains the entry by re-running `install --periodic` from the checkout;
 re-running it elsewhere keeps an existing entry.
+
+An installed schedule is not a running one (#553): on a Mac both LaunchAgents sat
+in launchd `spawn failed` (last exit code `78: EX_CONFIG`) for nine days while
+every signal read healthy. So when a freshen entry is installed, `doctor` reads
+the newest `freshen:` line in the log that entry writes to (the cron `>>` target
+or the plist's `StandardOutPath`; only the last 1 MiB, since the log is not
+rotated). It reports a `periodic freshen` **warning** when that line is more than
+3 hours old (two missed hourly ticks), missing, or dated more than 5 minutes in
+the future. Right after `install --periodic` the first line can take up to an
+hour to appear. On macOS it also asks launchd about each runecho LaunchAgent
+(`launchctl print gui/<uid>/<label>`, read-only). A `launchd <label>` **failure**
+means spawn failed, the job is not loaded, or its last exit code is one runecho-ir
+never returns (it returns 0–2; `repo reindex --all` exits 2 on any tick that meets
+a deleted enrolled repo, so 2 is not a dead job). The remedy is
+`launchctl bootout gui/$(id -u)/<label>` then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
 
 The installed hourly job runs `repo reindex --all --prune`, which keeps the
 store bounded on the same schedule that fills it. **Upgrading the binary does

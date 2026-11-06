@@ -266,6 +266,9 @@ func (ir *IR) Save(path string) error {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("failed to create IR dir: %w", err)
 		}
+		if filepath.Base(dir) == ".ai" {
+			ensureSelfIgnore(dir)
+		}
 	}
 
 	data, err := json.Marshal(ir)
@@ -294,6 +297,24 @@ func (ir *IR) Save(path string) error {
 		return fmt.Errorf("failed to save IR file: %w", err)
 	}
 	return nil
+}
+
+// ensureSelfIgnore writes dir/.gitignore containing "*" unless one exists, so
+// git ignores the whole .ai/ directory (the file included) whatever the host
+// repo's ignore config says (#550). Without it, ir.json shows up as untracked,
+// and scanners that read untracked files (gitleaks' generic-api-key on symbol
+// names, Biome) flag it. Applied only to a dir named .ai, so Save to an
+// arbitrary path never ignores a directory the caller owns. Best-effort: an
+// existing file is left alone, and a write failure never fails the Save.
+func ensureSelfIgnore(dir string) {
+	f, err := os.OpenFile(filepath.Join(dir, ".gitignore"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return
+	}
+	_, werr := f.WriteString("*\n")
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		_ = os.Remove(f.Name())
+	}
 }
 
 // maxIRBytes caps the size of an .ai/ir.json Load will read into memory. The IR

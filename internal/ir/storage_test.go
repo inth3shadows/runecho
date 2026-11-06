@@ -3,7 +3,9 @@ package ir
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +153,83 @@ func TestIR_Save_OwnerOnlyPerms(t *testing.T) {
 	if perm := di.Mode().Perm(); perm != 0700 {
 		t.Errorf(".ai dir perm = %o, want 0700", perm)
 	}
+}
+
+// TestIR_Save_SelfIgnoresAIDir pins #550: saving into a .ai/ dir writes a
+// .ai/.gitignore ("*") so git never lists the IR as untracked, regardless of
+// the host repo's ignore config; an existing .gitignore is never overwritten;
+// and a Save to a dir not named .ai writes none.
+func TestIR_Save_SelfIgnoresAIDir(t *testing.T) {
+	empty := &IR{Version: IRVersion, Files: map[string]FileIR{}}
+
+	t.Run("writes star gitignore", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := empty.Save(filepath.Join(dir, ".ai", "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, ".ai", ".gitignore"))
+		if err != nil {
+			t.Fatalf(".ai/.gitignore not written: %v", err)
+		}
+		if string(got) != "*\n" {
+			t.Errorf(".ai/.gitignore = %q, want %q", got, "*\n")
+		}
+	})
+
+	t.Run("keeps existing gitignore", func(t *testing.T) {
+		dir := t.TempDir()
+		ai := filepath.Join(dir, ".ai")
+		if err := os.MkdirAll(ai, 0700); err != nil {
+			t.Fatal(err)
+		}
+		const custom = "ir.json\n"
+		if err := os.WriteFile(filepath.Join(ai, ".gitignore"), []byte(custom), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := empty.Save(filepath.Join(ai, "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, _ := os.ReadFile(filepath.Join(ai, ".gitignore"))
+		if string(got) != custom {
+			t.Errorf("existing .gitignore overwritten: %q, want %q", got, custom)
+		}
+	})
+
+	t.Run("no gitignore outside .ai", func(t *testing.T) {
+		dir := t.TempDir()
+		out := filepath.Join(dir, "out")
+		if err := empty.Save(filepath.Join(out, "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(out, ".gitignore")); !os.IsNotExist(err) {
+			t.Errorf("Save outside .ai wrote a .gitignore (stat err=%v)", err)
+		}
+	})
+
+	t.Run("git lists nothing untracked under .ai", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not on PATH")
+		}
+		dir := t.TempDir()
+		git := func(args ...string) string {
+			t.Helper()
+			cmd := exec.Command("git", append([]string{"-c", "core.excludesFile=" + os.DevNull}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+			return string(out)
+		}
+		git("init", "-q")
+		if err := empty.Save(filepath.Join(dir, ".ai", "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if out := git("ls-files", "--others", "--exclude-standard"); strings.Contains(out, ".ai/") {
+			t.Errorf("git lists .ai/ as untracked:\n%s", out)
+		}
+	})
 }
 
 func TestIR_SaveAndLoad_RoundTrip(t *testing.T) {

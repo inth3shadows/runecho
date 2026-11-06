@@ -40,7 +40,15 @@ Key design decisions:
 - **The oracle never answers from a cache.** `runecho-mcp` and the CLI's
   `snapshot`/`diff`/`verify`/`truth-trail` build a *fresh* IR on every call.
   `.ai/ir.json` is only an incremental working artifact, written/updated by the
-  bare `runecho-ir [root-path]` invocation.
+  bare `runecho-ir [root-path]` invocation. When `IR.Save` creates `.ai/`, it
+  also writes `.ai/.gitignore` (#550). That file lists only runecho's own files,
+  anchored: `/.gitignore`, `/.gitignore.tmp-*`, `/ir.json` and `/ir.json.tmp-*`.
+  So git never shows the IR as untracked, whatever the host repo ignores. This
+  matters because scanners that read untracked files flag it: gitleaks'
+  `generic-api-key` fires on symbol names, and Biome lints it. Anything else a
+  repo keeps in `.ai/` stays visible. An existing `.gitignore` is never
+  overwritten. The file is linked into place only once complete, a symlinked
+  `.ai` is skipped, and any failure leaves the Save unaffected.
 
 ### Example: the `Diff` call trail, drawn by Codeshot
 

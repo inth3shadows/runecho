@@ -329,6 +329,12 @@ new state instead of the old one.
 > records this hook is the only source of. Re-run
 > `install.sh --print-hook-config` for the current snippet.
 >
+> **`.ai/` is ignored for you.** runecho writes its index to `.ai/ir.json` and
+> drops a `.ai/.gitignore` next to it that hides only runecho's own files. You
+> don't need to add `.ai/` to your `.gitignore`, and secret scanners or linters
+> that read untracked files won't trip on the index. Anything else you keep in
+> `.ai/` is still tracked as usual.
+>
 > **First edit in a repo can pause.** If the repo has no `.ai/ir.json` yet, this
 > hook builds the whole index once before returning, which on a large tree can
 > take several seconds (it gives up at 30). It is silent while it works. Every

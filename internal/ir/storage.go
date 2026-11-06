@@ -316,9 +316,11 @@ const selfIgnoreContent = `# Written by runecho: hides runecho's own files from 
 var linkSelfIgnore = os.Link
 
 // ensureSelfIgnore writes dir/.gitignore (selfIgnoreContent) unless one exists,
-// so git never lists runecho's IR as untracked whatever the host repo's ignore
-// config says (#550). Without it, scanners that read untracked files (gitleaks'
-// generic-api-key on symbol names, Biome) flag ir.json.
+// so git does not list runecho's IR as untracked regardless of the host repo's
+// own ignore config (#550), except in the cases below. Without it, scanners
+// that take their file list from git (e.g. gitleaks' generic-api-key on symbol
+// names, via `git ls-files --others`) flag ir.json. Tools that walk the
+// filesystem still read it.
 //
 // Best-effort: every failure is silent and never fails the Save.
 //   - Existing .gitignore: left alone; link refuses to replace it.

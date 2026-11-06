@@ -329,17 +329,27 @@ new state instead of the old one.
 > records this hook is the only source of. Re-run
 > `install.sh --print-hook-config` for the current snippet.
 >
-> **`.ai/` is ignored for you.** runecho writes its index to `.ai/ir.json` and
-> drops a `.ai/.gitignore` next to it that hides only runecho's own files. You
-> don't need to add `.ai/` to your `.gitignore`, and secret scanners or linters
-> that read untracked files won't trip on the index. Anything else you keep in
-> `.ai/` is still tracked as usual.
->
 > **First edit in a repo can pause.** If the repo has no `.ai/ir.json` yet, this
 > hook builds the whole index once before returning, which on a large tree can
 > take several seconds (it gives up at 30). It is silent while it works. Every
 > edit after that is incremental. Run `runecho-ir repo reindex <name>` once after
 > enrolling to pay that cost up front instead.
+>
+> **`.ai/` is ignored for you.** Whatever writes the index (this hook,
+> `repo reindex`, the git hooks), runecho drops a `.ai/.gitignore` next to
+> `.ai/ir.json` that hides only runecho's own files. So you don't need an `.ai/`
+> entry in your own `.gitignore`, and scanners that take their file list from
+> git won't see the index. Anything else you keep in `.ai/` is still tracked.
+>
+> It does not apply in three cases:
+> - **You already have a `.ai/.gitignore`.** runecho never overwrites it; add
+>   `ir.json` to it yourself.
+> - **`.ai` is a symlink.** The ignore file is not written.
+> - **You committed `.ai/ir.json` earlier.** It stays tracked until you run
+>   `git rm --cached .ai/ir.json`.
+>
+> Tools that walk the filesystem instead of asking git, such as `gitleaks dir`,
+> still read the index.
 >
 > If you end up with both wired anyway it is handled, not fatal: Claude Code runs
 > every matching hook, so the recorder fires twice, and the second fire sees the

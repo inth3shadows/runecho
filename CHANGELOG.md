@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.88.2] — 2026-11-06
+
+### Changed
+- doctor: report a periodic job that is installed but not running (#553) (#555)
+
 ## [0.88.1] — 2026-11-06
 
 ### Changed

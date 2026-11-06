@@ -64,6 +64,13 @@ func TestNewestFreshenLine_DropsPartialFirstLineWhenTruncated(t *testing.T) {
 	}
 }
 
+func TestNewestFreshenLine_CRLF(t *testing.T) {
+	_, msg, ok := newestFreshenLine([]byte("2026-11-06T13:30:02Z freshen: hi\r\n"), false)
+	if !ok || msg != "hi" {
+		t.Errorf("CRLF line: got (%q, %v), want (%q, true)", msg, ok, "hi")
+	}
+}
+
 func TestNewestFreshenLine_LastLineWithoutNewline(t *testing.T) {
 	if _, _, ok := newestFreshenLine([]byte(reindexLine+"\n2026-11-06T13:30:02Z freshen: x"), false); !ok {
 		t.Error("a final line with no trailing newline must still be read")
@@ -173,9 +180,16 @@ func TestFreshenLogPath(t *testing.T) {
 				"30 * * * * '/b/runecho-ir' freshen '/g/.git' >>'/b/f.log' 2>&1 # runecho", "/b/f.log"},
 		{"cron quoting undone",
 			`30 * * * * '/b/runecho-ir' freshen '/g/.git' >>'/h/o'\''b\%x/f.log' 2>&1 # runecho`, "/h/o'b%x/f.log"},
-		{"bare cron word", "30 * * * * /b/runecho-ir freshen /g/.git >>/tmp/r.log 2>&1 # runecho", "/tmp/r.log"},
+		{"bare redirect word", "30 * * * * '/b/runecho-ir' freshen '/g/.git' >>/tmp/r.log 2>&1 # runecho", "/tmp/r.log"},
 		{"freshen plist after reindex plist", reindexPlist + "\n" + freshenPlistText, "/b/a&b.log"},
-		{"no redirect", "30 * * * * /b/runecho-ir freshen /g/.git # runecho", ""},
+		{"no redirect", "30 * * * * '/b/runecho-ir' freshen '/g/.git' # runecho", ""},
+		// F4: a `>>` inside the quoted gitDir or binary is not the redirect.
+		{">> in gitDir", `30 * * * * '/b/runecho-ir' freshen '/g>>x/.git' >>'/h/r.log' 2>&1 # runecho`, "/h/r.log"},
+		{">> in binary", `30 * * * * '/b>>/ir' freshen '/g/.git' >>'/h/r.log' 2>&1 # runecho`, "/h/r.log"},
+		// F5: " freshen " inside the reindex line's quoted binary path does not
+		// make it the freshen line.
+		{"freshen in a path", "0 * * * * '/opt/my freshen tools/runecho-ir' repo reindex --all --prune >>'/a/r.log' 2>&1 # runecho\n" +
+			"30 * * * * '/opt/my freshen tools/runecho-ir' freshen '/g/.git' >>'/b/f.log' 2>&1 # runecho", "/b/f.log"},
 	}
 	for _, c := range cases {
 		if got := FreshenLogPath(c.entry); got != c.want {
@@ -251,7 +265,10 @@ func launchctlFixture(label string, topLevel ...string) string {
 	return b.String()
 }
 
-const freshenLabel = "com.runecho.freshen"
+const (
+	freshenLabel = "com.runecho.freshen"
+	reindexLabel = "com.runecho.reindex"
+)
 
 // The #553 incident, as `launchctl print` reported it during the outage.
 func TestClassifyLaunchAgent_SpawnFailedIsFail(t *testing.T) {
@@ -271,21 +288,58 @@ func TestClassifyLaunchAgent_SpawnFailedIsFail(t *testing.T) {
 }
 
 func TestClassifyLaunchAgent_LaunchdExitCodeIsFail(t *testing.T) {
-	out := launchctlFixture(freshenLabel, "state = not running", "last exit code = 78: EX_CONFIG")
-	if r := classifyLaunchAgent(freshenLabel, out, nil); r.Status != Fail {
-		t.Errorf("exit 78 without a spawn-failed state: status = %q, want fail", r.Status)
+	for _, label := range []string{reindexLabel, freshenLabel} {
+		out := launchctlFixture(label, "state = not running", "last exit code = 78: EX_CONFIG")
+		r := classifyLaunchAgent(label, out, nil)
+		if r.Status != Fail {
+			t.Errorf("%s exit 78 without a spawn-failed state: status = %q, want fail", label, r.Status)
+		}
+		if !strings.Contains(r.Remedy, "bootstrap") {
+			t.Errorf("%s exit 78: remedy %q should reload the agent", label, r.Remedy)
+		}
 	}
 }
 
 // Exit 1 and 2 are codes runecho-ir returns itself: `repo reindex --all` exits 2
 // on every healthy tick that meets an enrolled repo whose root is gone
-// (cmd/runecho-ir/repo.go runRepoReindexAll), so they must not read as dead.
+// (cmd/runecho-ir/repo.go runRepoReindexAll), so for the reindex agent they
+// must not read as dead. freshen is fail-open and always exits 0.
 func TestClassifyLaunchAgent_HealthyIsOK(t *testing.T) {
-	for _, code := range []string{"0", "(never exited)", "1", "2"} {
-		out := launchctlFixture(freshenLabel, "state = not running", "last exit code = "+code)
-		if r := classifyLaunchAgent(freshenLabel, out, nil); r.Status != OK {
-			t.Errorf("last exit code = %s: status = %q (%s), want ok", code, r.Status, r.Detail)
+	for label, codes := range map[string][]string{
+		reindexLabel: {"0", "(never exited)", "1", "2"},
+		freshenLabel: {"0", "(never exited)"},
+	} {
+		for _, code := range codes {
+			out := launchctlFixture(label, "state = not running", "last exit code = "+code)
+			if r := classifyLaunchAgent(label, out, nil); r.Status != OK {
+				t.Errorf("%s last exit code = %s: status = %q (%s), want ok", label, code, r.Status, r.Detail)
+			}
 		}
+	}
+}
+
+// F1 (#555 review): freshen returns ExitOK on every path, so any nonzero exit
+// means the binary could not run it — e.g. one too old to have the freshen
+// command exits 2 (unknown command) on every tick. bootout/bootstrap cannot
+// fix that, so the remedy must point at rebuilding the binary.
+func TestClassifyLaunchAgent_FreshenNonzeroExitIsFail(t *testing.T) {
+	for _, code := range []string{"1", "2"} {
+		out := launchctlFixture(freshenLabel, "state = not running", "last exit code = "+code)
+		r := classifyLaunchAgent(freshenLabel, out, nil)
+		if r.Status != Fail {
+			t.Errorf("freshen last exit code = %s: status = %q, want fail", code, r.Status)
+		}
+		if !strings.Contains(r.Remedy, "install.sh") {
+			t.Errorf("freshen exit %s: remedy %q should say to rebuild the binary", code, r.Remedy)
+		}
+	}
+}
+
+func TestClassifyLaunchAgent_SpawnFailedWithoutExitLine(t *testing.T) {
+	out := launchctlFixture(freshenLabel, "job state = spawn failed")
+	r := classifyLaunchAgent(freshenLabel, out, nil)
+	if r.Status != Fail || strings.Contains(r.Detail, "last exit code") {
+		t.Errorf("got %q %q, want fail that names no absent exit code", r.Status, r.Detail)
 	}
 }
 
@@ -397,8 +451,88 @@ func TestPeriodicLiveness_NoFreshenEntryReadsNoLog(t *testing.T) {
 
 func TestPeriodicLiveness_FallsBackToDefaultLog(t *testing.T) {
 	f := &fakeProbe{t: t}
-	periodicLiveness("30 * * * * /b/runecho-ir freshen /g/.git # runecho", "crontab", f.probe("linux"))
+	periodicLiveness("30 * * * * '/b/runecho-ir' freshen '/g/.git' # runecho", "crontab", f.probe("linux"))
 	if want := []string{"/default/reindex.log"}; !reflect.DeepEqual(f.tailPaths, want) {
 		t.Errorf("read %v, want the default log %v when the entry names none", f.tailPaths, want)
+	}
+}
+
+func TestRoughAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		0:                              "<1m",
+		20 * time.Second:               "<1m",
+		28 * time.Minute:               "28m",
+		90 * time.Minute:               "1h30m",
+		216*time.Hour + 30*time.Minute: "216h30m",
+	} {
+		if got := roughAge(d); got != want {
+			t.Errorf("roughAge(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+// F8: with no redirect in the entry and no resolvable $RUNECHO_HOME there is no
+// log to read; say so rather than warning about a file named "".
+func TestPeriodicLiveness_NoLocatableLogIsWarn(t *testing.T) {
+	f := &fakeProbe{t: t, noTail: true}
+	p := f.probe("linux")
+	p.defaultLog = ""
+	rs := periodicLiveness("30 * * * * '/b/runecho-ir' freshen '/g/.git' # runecho", "crontab", p)
+	r := find(rs, "periodic freshen")
+	if r == nil || r.Status != Warn || !strings.Contains(r.Detail, "cannot locate") {
+		t.Errorf("got %+v, want a warn saying the log cannot be located", r)
+	}
+}
+
+// F5: a reindex-only install whose paths merely contain " freshen " has no
+// freshen job, so it must get neither a freshen launchd check nor a log check.
+func TestPeriodicLiveness_FreshenInPathIsNotAFreshenEntry(t *testing.T) {
+	plist := `<plist><dict><key>ProgramArguments</key><array><string>/Users/me/my freshen dir/runecho-ir</string><string>repo</string><string>reindex</string><string>--prune</string></array></dict></plist>`
+	f := &fakeProbe{t: t, noTail: true}
+	rs := periodicLiveness(plist, "/Users/me/Library/LaunchAgents/com.runecho.reindex.plist", f.probe("darwin"))
+	if want := []string{"launchd com.runecho.reindex"}; !reflect.DeepEqual(checks(rs), want) {
+		t.Errorf("plist: checks = %v, want %v", checks(rs), want)
+	}
+	cron := "0 * * * * '/opt/my freshen tools/runecho-ir' repo reindex --all --prune >>'/a/r.log' 2>&1 # runecho"
+	f = &fakeProbe{t: t, noTail: true}
+	if rs := periodicLiveness(cron, "crontab", f.probe("linux")); len(rs) != 0 {
+		t.Errorf("cron: got %v, want no liveness results", checks(rs))
+	}
+}
+
+// F3: an agent loaded with legacy `launchctl load` from a non-GUI (ssh)
+// session lives in user/<uid>, not gui/<uid>. Not found in gui must fall back
+// to user before reading as "not loaded".
+func TestLaunchctlPrintWith_FallsBackToUserDomain(t *testing.T) {
+	notFound := "Bad request.\nCould not find service \"com.runecho.freshen\" in domain for user gui: 502\n"
+	healthy := launchctlFixture(freshenLabel, "state = not running", "last exit code = 0")
+	var asked []string
+	run := func(target string) (string, error) {
+		asked = append(asked, target)
+		if strings.HasPrefix(target, "gui/") {
+			return notFound, errors.New("exit status 113")
+		}
+		return healthy, nil
+	}
+	out, err := launchctlPrintWith(run, 502, freshenLabel)
+	if err != nil || out != healthy {
+		t.Errorf("got (%q, %v), want the user-domain output", out, err)
+	}
+	if want := []string{"gui/502/com.runecho.freshen", "user/502/com.runecho.freshen"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked %v, want %v", asked, want)
+	}
+
+	// Found in neither domain: the gui answer stands, so the verdict is "not loaded".
+	run = func(target string) (string, error) { return notFound, errors.New("exit status 113") }
+	out, err = launchctlPrintWith(run, 502, freshenLabel)
+	if r := classifyLaunchAgent(freshenLabel, out, err); r.Status != Fail {
+		t.Errorf("not found in either domain: status = %q, want fail", r.Status)
+	}
+
+	// A healthy gui answer never asks the user domain.
+	asked = nil
+	run = func(target string) (string, error) { asked = append(asked, target); return healthy, nil }
+	if _, _ = launchctlPrintWith(run, 502, freshenLabel); len(asked) != 1 {
+		t.Errorf("asked %v, want only the gui domain", asked)
 	}
 }

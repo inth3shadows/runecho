@@ -610,8 +610,8 @@ every edit lands regardless and the "approvals" are an artifact, not judgment.
 ## What to Do When Something Breaks
 
 Not sure which of these applies? `runecho-ir doctor` checks binaries-on-PATH,
-Claude Code hook wiring, git hooks, enrollment/staleness, store health, and
-active `RUNECHO_GUARD_*` flags in one pass and names which is wrong — start
+Claude Code hook wiring, git hooks, enrollment/staleness, store health, whether
+the periodic job is actually running, and active `RUNECHO_GUARD_*` flags in one pass and names which is wrong — start
 there before working through the list below.
 
 - **`runecho-ir: command not found`** — add `~/.local/bin` to your `PATH`, or

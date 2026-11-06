@@ -12,14 +12,22 @@ package doctor
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,7 +121,15 @@ func hasFreshenEntry(entry string) bool {
 // what is actually scheduled can, which is what this does.
 func checkPeriodic() []Result {
 	entry, where, found := installedPeriodicJob()
-	return classifyPeriodic(entry, where, found)
+	// No `found` guard: with nothing found entry and where are both empty, so
+	// neither liveness gate opens.
+	return append(classifyPeriodic(entry, where, found), periodicLiveness(entry, where, livenessProbe{
+		goos:       runtime.GOOS,
+		now:        time.Now(),
+		defaultLog: defaultReindexLog(),
+		readTail:   func(p string) ([]byte, bool, error) { return readLogTail(p, freshenLogTail) },
+		launchctl:  launchctlPrint,
+	})...)
 }
 
 // classifyPeriodic is the verdict, split from the I/O so it can be tested
@@ -188,6 +204,308 @@ func installedPeriodicJob() (entry, where string, found bool) {
 		return "", "", false
 	}
 	return strings.Join(append([]string{reindex}, others...), "\n"), "crontab", true
+}
+
+// The checks below answer "the periodic job is installed — is it actually
+// running?" (#553). classifyPeriodic judges the installed schedule's text, which
+// stays correct while the scheduler never starts the job: on a Mac both
+// LaunchAgents sat in launchd "spawn failed" (last exit code 78: EX_CONFIG) for
+// nine days while every runecho signal, this one included, read healthy.
+
+const (
+	// FreshenStaleAfter is how old the newest freshen line may be before the
+	// job reads as not running: two missed hourly ticks in a row. A single
+	// miss (a sleeping laptop, a stopped WSL VM) is ~2h and must not alarm.
+	// Exported only so cmd/runecho-ir can pin it to 3*freshenInterval.
+	FreshenStaleAfter = 3 * time.Hour
+	// freshenLogTail bounds what doctor reads: the log is never rotated (a 43 MB
+	// one was measured), and an hour of output is ~20 KB, so 1 MiB is ~50 hours.
+	// A freshen line older than the whole tail is stale evidence in itself.
+	freshenLogTail = 1 << 20
+	// freshenClockSkew is how far in the future a line may be dated before it
+	// reads as a moved clock rather than an NTP step.
+	freshenClockSkew = 5 * time.Minute
+	launchctlTimeout = 5 * time.Second
+)
+
+var (
+	// cronLogRedirect finds the `>>LOG` word cronEntry/freshenCronEntry write:
+	// a cronQuote'd single-quoted word, or a bare one.
+	cronLogRedirect = regexp.MustCompile(`>>\s*('(?:[^']|'\\'')*'|[^\s']+)`)
+	plistStdoutPath = regexp.MustCompile(`<key>StandardOutPath</key>\s*<string>([^<]*)</string>`)
+)
+
+// livenessProbe is checkPeriodic's I/O, injected so periodicLiveness is testable
+// without launchd, cron or a real log.
+type livenessProbe struct {
+	goos       string
+	now        time.Time
+	defaultLog string
+	readTail   func(path string) (tail []byte, truncated bool, err error)
+	launchctl  func(label string) (out string, err error)
+}
+
+// periodicLiveness reports whether the installed periodic job is running: on
+// macOS, launchd's own state for each runecho LaunchAgent; everywhere, how long
+// ago the freshen job last wrote its once-per-tick line (freshen.go writes one
+// on every path precisely so that silence means a dead job).
+func periodicLiveness(entry, where string, p livenessProbe) []Result {
+	var out []Result
+	// Both gates: a stray plist on Linux still yields a plist `where`, and a
+	// crontab install on a Mac has no LaunchAgent to ask about.
+	if p.goos == "darwin" && strings.HasSuffix(where, ".plist") {
+		for _, label := range launchAgentLabels(entry) {
+			printed, err := p.launchctl(label)
+			out = append(out, classifyLaunchAgent(label, printed, err))
+		}
+	}
+	if hasFreshenEntry(entry) {
+		path := FreshenLogPath(entry)
+		if path == "" {
+			path = p.defaultLog
+		}
+		tail, truncated, err := p.readTail(path)
+		out = append(out, classifyFreshenLog(path, tail, truncated, err, p.now))
+	}
+	return out
+}
+
+// FreshenLogPath returns the log the installed freshen entry writes to — the
+// cron line's `>>` target or the freshen plist's StandardOutPath — or "" if the
+// entry names none. The installed entry, not this process's $RUNECHO_HOME, is
+// the truth about where the job writes. The unquoting mirrors
+// existingFreshenSource (cmd/runecho-ir/install.go), which doctor cannot import;
+// TestDoctorFindsInstalledFreshenLog round-trips the generators to catch drift.
+func FreshenLogPath(entry string) string {
+	if i := strings.Index(entry, "<string>freshen</string>"); i >= 0 {
+		// Search after the freshen argv element: the reindex plist, folded in
+		// ahead of it, has its own StandardOutPath.
+		if m := plistStdoutPath.FindStringSubmatch(entry[i:]); m != nil {
+			return html.UnescapeString(m[1])
+		}
+		return ""
+	}
+	for _, line := range strings.Split(entry, "\n") {
+		if !strings.Contains(line, " freshen ") {
+			continue
+		}
+		if m := cronLogRedirect.FindStringSubmatch(line); m != nil {
+			return cronUnquote(m[1])
+		}
+		return ""
+	}
+	return ""
+}
+
+// cronUnquote reverses cronQuote for one word: `\%` back to `%`, then the
+// shell single quotes, with `'\”` standing for a literal quote.
+func cronUnquote(word string) string {
+	v := strings.ReplaceAll(word, `\%`, "%")
+	if len(v) >= 2 && strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+		v = strings.ReplaceAll(v[1:len(v)-1], `'\''`, "'")
+	}
+	return v
+}
+
+// defaultReindexLog is where `install --periodic` points the jobs
+// ($RUNECHO_HOME/logs/reindex.log), used only when the entry names no log.
+func defaultReindexLog() string {
+	dir, err := store.RunechoDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "logs", "reindex.log")
+}
+
+// readLogTail returns at most max bytes from the end of path, and whether
+// anything before them was cut off.
+func readLogTail(path string, max int64) (tail []byte, truncated bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if fi.Size() > max {
+		if _, err := f.Seek(fi.Size()-max, io.SeekStart); err != nil {
+			return nil, false, err
+		}
+		truncated = true
+	}
+	tail, err = io.ReadAll(io.LimitReader(f, max))
+	return tail, truncated, err
+}
+
+// newestFreshenLine returns the timestamp and message of the last line, by
+// position, shaped `<RFC3339> freshen: <msg>`. A line whose first word does not
+// parse is skipped, not fatal: a reindex error that mentions "freshen:", or the
+// partial line a truncated tail starts with, says nothing about liveness.
+func newestFreshenLine(tail []byte, truncated bool) (ts time.Time, msg string, ok bool) {
+	if truncated {
+		i := bytes.IndexByte(tail, '\n')
+		if i < 0 {
+			return time.Time{}, "", false
+		}
+		tail = tail[i+1:]
+	}
+	lines := strings.Split(string(tail), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		first, rest, found := strings.Cut(lines[i], " ")
+		if !found || !strings.HasPrefix(rest, "freshen: ") {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, first)
+		if err != nil {
+			continue
+		}
+		return t, strings.TrimPrefix(rest, "freshen: "), true
+	}
+	return time.Time{}, "", false
+}
+
+// freshenRemedy is shared by every "installed but not running" verdict.
+const freshenRemedy = "the freshen schedule is installed but not running — macOS: see the launchd checks above; " +
+	"Linux: confirm cron is running. Meanwhile 'runecho-ir version-check --reinstall' catches the binaries up"
+
+// classifyFreshenLog is the freshen-liveness verdict. Every non-OK case is a
+// Warn, not a Fail: it is an inference (a laptop asleep for a weekend looks the
+// same), matching doctor's other "installed but quietly not doing its job"
+// verdicts (stale enrollment, no prune, zero asks).
+func classifyFreshenLog(path string, tail []byte, truncated bool, readErr error, now time.Time) Result {
+	const name = "periodic freshen"
+	switch {
+	case errors.Is(readErr, fs.ErrNotExist):
+		return Result{Check: name, Status: Warn,
+			Detail: path + " does not exist — the freshen job has never written to it",
+			Remedy: freshenRemedy}
+	case readErr != nil:
+		return Result{Check: name, Status: Warn,
+			Detail: fmt.Sprintf("cannot read %s: %v", path, readErr),
+			Remedy: freshenRemedy}
+	}
+	ts, msg, ok := newestFreshenLine(tail, truncated)
+	if !ok {
+		if truncated {
+			return Result{Check: name, Status: Warn,
+				Detail: "no freshen line in the last 1 MiB of " + path + " — expected one every hour",
+				Remedy: freshenRemedy}
+		}
+		return Result{Check: name, Status: Warn,
+			Detail: "no freshen line in " + path + " — the job has never run (the first run lands up to an hour after install)",
+			Remedy: freshenRemedy}
+	}
+	age := now.Sub(ts)
+	switch {
+	case age < -freshenClockSkew:
+		return Result{Check: name, Status: Warn,
+			Detail: fmt.Sprintf("newest freshen line is dated %s, after now (%s) — the system clock moved; cannot judge",
+				ts.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339)),
+			Remedy: "check the system clock (date -u)"}
+	case age > FreshenStaleAfter:
+		return Result{Check: name, Status: Warn,
+			Detail: fmt.Sprintf("no freshen run for %s (last %s) — expected hourly; log %s",
+				roughAge(age), ts.UTC().Format(time.RFC3339), path),
+			Remedy: freshenRemedy}
+	}
+	if age < 0 {
+		age = 0
+	}
+	if r := []rune(msg); len(r) > 160 {
+		msg = string(r[:160]) + "…"
+	}
+	return Result{Check: name, Status: OK,
+		Detail: fmt.Sprintf("last ran %s ago: %s (%s)", roughAge(age), msg, path)}
+}
+
+// roughAge renders d to the minute without Duration's trailing "0s" ("23m",
+// "216h30m").
+func roughAge(d time.Duration) string {
+	return strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
+}
+
+// launchAgentLabels lists the LaunchAgents the installed entry implies: the
+// reindex agent always (its plist is what made `where` a plist), the freshen
+// agent only when its plist was folded in.
+func launchAgentLabels(entry string) []string {
+	labels := []string{"com.runecho.reindex"}
+	if hasFreshenEntry(entry) {
+		labels = append(labels, "com.runecho.freshen")
+	}
+	return labels
+}
+
+// launchctlPrint returns `launchctl print gui/<uid>/<label>` (stdout and
+// stderr: a missing service explains itself on stderr). A read, so doctor stays
+// read-only.
+func launchctlPrint(label string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), launchctlTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), label)).CombinedOutput()
+	return string(out), err
+}
+
+// launchdField returns the value of the first top-level `key = value` line in
+// `launchctl print` output whose key is one of keys. Top level is exactly one
+// tab deep: nested blocks (resource coalition, ...) carry their own
+// `state = active` two tabs deep, which must not be read as the job's state.
+// Trimming exactly one tab enforces that: a nested line keeps a leading tab,
+// so its key never equals a bare one.
+func launchdField(printed string, keys ...string) (string, bool) {
+	for _, line := range strings.Split(printed, "\n") {
+		rest, ok := strings.CutPrefix(line, "\t")
+		if !ok {
+			continue
+		}
+		k, v, found := strings.Cut(rest, " = ")
+		if found && slices.Contains(keys, k) {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
+}
+
+// runechoExitCode reports whether code is one runecho-ir itself can return
+// (cmd/runecho-ir/main.go: 0 ok, 1 findings, 2 error). Anything else — 78
+// EX_CONFIG above all — came from launchd failing to run the binary. Exit 2
+// alone is NOT a dead job: `repo reindex --all` returns it on every healthy
+// tick that meets an enrolled repo whose root is gone (repo.go).
+func runechoExitCode(code int) bool { return code >= 0 && code <= 2 }
+
+// classifyLaunchAgent is launchd's verdict on one runecho LaunchAgent.
+func classifyLaunchAgent(label, printed string, err error) Result {
+	name := "launchd " + label
+	remedy := fmt.Sprintf("launchctl bootout gui/$(id -u)/%s; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/%s.plist", label, label)
+	if err != nil {
+		if strings.Contains(strings.ToLower(printed), "could not find service") {
+			return Result{Check: name, Status: Fail,
+				Detail: "plist installed but not loaded in launchd — it never runs", Remedy: remedy}
+		}
+		return Result{Check: name, Status: Warn, Detail: fmt.Sprintf("could not query launchd: %v", err)}
+	}
+	exit, haveExit := launchdField(printed, "last exit code")
+	// Observed during the #553 outage as a top-level `job state = spawn
+	// failed`; `state` is checked too in case launchd reports it there.
+	for _, key := range []string{"job state", "state"} {
+		if v, ok := launchdField(printed, key); ok && strings.Contains(v, "spawn failed") {
+			return Result{Check: name, Status: Fail,
+				Detail: fmt.Sprintf("launchd cannot start it (%s = %s; last exit code = %s)", key, v, exit), Remedy: remedy}
+		}
+	}
+	if haveExit {
+		num, _, _ := strings.Cut(exit, ":")
+		if code, err := strconv.Atoi(strings.TrimSpace(num)); err == nil && !runechoExitCode(code) {
+			return Result{Check: name, Status: Fail,
+				Detail: "last exit code = " + exit + " — not a code runecho-ir returns; launchd failed to run it", Remedy: remedy}
+		}
+	}
+	st, haveState := launchdField(printed, "state")
+	if !haveExit && !haveState {
+		return Result{Check: name, Status: OK, Detail: "loaded (launchctl output not recognised; not judged)"}
+	}
+	return Result{Check: name, Status: OK, Detail: fmt.Sprintf("loaded; state = %s, last exit code = %s", st, exit)}
 }
 
 // resolvedBin returns the absolute, symlink-resolved path exec.LookPath finds

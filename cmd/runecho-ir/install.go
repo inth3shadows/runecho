@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"github.com/inth3shadows/runecho/internal/doctor"
 	"html"
 	"os"
 	"os/exec"
@@ -177,7 +178,9 @@ func warnIfNotInstalledBinary(irBin string) {
 //
 // $RUNECHO_HOME (default ~/.runecho) is already the owner-only 0700 home for
 // every other thing runecho writes, so the log belongs there and inherits the
-// same protection.
+// same protection. runecho never creates the file itself: the scheduler does,
+// with its own umask, so the 0700 dir is what protects it. The reindex job
+// rotates it (logrotate.go, #554).
 func reindexLogPath() (string, error) {
 	dir, err := runechoDir()
 	if err != nil {
@@ -187,8 +190,13 @@ func reindexLogPath() (string, error) {
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return "", fmt.Errorf("create log dir: %w", err)
 	}
-	return filepath.Join(logDir, "reindex.log"), nil
+	return reindexLogFile(dir), nil
 }
+
+// reindexLogFile is the periodic jobs' log under the RunEcho home dir: a plain
+// join that creates nothing, defined once in doctor so the installer, the job's
+// rotation and doctor's fallback all name the same file.
+func reindexLogFile(dir string) string { return doctor.ReindexLogFile(dir) }
 
 // installPeriodic installs an hourly reindex job via launchd (macOS) or cron
 // (Linux). When source resolves to a runecho checkout it also installs a second

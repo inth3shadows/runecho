@@ -362,3 +362,133 @@ func smallIR(rootHash string) *ir.IR {
 		Files:    map[string]ir.FileIR{"main.go": {Hash: rootHash, Symbols: []ir.Symbol{{Name: "Fn", Kind: "function"}}}},
 	}
 }
+
+// #554: `reindex --all` skips enrollments whose root is gone with ONE summary
+// line on stderr (they were 194k of one hourly log's 337k lines), and they no
+// longer set the exit code. They stay enrolled (see NotWiredIntoReindexAll).
+func TestReindexAll_SkipsMissingRootsWithOneSummary(t *testing.T) {
+	home := t.TempDir()
+	live := t.TempDir()
+	irGitInit(t, live)
+	enrollAt(t, home, "alive", live)
+	enrollAt(t, home, "ghost1", filepath.Join(t.TempDir(), "absent-1"))
+	enrollAt(t, home, "ghost2", filepath.Join(t.TempDir(), "absent-2"))
+
+	code, out, errOut := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "--all"})
+	if code != 0 {
+		t.Errorf("exit %d, want 0 — a tombstone is not a failed reindex\nstderr:\n%s", code, errOut)
+	}
+	const want = "2 of 3 enrolled repo(s) have a missing source root — runecho-ir repo prune-missing"
+	if n := strings.Count(errOut, want); n != 1 {
+		t.Errorf("summary appears %d times on stderr, want exactly once\nstderr:\n%s", n, errOut)
+	}
+	if strings.Contains(out, "missing source root") {
+		t.Error("the summary went to stdout; it belongs on stderr like repo list's footer")
+	}
+	if strings.Contains(errOut, "does not exist") {
+		t.Errorf("a per-repo error was still printed for a skipped repo:\n%s", errOut)
+	}
+	if !strings.Contains(out, "alive") {
+		t.Errorf("stdout %q should still report the live repo", out)
+	}
+	names := enrolledNames(t, home)
+	if !names["ghost1"] || !names["ghost2"] {
+		t.Error("a skipped repo was deregistered; reindex --all must never purge")
+	}
+}
+
+func TestReindexAll_SummaryMatchesRepoList(t *testing.T) {
+	home := t.TempDir()
+	live := t.TempDir()
+	irGitInit(t, live)
+	enrollAt(t, home, "alive", live)
+	enrollAt(t, home, "ghost", filepath.Join(t.TempDir(), "absent"))
+	_, _, listErr := runWith(t, home, []string{"runecho-ir", "repo", "list"})
+	_, _, reindexErr := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "--all"})
+	summary := func(s string) string {
+		for _, l := range strings.Split(s, "\n") {
+			if strings.Contains(l, "missing source root") {
+				return strings.TrimSpace(l)
+			}
+		}
+		return ""
+	}
+	if a, b := summary(listErr), summary(reindexErr); a == "" || a != b {
+		t.Errorf("repo list says %q, reindex --all says %q; they must match", a, b)
+	}
+}
+
+// Only ENOENT is skipped: a root that exists but is not a directory is a real
+// problem and must still fail the run.
+func TestReindexAll_OnlyENOENTIsSkipped(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	enrollAt(t, home, "filey", file)
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "--all"})
+	if strings.Contains(errOut, "missing source root") {
+		t.Error("a non-directory root was counted as missing")
+	}
+	if !strings.Contains(errOut, "not a directory") || code != 2 {
+		t.Errorf("exit %d, stderr %q; want exit 2 with 'not a directory'", code, errOut)
+	}
+}
+
+// A named repo whose root is gone still errors, and now says what is wrong
+// instead of the CLI-typo wording "expected a root directory or a subcommand".
+func TestRepoReindexNamed_MissingRootStillErrors(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(t.TempDir(), "absent-named")
+	enrollAt(t, home, "ghost", root)
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "ghost"})
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errOut, root) || !strings.Contains(errOut, "prune-missing") {
+		t.Errorf("stderr %q should name the root and point at prune-missing", errOut)
+	}
+	if strings.Contains(errOut, "expected a root directory or a subcommand") {
+		t.Errorf("stderr %q still uses the CLI-typo wording", errOut)
+	}
+}
+
+// F4 (#557 review): when EVERY enrolled root is gone — an unmounted volume
+// looks exactly like that — the run reindexed nothing and must not read as a
+// healthy tick.
+func TestReindexAll_AllRootsMissingIsAnError(t *testing.T) {
+	home := t.TempDir()
+	enrollAt(t, home, "ghost1", filepath.Join(t.TempDir(), "absent-1"))
+	enrollAt(t, home, "ghost2", filepath.Join(t.TempDir(), "absent-2"))
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "--all"})
+	if code != 2 {
+		t.Errorf("exit %d, want 2 when no enrolled repo could be reindexed\nstderr:\n%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "2 of 2 enrolled repo(s) have a missing source root") {
+		t.Errorf("stderr %q should still carry the summary", errOut)
+	}
+	if !strings.Contains(errOut, "unmounted") {
+		t.Errorf("stderr %q should name the likely cause", errOut)
+	}
+}
+
+// F3 (#557 review): `repo add --source-root <typo>` reaches the same missing-
+// root check. Its message must not tell a user who just mistyped a flag to go
+// purge the repo.
+func TestRepoAdd_MissingSourceRootDoesNotPresumeDeadRepo(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	typo := filepath.Join(dir, "no-such-subdir")
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "add", "--no-hooks", "--source-root", typo, dir})
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "does not exist") || !strings.Contains(errOut, typo) {
+		t.Errorf("stderr %q should say the root does not exist and name it", errOut)
+	}
+	if strings.Contains(errOut, "— see runecho-ir repo prune-missing") {
+		t.Errorf("stderr %q sends a typo straight to prune-missing", errOut)
+	}
+}

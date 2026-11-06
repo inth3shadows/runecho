@@ -228,9 +228,10 @@ const (
 	// miss (a sleeping laptop, a stopped WSL VM) is ~2h and must not alarm.
 	// Exported only so cmd/runecho-ir can pin it to 3*freshenInterval.
 	FreshenStaleAfter = 3 * time.Hour
-	// freshenLogTail bounds what doctor reads: the log is never rotated (a 43 MB
-	// one was measured), and an hour of output is ~20 KB, so 1 MiB is ~50 hours.
-	// A freshen line older than the whole tail is stale evidence in itself.
+	// freshenLogTail bounds what doctor reads: the reindex job rotates the log at
+	// 10 MiB since #554, but older installs never did (a 43 MB one was
+	// measured). An hour of output is ~10-20 KB, so 1 MiB is ~50+ hours. A
+	// freshen line older than the whole tail is stale evidence in itself.
 	freshenLogTail = 1 << 20
 	// freshenClockSkew is how far in the future a line may be dated before it
 	// reads as a moved clock rather than an NTP step.
@@ -244,6 +245,10 @@ var (
 	cronLogRedirect = regexp.MustCompile(`>>\s*('(?:[^']|'\\'')*'|[^\s']+)`)
 	plistStdoutPath = regexp.MustCompile(`<key>StandardOutPath</key>\s*<string>([^<]*)</string>`)
 )
+
+// RotatedLogSuffix is the one older generation the reindex job keeps (#554).
+// Exported so cmd/runecho-ir rotates to exactly the name doctor falls back to.
+const RotatedLogSuffix = ".1"
 
 // livenessProbe is checkPeriodic's I/O, injected so periodicLiveness is testable
 // without launchd, cron or a real log.
@@ -279,10 +284,37 @@ func periodicLiveness(entry, where string, p livenessProbe) []Result {
 				Detail: "cannot locate the freshen log: the installed entry names none and $RUNECHO_HOME does not resolve",
 				Remedy: "runecho-ir install --periodic   # rewrites the schedule with its log redirect"})
 		}
-		tail, truncated, err := p.readTail(path)
-		out = append(out, classifyFreshenLog(path, tail, truncated, err, p.now))
+		used, tail, truncated, err := readFreshenEvidence(path, p.readTail)
+		out = append(out, classifyFreshenLog(used, tail, truncated, err, p.now))
 	}
 	return out
+}
+
+// readFreshenEvidence returns the tail to judge and the path it came from:
+// path's own tail, unless path does not exist or holds no freshen line, in which
+// case path+RotatedLogSuffix's tail if THAT holds one. The reindex job rotates
+// the log (#554); until the next spawn reopens it there is no active log at
+// all, then one without a freshen line (under cron freshen runs 30 minutes
+// after the reindex; under launchd the two agents have no fixed offset, so
+// freshen's line can land in .1 too). Any other read error on path is reported
+// as it is.
+func readFreshenEvidence(path string, readTail func(string) ([]byte, bool, error)) (used string, tail []byte, truncated bool, err error) {
+	tail, truncated, err = readTail(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return path, tail, truncated, err
+	}
+	if err == nil {
+		if _, _, ok := newestFreshenLine(tail, truncated); ok {
+			return path, tail, truncated, nil
+		}
+	}
+	rotated := path + RotatedLogSuffix
+	if rTail, rTrunc, rErr := readTail(rotated); rErr == nil {
+		if _, _, ok := newestFreshenLine(rTail, rTrunc); ok {
+			return rotated, rTail, rTrunc, nil
+		}
+	}
+	return path, tail, truncated, err
 }
 
 // FreshenLogPath returns the log the installed freshen entry writes to — the
@@ -331,8 +363,13 @@ func defaultReindexLog() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "logs", "reindex.log")
+	return ReindexLogFile(dir)
 }
+
+// ReindexLogFile is the periodic jobs' log under the RunEcho home dir. The one
+// definition: the installer writes it into the schedule, the reindex job
+// rotates it, and doctor reads it.
+func ReindexLogFile(dir string) string { return filepath.Join(dir, "logs", "reindex.log") }
 
 // readLogTail returns at most max bytes from the end of path, and whether
 // anything before them was cut off. Only a regular file is read: opening a FIFO
@@ -527,8 +564,10 @@ func launchdField(printed string, keys ...string) (string, bool) {
 // runechoExitCode reports whether code is one runecho-ir itself can return
 // (cmd/runecho-ir/main.go: 0 ok, 1 findings, 2 error). Anything else — 78
 // EX_CONFIG above all — came from launchd failing to run the binary. Exit 2
-// alone is NOT a dead reindex job: `repo reindex --all` returns it on every
-// healthy tick that meets an enrolled repo whose root is gone (repo.go).
+// alone is NOT a dead reindex job: `repo reindex --all` returns it on any tick
+// where one repo's reindex fails (a walk timeout on a large tree, an unreadable
+// root), and binaries before #554 also returned it for every deleted
+// enrollment.
 func runechoExitCode(code int) bool { return code >= 0 && code <= 2 }
 
 // freshenAgentLabel's job is fail-open: freshen returns ExitOK on every path

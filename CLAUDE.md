@@ -55,7 +55,9 @@ never executed — which is why #373's HEAD-containment gate (inert on nearly ev
 branch) is gone. `git archive` works because the version is known from origin and
 `install.sh` honours `RUNECHO_VERSION` (the Dockerfile precedent); without it the
 build would stamp `dev`. The remote name `origin` is hardcoded (fail-closed,
-logged). Every tick writes one `freshen:` line to `~/.runecho/logs/reindex.log`;
+logged). Every tick writes one `freshen:` line to `~/.runecho/logs/reindex.log`
+(the reindex job rotates that file to `reindex.log.1` above 10 MiB, #554, so the
+newest line can be in `.1`, and the active file can be briefly absent);
 a run finding `$RUNECHO_HOME/freshen.lock` held skips rather than queueing, and
 `$RUNECHO_HOME/no-auto-install` is the opt-out a scheduled job can see.
 `version-check --reinstall --quiet` — the body of hooks installed before #375 —

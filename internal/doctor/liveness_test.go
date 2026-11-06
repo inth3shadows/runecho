@@ -536,3 +536,106 @@ func TestLaunchctlPrintWith_FallsBackToUserDomain(t *testing.T) {
 		t.Errorf("asked %v, want only the gui domain", asked)
 	}
 }
+
+// --- #554: the rotated-log fallback ---
+
+// mapProbe serves fixed tails per path and records what was read.
+type mapProbe struct {
+	files map[string]string // path -> tail; absent = ErrNotExist
+	errs  map[string]error
+	read  []string
+}
+
+func (m *mapProbe) readTail(p string) ([]byte, bool, error) {
+	m.read = append(m.read, p)
+	if err, ok := m.errs[p]; ok {
+		return nil, false, err
+	}
+	s, ok := m.files[p]
+	if !ok {
+		return nil, false, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+	}
+	return []byte(s), false, nil
+}
+
+const rotCron = "30 * * * * '/b/runecho-ir' freshen '/g/.git' >>'/a/r.log' 2>&1 # runecho"
+
+func rotLiveness(t *testing.T, m *mapProbe) Result {
+	t.Helper()
+	p := livenessProbe{goos: "linux", now: livenessNow, readTail: m.readTail,
+		launchctl: func(string) (string, error) { t.Error("launchctl called on linux"); return "", nil }}
+	r := find(periodicLiveness(rotCron, "crontab", p), "periodic freshen")
+	if r == nil {
+		t.Fatal("no periodic freshen result")
+	}
+	return *r
+}
+
+func recent(ago time.Duration) string { return freshenAt(livenessNow.Add(-ago), "ok") + "\n" }
+
+// Between the :00 rotation and the :30 freshen spawn there is no active log.
+func TestPeriodicLiveness_RotatedFallback_ActiveMissing(t *testing.T) {
+	m := &mapProbe{files: map[string]string{"/a/r.log.1": reindexLine + "\n" + recent(40*time.Minute)}}
+	r := rotLiveness(t, m)
+	if r.Status != OK || !strings.Contains(r.Detail, "/a/r.log.1") {
+		t.Errorf("got %q %q, want ok naming the rotated log", r.Status, r.Detail)
+	}
+	if want := []string{"/a/r.log", "/a/r.log.1"}; !reflect.DeepEqual(m.read, want) {
+		t.Errorf("read %v, want %v", m.read, want)
+	}
+}
+
+func TestPeriodicLiveness_RotatedFallback_ActiveWithoutFreshenLine(t *testing.T) {
+	m := &mapProbe{files: map[string]string{
+		"/a/r.log":   reindexLine + "\n",
+		"/a/r.log.1": recent(50 * time.Minute),
+	}}
+	if r := rotLiveness(t, m); r.Status != OK || !strings.Contains(r.Detail, "/a/r.log.1") {
+		t.Errorf("got %q %q, want ok naming the rotated log", r.Status, r.Detail)
+	}
+}
+
+func TestPeriodicLiveness_RotatedFallback_NeitherHasLine(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		".1 has no line": {"/a/r.log": reindexLine + "\n", "/a/r.log.1": reindexLine + "\n"},
+		".1 absent":      {"/a/r.log": reindexLine + "\n"},
+	} {
+		r := rotLiveness(t, &mapProbe{files: files})
+		if r.Status != Warn || !strings.Contains(r.Detail, "no freshen line in /a/r.log —") || strings.Contains(r.Detail, ".1") {
+			t.Errorf("%s: got %q %q, want the active log's own warn, not naming .1", name, r.Status, r.Detail)
+		}
+	}
+}
+
+func TestPeriodicLiveness_RotatedFallback_ActiveHasLineSkips1(t *testing.T) {
+	m := &mapProbe{files: map[string]string{"/a/r.log": recent(10 * time.Minute), "/a/r.log.1": recent(70 * time.Minute)}}
+	r := rotLiveness(t, m)
+	if r.Status != OK || strings.Contains(r.Detail, ".1") {
+		t.Errorf("got %q %q, want ok naming the active log", r.Status, r.Detail)
+	}
+	if want := []string{"/a/r.log"}; !reflect.DeepEqual(m.read, want) {
+		t.Errorf("read %v, want only the active log", m.read)
+	}
+}
+
+func TestPeriodicLiveness_RotatedFallback_UnreadableActiveNoFallback(t *testing.T) {
+	m := &mapProbe{
+		files: map[string]string{"/a/r.log.1": recent(10 * time.Minute)},
+		errs:  map[string]error{"/a/r.log": errors.New("permission denied")},
+	}
+	r := rotLiveness(t, m)
+	if r.Status != Warn || !strings.Contains(r.Detail, "cannot read /a/r.log") {
+		t.Errorf("got %q %q, want the active log's read error", r.Status, r.Detail)
+	}
+	if want := []string{"/a/r.log"}; !reflect.DeepEqual(m.read, want) {
+		t.Errorf("read %v; an unreadable active log must not fall back", m.read)
+	}
+}
+
+func TestPeriodicLiveness_RotatedFallback_StaleIn1IsWarn(t *testing.T) {
+	m := &mapProbe{files: map[string]string{"/a/r.log.1": recent(5 * time.Hour)}}
+	r := rotLiveness(t, m)
+	if r.Status != Warn || !strings.Contains(r.Detail, "no freshen run for 5h") || !strings.Contains(r.Detail, "/a/r.log.1") {
+		t.Errorf("got %q %q, want a stale warn naming the rotated log", r.Status, r.Detail)
+	}
+}

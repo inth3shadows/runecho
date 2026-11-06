@@ -292,10 +292,12 @@ func periodicLiveness(entry, where string, p livenessProbe) []Result {
 
 // readFreshenEvidence returns the tail to judge and the path it came from:
 // path's own tail, unless path does not exist or holds no freshen line, in which
-// case path+RotatedLogSuffix's tail if THAT holds one. The :00 reindex rotates
-// the log (#554), and until the :30 freshen spawn reopens it there is no active
-// log at all, then one without a freshen line. Any other read error on path is
-// reported as it is.
+// case path+RotatedLogSuffix's tail if THAT holds one. The reindex job rotates
+// the log (#554); until the next spawn reopens it there is no active log at
+// all, then one without a freshen line (under cron freshen runs 30 minutes
+// after the reindex; under launchd the two agents have no fixed offset, so
+// freshen's line can land in .1 too). Any other read error on path is reported
+// as it is.
 func readFreshenEvidence(path string, readTail func(string) ([]byte, bool, error)) (used string, tail []byte, truncated bool, err error) {
 	tail, truncated, err = readTail(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -361,8 +363,13 @@ func defaultReindexLog() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "logs", "reindex.log")
+	return ReindexLogFile(dir)
 }
+
+// ReindexLogFile is the periodic jobs' log under the RunEcho home dir. The one
+// definition: the installer writes it into the schedule, the reindex job
+// rotates it, and doctor reads it.
+func ReindexLogFile(dir string) string { return filepath.Join(dir, "logs", "reindex.log") }
 
 // readLogTail returns at most max bytes from the end of path, and whether
 // anything before them was cut off. Only a regular file is read: opening a FIFO

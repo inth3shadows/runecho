@@ -702,8 +702,10 @@ every signal read healthy. So when a freshen entry is installed, `doctor` reads
 the newest `freshen:` line in the log that entry writes to (the cron `>>` target
 or the plist's `StandardOutPath`). It reads only the last 1 MiB of the active
 log. When that file does not exist yet, or has no `freshen:` line, it reads
-`reindex.log.1` instead: the :00 reindex rotates the log (see below), and until
-the :30 freshen spawn reopens it the newest line is in `.1`. It reports a
+`reindex.log.1` instead: the reindex job rotates the log (see below), and until
+the next spawn reopens it the newest line is in `.1`. Under cron, freshen runs 30
+minutes after the reindex. Under launchd the two agents have no fixed offset, so
+freshen's line can land in `.1` as well. It reports a
 `periodic freshen` **warning** when that line is more than
 3 hours old (two missed hourly ticks), missing, or dated more than 5 minutes in
 the future. Right after `install --periodic` the first line can take up to an
@@ -730,8 +732,12 @@ on Windows. Only the reindex job rotates, because it writes nearly all of the
 bytes and is the entry every install has. A run that finds an enrollment whose
 root is gone skips it, prints one stderr line in the same words as `repo list`
 (`N of M enrolled repo(s) have a missing source root — runecho-ir repo prune-missing`),
-and leaves the exit code alone. Before this, each such repo printed an error and
-set exit 2 every hour.
+and leaves the exit code alone, unless every enrolled root is missing (an
+unmounted volume looks like that), which exits 2. Before this, each such repo
+printed an error and set exit 2 every hour. Rotation only applies to the default
+log path: a schedule that redirects elsewhere (for example an old
+`/tmp/runecho-reindex.log` install) is not rotated until `install --periodic` is
+re-run.
 
 The installed hourly job runs `repo reindex --all --prune`, which keeps the
 store bounded on the same schedule that fills it. **Upgrading the binary does

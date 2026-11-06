@@ -329,6 +329,12 @@ func runRepoReindexAll(prune bool, keepN int) int {
 	if missing > 0 {
 		fmt.Fprintln(os.Stderr, missingRootSummary(missing, len(repos)))
 	}
+	// Every root gone at once is not hygiene: it is what an unmounted volume
+	// looks like, and the run reindexed nothing. Do not let it pass as healthy.
+	if missing == len(repos) {
+		fmt.Fprintln(os.Stderr, "Error: no enrolled repo could be reindexed — every source root is missing (is a volume unmounted?)")
+		exitCode = ExitError
+	}
 
 	if prune {
 		// Prune even when some repo failed to reindex: retention is about rows
@@ -353,7 +359,7 @@ func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 	// reads "path does not exist ... (expected a root directory or a subcommand
 	// — see --help)", wording meant for a mistyped CLI argument (#554).
 	if rootIsMissing(srcRoot) {
-		fmt.Fprintf(os.Stderr, "Error: source root of %s does not exist: %q — see runecho-ir repo prune-missing\n", repo.Name, srcRoot)
+		fmt.Fprintf(os.Stderr, "Error: source root of %s does not exist: %q (if it was removed for good: runecho-ir repo prune-missing)\n", repo.Name, srcRoot)
 		return ExitError
 	}
 	// Hold the E6 refresh lock across the whole build→save→snapshot: buildIR reads
@@ -508,8 +514,9 @@ func runRepoPrune(args []string) int {
 // os.ErrNotExist counts. A permission error or an I/O error on a flaky mount
 // is NOT evidence the repo is gone, so those report false — treating them as
 // missing is how --yes would delete something real. Shared by
-// runRepoPruneMissing and runRepoList so "missing" cannot mean two different
-// things between the two commands (issue #370: the rot must be visible in
+// runRepoPruneMissing, runRepoList, runRepoReindexAll (which skips these, #554)
+// and doReindex (which errors on them), so "missing" cannot mean two different
+// things between the commands (issue #370: the rot must be visible in
 // `repo list` in exactly the same terms prune-missing acts on).
 func rootIsMissing(root string) bool {
 	return dirstate.IsGone(root)

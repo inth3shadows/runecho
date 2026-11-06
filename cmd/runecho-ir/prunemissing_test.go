@@ -453,3 +453,42 @@ func TestRepoReindexNamed_MissingRootStillErrors(t *testing.T) {
 		t.Errorf("stderr %q still uses the CLI-typo wording", errOut)
 	}
 }
+
+// F4 (#557 review): when EVERY enrolled root is gone — an unmounted volume
+// looks exactly like that — the run reindexed nothing and must not read as a
+// healthy tick.
+func TestReindexAll_AllRootsMissingIsAnError(t *testing.T) {
+	home := t.TempDir()
+	enrollAt(t, home, "ghost1", filepath.Join(t.TempDir(), "absent-1"))
+	enrollAt(t, home, "ghost2", filepath.Join(t.TempDir(), "absent-2"))
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "reindex", "--all"})
+	if code != 2 {
+		t.Errorf("exit %d, want 2 when no enrolled repo could be reindexed\nstderr:\n%s", code, errOut)
+	}
+	if !strings.Contains(errOut, "2 of 2 enrolled repo(s) have a missing source root") {
+		t.Errorf("stderr %q should still carry the summary", errOut)
+	}
+	if !strings.Contains(errOut, "unmounted") {
+		t.Errorf("stderr %q should name the likely cause", errOut)
+	}
+}
+
+// F3 (#557 review): `repo add --source-root <typo>` reaches the same missing-
+// root check. Its message must not tell a user who just mistyped a flag to go
+// purge the repo.
+func TestRepoAdd_MissingSourceRootDoesNotPresumeDeadRepo(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	irGitInit(t, dir)
+	typo := filepath.Join(dir, "no-such-subdir")
+	code, _, errOut := runWith(t, home, []string{"runecho-ir", "repo", "add", "--no-hooks", "--source-root", typo, dir})
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "does not exist") || !strings.Contains(errOut, typo) {
+		t.Errorf("stderr %q should say the root does not exist and name it", errOut)
+	}
+	if strings.Contains(errOut, "— see runecho-ir repo prune-missing") {
+		t.Errorf("stderr %q sends a typo straight to prune-missing", errOut)
+	}
+}

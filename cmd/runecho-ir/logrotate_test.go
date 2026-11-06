@@ -207,8 +207,9 @@ func TestRotateJobLog_LogAbsent(t *testing.T) {
 	mustNotExist(t, logPath+".1", "rotation must never create .1 from nothing")
 }
 
-// Two runs passing their checks before either renames: the second rename finds
-// no file and fails open, and .1 keeps exactly the original bytes.
+// Two runs passing their checks before either renames: the loser's re-check
+// right before its rename sees the log is no longer its stdout and backs off,
+// and .1 keeps exactly the original bytes.
 func TestRotateJobLog_RacingRotators(t *testing.T) {
 	logPath, outA := logFixture(t, testCap+1)
 	outB := openAppend(t, logPath)
@@ -224,8 +225,8 @@ func TestRotateJobLog_RacingRotators(t *testing.T) {
 		bGot = rotateJobLog(logPath, outB, testCap, &bytes.Buffer{})
 	}
 	aGot := rotateJobLog(logPath, outA, testCap, &bytes.Buffer{})
-	if bGot != rotated || aGot != rotateRenameFailed {
-		t.Errorf("outcomes: B=%v A=%v, want B rotated and A rename-failed (fail-open)", bGot, aGot)
+	if bGot != rotated || aGot != rotateNotOurLog {
+		t.Errorf("outcomes: B=%v A=%v, want B rotated and A backing off (not our log any more)", bGot, aGot)
 	}
 	if got := slurp(t, logPath+".1"); got != strings.Repeat("x", testCap+1) {
 		t.Errorf(".1 holds %d bytes, want exactly the original %d", len(got), testCap+1)
@@ -319,5 +320,56 @@ func TestReindexAll_RotationFailureStillReindexes(t *testing.T) {
 	}
 	if got := slurp(t, logPath); !strings.Contains(got, "alive") {
 		t.Errorf("log = %q, want this run's line for alive", got)
+	}
+}
+
+// F2 (#557 review): if a scheduler spawn creates a fresh log after another run
+// rotated, a run whose checks passed earlier must not rename that fresh file
+// over .1 — that would throw away the generation just rotated.
+func TestRotateJobLog_RecreatedLogIsNotRenamedOver1(t *testing.T) {
+	logPath, out := logFixture(t, testCap+1)
+	orig := rotateHook
+	t.Cleanup(func() { rotateHook = orig })
+	rotateHook = func() {
+		// Another run rotates, then the next spawn's `>>` creates a fresh log.
+		if err := os.Rename(logPath, logPath+".1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(logPath, []byte("fresh"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rotateJobLog(logPath, out, testCap, &bytes.Buffer{}); got != rotateNotOurLog {
+		t.Errorf("outcome = %v, want rotateNotOurLog", got)
+	}
+	if got := slurp(t, logPath+".1"); len(got) != testCap+1 {
+		t.Errorf(".1 holds %d bytes (%q...), want the rotated generation's %d", len(got), got[:min(len(got), 10)], testCap+1)
+	}
+	if got := slurp(t, logPath); got != "fresh" {
+		t.Errorf("the fresh log was moved: %q", got)
+	}
+}
+
+// F5 (#557 review): a small symlinked log is below the cap, so there is nothing
+// to refuse yet; it must not print a warning into the log every hour.
+func TestRotateJobLog_SmallSymlinkLogIsSilent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.log")
+	if err := os.WriteFile(target, []byte("small"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "reindex.log")
+	if err := os.Symlink(target, logPath); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	var warn bytes.Buffer
+	if got := rotateJobLog(logPath, openAppend(t, logPath), testCap, &warn); got != rotateBelowCap {
+		t.Errorf("outcome = %v, want rotateBelowCap", got)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("printed %q for a small symlinked log; it should be silent until there is something to refuse", warn.String())
 	}
 }

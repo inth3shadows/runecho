@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"github.com/inth3shadows/runecho/internal/doctor"
 	"html"
 	"os"
 	"os/exec"
@@ -192,9 +193,10 @@ func reindexLogPath() (string, error) {
 	return reindexLogFile(dir), nil
 }
 
-// reindexLogFile is the periodic jobs' log under the RunEcho home dir. A plain
-// join that creates nothing, shared by the installer and the job's rotation.
-func reindexLogFile(dir string) string { return filepath.Join(dir, "logs", "reindex.log") }
+// reindexLogFile is the periodic jobs' log under the RunEcho home dir: a plain
+// join that creates nothing, defined once in doctor so the installer, the job's
+// rotation and doctor's fallback all name the same file.
+func reindexLogFile(dir string) string { return doctor.ReindexLogFile(dir) }
 
 // installPeriodic installs an hourly reindex job via launchd (macOS) or cron
 // (Linux). When source resolves to a runecho checkout it also installs a second

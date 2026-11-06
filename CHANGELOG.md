@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.88.3] — 2026-11-06
+
+### Changed
+- logs: rotate reindex.log, and summarise missing-root enrollments (#554) (#557)
+
 ## [0.88.2] — 2026-11-06
 
 ### Changed

@@ -700,17 +700,38 @@ An installed schedule is not a running one (#553): on a Mac both LaunchAgents sa
 in launchd `spawn failed` (last exit code `78: EX_CONFIG`) for nine days while
 every signal read healthy. So when a freshen entry is installed, `doctor` reads
 the newest `freshen:` line in the log that entry writes to (the cron `>>` target
-or the plist's `StandardOutPath`; only the last 1 MiB, since the log is not
-rotated). It reports a `periodic freshen` **warning** when that line is more than
+or the plist's `StandardOutPath`). It reads only the last 1 MiB of the active
+log. When that file does not exist yet, or has no `freshen:` line, it reads
+`reindex.log.1` instead: the :00 reindex rotates the log (see below), and until
+the :30 freshen spawn reopens it the newest line is in `.1`. It reports a
+`periodic freshen` **warning** when that line is more than
 3 hours old (two missed hourly ticks), missing, or dated more than 5 minutes in
 the future. Right after `install --periodic` the first line can take up to an
 hour to appear. On macOS it also asks launchd about each runecho LaunchAgent
-(`launchctl print gui/<uid>/<label>`, read-only). A `launchd <label>` **failure**
-means spawn failed, the job is not loaded, or its last exit code is one runecho-ir
-never returns (it returns 0–2; `repo reindex --all` exits 2 on any tick that meets
-a deleted enrolled repo, so 2 is not a dead job). The remedy is
+(`launchctl print gui/<uid>/<label>`, then `user/<uid>/<label>` when gui does not
+know it, read-only). A `launchd <label>` **failure** means spawn failed, the job
+is not loaded, or its last exit code is one runecho-ir never returns. runecho-ir
+returns 0–2, and `repo reindex --all` exits 2 when one repo's reindex fails (a
+walk timeout, an unreadable root), so for the reindex agent 2 is not a dead job.
+freshen always exits 0, so any nonzero freshen exit fails. The remedy is
 `launchctl bootout gui/$(id -u)/<label>` then
 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
+
+**Log rotation (#554).** Both periodic jobs append to `$RUNECHO_HOME/logs/reindex.log`,
+which grew to 43 MB in 83 days on one box. At the start of each run,
+`repo reindex --all` renames that file to `reindex.log.1` when it is over 10 MiB,
+replacing any older `.1`. It does this only when its own stdout **is** that file
+(`os.SameFile`), so an interactive run or a custom redirect never renames
+anything. The scheduler opened the file before the process started, so the run's
+output follows its fd into `.1`, and the next spawn creates a fresh log.
+Rotation never creates a file, never renames through or onto a symlink, and is
+fail-open (a failed rename leaves the job writing to the old file). It is skipped
+on Windows. Only the reindex job rotates, because it writes nearly all of the
+bytes and is the entry every install has. A run that finds an enrollment whose
+root is gone skips it, prints one stderr line in the same words as `repo list`
+(`N of M enrolled repo(s) have a missing source root — runecho-ir repo prune-missing`),
+and leaves the exit code alone. Before this, each such repo printed an error and
+set exit 2 every hour.
 
 The installed hourly job runs `repo reindex --all --prune`, which keeps the
 store bounded on the same schedule that fills it. **Upgrading the binary does
@@ -738,8 +759,10 @@ and purging a repo's whole history on one failed stat is unrecoverable. Only
 `ENOENT` counts as evidence — a permission or I/O error means "cannot tell", not
 "gone". It is never wired into `reindex --all`, cron, or launchd, and purging
 goes through the same `PurgeRepo` funnel `repo rm` uses. Note this is dead
-weight and hourly log noise, not a source of junk rows: `buildIR` already
-refuses a vanished root via `requireExistingDir` before any snapshot is written.
+weight, not a source of junk rows: reindexing refuses a vanished root before
+any snapshot is written. `reindex --all` skips such repos with one summary line
+(#554), and `repo reindex <name>` says the root is gone and points at
+`prune-missing`.
 
 WAL is enabled; the connection pool is capped to a single connection, so writes
 and reads are serialized — there are no torn reads (verified by a `-race`

@@ -181,10 +181,16 @@ func runRepoList(args []string) int {
 	// stderr, not stdout: the table is the command's data, and a footer on
 	// stdout adds two lines a `tail -n +3 | awk` reader parses as rows.
 	if missing > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d of %d enrolled repo(s) have a missing source root — runecho-ir repo prune-missing\n",
-			missing, len(repos))
+		fmt.Fprintf(os.Stderr, "\n%s\n", missingRootSummary(missing, len(repos)))
 	}
 	return 0
+}
+
+// missingRootSummary is the one-line count of enrollments whose source root is
+// gone, shared by `repo list` and `repo reindex --all` so the two always say it
+// the same way.
+func missingRootSummary(missing, total int) string {
+	return fmt.Sprintf("%d of %d enrolled repo(s) have a missing source root — runecho-ir repo prune-missing", missing, total)
 }
 
 // runRepoRemove purges a repo and its entire history by name.
@@ -284,6 +290,9 @@ func runRepoReindex(args []string) int {
 // installed hourly job runs, so the store stays bounded without a second
 // scheduled entry.
 func runRepoReindexAll(prune bool, keepN int) int {
+	// First, before anything writes: when stdout is the scheduled log and it is
+	// over the cap, this run's output (and the next spawn's) moves on (#554).
+	rotateScheduledLog()
 	db, code := mustOpenDBVerified() // the hourly sweep: doubles as the periodic integrity check
 	if code != 0 {
 		return code
@@ -299,11 +308,26 @@ func runRepoReindexAll(prune bool, keepN int) int {
 		return ExitOK
 	}
 
+	// Enrollments whose root is gone (deleted worktrees, mostly) are skipped
+	// with one summary line instead of one error each per hour: they were
+	// 194k of one log's 337k lines (#554). Same ENOENT-only predicate as
+	// `repo list` and prune-missing; an unreadable or non-directory root still
+	// goes through doReindex and still errors. They leave the exit code alone:
+	// a tombstone is enrollment hygiene that `repo list` reports, not a reindex
+	// that failed. They are never purged here (see runRepoPruneMissing).
 	exitCode := ExitOK
+	missing := 0
 	for i := range repos {
+		if rootIsMissing(repos[i].EffectiveSourceRoot()) {
+			missing++
+			continue
+		}
 		if c := doReindex(db, &repos[i]); c != 0 {
 			exitCode = c
 		}
+	}
+	if missing > 0 {
+		fmt.Fprintln(os.Stderr, missingRootSummary(missing, len(repos)))
 	}
 
 	if prune {
@@ -325,6 +349,13 @@ func runRepoReindexAll(prune bool, keepN int) int {
 // stores a snapshot, and updates the repo's last-indexed timestamp.
 func doReindex(db *snapshot.DB, repo *snapshot.Repo) int {
 	srcRoot := repo.EffectiveSourceRoot()
+	// Say what is actually wrong. Left to buildIR, a vanished enrolled root
+	// reads "path does not exist ... (expected a root directory or a subcommand
+	// — see --help)", wording meant for a mistyped CLI argument (#554).
+	if rootIsMissing(srcRoot) {
+		fmt.Fprintf(os.Stderr, "Error: source root of %s does not exist: %q — see runecho-ir repo prune-missing\n", repo.Name, srcRoot)
+		return ExitError
+	}
 	// Hold the E6 refresh lock across the whole build→save→snapshot: buildIR reads
 	// the existing ir.json for incremental reuse, so a concurrent PostToolUse hook
 	// that also load-modify-saves ir.json would otherwise lose (or be lost to) this
@@ -501,10 +532,10 @@ func rootIsMissing(root string) bool {
 // This is never wired into `reindex --all`, cron, or launchd for the same
 // reason.
 //
-// It is not, despite appearances, a fix for snapshot growth. buildIR already
-// refuses a vanished root via requireExistingDir before any snapshot is
-// written, so these repos are dead weight and hourly log noise, not a source
-// of junk rows.
+// It is not, despite appearances, a fix for snapshot growth. doReindex already
+// refuses a vanished root before any snapshot is written, so these repos are
+// dead weight, not a source of junk rows; since #554 `reindex --all` skips them
+// with one summary line rather than an error each per hour.
 func runRepoPruneMissing(args []string) int {
 	fs := flag.NewFlagSet("repo prune-missing", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "actually purge the listed repos and their history")

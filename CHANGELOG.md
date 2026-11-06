@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.88.1] — 2026-11-06
+
+### Changed
+- ir: write a self-ignoring .ai/.gitignore when saving the IR (#550) (#551)
+
 ## [0.88.0] — 2026-10-30
 
 ### Changed

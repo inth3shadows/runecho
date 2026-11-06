@@ -335,22 +335,6 @@ new state instead of the old one.
 > edit after that is incremental. Run `runecho-ir repo reindex <name>` once after
 > enrolling to pay that cost up front instead.
 >
-> **`.ai/` is ignored for you.** Whatever writes the index (this hook,
-> `repo reindex`, the git hooks), runecho drops a `.ai/.gitignore` next to
-> `.ai/ir.json` that hides only runecho's own files. So you don't need an `.ai/`
-> entry in your own `.gitignore`, and scanners that take their file list from
-> git won't see the index. Anything else you keep in `.ai/` is still tracked.
->
-> It does not apply in three cases:
-> - **You already have a `.ai/.gitignore`.** runecho never overwrites it; add
->   `ir.json` to it yourself.
-> - **`.ai` is a symlink.** The ignore file is not written.
-> - **You committed `.ai/ir.json` earlier.** It stays tracked until you run
->   `git rm --cached .ai/ir.json`.
->
-> Tools that walk the filesystem instead of asking git, such as `gitleaks dir`,
-> still read the index.
->
 > If you end up with both wired anyway it is handled, not fatal: Claude Code runs
 > every matching hook, so the recorder fires twice, and the second fire sees the
 > outcome the first one wrote and no-ops. That dedupe is what keeps a
@@ -359,6 +343,26 @@ new state instead of the old one.
 > by design — it never blocks an edit, so on a platform without file locking, or
 > if the lock cannot be taken, a rare duplicate is still possible. Prefer wiring
 > the hook once.
+
+**`.ai/` is ignored for you.** Whatever writes the index (`repo add`,
+`repo reindex` and the git hooks, the PostToolUse hook, a bare `runecho-ir`),
+runecho drops a `.ai/.gitignore` next to `.ai/ir.json` that hides only runecho's
+own files. So you don't need an `.ai/` entry in your own `.gitignore`, and
+scanners that take their file list from git won't see the index. Anything else
+you keep in `.ai/` still shows up in git as usual.
+
+It does not help in these cases:
+- **You already have a `.ai/.gitignore`.** runecho never overwrites it; add
+  `ir.json*` to it yourself (the `*` also covers the temp files a killed save
+  can leave behind).
+- **`.ai` is a symlink.** The ignore file is not written.
+- **The ignore file cannot be written** (e.g. a filesystem without hard links).
+  runecho stays silent about it.
+- **You committed `.ai/ir.json` earlier.** It stays tracked until you run
+  `git rm --cached .ai/ir.json` and commit that.
+
+Tools that walk the filesystem instead of asking git, such as `gitleaks dir`,
+still read the index.
 
 ### Inspect recent history
 

@@ -40,9 +40,9 @@ Key design decisions:
 - **The oracle never answers from a cache.** `runecho-mcp` and the CLI's
   `snapshot`/`diff`/`verify`/`truth-trail` build a *fresh* IR on every call.
   `.ai/ir.json` is only an incremental working artifact. It is written by the
-  bare `runecho-ir [root-path]` invocation, by `repo reindex` (and so by the
-  post-commit, post-merge and post-checkout hooks), and by the guard's
-  PostToolUse refresh.
+  bare `runecho-ir [root-path]` invocation, by `repo add` and `repo reindex`
+  (and so by the post-commit, post-merge and post-checkout hooks), and by the
+  guard's PostToolUse refresh when an edit changes the IR.
 - **`.ai/` hides its own files from git (#550).** Every `IR.Save` into a
   directory named `.ai` that has no `.ai/.gitignore` adds one. That includes
   checkouts whose `.ai/` predates the change; the next save adds the file. It
@@ -56,8 +56,9 @@ Key design decisions:
     - an existing `.ai/.gitignore` is never overwritten;
     - a symlinked `.ai` is skipped;
     - a failure to write the file (e.g. a filesystem without hard links) is
-      silent, since the file is linked into place only once complete and the
-      Save never fails because of it.
+      silent: the step is best-effort and never fails the Save. Separately,
+      the file is linked into place from a finished temp file, so it never
+      appears partial or empty.
   - **Not covered:** a tracked `.ai/ir.json` stays tracked. Tools that walk the
     filesystem instead of asking git (for example `gitleaks dir`) still read the
     IR.

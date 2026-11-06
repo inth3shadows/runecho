@@ -156,23 +156,37 @@ func TestIR_Save_OwnerOnlyPerms(t *testing.T) {
 }
 
 // TestIR_Save_SelfIgnoresAIDir pins #550: saving into a .ai/ dir writes a
-// .ai/.gitignore ("*") so git never lists the IR as untracked, regardless of
-// the host repo's ignore config; an existing .gitignore is never overwritten;
-// and a Save to a dir not named .ai writes none.
+// .ai/.gitignore that hides runecho's own files from git regardless of the host
+// repo's ignore config, without hiding anything else a repo keeps in .ai/
+// (PR #551 F1); it is never overwritten, never written through a symlinked .ai
+// (F3), is world-readable (F4), and a Save to a dir not named .ai writes none.
 func TestIR_Save_SelfIgnoresAIDir(t *testing.T) {
 	empty := &IR{Version: IRVersion, Files: map[string]FileIR{}}
 
-	t.Run("writes star gitignore", func(t *testing.T) {
+	t.Run("writes runecho-only gitignore", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := empty.Save(filepath.Join(dir, ".ai", "ir.json")); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
-		got, err := os.ReadFile(filepath.Join(dir, ".ai", ".gitignore"))
+		gi := filepath.Join(dir, ".ai", ".gitignore")
+		got, err := os.ReadFile(gi)
 		if err != nil {
 			t.Fatalf(".ai/.gitignore not written: %v", err)
 		}
-		if string(got) != "*\n" {
-			t.Errorf(".ai/.gitignore = %q, want %q", got, "*\n")
+		if string(got) != selfIgnoreContent {
+			t.Errorf(".ai/.gitignore = %q, want %q", got, selfIgnoreContent)
+		}
+		for _, line := range strings.Split(string(got), "\n") {
+			if strings.TrimSpace(line) == "*" {
+				t.Errorf(".ai/.gitignore ignores everything (%q); must list runecho's files only", line)
+			}
+		}
+		fi, err := os.Stat(gi)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0644 {
+			t.Errorf(".ai/.gitignore perm = %o, want 0644 (other uids running git must read it)", perm)
 		}
 	})
 
@@ -206,16 +220,80 @@ func TestIR_Save_SelfIgnoresAIDir(t *testing.T) {
 		}
 	})
 
-	t.Run("git lists nothing untracked under .ai", func(t *testing.T) {
+	t.Run("no gitignore through symlinked .ai", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "elsewhere")
+		if err := os.MkdirAll(target, 0700); err != nil {
+			t.Fatal(err)
+		}
+		repo := filepath.Join(dir, "repo")
+		if err := os.MkdirAll(repo, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(repo, ".ai")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := empty.Save(filepath.Join(repo, ".ai", "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(target, ".gitignore")); !os.IsNotExist(err) {
+			t.Errorf("Save wrote a .gitignore into a symlinked .ai's target (stat err=%v)", err)
+		}
+	})
+
+	t.Run("gitignore appears only complete", func(t *testing.T) {
+		// F2: a kill between creating .gitignore and writing it must not leave
+		// an empty file that EEXIST then protects forever. The file may only
+		// come into existence by linking an already complete temp file.
+		dir := t.TempDir()
+		ai := filepath.Join(dir, ".ai")
+		gi := filepath.Join(ai, ".gitignore")
+		called := false
+		orig := linkSelfIgnore
+		t.Cleanup(func() { linkSelfIgnore = orig })
+		linkSelfIgnore = func(oldname, newname string) error {
+			called = true
+			if newname != gi {
+				t.Errorf("link target = %q, want %q", newname, gi)
+			}
+			if _, err := os.Lstat(gi); !os.IsNotExist(err) {
+				t.Errorf(".gitignore existed before the link (stat err=%v)", err)
+			}
+			if got, err := os.ReadFile(oldname); err != nil || string(got) != selfIgnoreContent {
+				t.Errorf("temp at link time = %q (err %v), want complete content", got, err)
+			}
+			return orig(oldname, newname)
+		}
+		if err := empty.Save(filepath.Join(ai, "ir.json")); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if !called {
+			t.Fatal(".gitignore was not created by linking a complete temp file")
+		}
+		if left, _ := filepath.Glob(filepath.Join(ai, ".gitignore.tmp-*")); len(left) != 0 {
+			t.Errorf("temp files left behind: %v", left)
+		}
+	})
+
+	t.Run("git hides runecho files only", func(t *testing.T) {
 		if _, err := exec.LookPath("git"); err != nil {
 			t.Skip("git not on PATH")
 		}
 		dir := t.TempDir()
+		// F6: drop GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE etc. inherited from a
+		// hook or `git rebase -x`, which would aim these commands at the outer repo.
+		var env []string
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "GIT_") {
+				env = append(env, kv)
+			}
+		}
+		env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 		git := func(args ...string) string {
 			t.Helper()
 			cmd := exec.Command("git", append([]string{"-c", "core.excludesFile=" + os.DevNull}, args...)...)
 			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+			cmd.Env = env
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -223,11 +301,18 @@ func TestIR_Save_SelfIgnoresAIDir(t *testing.T) {
 			return string(out)
 		}
 		git("init", "-q")
-		if err := empty.Save(filepath.Join(dir, ".ai", "ir.json")); err != nil {
+		ai := filepath.Join(dir, ".ai")
+		if err := empty.Save(filepath.Join(ai, "ir.json")); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
-		if out := git("ls-files", "--others", "--exclude-standard"); strings.Contains(out, ".ai/") {
-			t.Errorf("git lists .ai/ as untracked:\n%s", out)
+		for _, name := range []string{"ir.json.tmp-123", ".gitignore.tmp-456", "notes.md"} {
+			if err := os.WriteFile(filepath.Join(ai, name), []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out := git("ls-files", "--others", "--exclude-standard")
+		if out != ".ai/notes.md\n" {
+			t.Errorf("untracked = %q, want only %q (runecho files hidden, the repo's own .ai files visible)", out, ".ai/notes.md\n")
 		}
 	})
 }

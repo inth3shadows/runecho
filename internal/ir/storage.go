@@ -299,22 +299,55 @@ func (ir *IR) Save(path string) error {
 	return nil
 }
 
-// ensureSelfIgnore writes dir/.gitignore containing "*" unless one exists, so
-// git ignores the whole .ai/ directory (the file included) whatever the host
-// repo's ignore config says (#550). Without it, ir.json shows up as untracked,
-// and scanners that read untracked files (gitleaks' generic-api-key on symbol
-// names, Biome) flag it. Applied only to a dir named .ai, so Save to an
-// arbitrary path never ignores a directory the caller owns. Best-effort: an
-// existing file is left alone, and a write failure never fails the Save.
+// selfIgnoreContent is the .ai/.gitignore runecho writes (#550). It lists only
+// runecho's own files, anchored to this directory: a repo that keeps its own
+// files in .ai/ (AI rules, prompts) must still see new ones in git status, so
+// "*" is wrong here (PR #551 F1). The .gitignore.tmp-* line hides a temp a kill
+// left behind on an earlier attempt.
+const selfIgnoreContent = `# Written by runecho: hides runecho's own files from git (#550).
+/.gitignore
+/.gitignore.tmp-*
+/ir.json
+/ir.json.tmp-*
+`
+
+// linkSelfIgnore is os.Link, swappable so a test can check that .gitignore only
+// ever appears complete.
+var linkSelfIgnore = os.Link
+
+// ensureSelfIgnore writes dir/.gitignore (selfIgnoreContent) unless one exists,
+// so git never lists runecho's IR as untracked whatever the host repo's ignore
+// config says (#550). Without it, scanners that read untracked files (gitleaks'
+// generic-api-key on symbol names, Biome) flag ir.json.
+//
+// Best-effort: every failure is silent and never fails the Save.
+//   - Existing .gitignore: left alone; link refuses to replace it.
+//   - Symlinked dir: skipped, so a repo-controlled .ai link cannot plant an
+//     ignore file in another directory (F3).
+//   - Kill mid-write: the content goes to a temp file that is linked into place
+//     only when complete, so a kill never leaves an empty .gitignore that
+//     "exists" protects forever (F2).
+//   - Mode 0644: the file holds no secret, and another uid running git on the
+//     checkout must be able to read it (F4).
 func ensureSelfIgnore(dir string) {
-	f, err := os.OpenFile(filepath.Join(dir, ".gitignore"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if fi, err := os.Lstat(dir); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	target := filepath.Join(dir, ".gitignore")
+	if _, err := os.Lstat(target); err == nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".gitignore.tmp-*")
 	if err != nil {
 		return
 	}
-	_, werr := f.WriteString("*\n")
-	if cerr := f.Close(); werr != nil || cerr != nil {
-		_ = os.Remove(f.Name())
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.WriteString(selfIgnoreContent)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil || os.Chmod(tmp.Name(), 0644) != nil {
+		return
 	}
+	_ = linkSelfIgnore(tmp.Name(), target)
 }
 
 // maxIRBytes caps the size of an .ai/ir.json Load will read into memory. The IR

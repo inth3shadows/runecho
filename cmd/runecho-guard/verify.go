@@ -284,6 +284,15 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
 
+	// A star import whose exports are not fully known (`from tkinter import *`, an
+	// in-repo module with no literal __all__) can bind any bare name, so the
+	// additive check abstains for the file rather than flag it (#477). fileLines
+	// is the pre-edit whole file: an Edit's hunk rarely contains the import.
+	starReason := ""
+	if lang == guard.LangPython {
+		starReason = guard.PyStarImportReason(filePath, fileLines, newLines)
+		diffs[0].StarImportAbstain = starReason != ""
+	}
 	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
 	// status — OK/Violation/Unknown/Skipped, replacing firedChecks/degraded's
@@ -295,7 +304,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// "violations" captured before recv-method/var-type below append (the only
 	// two checks still merging into `violations` — qualified/deps-go/
 	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
-	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, starReason)}
 	// learnEligible is the additive check's OWN finding set, captured here for the
 	// same reason firedChecks is: recv-method and var-type below append into
 	// `violations` too, and reading learn-eligibility back off the merged slice

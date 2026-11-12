@@ -393,12 +393,25 @@ func runPreCommit(dryRun, verbose bool) int {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
 	}
 
+	// Abstain per file on a star import whose exports are not fully known (#477);
+	// see guard.PyStarImportReason. The reason is recorded on the check's result.
+	starReason := ""
+	for i := range diffs {
+		if guard.LangFor(diffs[i].Path) != guard.LangPython {
+			continue
+		}
+		if r := guard.PyStarImportReason(filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path)), stagedFileLines(diffs[i]), diffs[i].AddedLines); r != "" {
+			diffs[i].StarImportAbstain = true
+			starReason = r
+		}
+	}
 	violations := guard.Run(symbols, ignorePath, diffs)
 	// results accumulates one CheckResult per applicable check (#330), mirroring
 	// runHookMode — see checkresult.go. Pre-commit has no deletion-side checks
 	// and no strict-mode degraded advisory, so unlike runHookMode this is a
-	// pure internal bookkeeping refactor: Skipped/OK/Violation only, no Unknown
-	// verdict is ever produced here, and firedChecksFrom/askReason's output is
+	// pure internal bookkeeping refactor: Skipped/OK/Violation only, except that
+	// "violations" is Unknown (reason "star-import") when the additive check
+	// abstained on a star import (#477); firedChecksFrom/askReason's output is
 	// unchanged for every existing input.
 	//
 	// "violations" captured here, before any other check runs, so it names only
@@ -406,7 +419,7 @@ func runPreCommit(dryRun, verbose bool) int {
 	// into this same slice, which erased their provenance and made them all log
 	// as "violations" (#268); #269 stopped that merge (see qualifiedV/depsGoV/
 	// fileScopeV below), so today they never touch this slice at all.
-	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, starReason)}
 
 	// Same-repo internal-package qualified-call check (default on since #314;
 	// RUNECHO_GUARD_QUALIFIED=0 disables it). Reads each staged Go file's whole

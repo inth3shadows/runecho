@@ -187,7 +187,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	var violations []Violation
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
-		if lang == LangUnknown {
+		if lang == LangUnknown || fd.StarImportAbstain {
 			continue
 		}
 		// When the file is on disk (pre-commit path), seed the per-hunk string

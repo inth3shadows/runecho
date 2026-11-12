@@ -97,7 +97,7 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 	source = strings.ReplaceAll(source, "\r\n", "\n")
 
 	imports, exports, hasAll := pyImportsAndExports(source)
-	functions, classes, hashes, lines, docs := pySymbolsFromAST(source)
+	functions, classes, hashes, lines, docs, assigned := pySymbolsFromAST(source)
 
 	// When __all__ is absent, a module's public surface is conventionally its
 	// non-underscore top-level names (the rule `from m import *`, PEP 8, and
@@ -105,7 +105,7 @@ func (p *PythonParser) Parse(source string) (FileStructure, error) {
 	// exports relative to the Go/JS parsers. An explicit __all__ — even an empty
 	// one — is a deliberate declaration and stays authoritative.
 	if !hasAll {
-		exports = pyFallbackExports(source, functions, classes)
+		exports = pyFallbackExports(source, functions, classes, assigned)
 	}
 
 	sort.Strings(imports)
@@ -166,7 +166,7 @@ func pyImportsAndExports(source string) (imports, exports []string, hasAll bool)
 // constants. functions/classes come from the AST pass (already qualified, so
 // nested defs and methods carry a "." and are excluded); constants are matched
 // from source since the AST walk only records def/class nodes.
-func pyFallbackExports(source string, functions, classes []string) []string {
+func pyFallbackExports(source string, functions, classes, assigned []string) []string {
 	var exports []string
 	for _, name := range functions {
 		if isPyPublicTopLevel(name) {
@@ -174,6 +174,17 @@ func pyFallbackExports(source string, functions, classes []string) []string {
 		}
 	}
 	for _, name := range classes {
+		if isPyPublicTopLevel(name) {
+			exports = append(exports, name)
+		}
+	}
+	// Public module-level assignment targets (#477): `from m import *` binds every
+	// public global, not just defs and UPPER_CASE constants, so `get_config =
+	// functools.lru_cache()(_impl)`, `square = lambda ...` and `Point =
+	// namedtuple(...)` are real exports. Recorded as plain exports (no new symbol
+	// kind), and only on this __all__-absent path, so an explicit __all__ stays
+	// authoritative.
+	for _, name := range assigned {
 		if isPyPublicTopLevel(name) {
 			exports = append(exports, name)
 		}
@@ -204,7 +215,7 @@ func isPyPublicTopLevel(qualified string) bool {
 // members don't otherwise surface (e.g. an edited class-level field) is still
 // detected as a modification. lines carries each symbol's 1-based start line, keyed
 // "kind:<qualified name>", for the repo map.
-func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int, docs map[string]string) {
+func pySymbolsFromAST(source string) (functions, classes []string, hashes map[string]string, lines map[string]int, docs map[string]string, assigned []string) {
 	// The pure-Go tree-sitter runtime can panic on adversarial or malformed
 	// input; a panic here would otherwise propagate through parseFile→Generate
 	// and crash the indexer/MCP server. Recover and degrade to no AST symbols
@@ -214,7 +225,7 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "runecho: Python parse panicked (%v); AST symbols for this file disabled\n", r)
-			functions, classes, hashes, lines, docs = nil, nil, nil, nil, nil
+			functions, classes, hashes, lines, docs, assigned = nil, nil, nil, nil, nil, nil
 		}
 	}()
 	lang := pythonLanguage()
@@ -222,18 +233,18 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 		// Grammar unavailable (e.g. a grammar_subset build that omitted Python).
 		// Degrade to no AST symbols rather than panicking; imports/exports still
 		// come from the regex pass.
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 	src := []byte(source)
 	// Reject pathologically-nested input before the super-linear tree-sitter
 	// parse can hang the process; degrade to no AST symbols (see maxParseNestDepth).
 	if exceedsNestDepth(src) {
 		fmt.Fprintf(os.Stderr, "runecho: Python source exceeds max nesting depth (%d); AST symbols for this file disabled\n", maxParseNestDepth)
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 	tree, err := ts.NewParser(lang).Parse(src)
 	if err != nil || tree == nil || tree.RootNode() == nil {
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 
 	hashes = make(map[string]string)
@@ -344,7 +355,90 @@ func pySymbolsFromAST(source string) (functions, classes []string, hashes map[st
 	if len(docs) == 0 {
 		docs = nil
 	}
-	return functions, classes, hashes, lines, docs
+	assigned = pyModuleAssignments(tree.RootNode(), lang, src)
+	return functions, classes, hashes, lines, docs, assigned
+}
+
+// pyModuleAssignments returns the names bound by module-level assignment
+// statements (#477): `name = ...`, annotated `name: T = ...` (a bare `name: T`
+// binds nothing and is skipped), chained `a = b = ...`, and tuple/list/starred
+// targets `a, (b, *c) = ...`. Attribute and subscript targets bind no name.
+//
+// Module-level `if`/`elif`/`else`, `try`/`except`/`else`/`finally` and `with`
+// bodies DO bind at module scope, so they are walked; this over-includes
+// `if TYPE_CHECKING:` names, which is the fail-open direction (a name too many
+// in the known set, never one too few). Function and class bodies are never
+// entered, and neither is an `if __name__ == "__main__":` block: that code runs
+// only as a script, never on import, so `import *` cannot see it. Loop bodies
+// are not walked either, a deliberate under-approximation (callers treat the
+// module as exporting-unknown unless __all__ says otherwise).
+//
+// The result is not filtered for privacy; callers apply isPyPublicTopLevel.
+func pyModuleAssignments(root *ts.Node, lang *ts.Language, src []byte) []string {
+	var out []string
+	var addTarget func(n *ts.Node)
+	addTarget = func(n *ts.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type(lang) {
+		case "identifier":
+			out = append(out, string(src[n.StartByte():n.EndByte()]))
+		case "pattern_list", "tuple_pattern", "list_pattern", "list_splat_pattern", "parenthesized_expression":
+			for i := 0; i < n.NamedChildCount(); i++ {
+				addTarget(n.NamedChild(i))
+			}
+		}
+	}
+	// addAssignment follows a chained `a = b = value` (the inner assignment is the
+	// outer one's right-hand side). A bare annotation `a: int` has no right side
+	// and binds nothing.
+	addAssignment := func(a *ts.Node) {
+		for a != nil && a.Type(lang) == "assignment" {
+			if a.ChildByFieldName("right", lang) != nil {
+				addTarget(a.ChildByFieldName("left", lang))
+			}
+			a = a.ChildByFieldName("right", lang)
+		}
+	}
+	var walk func(n *ts.Node, depth int)
+	walk = func(n *ts.Node, depth int) {
+		if depth > maxParseNestDepth {
+			return
+		}
+		for i := 0; i < n.NamedChildCount(); i++ {
+			c := n.NamedChild(i)
+			switch c.Type(lang) {
+			case "assignment":
+				addAssignment(c)
+			case "expression_statement":
+				// Some grammar builds wrap the assignment in expression_statement,
+				// others expose it directly under the block; accept both.
+				for j := 0; j < c.NamedChildCount(); j++ {
+					if a := c.NamedChild(j); a.Type(lang) == "assignment" {
+						addAssignment(a)
+					}
+				}
+			case "if_statement":
+				if cond := c.ChildByFieldName("condition", lang); cond != nil && isPyMainGuard(string(src[cond.StartByte():cond.EndByte()])) {
+					continue
+				}
+				walk(c, depth+1)
+			case "block", "elif_clause", "else_clause", "try_statement", "except_clause",
+				"except_group_clause", "finally_clause", "with_statement", "with_clause":
+				walk(c, depth+1)
+			}
+		}
+	}
+	walk(root, 0)
+	return out
+}
+
+// isPyMainGuard reports whether an if-condition is the `__name__ == "__main__"`
+// script guard, in either operand order and either quote style.
+func isPyMainGuard(cond string) bool {
+	c := strings.NewReplacer(" ", "", "\t", "", "'", `"`).Replace(cond)
+	return c == `__name__=="__main__"` || c == `"__main__"==__name__`
 }
 
 // pyDocstring returns the first line of the docstring opening a def/class body,

@@ -1097,7 +1097,7 @@ that never ran at all.
 
 | Class | Reasons | Meaning |
 |---|---|---|
-| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dynamic-binding`, and `depindex`'s lookup tokens (`go-work`, `no-go-mod`, `not-in-module-cache`, `replace-directive`, `not-vendored`, `scan-budget-exhausted`, …) | The input or the environment was missing — coverage really was lost for this edit |
+| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dot-import` (a Go `import . "pkg"` makes bare names unresolvable, so the additive check abstains on that file), `dynamic-binding`, and `depindex`'s lookup tokens (`go-work`, `no-go-mod`, `not-in-module-cache`, `replace-directive`, `not-vendored`, `scan-budget-exhausted`, …) | The input or the environment was missing — coverage really was lost for this edit |
 | gate | `shadowed-qualifier`, `unexported-selector`, `ambiguous-receiver`, `ambiguous-local`, `name-known-elsewhere`, `no-indexed-members`, `unreliable-call-shape`, `shadowed-callee`, `nested-def-shadow`, `ambiguous-decl-shapes`, `unusable-decl-shape`, `unparseable-added-signature`, `decl-edited-in-hunk` | A candidate existed and the check declined it on its own precision gate |
 
 Every reason is a stable kebab-case token with no path, module name, or error

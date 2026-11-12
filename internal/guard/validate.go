@@ -5,6 +5,8 @@ import (
 	"os"
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Violation records a single unresolved symbol reference.
@@ -190,6 +192,11 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		if lang == LangUnknown || fd.StarImportAbstain {
 			continue
 		}
+		// A dot-import binds every EXPORTED name of another package as a bare
+		// identifier, so an unresolved uppercase bare name in this file may come
+		// from it. Abstain on those only, as the Python star-import check does
+		// (#474); a lowercase name cannot come from another package.
+		dot := lang == LangGo && GoDotImportAbstains(fd)
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
@@ -205,6 +212,9 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 				continue
 			}
 			if _, ok := starNames[ref.Name]; ok {
+				continue
+			}
+			if dot && startsUpper(ref.Name) {
 				continue
 			}
 			if matchesIgnoreGlob(ref.Name, ignoreGlobs) {
@@ -402,4 +412,21 @@ func loadIgnore(path string) []string {
 		names = append(names, line)
 	}
 	return names
+}
+
+// GoDotImportAbstains reports whether the additive check abstains on this Go
+// file's exported-looking bare names: a dot-import in the hunk, or one the
+// caller found in the rest of the file and set on the diff (#474).
+func GoDotImportAbstains(fd FileDiff) bool {
+	if fd.GoDotImportWhole {
+		return fd.GoDotImport
+	}
+	return fd.GoDotImport || GoHasDotImport(fd.AddedLines)
+}
+
+// startsUpper reports whether name's first rune is an uppercase letter, i.e.
+// is exported in Go.
+func startsUpper(name string) bool {
+	r, _ := utf8.DecodeRuneInString(name)
+	return unicode.IsUpper(r)
 }

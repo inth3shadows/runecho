@@ -22,6 +22,17 @@ const maxDiffBytes = 64 << 20 // 64 MiB
 type FileDiff struct {
 	Path       string
 	AddedLines []AddedLine
+	// StarImportAbstain makes Run skip its unresolved-name check for this file:
+	// the caller found a `from m import *` whose exported names are not fully
+	// known (see PyStarImportReason), so any bare name could legitimately come
+	// from it and flagging one would be a false alarm (#477). Definitions and
+	// imports in the diff are still folded into the known set.
+	StarImportAbstain bool
+	// StarImportNames are the names this file's fully-known star imports bring in
+	// (the literal __all__ of each in-repo source). Run treats them as resolved
+	// for THIS file only, so a stale or unindexed source cannot bring the #477
+	// false positive back, and one file's names never leak into another's check.
+	StarImportNames []string
 	// AbsPath is the absolute on-disk path of the file, used only to seed
 	// pre-hunk multi-line string state so a hunk that begins inside a
 	// pre-existing docstring is masked rather than scanned as code (issue #145).
@@ -102,6 +113,14 @@ type FileDiff struct {
 	// shift or change them. nil when unavailable: the AbsPath read stands, with
 	// the rules that guard against its misalignment.
 	Staged []byte
+	// GoDotImport is set by the callers when the rest of the Go file holds an
+	// `import . "pkg"` the hunk does not show (#474): the hook from the pre-edit
+	// file, pre-commit from the staged blob. Run also reads AddedLines itself.
+	GoDotImport bool
+	// GoDotImportWhole says GoDotImport was decided on the whole file, so the
+	// hunk is not scanned again: scanned alone and unseeded, a hunk that starts
+	// inside a raw string or block comment reads its text as code (G16).
+	GoDotImportWhole bool
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

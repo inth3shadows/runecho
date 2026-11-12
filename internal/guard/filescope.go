@@ -45,7 +45,7 @@ import (
 
 var (
 	// rePyStarImport matches `from x import *`, which binds an unknowable set.
-	rePyStarImport = regexp.MustCompile(`^\s*from\s+[.\w]+\s+import\s+\*`)
+	rePyStarImport = regexp.MustCompile(`^\s*from\s+([.\w]+)\s+import\s+\*`)
 	// rePyGlobalDecl matches `global a, b` / `nonlocal a` — the names are bound
 	// elsewhere by declaration, so they must count as resolved.
 	rePyGlobalDecl = regexp.MustCompile(`^\s*(?:global|nonlocal)\s+(.+)$`)

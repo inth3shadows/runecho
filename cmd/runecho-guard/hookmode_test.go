@@ -933,3 +933,146 @@ func TestRunHookMode_CheckReasonsOnAnAskRecord(t *testing.T) {
 		t.Errorf("check_reasons[qualified] = %q on an ask record, want unexported-selector (reasons=%v)", got, reasons)
 	}
 }
+
+// G4: a Write decides from its own text. The pre-edit file's dot-import must
+// not blind the guard to a hallucination in the content that replaces it.
+func TestRunHookMode_WriteIgnoresPreEditDotImport(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	goFile := filepath.Join(repoRoot, "a_test.go")
+	if err := os.WriteFile(goFile, []byte("package main\n\nimport . \"github.com/onsi/gomega\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, d := runHook(t, payload(t, "Write", goFile, "", "package main\n\nfunc F() { HallucinatedFunc() }\n", nil))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("G4: want ask for a Write that drops the dot-import, got %+v", d.Hook)
+	}
+}
+
+// G10: an Edit/MultiEdit's dot-import decision is made on the post-edit file,
+// not on the hunk and the pre-edit file separately.
+func TestRunHookMode_DotImportDecidedOnPostEditFile(t *testing.T) {
+	const ginkgo = "\t. \"github.com/onsi/ginkgo/v2\"\n"
+	const gomega = "\t. \"github.com/onsi/gomega\"\n"
+	cases := []struct {
+		name    string
+		pre     string
+		payload func(goFile string) string
+		wantAsk bool
+	}{
+		{
+			// (a) with default env (no dangling/dropped-import flags).
+			name: "MultiEdit deletes the only dot import and adds a hallucination",
+			pre:  "package main\n\nimport (\n" + gomega + ")\n\nfunc F() {}\n",
+			payload: func(f string) string {
+				return payloadOld(t, "MultiEdit", f, "", "", "", []editOp{
+					{OldString: gomega, NewString: ""},
+					{OldString: "func F() {}", NewString: "func F() { GhostFunc() }"},
+				})
+			},
+			wantAsk: true,
+		},
+		{
+			name: "Edit replaces the dot import line and adds a hallucination",
+			pre:  "package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc F() {}\n",
+			payload: func(f string) string {
+				return payloadOld(t, "Edit", f,
+					"import . \"github.com/onsi/gomega\"\n\nfunc F() {}",
+					"import \"fmt\"\n\nfunc F() { fmt.Println(); GhostFunc() }", "", nil)
+			},
+			wantAsk: true,
+		},
+		{
+			// (b) removing gomega leaves ginkgo's dot import.
+			name: "MultiEdit removes one of two dot imports",
+			pre:  "package main\n\nimport (\n" + ginkgo + gomega + ")\n\nfunc F() {}\n",
+			payload: func(f string) string {
+				return payloadOld(t, "MultiEdit", f, "", "", "", []editOp{
+					{OldString: gomega, NewString: ""},
+					{OldString: "func F() {}", NewString: "func F() { Describe() }"},
+				})
+			},
+		},
+		{
+			// (c) a dot spec added into an existing import block.
+			name: "Edit adds a dot spec into an existing import block",
+			pre:  "package main\n\nimport (\n\t\"fmt\"\n)\n\nfunc F() { fmt.Println() }\n",
+			payload: func(f string) string {
+				return payloadOld(t, "MultiEdit", f, "", "", "", []editOp{
+					{OldString: "\t\"fmt\"\n", NewString: "\t\"fmt\"\n" + gomega},
+					{OldString: "func F() { fmt.Println() }", NewString: "func F() { fmt.Println(); Expect() }"},
+				})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			goModRepo(t, repoRoot, []string{"KnownFunc"})
+			goFile := filepath.Join(repoRoot, "a_test.go")
+			if err := os.WriteFile(goFile, []byte(tc.pre), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, _, d := runHook(t, tc.payload(goFile))
+			if got := d.Hook.PermissionDec == "ask"; got != tc.wantAsk {
+				t.Fatalf("ask=%v, want %v: %+v", got, tc.wantAsk, d.Hook)
+			}
+		})
+	}
+}
+
+// G16: once the post-edit file decides, a hunk that starts inside a raw string
+// or block comment holding dot-import text does not abstain the file.
+func TestRunHookMode_DotImportTextInsideLiteralHunk(t *testing.T) {
+	cases := []struct{ name, pre, old, new string }{
+		{"raw string", "package main\n\nfunc TestX() {\n\tsrc := `\nA\nB\n`\n\t_ = src\n}\n",
+			"A\nB\n`\n\t_ = src", "import . \"x\"\n`\n\t_ = src\n\tGhostFunc()"},
+		{"block comment", "package main\n\n/*\nold\n*/\nfunc F() {}\n",
+			"old\n*/\nfunc F() {}", "import . \"x\"\n*/\nfunc F() { GhostFunc() }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			goModRepo(t, repoRoot, []string{"KnownFunc"})
+			goFile := filepath.Join(repoRoot, "a_test.go")
+			if err := os.WriteFile(goFile, []byte(tc.pre), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, _, d := runHook(t, payloadOld(t, "Edit", goFile, tc.old, tc.new, "", nil))
+			if d.Hook.PermissionDec != "ask" {
+				t.Fatalf("G16: want ask for GhostFunc, got %+v", d.Hook)
+			}
+		})
+	}
+}
+
+// G17: the dot-import degraded reason is recorded only when the abstain hid an
+// unresolved name, not on every edit to a dot-import file.
+func TestRunHookMode_DotImportReasonOnlyWhenSkipped(t *testing.T) {
+	const pre = "package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc F() {}\n"
+	cases := []struct {
+		name, new, want string
+	}{
+		{"nothing hidden", "func F() { KnownFunc() }", ""},
+		{"uppercase name hidden", "func F() { Expect() }", "dot-import"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			goModRepo(t, repoRoot, []string{"KnownFunc"})
+			goFile := filepath.Join(repoRoot, "a_test.go")
+			if err := os.WriteFile(goFile, []byte(pre), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runHook(t, payloadOld(t, "Edit", goFile, "func F() {}", tc.new, "", nil))
+			reasons, _ := readLastDecisionLog(t)["check_reasons"].(map[string]any)
+			if got, _ := reasons["violations"].(string); got != tc.want {
+				t.Fatalf("G17: check_reasons[violations] = %q, want %q (%v)", got, tc.want, reasons)
+			}
+		})
+	}
+}

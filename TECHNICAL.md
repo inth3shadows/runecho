@@ -1097,7 +1097,7 @@ that never ran at all.
 
 | Class | Reasons | Meaning |
 |---|---|---|
-| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dynamic-binding`, and `depindex`'s lookup tokens (`go-work`, `no-go-mod`, `not-in-module-cache`, `replace-directive`, `not-vendored`, `scan-budget-exhausted`, …) | The input or the environment was missing — coverage really was lost for this edit |
+| degraded | `oversized-pre-edit-file`, `store-query-failed`, `star-import`, `dot-import` (a Go `import . "pkg"` makes bare names unresolvable, so the additive check abstains on that file), `dynamic-binding`, and `depindex`'s lookup tokens (`go-work`, `no-go-mod`, `not-in-module-cache`, `replace-directive`, `not-vendored`, `scan-budget-exhausted`, …) | The input or the environment was missing — coverage really was lost for this edit |
 | gate | `shadowed-qualifier`, `unexported-selector`, `ambiguous-receiver`, `ambiguous-local`, `name-known-elsewhere`, `no-indexed-members`, `unreliable-call-shape`, `shadowed-callee`, `nested-def-shadow`, `ambiguous-decl-shapes`, `unusable-decl-shape`, `unparseable-added-signature`, `decl-edited-in-hunk` | A candidate existed and the check declined it on its own precision gate |
 
 Every reason is a stable kebab-case token with no path, module name, or error
@@ -1329,6 +1329,11 @@ which member changed.
   triple-quoted string can be matched — the same cheap-and-deterministic tradeoff
   the import/`__all__` regexes already accept. An explicit `__all__` (even empty)
   is authoritative and disables the fallback.
+- **Python star imports, additive check** abstain per file (degraded token
+  `star-import`, check result `violations` = unknown) when a `from m import *`
+  resolves to anything but an in-repo module with a single literal `__all__`. An
+  in-repo source with such an `__all__` has a fully known export set, so a name
+  outside it is still flagged.
 
 ## Known Limitations
 

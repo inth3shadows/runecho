@@ -478,3 +478,17 @@ func TestPythonParser_AllComparisonDoesNotSuppressFallback(t *testing.T) {
 		t.Errorf("fallback exports suppressed by an __all__ comparison: %v", fs.Exports)
 	}
 }
+
+// TestPythonParser_LowercaseAssignmentsAreNotExports pins the #564 review's P1:
+// a public lowercase module-level assignment must not become an export, because
+// exports are loaded as repo-wide known symbols and would hide a hallucinated
+// call to a same-named function in an unrelated file.
+func TestPythonParser_LowercaseAssignmentsAreNotExports(t *testing.T) {
+	fs, err := NewPythonParser().Parse("client = make_client()\nsquare = lambda x: x\nMAX = 1\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !slices.Equal(fs.Exports, []string{"MAX"}) {
+		t.Errorf("exports = %v, want [MAX] only", fs.Exports)
+	}
+}

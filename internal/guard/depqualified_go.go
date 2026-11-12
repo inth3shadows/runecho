@@ -72,6 +72,40 @@ func externalGoAliases(wholeFile []AddedLine, modulePath string) map[string]stri
 	return aliases
 }
 
+// GoHasDotImport reports whether the lines contain a `import . "pkg"`, in
+// single-line or block form. A dot-import puts every exported name of another
+// package into the file's scope as a bare identifier, so what a bare name in
+// that file resolves to is unknowable without that package's exports: callers
+// abstain on unresolved bare identifiers (#474). A match inside a raw string
+// only causes an extra abstain, the safe direction.
+func GoHasDotImport(lines []AddedLine) bool {
+	inBlock := false
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l.Text)
+		spec := ""
+		switch {
+		case !inBlock && (trimmed == "import (" || trimmed == "import("):
+			inBlock = true
+			continue
+		case !inBlock:
+			rest, ok := strings.CutPrefix(trimmed, "import ")
+			if !ok {
+				continue
+			}
+			spec = rest
+		case trimmed == ")":
+			inBlock = false
+			continue
+		default:
+			spec = trimmed
+		}
+		if m := reGoImportSpec.FindStringSubmatch(spec); m != nil && m[1] == "." {
+			return true
+		}
+	}
+	return false
+}
+
 // addExternalGoAlias records one import spec's alias when its path lies outside
 // the repo's own module.
 func addExternalGoAlias(aliases map[string]string, spec, modulePath string) {

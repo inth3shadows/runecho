@@ -283,6 +283,8 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// block editing inside a literal or signature whose opener is unchanged
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
+	// A dot-import in the pre-edit file sits outside an Edit hunk (#474).
+	diffs[0].GoDotImport = lang == guard.LangGo && guard.GoHasDotImport(fileLines)
 
 	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
@@ -295,7 +297,13 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// "violations" captured before recv-method/var-type below append (the only
 	// two checks still merging into `violations` — qualified/deps-go/
 	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
-	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
+	// A Go file with a dot-import abstains on bare names (#474); like star-import
+	// that is a degraded abstain, recorded rather than silent.
+	additiveReason := ""
+	if lang == guard.LangGo && (diffs[0].GoDotImport || guard.GoHasDotImport(newLines)) {
+		additiveReason = "dot-import"
+	}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, additiveReason)}
 	// learnEligible is the additive check's OWN finding set, captured here for the
 	// same reason firedChecks is: recv-method and var-type below append into
 	// `violations` too, and reading learn-eligibility back off the merged slice

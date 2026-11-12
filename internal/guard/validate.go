@@ -190,6 +190,12 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		if lang == LangUnknown {
 			continue
 		}
+		// A dot-import binds every exported name of another package as a bare
+		// identifier, so an unresolved bare name in this file may come from it.
+		// Abstain, as the Python star-import check does (#474).
+		if lang == LangGo && goDotImports(fd) {
+			continue
+		}
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
@@ -393,3 +399,18 @@ func loadIgnore(path string) []string {
 	}
 	return names
 }
+
+// goDotImports reports whether a Go file's binding surface includes a
+// dot-import, from the hunk, the staged blob, or the hook's pre-edit read.
+func goDotImports(fd FileDiff) bool {
+	if fd.GoDotImport || GoHasDotImport(fd.AddedLines) {
+		return true
+	}
+	return len(fd.Staged) > 0 && len(fd.Staged) <= maxDotImportScanBytes &&
+		GoHasDotImport(TextToAddedLines(string(fd.Staged)))
+}
+
+// maxDotImportScanBytes bounds the staged blob re-read for dot-imports, so a
+// huge file does not cost a full split on the commit path. Past it the file is
+// checked as before.
+const maxDotImportScanBytes = 2 << 20

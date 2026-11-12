@@ -1584,7 +1584,6 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// jsF tracks interface/class/type-literal bodies so their member signatures
 	// are not read as calls (#475); sigHeads holds this line's signature names.
 	var jsF jsFrames
-	var sigHeads map[int]struct{}
 	// prevEndsTernary: the previous code line ended in `?`, so this one may open
 	// a ternary branch — `compute(x) : {}` there is a call followed by the
 	// alternative, not a method with a return type, and must not be read as one.
@@ -1648,6 +1647,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			prevEndsTernary = strings.HasSuffix(trimmed, "?")
 			prevEndsDot = endsInSelectorDot(lang, trimmed)
 		}
+		var sigHeads map[int]struct{}
 		if lang == LangJS {
 			sigHeads = jsF.scanLine(scan)
 			if pendingMethod != nil {

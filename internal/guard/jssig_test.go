@@ -103,3 +103,42 @@ func TestExtractRefs_TS_RealCallsStillFlagged(t *testing.T) {
 		t.Errorf("ghostRun in an object-literal method body must be flagged, got %v", names)
 	}
 }
+
+// Review round 1 (#563): wrapped initializers, ternary object branches, regex
+// literals and heritage generics must neither hide a real call nor lose a
+// signature.
+func TestExtractRefs_TS_ReviewRound1(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  []string
+		want []string // must be refs
+		nope []string // must not be refs
+	}{
+		{"T1 wrapped field initializer", []string{`class Store {`, `  private readonly client =`, `    createClient(config);`, `}`}, []string{"createClient"}, nil},
+		{"T1 static field", []string{`class Store {`, `  static x =`, `    makeX(1);`, `}`}, []string{"makeX"}, nil},
+		{"T1 arrow body wrap", []string{`class Store {`, `  h = () =>`, `    doIt(1);`, `}`}, []string{"doIt"}, nil},
+		{"T1 or wrap", []string{`class Store {`, `  x = a ||`, `    fallbackOne();`, `}`}, []string{"fallbackOne"}, nil},
+		{"T1 await wrap", []string{`class Store {`, `  x = await`, `    loadIt();`, `}`}, []string{"loadIt"}, nil},
+		{"T1 ternary wrap", []string{`class Store {`, `  x = cond ?`, `    pickA() : pickB();`, `}`}, []string{"pickA"}, nil},
+		{"T1 sig after sig without semicolon", []string{`class S {`, `  abs(): void`, `  other(x: number): string`, `}`}, nil, []string{"abs", "other"}},
+		{"T1 sig after union wrap kept flagged", []string{`interface I {`, `  a: string |`, `    number;`, `  m(): void;`, `}`}, nil, []string{"m"}},
+		{"T2 ternary return", []string{`function f() {`, `  return enabled ? defaults() : {`, `    extra:`, `      ghostE(1),`, `  };`, `}`}, []string{"ghostE"}, nil},
+		{"T2 ternary call arg", []string{`foo(cond ? a : {`, `  b:`, `    ghostArg(),`, `});`}, []string{"ghostArg"}, nil},
+		{"T2 optional method return type kept", []string{`interface I {`, `  m?(): { n(): void };`, `}`}, nil, []string{"n"}},
+		{"T3 regex brace", []string{`class A {`, `  r = /\{/;`, `}`, `ghost();`}, []string{"ghost"}, nil},
+		{"T5 generic constraint literal", []string{`class A<T extends { id: string }> {`, `  m(): void;`, `}`}, nil, []string{"m"}},
+		{"T5 interface generic literal", []string{`interface R<T extends { id: string }> extends B<{ a: 1 }> {`, `  m(): void;`, `}`}, nil, []string{"m"}},
+		{"T5 type alias generic literal", []string{`type T<X extends { a: 1 }> = {`, `  m(): void;`, `};`}, nil, []string{"m"}},
+		{"T6 non-ascii head", []string{`class A {`, `  x = "é" + ünï(1);`, `  m(): void;`, `}`}, nil, []string{"m"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := ExtractRefs(LangJS, lines(tc.src...))
+			if !containsAll(refs, tc.want...) {
+				t.Errorf("want refs %v, got %v", tc.want, refNames(refs))
+			}
+			if !containsNone(refs, tc.nope...) {
+				t.Errorf("must not be refs %v, got %v", tc.nope, refNames(refs))
+			}
+		})
+	}
+}

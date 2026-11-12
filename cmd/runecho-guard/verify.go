@@ -283,12 +283,16 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// block editing inside a literal or signature whose opener is unchanged
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
-	// A dot-import in the pre-edit file sits outside an Edit hunk (#474). A
-	// Write's text is the whole file, so it alone decides (the pre-edit file is
-	// being replaced), and an edit that deletes the import ends it too.
-	diffs[0].GoDotImport = lang == guard.LangGo && edit.ToolName != "Write" &&
-		guard.GoHasDotImport(fileLines) &&
-		(!guard.GoHasDotImport(guard.TextToAddedLines(removedText)) || guard.GoHasDotImport(newLines))
+	// A dot import usually sits outside an Edit hunk (#474), so it is decided on
+	// the post-edit file. When the edit cannot be replayed, the pre-edit file
+	// decides, which can only over-abstain (an edit that drops the import).
+	if lang == guard.LangGo {
+		if post, ok := postEditFile(edit, fileLines); ok {
+			diffs[0].GoDotImport = guard.GoHasDotImport(post)
+		} else {
+			diffs[0].GoDotImport = edit.ToolName != "Write" && guard.GoHasDotImport(fileLines)
+		}
+	}
 
 	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic

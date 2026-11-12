@@ -557,7 +557,7 @@ var reGoReceiverTail = regexp.MustCompile(`^\s*[A-Za-z_]\w*\s*\(`)
 // reGoTypeParamDecl is what the LAST entry of a declared type-parameter list
 // looks like: a name, then a constraint. A bare name or `name(…)` is an array
 // length (`type Buf [n]byte`), not a list (G7).
-var reGoTypeParamDecl = regexp.MustCompile(`^[A-Za-z_]\w*\s+[A-Za-z_~\[(]`)
+var reGoTypeParamDecl = regexp.MustCompile(`^[A-Za-z_]\w*\s+[A-Za-z_~\[]`)
 
 // reGoTypeDeclParams matches the start of `type Name[` on a masked line.
 var reGoTypeDeclParams = regexp.MustCompile(`^\s*type\s+[A-Za-z_]\w*\s*\[`)
@@ -621,6 +621,12 @@ func goReceiverTypeParams(group string) []string {
 // is `name constraint`.
 func typeDeclParams(content string) []string {
 	parts := splitTypeParamParts(content)
+	// A trailing comma (`[T any,]`, gofmt's multi-line form, or the spec's
+	// `[P *C,]` that tells a type-parameter list from an array length) can only
+	// end a type-parameter list (G11).
+	if n := len(parts); n > 1 && parts[n-1] == "" {
+		return typeParamNames(parts[:n-1])
+	}
 	if len(parts) == 0 || !reGoTypeParamDecl.MatchString(parts[len(parts)-1]) {
 		return nil
 	}

@@ -244,3 +244,37 @@ func TestGoDeclaredNames_ArrayLengthNotTypeParam(t *testing.T) {
 		t.Errorf("type L[A, B any]: got %v", got)
 	}
 }
+
+// G11: a trailing comma ends a type-parameter list, so it binds even with a
+// pointer constraint; without one, `[P *C]` is an array length (Go spec), as is
+// a parenthesised call.
+func TestTypeDeclParams_G11(t *testing.T) {
+	cases := []struct {
+		content string
+		want    []string
+	}{
+		{"T *C,", []string{"T"}},
+		{"K comparable, V any,", []string{"K", "V"}},
+		{"P *C", nil},
+		{"ghost (1)", nil},
+	}
+	for _, tc := range cases {
+		if got := typeDeclParams(tc.content); !slices.Equal(got, tc.want) {
+			t.Errorf("typeDeclParams(%q) = %v, want %v", tc.content, got, tc.want)
+		}
+	}
+}
+
+// G13: a dot spec after a block comment closes on its line, and an import on
+// the package line.
+func TestGoHasDotImport_G13(t *testing.T) {
+	yes := []string{
+		"package p\n\nimport (\n\t/* a\n\tb */ . \"x\"\n)\n",
+		"package p; import . \"x\"\n",
+	}
+	for _, s := range yes {
+		if !GoHasDotImport(TextToAddedLines(s)) {
+			t.Errorf("G13: want dot-import in %q", s)
+		}
+	}
+}

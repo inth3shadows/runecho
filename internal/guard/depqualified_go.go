@@ -87,13 +87,19 @@ func GoHasDotImport(lines []AddedLine) bool {
 	inBlock := false
 	open := ""
 	for _, l := range lines {
-		lineStartOpen := open
+		// A line that starts inside a raw string or block comment is read too:
+		// the masked part is blank, so only code after the close is seen (G13).
 		scan, o := stripLiteralsStateful(LangGo, l.Text, open)
 		open = o
-		if lineStartOpen != "" {
-			continue
-		}
 		trimmed := strings.TrimSpace(scan)
+		// `package p; import . "x"`: the clause ends at the `;` (G13).
+		if !inBlock && hasGoKeyword(trimmed, "package") {
+			_, after, ok := strings.Cut(trimmed, ";")
+			if !ok {
+				continue
+			}
+			trimmed = strings.TrimSpace(after)
+		}
 		spec := ""
 		switch {
 		case inBlock:

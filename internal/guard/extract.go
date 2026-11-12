@@ -1581,6 +1581,11 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 	// input, or jsMethodPendingMax lines simply forget it, leaving the ref in
 	// place — a verdict it can't reach never costs a finding.
 	var pendingMethod *jsPendingMethod
+	// jsF tracks interface and ambient (declare) bodies, and abstract members,
+	// so their signatures are not read as calls (#475); sigHeads holds this
+	// line's declaration names. See jssig.go for why class bodies and type
+	// literals are not tracked.
+	var jsF jsFrames
 	// prevEndsTernary: the previous code line ended in `?`, so this one may open
 	// a ternary branch — `compute(x) : {}` there is a call followed by the
 	// alternative, not a method with a return type, and must not be read as one.
@@ -1615,6 +1620,7 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 				pyBraceDepth = 0
 			}
 			inIface = false
+			jsF.reset()
 		}
 		prevNo = l.LineNo
 		// Skip whole-line comments (only meaningful when not mid-string).
@@ -1643,7 +1649,9 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 			prevEndsTernary = strings.HasSuffix(trimmed, "?")
 			prevEndsDot = endsInSelectorDot(lang, trimmed)
 		}
+		var sigHeads map[int]struct{}
 		if lang == LangJS {
+			sigHeads = jsF.scanLine(scan)
 			if pendingMethod != nil {
 				pendingMethod.lines++
 				end, closed := jsParenClose(scan, 0, &pendingMethod.depth)
@@ -1741,6 +1749,9 @@ func extractRefs(lang Lang, lines []AddedLine, openSeed func(lineNo int) string,
 
 			if nameStart == methodSkip {
 				continue // a method definition's own name (#431)
+			}
+			if _, isSig := sigHeads[nameStart]; isSig {
+				continue // an interface, ambient or abstract signature (#475)
 			}
 
 			// Skip if preceded by '.' (qualified call), or by an identifier byte

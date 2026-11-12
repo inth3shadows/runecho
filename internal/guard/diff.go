@@ -106,6 +106,10 @@ type FileDiff struct {
 	// `import . "pkg"` the hunk does not show (#474): the hook from the pre-edit
 	// file, pre-commit from the staged blob. Run also reads AddedLines itself.
 	GoDotImport bool
+	// GoDotImportWhole says GoDotImport was decided on the whole file, so the
+	// hunk is not scanned again: scanned alone and unseeded, a hunk that starts
+	// inside a raw string or block comment reads its text as code (G16).
+	GoDotImportWhole bool
 }
 
 // AddedLine is a single '+' line from the diff with its new-file line number.

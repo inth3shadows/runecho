@@ -486,7 +486,11 @@ func goFuncGroups(scan string) (out []string, tparams []string, open string) {
 				// A receiver is the group straight after `func` that is followed by
 				// the method name; a func literal's parameter list is not, and its
 				// `List[int]` arguments must not bind.
-				wasReceiver := first && reGoReceiverTail.MatchString(scan[j:])
+				// Only a top-level `func` declares a method: a `func` later on the
+				// line is a literal or a func type, whose result may itself be
+				// `func(...)` (G18).
+				wasReceiver := first && strings.TrimSpace(scan[:loc[0]]) == "" &&
+					reGoReceiverTail.MatchString(scan[j:])
 				if wasReceiver {
 					tparams = append(tparams, goReceiverTypeParams(scan[start:j-1])...)
 				}

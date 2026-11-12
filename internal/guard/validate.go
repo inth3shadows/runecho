@@ -408,6 +408,9 @@ func loadIgnore(path string) []string {
 // file's exported-looking bare names: a dot-import in the hunk, or one the
 // caller found in the rest of the file and set on the diff (#474).
 func GoDotImportAbstains(fd FileDiff) bool {
+	if fd.GoDotImportWhole {
+		return fd.GoDotImport
+	}
 	return fd.GoDotImport || GoHasDotImport(fd.AddedLines)
 }
 

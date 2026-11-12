@@ -1022,3 +1022,57 @@ func TestRunHookMode_DotImportDecidedOnPostEditFile(t *testing.T) {
 		})
 	}
 }
+
+// G16: once the post-edit file decides, a hunk that starts inside a raw string
+// or block comment holding dot-import text does not abstain the file.
+func TestRunHookMode_DotImportTextInsideLiteralHunk(t *testing.T) {
+	cases := []struct{ name, pre, old, new string }{
+		{"raw string", "package main\n\nfunc TestX() {\n\tsrc := `\nA\nB\n`\n\t_ = src\n}\n",
+			"A\nB\n`\n\t_ = src", "import . \"x\"\n`\n\t_ = src\n\tGhostFunc()"},
+		{"block comment", "package main\n\n/*\nold\n*/\nfunc F() {}\n",
+			"old\n*/\nfunc F() {}", "import . \"x\"\n*/\nfunc F() { GhostFunc() }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			goModRepo(t, repoRoot, []string{"KnownFunc"})
+			goFile := filepath.Join(repoRoot, "a_test.go")
+			if err := os.WriteFile(goFile, []byte(tc.pre), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, _, d := runHook(t, payloadOld(t, "Edit", goFile, tc.old, tc.new, "", nil))
+			if d.Hook.PermissionDec != "ask" {
+				t.Fatalf("G16: want ask for GhostFunc, got %+v", d.Hook)
+			}
+		})
+	}
+}
+
+// G17: the dot-import degraded reason is recorded only when the abstain hid an
+// unresolved name, not on every edit to a dot-import file.
+func TestRunHookMode_DotImportReasonOnlyWhenSkipped(t *testing.T) {
+	const pre = "package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc F() {}\n"
+	cases := []struct {
+		name, new, want string
+	}{
+		{"nothing hidden", "func F() { KnownFunc() }", ""},
+		{"uppercase name hidden", "func F() { Expect() }", "dot-import"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			gitInit(t, repoRoot)
+			goModRepo(t, repoRoot, []string{"KnownFunc"})
+			goFile := filepath.Join(repoRoot, "a_test.go")
+			if err := os.WriteFile(goFile, []byte(pre), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runHook(t, payloadOld(t, "Edit", goFile, "func F() {}", tc.new, "", nil))
+			reasons, _ := readLastDecisionLog(t)["check_reasons"].(map[string]any)
+			if got, _ := reasons["violations"].(string); got != tc.want {
+				t.Fatalf("G17: check_reasons[violations] = %q, want %q (%v)", got, tc.want, reasons)
+			}
+		})
+	}
+}

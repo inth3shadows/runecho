@@ -139,16 +139,23 @@ func TestMarkDotImports(t *testing.T) {
 		{Path: "a_test.go", AddedLines: hunk, Staged: staged},
 		{Path: "b.go", AddedLines: hunk, Staged: []byte("package main\n")},
 	}
-	if !markDotImports(diffs) {
+	markDotImports(diffs)
+	if !diffs[0].GoDotImport || diffs[1].GoDotImport || !diffs[0].GoDotImportWhole {
+		t.Errorf("GoDotImport = %v, %v (whole %v); want true, false (true)", diffs[0].GoDotImport, diffs[1].GoDotImport, diffs[0].GoDotImportWhole)
+	}
+	// The abstain hid Expect, so it is reported (G17: only then).
+	if !dotImportHid(map[string]struct{}{}, "", diffs, 0) {
 		t.Fatal("want abstain reported")
 	}
-	if !diffs[0].GoDotImport || diffs[1].GoDotImport {
-		t.Errorf("GoDotImport = %v, %v; want true, false", diffs[0].GoDotImport, diffs[1].GoDotImport)
+	if dotImportHid(map[string]struct{}{"Expect": {}}, "", diffs, 0) {
+		t.Error("nothing hidden: must not report an abstain")
 	}
 	if r := classifyResult("violations", false, "dot-import"); r.Verdict != VerdictUnknown || r.Reason != "dot-import" {
 		t.Errorf("result = %+v, want unknown/dot-import", r)
 	}
-	if markDotImports([]guard.FileDiff{{Path: "c.go", AddedLines: hunk, Staged: []byte("package main\n")}}) {
+	none := []guard.FileDiff{{Path: "c.go", AddedLines: hunk, Staged: []byte("package main\n")}}
+	markDotImports(none)
+	if dotImportHid(map[string]struct{}{}, "", none, 1) {
 		t.Error("no dot-import: must not report an abstain")
 	}
 }

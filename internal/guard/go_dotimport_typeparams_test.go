@@ -278,3 +278,26 @@ func TestGoHasDotImport_G13(t *testing.T) {
 		}
 	}
 }
+
+// G18: a func literal or func type whose result is itself a func type is not a
+// method, so its parameter list's type arguments do not bind.
+func TestFoldInFileDefs_FuncLiteralReturningFuncBindsNoTypeArgs(t *testing.T) {
+	for _, src := range []string{
+		"package p\n\nfunc f() {\n\tg := func(m Map[K, V]) func() { return nil }\n\t_ = g\n}\n",
+		"package p\n\ntype F func(m M[Foo]) func(x int)\n",
+	} {
+		syms := map[string]struct{}{}
+		FoldInFileDefs(syms, TextToAddedLines(src), LangGo)
+		for _, n := range []string{"K", "V", "Foo"} {
+			if _, ok := syms[n]; ok {
+				t.Errorf("G18: %q bound by %q", n, src)
+			}
+		}
+	}
+	// A real method still binds its receiver's type parameter.
+	syms := map[string]struct{}{}
+	FoldInFileDefs(syms, TextToAddedLines("package p\n\nfunc (l *List[T]) Each(f func(T)) func() {\n}\n"), LangGo)
+	if _, ok := syms["T"]; !ok {
+		t.Errorf("G18: method receiver T not bound")
+	}
+}

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.91.0] — 2026-11-12
+
+### Changed
+- guard: treat TS interface, declare and abstract signatures as declarations (#475) (#563)
+
 ## [0.90.0] — 2026-11-12
 
 ### Changed

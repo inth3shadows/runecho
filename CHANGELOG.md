@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.89.0] — 2026-11-12
+
+### Changed
+- guard: bind Go type parameters; abstain on bare names in dot-import files (#474) (#562)
+
 ## [0.88.4] — 2026-11-12
 
 ### Changed

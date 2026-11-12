@@ -31,10 +31,11 @@ var pyAllHead = regexp.MustCompile(`^__all__\s*(?::[^=]*)?=\s*[\[(]`)
 
 // rePyStarImportStmt matches a star import at the start of a statement on a
 // masked line: the line start, after a `;`, or after a compound statement's
-// colon (`if X: from m import *`) (P13). The masking is what makes the `;` and
-// `:` safe to trust; filescope's rePyStarImport reads unmasked lines and stays
-// line-start only.
-var rePyStarImportStmt = regexp.MustCompile(`(?:^|[;:])\s*from\s+([.\w]+)\s+import\s+\*`)
+// colon (`if X: from m import *`) (P13), spelled `import*` or `from .import *`
+// too (P18). A backslash-continued import is not seen. The masking is what
+// makes the `;` and `:` safe to trust; filescope's rePyStarImport reads
+// unmasked lines and stays line-start only.
+var rePyStarImportStmt = regexp.MustCompile(`(?:^|[;:])\s*from\s+(\.+\s*|[.\w]*\w\s+)import\s*\*`)
 
 // pyIdent is a Python identifier, the only thing a star import can bind.
 var pyIdent = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_]*$`)
@@ -71,9 +72,10 @@ func PyStarImport(importerPath string, env PyStarEnv, wholeFile []AddedLine, fd 
 	collect := func(lines []AddedLine, seed func(int) string) {
 		scanStrippedSeeded(LangPython, lines, seed, func(scan string, _ AddedLine) {
 			for _, m := range rePyStarImportStmt.FindAllStringSubmatch(scan, -1) {
-				if _, dup := seen[m[1]]; !dup {
-					seen[m[1]] = struct{}{}
-					modules = append(modules, m[1])
+				mod := strings.TrimSpace(m[1])
+				if _, dup := seen[mod]; !dup {
+					seen[mod] = struct{}{}
+					modules = append(modules, mod)
 				}
 			}
 		})
@@ -120,6 +122,13 @@ func pyStarSourceNames(importerPath, module string, env PyStarEnv) ([]string, bo
 // joins them. `__all__ +=`, `.extend(`, an indented or computed value all fail
 // one of these, and each makes the set dynamic.
 func pyLiteralAllNames(text string) ([]string, bool) {
+	// The masker does not honour a backslash before a triple quote, so a
+	// docstring holding one closes early and the rest reads as code: an
+	// `__all__` example inside it would be taken for the real one (P17). Such a
+	// source is not judged.
+	if strings.Contains(text, `\"""`) || strings.Contains(text, `\'''`) {
+		return nil, false
+	}
 	lines := strings.Split(text, "\n")
 	at, col, open := -1, 0, ""
 	for i, l := range lines {

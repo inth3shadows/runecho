@@ -124,6 +124,8 @@ func TestPyLiteralAllNames(t *testing.T) {
 		{"prefixed string", "__all__ = [b'a']\n", nil},
 		{"unclosed", "__all__ = ['a',\n", nil},
 		{"none", "def a(): pass\n", nil},
+		{"P17 escaped triple quote hides a docstring __all__", "\"\"\"Doc \\\"\"\" quote.\n__all__ = ['ghost']\n\"\"\"\ndef real(): pass\n", nil},
+		{"P17 raw docstring", "r'''Doc \\''' q.\n__all__ = ['ghost']\n'''\n", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,6 +149,9 @@ func TestPyStarImport_NotAtLineStart(t *testing.T) {
 		"import os; from tkinter import *\n",
 		"if True: from tkinter import *\n",
 		"import os; import sys; from tkinter import *\n",
+		"from tkinter import*\n",
+		"from .import *\n",
+		"from ..import*\n",
 	} {
 		fd := FileDiff{Path: "a.py", AddedLines: TextToAddedLines(src)}
 		if r := PyStarImport("/nowhere/a.py", PyStarEnv{Root: "/nowhere"}, nil, fd); r.Reason != "star-import" {

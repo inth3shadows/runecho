@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.88.4] — 2026-11-12
+
+### Changed
+- test(guard): bound the nested-paren scan absolutely, not by a ratio (#561)
+
 ## [0.88.3] — 2026-11-06
 
 ### Changed

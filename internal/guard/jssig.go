@@ -1,6 +1,9 @@
 package guard
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // TypeScript member signatures are declarations, not calls (#475):
 // `findUser(id: string): Promise<User>;` in an interface, `abstract render():
@@ -35,8 +38,8 @@ var reTSDeclareLine = regexp.MustCompile(`^\s*(?:export\s+)?declare\s+(?:functio
 // reTSAbstractMember is an abstract member; group 1 is its name.
 var reTSAbstractMember = regexp.MustCompile(`^\s*(?:(?:public|protected|private|static|readonly|override|async)\s+)*abstract\s+(?:(?:async|readonly|override|get|set)\s+)*([A-Za-z_$][\w$]*)\s*[?!]?\s*[<(:;]`)
 
-// jsSigHeadMaxLines bounds how far below an interface or declare head its
-// body `{` may open. A head that never opens one is forgotten.
+// jsSigHeadMaxLines bounds how far below an interface head its body `{` may
+// open. A head that never opens one is forgotten.
 const jsSigHeadMaxLines = 8
 
 // jsFrames tracks whether a line is inside an interface or ambient body.
@@ -60,9 +63,19 @@ func (f *jsFrames) scanLine(scan string) map[int]struct{} {
 	}
 	whole := false
 	if f.depth == 0 && f.pending == 0 {
+		// Nearly every line names none of the keywords; skip the regexes.
+		if !strings.Contains(scan, "interface") && !strings.Contains(scan, "declare") &&
+			!strings.Contains(scan, "abstract") {
+			return nil
+		}
 		switch {
-		case reTSInterfaceHead.MatchString(scan), reTSDeclareBlock.MatchString(scan):
+		case reTSInterfaceHead.MatchString(scan):
 			f.pending, f.angle = jsSigHeadMaxLines, 0
+		case reTSDeclareBlock.MatchString(scan):
+			// Its body opens on the head line. A shorthand ambient module
+			// (`declare module "*.svg"`, no `;` under semi-less formatting) has
+			// none, and a head left pending would swallow the code below it.
+			f.pending, f.angle = 1, 0
 		case reTSDeclareLine.MatchString(scan):
 			whole = true
 		default:
@@ -74,8 +87,13 @@ func (f *jsFrames) scanLine(scan string) map[int]struct{} {
 	}
 	for i := 0; i < len(scan); i++ {
 		c := scan[i]
-		if (whole || f.depth > 0 || f.pending > 0) && jsSigIdentStart(c) &&
-			(i == 0 || !jsSigIdentByte(scan[i-1])) {
+		if whole && c == ';' {
+			whole = false // the declaration ends; code may follow on the line
+		}
+		// The same identifier bytes the call loop uses, so a marked offset is
+		// the nameStart it looks up.
+		if (whole || f.depth > 0 || f.pending > 0) && isJSIdentByte(c) && !(c >= '0' && c <= '9') &&
+			(i == 0 || !isJSIdentByte(scan[i-1])) {
 			mark(i)
 		}
 		switch {
@@ -103,12 +121,4 @@ func (f *jsFrames) scanLine(scan string) map[int]struct{} {
 		f.pending--
 	}
 	return out
-}
-
-func jsSigIdentStart(c byte) bool {
-	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
-}
-
-func jsSigIdentByte(c byte) bool {
-	return jsSigIdentStart(c) || (c >= '0' && c <= '9')
 }

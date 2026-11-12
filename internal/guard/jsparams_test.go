@@ -753,32 +753,60 @@ func TestJSParamNamesRoundFiveShapes(t *testing.T) {
 // where every group BINDS, and a bound group is skipped whole. This one uses
 // the shape where none bind.
 //
-// It used to compare two wall-clock times (depth 5000 vs 20000, fail past 8x).
-// Linear is ~4x and quadratic ~16x, but the small run is ~0.5 ms, so scheduler
-// noise under a loaded `go test ./...` pushed the ratio past 8x on correct code
-// (observed: 537µs vs 8.3ms). It now bounds ONE in-cap input absolutely: the
-// linear scan takes ~1.5 ms on a 60 KB line, the quadratic one took 835 ms on
-// 40 KB (~1.9 s at 60 KB by its n² curve), and the 250 ms ceiling sits about two
-// orders of magnitude above the first and ~7x below the second. Best of 3
-// filters a single preemption.
+// It used to compare two wall-clock times at depth 5000 vs 20000 and fail past
+// 8x (linear ~4x, quadratic ~16x). The small run is ~0.5 ms in a plain build,
+// so scheduler noise under a loaded `go test ./...` pushed correct code past 8x
+// (observed: 537µs vs 8.3ms). An absolute ceiling alone fails the other way:
+// CI runs with -race -cover, which slows the linear scan ~200x (~350 ms here).
+//
+// So two stages. FLOOR: if the large input finishes under 50 ms it cannot be the
+// quadratic scan (835 ms at 40 KB plain, slower instrumented), pass. Otherwise
+// (an instrumented build, or a real regression) fall back to the ratio, now at
+// depth 7500 vs 30000 so the small run is long enough under instrumentation that
+// noise is negligible, with up to 3 attempts so one preemption cannot fail it.
+// Any single call over 5 s fails at once (linear is ~350 ms instrumented).
 func TestJSParamNamesNestedParenNotQuadratic(t *testing.T) {
-	const depth = 30000 // 60 KB of parens + ";": under TextToAddedLines' 64 KiB capLine
-	src := strings.Repeat("(", depth) + strings.Repeat(")", depth) + ";"
-	lines := TextToAddedLines(src)
-	if len(lines) != 1 || len(lines[0].Text) != len(src) {
-		t.Fatalf("input was capped or split (%d lines); the bound below would measure a truncated line", len(lines))
+	input := func(depth int) []AddedLine {
+		src := strings.Repeat("(", depth) + strings.Repeat(")", depth) + ";"
+		lines := TextToAddedLines(src)
+		if len(lines) != 1 || len(lines[0].Text) != len(src) {
+			t.Fatalf("depth %d: input was capped or split (%d lines, %d of %d bytes); "+
+				"the bound would measure a truncated line", depth, len(lines), len(lines[0].Text), len(src))
+		}
+		return lines
 	}
-	best := time.Hour
-	for i := 0; i < 3; i++ {
-		st := time.Now()
-		_ = JSParamNames(lines)
-		if d := time.Since(st); d < best {
-			best = d
+	measure := func(lines []AddedLine) time.Duration {
+		best := time.Hour
+		for i := 0; i < 3; i++ {
+			st := time.Now()
+			_ = JSParamNames(lines)
+			d := time.Since(st)
+			if d > 5*time.Second {
+				// Linear is ~350 ms even under -race -cover; a quadratic scan takes
+				// minutes there. Fail now instead of waiting out the retries.
+				t.Fatalf("nested-paren scan is superlinear: one call took %v", d)
+			}
+			if d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	small, large := input(7500), input(30000) // 30000: 60 KB, under the 64 KiB capLine
+	var s, l time.Duration
+	for attempt := 0; attempt < 3; attempt++ {
+		s = measure(small) // first: a quadratic scan trips the 5 s fail-fast here sooner
+		l = measure(large)
+		if l < 50*time.Millisecond {
+			return // too fast to be quadratic in any build
+		}
+		// 4x the depth: linear predicts ~4x, quadratic ~16x.
+		if l <= 8*s {
+			return
 		}
 	}
-	if best > 250*time.Millisecond {
-		t.Errorf("nested-paren scan is superlinear: depth %d took %v (linear is ~1.5ms; the quadratic regression took ~1.9s)", depth, best)
-	}
+	t.Errorf("nested-paren scan is superlinear: depth 7500 %v, depth 30000 %v (ratio %.1fx; linear ~4x, quadratic ~16x)",
+		s, l, float64(l)/float64(s))
 }
 
 // TestJSParamNamesNestedPatternGenericLeak pins review-round-6 finding 2.

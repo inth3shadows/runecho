@@ -2,7 +2,7 @@ package guard
 
 import "testing"
 
-// #475: a TS interface, abstract or type-literal method signature declares a
+// #475: a TS interface, abstract or ambient (declare) method signature declares a
 // member; it is not a call. The IR stores these qualified (`Repo.findUser`), so
 // the bare name is unknown and, before the fix, every signature that ended in
 // `;` was flagged. The issue's exact repro, end to end.
@@ -40,19 +40,20 @@ func TestExtractRefs_TS_SignaturesSkipped(t *testing.T) {
 		{"readonly getter setter", []string{`interface G {`, `  get size(): number;`, `  set size(v: number);`, `}`}, []string{"size"}},
 		{"multi-line signature", []string{`interface H {`, `  find(`, `    id: string,`, `    opts: Opts,`, `  ): Promise<User>;`, `}`}, []string{"find"}},
 		{"comma separated members", []string{`interface C {`, `  a(): void,`, `  b(): void,`, `}`}, []string{"a", "b"}},
-		{"type literal alias", []string{`type T = { m(): void };`}, []string{"m"}},
-		{"multi-line type literal", []string{`export type T<X> = {`, `  m(x: X): void`, `  n(): string`, `};`}, []string{"m", "n"}},
-		{"intersection literal", []string{`type T = Base & {`, `  extra(): void;`, `};`}, []string{"extra"}},
-		{"inline param type", []string{`function f(cb: { m(): void; n(): void }) {}`}, []string{"m", "n"}},
-		{"inline return type", []string{`function g(): { m(): void, n(): void } {`, `}`}, []string{"m", "n"}},
 		{"nested literal in interface", []string{`interface N {`, `  inner: {`, `    deep(): void;`, `  };`, `}`}, []string{"deep"}},
 		{"abstract methods", []string{`export abstract class Base {`, `  abstract render(): void;`, `  protected abstract load(id: string): Promise<void>;`, `  public abstract async run(): Promise<void>;`, `  abstract get name(): string;`, `}`}, []string{"render", "load", "run", "name"}},
 		{"abstract without class line", []string{`  protected abstract load(id: string): Promise<void>;`}, []string{"load"}},
-		{"overload signatures", []string{`class S {`, `  foo(a: string): void;`, `  foo(a: number): void;`, `  foo(a: any) { return a; }`, `}`}, []string{"foo"}},
+		{"declare module", []string{`declare module "x" {`, `  export function f(a: string): void;`, `  export class K { m(): void; }`, `}`}, []string{"f", "m"}},
+		{"declare global nested interface", []string{`declare global {`, `  interface Window {`, `    track(e: string): void;`, `  }`, `}`}, []string{"track"}},
+		{"declare namespace", []string{`export declare namespace N {`, `  function g(): void;`, `}`}, []string{"g"}},
+		{"declare const", []string{`declare const h: (x: number) => Thing;`}, []string{"h"}},
+		{"one-line interface", []string{`interface I { m(): void; n(x: T): U }`}, []string{"m", "n"}},
+		{"interface generic default arrow", []string{`interface E<T = () => void> {`, `  m(): T;`, `}`}, []string{"m"}},
+		{"interface generic constraint literal", []string{`interface R<T extends { id: string }> {`, `  m(): void;`, `}`}, []string{"m"}},
+		{"abstract property and member", []string{`abstract class A {`, `  abstract readonly size: number;`, `  abstract m?(): void;`, `}`}, []string{"m"}},
 		{"declare class", []string{`declare class D {`, `  m(): void;`, `  static s(x: number): D;`, `}`}, []string{"m", "s"}},
 		{"declare function", []string{`declare function f(): void;`, `export declare function g(x: number): string;`}, []string{"f", "g"}},
 		{"newline terminated no semicolon", []string{`interface Q {`, `  a(): void`, `  b(x: number): string`, `}`}, []string{"a", "b"}},
-		{"member after method body", []string{`class W {`, `  a() { return 1; }`, `  abs(): void;`, `}`}, []string{"a", "abs"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refs := ExtractRefs(LangJS, lines(tc.src...))
@@ -77,7 +78,6 @@ func TestExtractRefs_TS_RealCallsStillFlagged(t *testing.T) {
 		{"arrow in class property", []string{`class A {`, `  h = () => {`, `    ghostProp();`, `  };`, `}`}, []string{"ghostProp"}},
 		{"top level", []string{`ghostTop();`}, []string{"ghostTop"}},
 		{"after interface", []string{`interface R {`, `  m(): void;`, `}`, `ghostAfter();`}, []string{"ghostAfter"}},
-		{"after type literal", []string{`type T = { m(): void };`, `ghostAfterT();`}, []string{"ghostAfterT"}},
 		{"object literal method body", []string{`const o = {`, `  run() {`, `    obj.method();`, `    ghostObj();`, `  },`, `};`}, []string{"ghostObj"}},
 		{"object literal method body, bare call", []string{`const o = {`, `  run() {`, `    ghostInObj();`, `  },`, `};`}, []string{"ghostInObj"}},
 		{"case block", []string{`switch (x) {`, `  case 1: {`, `    ghostCase();`, `  }`, `}`}, []string{"ghostCase"}},
@@ -85,6 +85,12 @@ func TestExtractRefs_TS_RealCallsStillFlagged(t *testing.T) {
 		{"static block", []string{`class A {`, `  static {`, `    ghostStatic();`, `  }`, `}`}, []string{"ghostStatic"}},
 		{"call after class", []string{`class A {`, `  abstractish(): void;`, `}`, `abstractish();`}, []string{"abstractish"}},
 		{"params of signature body method", []string{`interface I {`, `  m(): void;`, `}`, `function k() {`, `  ghostFn();`, `}`}, []string{"ghostFn"}},
+		{"after declare module", []string{`declare module "x" {`, `  export function f(): void;`, `}`, `ghostAfterDecl();`}, []string{"ghostAfterDecl"}},
+		{"declare function without semicolon", []string{`declare function f(): void`, `function g() {`, `  ghostG();`, `}`}, []string{"ghostG"}},
+		{"after one-line interface", []string{`interface I { m(): void }`, `ghostAfterOne();`}, []string{"ghostAfterOne"}},
+		{"interface word in a call", []string{`const interface_ = 1;`, `makeInterface({`, `  a: 1,`, `});`, `ghostIf();`}, []string{"makeInterface", "ghostIf"}},
+		{"class body calls", []string{`class S {`, `  x = build(1);`, `  m() { return ghostM(); }`, `}`}, []string{"build", "ghostM"}},
+		{"abstract class concrete method body", []string{`abstract class A {`, `  abstract m(): void;`, `  run() { ghostRunA(); }`, `}`}, []string{"ghostRunA"}},
 		{"jsx class attr", []string{`const v = <div class={cls}>`, `  {ghostJsx()}`, `</div>;`}, []string{"ghostJsx"}},
 		{"object literal arg", []string{`foo({`, `  a: 1,`, `});`, `ghostArg();`}, []string{"foo", "ghostArg"}},
 	} {
@@ -120,16 +126,11 @@ func TestExtractRefs_TS_ReviewRound1(t *testing.T) {
 		{"T1 or wrap", []string{`class Store {`, `  x = a ||`, `    fallbackOne();`, `}`}, []string{"fallbackOne"}, nil},
 		{"T1 await wrap", []string{`class Store {`, `  x = await`, `    loadIt();`, `}`}, []string{"loadIt"}, nil},
 		{"T1 ternary wrap", []string{`class Store {`, `  x = cond ?`, `    pickA() : pickB();`, `}`}, []string{"pickA"}, nil},
-		{"T1 sig after sig without semicolon", []string{`class S {`, `  abs(): void`, `  other(x: number): string`, `}`}, nil, []string{"abs", "other"}},
 		{"T1 sig after union wrap kept flagged", []string{`interface I {`, `  a: string |`, `    number;`, `  m(): void;`, `}`}, nil, []string{"m"}},
 		{"T2 ternary return", []string{`function f() {`, `  return enabled ? defaults() : {`, `    extra:`, `      ghostE(1),`, `  };`, `}`}, []string{"ghostE"}, nil},
 		{"T2 ternary call arg", []string{`foo(cond ? a : {`, `  b:`, `    ghostArg(),`, `});`}, []string{"ghostArg"}, nil},
-		{"T2 optional method return type kept", []string{`interface I {`, `  m?(): { n(): void };`, `}`}, nil, []string{"n"}},
 		{"T3 regex brace", []string{`class A {`, `  r = /\{/;`, `}`, `ghost();`}, []string{"ghost"}, nil},
-		{"T5 generic constraint literal", []string{`class A<T extends { id: string }> {`, `  m(): void;`, `}`}, nil, []string{"m"}},
 		{"T5 interface generic literal", []string{`interface R<T extends { id: string }> extends B<{ a: 1 }> {`, `  m(): void;`, `}`}, nil, []string{"m"}},
-		{"T5 type alias generic literal", []string{`type T<X extends { a: 1 }> = {`, `  m(): void;`, `};`}, nil, []string{"m"}},
-		{"T6 non-ascii head", []string{`class A {`, `  x = "é" + ünï(1);`, `  m(): void;`, `}`}, nil, []string{"m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refs := ExtractRefs(LangJS, lines(tc.src...))

@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.90.0] — 2026-11-12
+
+### Changed
+- guard: abstain on Python star imports with unknown exports (#477) (#564)
+
 ## [0.89.0] — 2026-11-12
 
 ### Changed

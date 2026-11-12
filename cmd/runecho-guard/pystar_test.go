@@ -179,3 +179,36 @@ func TestPyStarImport_LiteralAllNamesFoldedWhenIndexStale(t *testing.T) {
 		t.Errorf("a name outside __all__ must still be flagged, got %q", got)
 	}
 }
+
+// P9: an Edit's star-import decision is made on the post-edit file, so an Edit
+// that replaces the star import no longer abstains on the pre-edit copy.
+func TestPyStarImport_EditDroppingStarImportFlags(t *testing.T) {
+	repo := pyStarRepo(t, map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/ui.py":       "from tkinter import *\n\nroot = Tk()\n",
+	})
+	f := filepath.Join(repo, "pkg", "ui.py")
+	_, _, d := runHook(t, payloadOld(t, "Edit", f,
+		"from tkinter import *\n\nroot = Tk()",
+		"import tkinter\n\nroot = tkinter.Tk()\nzz_not_real()", "", nil))
+	if d.Hook.PermissionDec != "ask" || !strings.Contains(d.Hook.PermissionReason, "zz_not_real") {
+		t.Errorf("an Edit that drops the star import must flag zz_not_real, got %+v", d.Hook)
+	}
+}
+
+// P9: a MultiEdit that adds a star import in one edit and a name it binds in
+// another does not flag the name.
+func TestPyStarImport_MultiEditAddingStarImport(t *testing.T) {
+	repo := pyStarRepo(t, map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/ui.py":       "import os\n\nroot = os.getcwd()\n",
+	})
+	f := filepath.Join(repo, "pkg", "ui.py")
+	_, _, d := runHook(t, payloadOld(t, "MultiEdit", f, "", "", "", []editOp{
+		{OldString: "import os\n", NewString: "import os\nfrom tkinter import *\n"},
+		{OldString: "root = os.getcwd()", NewString: "root = Tk()"},
+	}))
+	if d.Hook.PermissionDec == "ask" {
+		t.Errorf("Tk() bound by a star import added in the same MultiEdit was flagged: %q", d.Hook.PermissionReason)
+	}
+}

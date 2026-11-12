@@ -24,14 +24,20 @@ import (
 // file is treated as not fully known (abstain), the fail-open direction.
 const pyStarSourceMaxBytes = 1 << 20
 
-// pyLiteralAll matches a module's one `__all__` assignment when its value is a
-// list or tuple holding only string literals (comments and line breaks
-// allowed): the one shape whose export set is knowable without evaluating code.
-// Group 1 is the bracket body.
-var pyLiteralAll = regexp.MustCompile(`(?m)^__all__\s*(?::[^=\n]*)?=\s*[\[(]((?:\s*(?:"\w*"|'\w*')\s*,?|\s*#[^\n]*)*)\s*[\])]\s*(?:#[^\n]*)?$`)
+// pyAllHead matches, on a line with strings and comments masked, a column-0
+// `__all__ =` (optionally annotated) up to and including the opening bracket of
+// a list or tuple.
+var pyAllHead = regexp.MustCompile(`^__all__\s*(?::[^=]*)?=\s*[\[(]`)
 
-// pyAllItem extracts one quoted name from a literal __all__ body.
-var pyAllItem = regexp.MustCompile(`["'](\w+)["']`)
+// rePyStarImportStmt matches a star import at the start of a statement on a
+// masked line: the line start, after a `;`, or after a compound statement's
+// colon (`if X: from m import *`) (P13). The masking is what makes the `;` and
+// `:` safe to trust; filescope's rePyStarImport reads unmasked lines and stays
+// line-start only.
+var rePyStarImportStmt = regexp.MustCompile(`(?:^|[;:])\s*from\s+([.\w]+)\s+import\s+\*`)
+
+// pyIdent is a Python identifier, the only thing a star import can bind.
+var pyIdent = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_]*$`)
 
 // PyStarEnv says where star-import sources are read from.
 type PyStarEnv struct {
@@ -53,9 +59,10 @@ type PyStarResult struct {
 }
 
 // PyStarImport finds the file's `from m import *` statements and decides whether
-// the additive check can still run. wholeFile is the pre-edit/staged file (nil
-// for a Write, whose added text IS the whole file, so a stale copy must not
-// decide); fd carries the added lines and their string-state seeds. Both are
+// the additive check can still run. wholeFile is the file the decision is made
+// on: the post-edit file in the hook, or the staged file at commit. fd carries
+// added lines not already in it (with their string-state seeds), for a hook
+// edit that could not be replayed; both are
 // scanned with string and docstring content masked, so an example in a
 // docstring does not count as an import.
 func PyStarImport(importerPath string, env PyStarEnv, wholeFile []AddedLine, fd FileDiff) PyStarResult {
@@ -63,13 +70,11 @@ func PyStarImport(importerPath string, env PyStarEnv, wholeFile []AddedLine, fd 
 	seen := make(map[string]struct{})
 	collect := func(lines []AddedLine, seed func(int) string) {
 		scanStrippedSeeded(LangPython, lines, seed, func(scan string, _ AddedLine) {
-			m := rePyStarImport.FindStringSubmatch(scan)
-			if m == nil {
-				return
-			}
-			if _, dup := seen[m[1]]; !dup {
-				seen[m[1]] = struct{}{}
-				modules = append(modules, m[1])
+			for _, m := range rePyStarImportStmt.FindAllStringSubmatch(scan, -1) {
+				if _, dup := seen[m[1]]; !dup {
+					seen[m[1]] = struct{}{}
+					modules = append(modules, m[1])
+				}
 			}
 		})
 	}
@@ -102,21 +107,94 @@ func pyStarSourceNames(importerPath, module string, env PyStarEnv) ([]string, bo
 		return nil, false
 	}
 	text := strings.ReplaceAll(string(src), "\r\n", "\n")
-	// Exactly one mention, and it is the literal assignment: `__all__ +=`,
-	// `.extend(`, or a computed value would all show up as a second mention or
-	// fail the literal match, and each makes the set dynamic.
-	if strings.Count(text, "__all__") != 1 {
+	return pyLiteralAllNames(text)
+}
+
+// pyLiteralAllNames reads a module's __all__ when its export set is fully
+// known: __all__ is mentioned exactly once in code (strings, docstrings and
+// comments masked first, so an example in a docstring neither counts as the
+// assignment nor blocks it), and that mention is a column-0 assignment of a list
+// or tuple holding only plain string literals, with nothing but a comment after
+// the closing bracket. Inside the brackets, comments are skipped (a quoted name
+// in a comment is not an export) and adjacent literals are joined, as Python
+// joins them. `__all__ +=`, `.extend(`, an indented or computed value all fail
+// one of these, and each makes the set dynamic.
+func pyLiteralAllNames(text string) ([]string, bool) {
+	lines := strings.Split(text, "\n")
+	at, col, open := -1, 0, ""
+	for i, l := range lines {
+		scan, o := stripLiteralsStateful(LangPython, l, open)
+		open = o
+		switch n := strings.Count(scan, "__all__"); {
+		case n == 0:
+			continue
+		case n > 1 || at >= 0:
+			return nil, false
+		}
+		m := pyAllHead.FindStringIndex(scan)
+		if m == nil {
+			return nil, false
+		}
+		at, col = i, m[1]-1
+	}
+	if at < 0 {
 		return nil, false
 	}
-	m := pyLiteralAll.FindStringSubmatch(text)
-	if m == nil {
-		return nil, false
+	rest := strings.Join(lines[at:], "\n")[col:]
+	closer := byte(']')
+	if rest[0] == '(' {
+		closer = ')'
 	}
-	var names []string
-	for _, it := range pyAllItem.FindAllStringSubmatch(m[1], -1) {
-		names = append(names, it[1])
+	names := []string{}
+	cur, pending := "", false
+	for i := 1; i < len(rest); {
+		switch c := rest[i]; {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '#':
+			k := strings.IndexByte(rest[i:], '\n')
+			if k < 0 {
+				return nil, false
+			}
+			i += k
+		case c == ',':
+			if !pending {
+				return nil, false
+			}
+			names, cur, pending = append(names, cur), "", false
+			i++
+		case c == '"' || c == '\'':
+			k := strings.IndexByte(rest[i+1:], c)
+			// No close, an escape or line break inside, or a triple quote: not a
+			// plain literal.
+			if k < 0 || strings.ContainsAny(rest[i+1:i+1+k], "\\\n") ||
+				(k == 0 && i+2 < len(rest) && rest[i+2] == c) {
+				return nil, false
+			}
+			cur, pending = cur+rest[i+1:i+1+k], true
+			i += k + 2
+		case c == closer:
+			if pending {
+				names = append(names, cur)
+			}
+			tail := rest[i+1:]
+			if k := strings.IndexByte(tail, '\n'); k >= 0 {
+				tail = tail[:k]
+			}
+			if tail = strings.TrimSpace(tail); tail != "" && tail[0] != '#' {
+				return nil, false
+			}
+			for _, n := range names {
+				if !pyIdent.MatchString(n) {
+					return nil, false
+				}
+			}
+			return names, true
+		default:
+			return nil, false
+		}
 	}
-	return names, true
+	return nil, false
 }
 
 // readDiskCapped reads a working-tree file, refusing one over the size cap.

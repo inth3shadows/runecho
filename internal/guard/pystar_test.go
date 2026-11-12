@@ -3,6 +3,7 @@ package guard
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -95,4 +96,66 @@ func TestResolvePyModule_RootsAndPackagePrecedence(t *testing.T) {
 func resolvePyModuleDisk(importer, module string) string {
 	p, _, _ := resolvePyModule(importer, module, "", readDiskCapped)
 	return p
+}
+
+// TestPyLiteralAllNames pins the __all__ reader on comments, docstrings and
+// implicit concatenation (P10, P11, P12 in the #564 review).
+func TestPyLiteralAllNames(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []string // nil: not fully known
+	}{
+		{"plain", "__all__ = ['a', \"b\"]\n", []string{"a", "b"}},
+		{"multi-line with comments", "__all__ = [\n    \"a\",  # first\n    'b',\n]\n", []string{"a", "b"}},
+		{"P10 quoted name in a comment is not an export", "__all__ = [\n    \"real\",  # 'ghost' was removed\n]\n", []string{"real"}},
+		{"P11 docstring __all__ only", "\"\"\"Example:\n__all__ = ['x']\n\"\"\"\ndef x(): pass\n", nil},
+		{"P11 docstring mention plus real one", "\"\"\"Set __all__ below.\"\"\"\n__all__ = ['a']\n", []string{"a"}},
+		{"comment mention plus real one", "# __all__ is literal\n__all__ = ['a']\n", []string{"a"}},
+		{"P12 implicit concatenation", "__all__ = ['get_' 'config', 'b']\n", []string{"get_config", "b"}},
+		{"trailing comment after close", "__all__ = ('a',)  # done\n", []string{"a"}},
+		{"annotated", "__all__: list[str] = ['a']\n", []string{"a"}},
+		{"empty", "__all__ = []\n", []string{}},
+		{"computed", "__all__ = base.__all__ + ['a']\n", nil},
+		{"splat", "__all__ = [*base]\n", nil},
+		{"extended", "__all__ = ['a']\n__all__ += ['b']\n", nil},
+		{"trailing expression", "__all__ = ['a'] + extra\n", nil},
+		{"indented", "if X:\n    __all__ = ['a']\n", nil},
+		{"non-identifier string", "__all__ = ['a-b']\n", nil},
+		{"prefixed string", "__all__ = [b'a']\n", nil},
+		{"unclosed", "__all__ = ['a',\n", nil},
+		{"none", "def a(): pass\n", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := pyLiteralAllNames(tc.src)
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("want not known, got %q", got)
+				}
+				return
+			}
+			if !ok || strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("got %q ok=%v, want %q", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// P13: a star import after `;` or a compound-statement colon is still found.
+func TestPyStarImport_NotAtLineStart(t *testing.T) {
+	for _, src := range []string{
+		"import os; from tkinter import *\n",
+		"if True: from tkinter import *\n",
+		"import os; import sys; from tkinter import *\n",
+	} {
+		fd := FileDiff{Path: "a.py", AddedLines: TextToAddedLines(src)}
+		if r := PyStarImport("/nowhere/a.py", PyStarEnv{Root: "/nowhere"}, nil, fd); r.Reason != "star-import" {
+			t.Errorf("P13: %q: want star-import, got %+v", src, r)
+		}
+	}
+	// Masked: inside a string it is not an import.
+	fd := FileDiff{Path: "a.py", AddedLines: TextToAddedLines("x = 'a; from tkinter import *'\n")}
+	if r := PyStarImport("/nowhere/a.py", PyStarEnv{Root: "/nowhere"}, nil, fd); r.Reason != "" {
+		t.Errorf("P13: star import in a string: want none, got %+v", r)
+	}
 }

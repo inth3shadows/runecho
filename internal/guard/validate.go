@@ -5,6 +5,8 @@ import (
 	"os"
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Violation records a single unresolved symbol reference.
@@ -190,17 +192,19 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		if lang == LangUnknown {
 			continue
 		}
-		// A dot-import binds every exported name of another package as a bare
-		// identifier, so an unresolved bare name in this file may come from it.
-		// Abstain, as the Python star-import check does (#474).
-		if lang == LangGo && goDotImports(fd) {
-			continue
-		}
+		// A dot-import binds every EXPORTED name of another package as a bare
+		// identifier, so an unresolved uppercase bare name in this file may come
+		// from it. Abstain on those only, as the Python star-import check does
+		// (#474); a lowercase name cannot come from another package.
+		dot := lang == LangGo && GoDotImportAbstains(fd)
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
 		for _, ref := range extractRefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i], dotSeeds[i]) {
 			if _, ok := known[ref.Name]; ok {
+				continue
+			}
+			if dot && startsUpper(ref.Name) {
 				continue
 			}
 			if matchesIgnoreGlob(ref.Name, ignoreGlobs) {
@@ -400,17 +404,16 @@ func loadIgnore(path string) []string {
 	return names
 }
 
-// goDotImports reports whether a Go file's binding surface includes a
-// dot-import, from the hunk, the staged blob, or the hook's pre-edit read.
-func goDotImports(fd FileDiff) bool {
-	if fd.GoDotImport || GoHasDotImport(fd.AddedLines) {
-		return true
-	}
-	return len(fd.Staged) > 0 && len(fd.Staged) <= maxDotImportScanBytes &&
-		GoHasDotImport(TextToAddedLines(string(fd.Staged)))
+// GoDotImportAbstains reports whether the additive check abstains on this Go
+// file's exported-looking bare names: a dot-import in the hunk, or one the
+// caller found in the rest of the file and set on the diff (#474).
+func GoDotImportAbstains(fd FileDiff) bool {
+	return fd.GoDotImport || GoHasDotImport(fd.AddedLines)
 }
 
-// maxDotImportScanBytes bounds the staged blob re-read for dot-imports, so a
-// huge file does not cost a full split on the commit path. Past it the file is
-// checked as before.
-const maxDotImportScanBytes = 2 << 20
+// startsUpper reports whether name's first rune is an uppercase letter, i.e.
+// is exported in Go.
+func startsUpper(name string) bool {
+	r, _ := utf8.DecodeRuneInString(name)
+	return unicode.IsUpper(r)
+}

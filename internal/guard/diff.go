@@ -102,9 +102,9 @@ type FileDiff struct {
 	// shift or change them. nil when unavailable: the AbsPath read stands, with
 	// the rules that guard against its misalignment.
 	Staged []byte
-	// GoDotImport is set by the hook path when the pre-edit Go file holds a
-	// `import . "pkg"` the edited hunk does not show (#474). Run also looks at
-	// AddedLines and Staged itself, so pre-commit needs no help.
+	// GoDotImport is set by the callers when the rest of the Go file holds an
+	// `import . "pkg"` the hunk does not show (#474): the hook from the pre-edit
+	// file, pre-commit from the staged blob. Run also reads AddedLines itself.
 	GoDotImport bool
 }
 

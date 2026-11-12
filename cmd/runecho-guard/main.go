@@ -393,6 +393,10 @@ func runPreCommit(dryRun, verbose bool) int {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
 	}
 
+	// A dot-import in the staged file may sit outside the hunk (#474), as in the
+	// hook path. Past maxInFileBytes stagedFileLines reads nothing, as there.
+	dotImport := markDotImports(diffs)
+
 	violations := guard.Run(symbols, ignorePath, diffs)
 	// results accumulates one CheckResult per applicable check (#330), mirroring
 	// runHookMode — see checkresult.go. Pre-commit has no deletion-side checks
@@ -406,7 +410,12 @@ func runPreCommit(dryRun, verbose bool) int {
 	// into this same slice, which erased their provenance and made them all log
 	// as "violations" (#268); #269 stopped that merge (see qualifiedV/depsGoV/
 	// fileScopeV below), so today they never touch this slice at all.
-	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
+	// A skipped dot-import file is a degraded abstain, recorded rather than OK (#474).
+	additiveReason := ""
+	if dotImport {
+		additiveReason = "dot-import"
+	}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, additiveReason)}
 
 	// Same-repo internal-package qualified-call check (default on since #314;
 	// RUNECHO_GUARD_QUALIFIED=0 disables it). Reads each staged Go file's whole
@@ -816,6 +825,20 @@ func runHookMode(in io.Reader, out io.Writer) int {
 		Edits:     payload.ToolInput.Edits,
 	}
 	return renderHookDecision(out, verifyEdit(edit, payload.ToolInput.FilePath, payload.SessionID))
+}
+
+// markDotImports sets GoDotImport on each staged Go diff whose whole staged
+// file holds a dot-import, and reports whether any Go diff abstains on one.
+func markDotImports(diffs []guard.FileDiff) bool {
+	any := false
+	for i := range diffs {
+		if guard.LangFor(diffs[i].Path) != guard.LangGo {
+			continue
+		}
+		diffs[i].GoDotImport = guard.GoHasDotImport(stagedFileLines(diffs[i]))
+		any = any || guard.GoDotImportAbstains(diffs[i])
+	}
+	return any
 }
 
 // maxInFileBytes caps the on-disk file read in readFileLines. Files larger than

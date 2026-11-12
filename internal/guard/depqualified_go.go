@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/inth3shadows/runecho/internal/depindex"
@@ -73,37 +74,60 @@ func externalGoAliases(wholeFile []AddedLine, modulePath string) map[string]stri
 }
 
 // GoHasDotImport reports whether the lines contain a `import . "pkg"`, in
-// single-line or block form. A dot-import puts every exported name of another
-// package into the file's scope as a bare identifier, so what a bare name in
-// that file resolves to is unknowable without that package's exports: callers
-// abstain on unresolved bare identifiers (#474). A match inside a raw string
-// only causes an extra abstain, the safe direction.
+// single-line, block, one-line-block or `;`-separated form, with trailing
+// comments and interpreted or raw string paths. A dot-import puts every
+// exported name of another package into the file's scope as a bare identifier,
+// so what an uppercase bare name in that file resolves to is unknowable without
+// that package's exports: callers abstain on those (#474).
+//
+// Each line is read through stripLiteralsStateful, so an import inside a raw
+// string or block comment is not seen, and scanning stops at the first
+// top-level declaration, after which no import can appear.
 func GoHasDotImport(lines []AddedLine) bool {
 	inBlock := false
+	open := ""
 	for _, l := range lines {
-		trimmed := strings.TrimSpace(l.Text)
+		lineStartOpen := open
+		scan, o := stripLiteralsStateful(LangGo, l.Text, open)
+		open = o
+		if lineStartOpen != "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(scan)
 		spec := ""
 		switch {
-		case !inBlock && (trimmed == "import (" || trimmed == "import("):
-			inBlock = true
-			continue
-		case !inBlock:
-			rest, ok := strings.CutPrefix(trimmed, "import ")
-			if !ok {
-				continue
-			}
-			spec = rest
-		case trimmed == ")":
-			inBlock = false
-			continue
-		default:
+		case inBlock:
 			spec = trimmed
+		case hasGoKeyword(trimmed, "import"):
+			rest := strings.TrimSpace(trimmed[len("import"):])
+			if body, ok := strings.CutPrefix(rest, "("); ok {
+				spec, inBlock = body, true
+			} else {
+				spec = rest
+			}
+		case hasGoKeyword(trimmed, "func"), hasGoKeyword(trimmed, "type"),
+			hasGoKeyword(trimmed, "var"), hasGoKeyword(trimmed, "const"):
+			return false
+		default:
+			continue
 		}
-		if m := reGoImportSpec.FindStringSubmatch(spec); m != nil && m[1] == "." {
+		if inBlock && strings.Contains(spec, ")") {
+			inBlock = false
+		}
+		if reGoDotSpec.MatchString(spec) {
 			return true
 		}
 	}
 	return false
+}
+
+// reGoDotSpec matches a `.` alias in front of an import path on a masked line:
+// the path's content is blanked but its quotes survive.
+var reGoDotSpec = regexp.MustCompile("(?:^|[\\s;])\\.\\s*[\"`]")
+
+// hasGoKeyword reports whether s opens with kw as a whole word.
+func hasGoKeyword(s, kw string) bool {
+	return strings.HasPrefix(s, kw) && (len(s) == len(kw) || !isWordByte(s[len(kw)]))
 }
 
 // addExternalGoAlias records one import spec's alias when its path lies outside

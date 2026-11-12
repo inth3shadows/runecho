@@ -549,9 +549,15 @@ func goFuncGroups(scan string) (out []string, tparams []string, open string) {
 }
 
 // reGoReceiverTail matches what follows a method receiver: the method name and
-// then its type-parameter list or parameter list. A func literal's parameter
-// list is followed by a result type or a body instead.
-var reGoReceiverTail = regexp.MustCompile(`^\s*[A-Za-z_]\w*\s*[\[(]`)
+// then its parameter list (a method has no type parameters of its own). A func
+// literal's or func type's parameter list is followed by a result type, which
+// may be `Result[User]` or `map[K]V`, or a body instead (#474 review G6).
+var reGoReceiverTail = regexp.MustCompile(`^\s*[A-Za-z_]\w*\s*\(`)
+
+// reGoTypeParamDecl is what the LAST entry of a declared type-parameter list
+// looks like: a name, then a constraint. A bare name or `name(…)` is an array
+// length (`type Buf [n]byte`), not a list (G7).
+var reGoTypeParamDecl = regexp.MustCompile(`^[A-Za-z_]\w*\s+[A-Za-z_~\[(]`)
 
 // reGoTypeDeclParams matches the start of `type Name[` on a masked line.
 var reGoTypeDeclParams = regexp.MustCompile(`^\s*type\s+[A-Za-z_]\w*\s*\[`)
@@ -581,7 +587,7 @@ func goTypeDeclParams(scan string) []string {
 		case ']':
 			depth--
 			if depth == 0 {
-				return splitTypeParams(scan[loc[1]:j])
+				return typeDeclParams(scan[loc[1]:j])
 			}
 		}
 	}
@@ -610,24 +616,29 @@ func goReceiverTypeParams(group string) []string {
 	return nil
 }
 
+// typeDeclParams is splitTypeParams for a `type Name[...]` list, which unlike a
+// func's is ambiguous with an array length: it binds only when the last entry
+// is `name constraint`.
+func typeDeclParams(content string) []string {
+	parts := splitTypeParamParts(content)
+	if len(parts) == 0 || !reGoTypeParamDecl.MatchString(parts[len(parts)-1]) {
+		return nil
+	}
+	return typeParamNames(parts)
+}
+
 // splitTypeParams returns the declared names in the content of a type-parameter
 // list: the first identifier of each comma-separated part, with commas inside
 // nested brackets, braces or parens (`T interface{ ~[]E }, E any`) not
 // splitting. In `[A, B any]` the part `A` is a name with no constraint of its
 // own. The constraint itself is a type and never binds.
 func splitTypeParams(content string) []string {
-	var out []string
+	return typeParamNames(splitTypeParamParts(content))
+}
+
+func splitTypeParamParts(content string) []string {
+	var parts []string
 	depth, start := 0, 0
-	flush := func(end int) {
-		part := strings.TrimSpace(content[start:end])
-		k := 0
-		for k < len(part) && isWordByte(part[k]) {
-			k++
-		}
-		if k > 0 && !(part[0] >= '0' && part[0] <= '9') {
-			out = append(out, part[:k])
-		}
-	}
 	for i := 0; i < len(content); i++ {
 		switch content[i] {
 		case '(', '[', '{':
@@ -636,11 +647,24 @@ func splitTypeParams(content string) []string {
 			depth--
 		case ',':
 			if depth == 0 {
-				flush(i)
+				parts = append(parts, strings.TrimSpace(content[start:i]))
 				start = i + 1
 			}
 		}
 	}
-	flush(len(content))
+	return append(parts, strings.TrimSpace(content[start:]))
+}
+
+func typeParamNames(parts []string) []string {
+	var out []string
+	for _, part := range parts {
+		k := 0
+		for k < len(part) && isWordByte(part[k]) {
+			k++
+		}
+		if k > 0 && !(part[0] >= '0' && part[0] <= '9') {
+			out = append(out, part[:k])
+		}
+	}
 	return out
 }

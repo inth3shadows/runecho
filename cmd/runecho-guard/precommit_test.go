@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/inth3shadows/runecho/internal/guard"
 	"github.com/inth3shadows/runecho/internal/snapshot"
 )
 
@@ -124,5 +125,59 @@ func TestRunArgs_StagedDiff_AsksAndRecordsCheckReasons(t *testing.T) {
 	reasons, _ := rec["check_reasons"].(map[string]any)
 	if got, _ := reasons["qualified"].(string); got != "no-module-path" {
 		t.Errorf("check_reasons[qualified] = %q, want no-module-path (reasons=%v)", got, reasons)
+	}
+}
+
+// G5/G8: a staged Go file whose dot-import sits outside the hunk is marked, and
+// pre-commit reports the abstain so the additive result is unknown/dot-import
+// (classifyResult makes a reason with no violation Unknown; a violation in
+// another file wins the single per-check verdict, so this pins the inputs).
+func TestMarkDotImports(t *testing.T) {
+	hunk := guard.TextToAddedLines("\tExpect(1)\n")
+	staged := []byte("package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc A() {\n\tExpect(1)\n}\n")
+	diffs := []guard.FileDiff{
+		{Path: "a_test.go", AddedLines: hunk, Staged: staged},
+		{Path: "b.go", AddedLines: hunk, Staged: []byte("package main\n")},
+	}
+	if !markDotImports(diffs) {
+		t.Fatal("want abstain reported")
+	}
+	if !diffs[0].GoDotImport || diffs[1].GoDotImport {
+		t.Errorf("GoDotImport = %v, %v; want true, false", diffs[0].GoDotImport, diffs[1].GoDotImport)
+	}
+	if r := classifyResult("violations", false, "dot-import"); r.Verdict != VerdictUnknown || r.Reason != "dot-import" {
+		t.Errorf("result = %+v, want unknown/dot-import", r)
+	}
+	if markDotImports([]guard.FileDiff{{Path: "c.go", AddedLines: hunk, Staged: []byte("package main\n")}}) {
+		t.Error("no dot-import: must not report an abstain")
+	}
+}
+
+// End to end: a hunk that only calls Expect in a staged file whose import is
+// already committed must not ask.
+func TestRunArgs_StagedDotImportOutsideHunkDoesNotAsk(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	enrolledStore(t, repoRoot, []string{"KnownFunc"})
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-C", repoRoot, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	a := filepath.Join(repoRoot, "a_test.go")
+	if err := os.WriteFile(a, []byte("package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc A() {\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "a_test.go")
+	git("commit", "--no-verify", "-q", "-m", "base")
+	if err := os.WriteFile(a, []byte("package main\n\nimport . \"github.com/onsi/gomega\"\n\nfunc A() {\n\tExpect(1)\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "a_test.go")
+	t.Chdir(repoRoot)
+	if code := runArgs(nil); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
 	}
 }

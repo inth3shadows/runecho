@@ -283,8 +283,12 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// block editing inside a literal or signature whose opener is unchanged
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
-	// A dot-import in the pre-edit file sits outside an Edit hunk (#474).
-	diffs[0].GoDotImport = lang == guard.LangGo && guard.GoHasDotImport(fileLines)
+	// A dot-import in the pre-edit file sits outside an Edit hunk (#474). A
+	// Write's text is the whole file, so it alone decides (the pre-edit file is
+	// being replaced), and an edit that deletes the import ends it too.
+	diffs[0].GoDotImport = lang == guard.LangGo && edit.ToolName != "Write" &&
+		guard.GoHasDotImport(fileLines) &&
+		(!guard.GoHasDotImport(guard.TextToAddedLines(removedText)) || guard.GoHasDotImport(newLines))
 
 	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
@@ -300,7 +304,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// A Go file with a dot-import abstains on bare names (#474); like star-import
 	// that is a degraded abstain, recorded rather than silent.
 	additiveReason := ""
-	if lang == guard.LangGo && (diffs[0].GoDotImport || guard.GoHasDotImport(newLines)) {
+	if lang == guard.LangGo && guard.GoDotImportAbstains(diffs[0]) {
 		additiveReason = "dot-import"
 	}
 	results := []CheckResult{classifyResult("violations", len(violations) > 0, additiveReason)}

@@ -933,3 +933,19 @@ func TestRunHookMode_CheckReasonsOnAnAskRecord(t *testing.T) {
 		t.Errorf("check_reasons[qualified] = %q on an ask record, want unexported-selector (reasons=%v)", got, reasons)
 	}
 }
+
+// G4: a Write decides from its own text. The pre-edit file's dot-import must
+// not blind the guard to a hallucination in the content that replaces it.
+func TestRunHookMode_WriteIgnoresPreEditDotImport(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitInit(t, repoRoot)
+	goModRepo(t, repoRoot, []string{"KnownFunc"})
+	goFile := filepath.Join(repoRoot, "a_test.go")
+	if err := os.WriteFile(goFile, []byte("package main\n\nimport . \"github.com/onsi/gomega\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, d := runHook(t, payload(t, "Write", goFile, "", "package main\n\nfunc F() { HallucinatedFunc() }\n", nil))
+	if d.Hook.PermissionDec != "ask" {
+		t.Fatalf("G4: want ask for a Write that drops the dot-import, got %+v", d.Hook)
+	}
+}

@@ -126,17 +126,11 @@ func TestGoHasDotImport(t *testing.T) {
 	}
 }
 
-// Hook path: the dot-import is in the pre-edit file, the hunk shows only the
-// call. Staged path: the blob carries it.
+// The dot-import is elsewhere in the file (callers set GoDotImport, #474 G8).
 func TestRun_DotImportOutsideHunk(t *testing.T) {
 	hunk := TextToAddedLines("Expect(1).To(Equal(1))\n")
 	if v := Run(map[string]struct{}{}, "", []FileDiff{{Path: "a_test.go", AddedLines: hunk, GoDotImport: true}}); len(v) != 0 {
 		t.Errorf("hook flag: want none, got %+v", v)
-	}
-	staged := []byte("package p\n\nimport . \"github.com/onsi/gomega\"\n\nfunc f() {\n\tExpect(1).To(Equal(1))\n}\n")
-	v := Run(map[string]struct{}{}, "", []FileDiff{{Path: "a_test.go", AddedLines: hunk, Staged: staged}})
-	if len(v) != 0 {
-		t.Errorf("staged blob: want none, got %+v", v)
 	}
 }
 
@@ -169,5 +163,84 @@ func Sum[T ~int | ~float64](xs []T) T {
 	named := "package p\n\nimport g \"github.com/onsi/gomega\"\n\nfunc f() {\n\tg.Expect(1)\n\tinvented()\n}\n"
 	if got := runGoSrc(named); !slices.Equal(got, []string{"invented"}) {
 		t.Errorf("named import: want [invented], got %v", got)
+	}
+}
+
+// G1: dot-import spellings the first detector missed.
+func TestGoHasDotImport_Spellings(t *testing.T) {
+	yes := []string{
+		"import (\n\t. \"github.com/onsi/gomega\" // matchers\n)\n",
+		"import . \"github.com/onsi/gomega\" //nolint:revive\n",
+		"import ( // deps\n\t. \"x\"\n)\n",
+		"import . `x`\n",
+		"import ( . \"x\" )\n",
+		"import .\"x\"\n",
+		"import (\"fmt\"; . \"x\")\n",
+		"import (\n\t\"fmt\"\n\t/* c */ . \"x\"\n)\n",
+	}
+	for _, s := range yes {
+		if !GoHasDotImport(TextToAddedLines("package p\n\n" + s)) {
+			t.Errorf("G1: want dot-import in %q", s)
+		}
+	}
+}
+
+// G3: not inside a raw string or a block comment, and not past the imports.
+func TestGoHasDotImport_NotInLiteralsOrBody(t *testing.T) {
+	no := []string{
+		"package p\n\nvar s = `\nimport . \"x\"\n`\n",
+		"package p\n\n/*\nimport . \"x\"\n*/\n",
+		"package p\n\nimport \"fmt\"\n\nfunc f() {}\n\nimport . \"x\"\n",
+		"package p\n\n// import . \"x\"\nimport \"fmt\"\n",
+	}
+	for _, s := range no {
+		if GoHasDotImport(TextToAddedLines(s)) {
+			t.Errorf("G3: want no dot-import in %q", s)
+		}
+	}
+}
+
+// G2: a dot-import supplies exported names only; a lowercase ghost still flags.
+func TestRun_DotImportAbstainsOnExportedOnly(t *testing.T) {
+	src := "package p\n\nimport . \"x\"\n\nfunc f() {\n\tExported()\n\tghost()\n}\n"
+	if got := runGoSrc(src); !slices.Equal(got, []string{"ghost"}) {
+		t.Errorf("G2: want [ghost], got %v", got)
+	}
+}
+
+// G6: a func literal / func type whose RESULT is generic or a map binds nothing.
+func TestGoDeclaredNames_FuncResultTypeArgsUnbound(t *testing.T) {
+	for _, src := range []string{
+		"x := func(ctx Ctx) Result[User] {\n}\n",
+		"x := func() map[Key]Val {\n}\n",
+		"type Mk func(a int) Result[Foo, Bar]\n",
+	} {
+		got := declaredNames("package p\n\n" + src)
+		for _, bad := range []string{"User", "Key", "Val", "Foo", "Bar"} {
+			if slices.Contains(got, bad) {
+				t.Errorf("G6: %q bound by %q (got %v)", bad, src, got)
+			}
+		}
+	}
+}
+
+// G7: an array length is not a type-parameter list.
+func TestGoDeclaredNames_ArrayLengthNotTypeParam(t *testing.T) {
+	for _, src := range []string{
+		"type T [ghost(1)]int\n",
+		"type Buf [computeLen]byte\n",
+		"type A [pkg.N]int\n",
+		"type B [N * 2]int\n",
+	} {
+		got := declaredNames("package p\n\n" + src)
+		for _, bad := range []string{"ghost", "computeLen", "pkg", "N"} {
+			if slices.Contains(got, bad) {
+				t.Errorf("G7: %q bound by %q (got %v)", bad, src, got)
+			}
+		}
+	}
+	// A real constrained list still binds.
+	if got := declaredNames("package p\n\ntype L[A, B any] struct{}\n"); !slices.Equal(got, []string{"A", "B", "L"}) {
+		t.Errorf("type L[A, B any]: got %v", got)
 	}
 }

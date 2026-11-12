@@ -245,8 +245,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		if carried {
 			sigLines++
 			joined := sig + " " + scan
-			groups, rest := goFuncGroups(joined)
+			groups, tparams, rest := goFuncGroups(joined)
 			bindFuncGroups(seen, groups)
+			addTypeParams(seen, tparams)
 			if rest != joined {
 				sigLines = 0 // a new signature opened on the line that closed the last
 			}
@@ -272,6 +273,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 				addList(seen, m[1])
 			}
 		}
+		if strings.Contains(scan, "type") {
+			addTypeParams(seen, goTypeDeclParams(scan))
+		}
 		if names := block.advance(scan); names != "" {
 			addList(seen, names)
 		}
@@ -280,8 +284,9 @@ func goDeclaredNamesScan(fileLines []AddedLine, openSeed func(lineNo int) string
 		// treating them uniformly avoids having to know which is which on a line
 		// that may hold a method, a literal, or both.
 		if !carried && strings.Contains(scan, "func") {
-			groups, rest := goFuncGroups(scan)
+			groups, tparams, rest := goFuncGroups(scan)
 			bindFuncGroups(seen, groups)
+			addTypeParams(seen, tparams)
 			if rest != "" && sig == "" {
 				sig, sigLines = rest, 0
 			}
@@ -441,7 +446,12 @@ func addList(seen map[string]struct{}, lhs string) {
 // at the end of scan (a signature gofmt wrapped across lines) is not guessed at:
 // the groups that closed are returned, and open is scan from that group's `func`
 // keyword on, for the caller to join to the following lines and scan again (#473).
-func goFuncGroups(scan string) (out []string, open string) {
+//
+// tparams are the type-parameter names of each `func Name[T any]` list and of a
+// method receiver's `(l *List[T])`, bound because a type parameter is callable
+// in conversion position (`T(0)`, #474). Only those two places: a `[...]` after
+// any other identifier is a type argument or an index, not a declaration.
+func goFuncGroups(scan string) (out []string, tparams []string, open string) {
 	// End of the last bracket group stepped over: a `func` inside one (a
 	// func-typed constraint, `[F func(x int) bool]`) is part of a type and its
 	// parameter names are not bindings.
@@ -451,6 +461,11 @@ func goFuncGroups(scan string) (out []string, open string) {
 			continue
 		}
 		i := loc[1]
+		// expectName: the next identifier is the function's name, so a `[` right
+		// after it opens its type-parameter list. True straight after `func` and
+		// again after a receiver group.
+		expectName := true
+		first := true
 		for i < len(scan) {
 			switch scan[i] {
 			case '(':
@@ -465,9 +480,22 @@ func goFuncGroups(scan string) (out []string, open string) {
 					}
 				}
 				if depth != 0 {
-					return out, scan[loc[0]:]
+					return out, tparams, scan[loc[0]:]
 				}
 				out = append(out, scan[start:j-1])
+				// A receiver is the group straight after `func` that is followed by
+				// the method name; a func literal's parameter list is not, and its
+				// `List[int]` arguments must not bind.
+				// Only a top-level `func` declares a method: a `func` later on the
+				// line is a literal or a func type, whose result may itself be
+				// `func(...)` (G18).
+				wasReceiver := first && strings.TrimSpace(scan[:loc[0]]) == "" &&
+					reGoReceiverTail.MatchString(scan[j:])
+				if wasReceiver {
+					tparams = append(tparams, goReceiverTypeParams(scan[start:j-1])...)
+				}
+				first = false
+				expectName = wasReceiver
 				i = j
 				continue
 			case '[':
@@ -487,14 +515,20 @@ func goFuncGroups(scan string) (out []string, open string) {
 					}
 				}
 				if depth != 0 {
-					return out, scan[loc[0]:]
+					return out, tparams, scan[loc[0]:]
 				}
+				if expectName && i > loc[1] && isWordByte(scan[i-1]) {
+					tparams = append(tparams, splitTypeParams(scan[i+1:j-1])...)
+				}
+				expectName, first = false, false
 				stepped = max(stepped, j)
 				i = j
 				continue
 			case '{':
 				i = len(scan) // body starts; no more signature groups
 				continue
+			case ' ', '\t':
+				// Whitespace keeps expectName alive: `func (r R) Name[`.
 			case ')', ']', '=', ',':
 				// A closer this walk never opened, or a top-level `=` or `,`: the
 				// func was a type nested in a group opened before its keyword
@@ -506,9 +540,141 @@ func goFuncGroups(scan string) (out []string, open string) {
 				// open a carry (#506).
 				i = len(scan)
 				continue
+			default:
+				first = false // only whitespace may sit between `func` and a receiver
+				if !isWordByte(scan[i]) {
+					expectName = false
+				}
 			}
 			i++
 		}
 	}
-	return out, ""
+	return out, tparams, ""
+}
+
+// reGoReceiverTail matches what follows a method receiver: the method name and
+// then its parameter list (a method has no type parameters of its own). A func
+// literal's or func type's parameter list is followed by a result type, which
+// may be `Result[User]` or `map[K]V`, or a body instead (#474 review G6).
+var reGoReceiverTail = regexp.MustCompile(`^\s*[A-Za-z_]\w*\s*\(`)
+
+// reGoTypeParamDecl is what the LAST entry of a declared type-parameter list
+// looks like: a name, then a constraint. A bare name or `name(…)` is an array
+// length (`type Buf [n]byte`), not a list (G7).
+var reGoTypeParamDecl = regexp.MustCompile(`^[A-Za-z_]\w*\s+[A-Za-z_~\[]`)
+
+// reGoTypeDeclParams matches the start of `type Name[` on a masked line.
+var reGoTypeDeclParams = regexp.MustCompile(`^\s*type\s+[A-Za-z_]\w*\s*\[`)
+
+// addTypeParams binds the type-parameter names; `_` binds nothing.
+func addTypeParams(seen map[string]struct{}, names []string) {
+	for _, n := range names {
+		if n != "_" {
+			seen[n] = struct{}{}
+		}
+	}
+}
+
+// goTypeDeclParams returns the type parameters of a single-line
+// `type List[T any] struct`. A list that does not close on the line is not
+// guessed at. Over-binding `type A [N]int`'s N is harmless: it is a constant.
+func goTypeDeclParams(scan string) []string {
+	loc := reGoTypeDeclParams.FindStringIndex(scan)
+	if loc == nil {
+		return nil
+	}
+	depth := 1
+	for j := loc[1]; j < len(scan); j++ {
+		switch scan[j] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return typeDeclParams(scan[loc[1]:j])
+			}
+		}
+	}
+	return nil
+}
+
+// goReceiverTypeParams returns the type-parameter names in a receiver group
+// like `l *List[T]` or `m Map[K, V]`.
+func goReceiverTypeParams(group string) []string {
+	i := strings.IndexByte(group, '[')
+	if i < 0 {
+		return nil
+	}
+	depth := 1
+	for j := i + 1; j < len(group); j++ {
+		switch group[j] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return splitTypeParams(group[i+1 : j])
+			}
+		}
+	}
+	return nil
+}
+
+// typeDeclParams is splitTypeParams for a `type Name[...]` list, which unlike a
+// func's is ambiguous with an array length: it binds only when the last entry
+// is `name constraint`.
+func typeDeclParams(content string) []string {
+	parts := splitTypeParamParts(content)
+	// A trailing comma (`[T any,]`, gofmt's multi-line form, or the spec's
+	// `[P *C,]` that tells a type-parameter list from an array length) can only
+	// end a type-parameter list (G11).
+	if n := len(parts); n > 1 && parts[n-1] == "" {
+		return typeParamNames(parts[:n-1])
+	}
+	if len(parts) == 0 || !reGoTypeParamDecl.MatchString(parts[len(parts)-1]) {
+		return nil
+	}
+	return typeParamNames(parts)
+}
+
+// splitTypeParams returns the declared names in the content of a type-parameter
+// list: the first identifier of each comma-separated part, with commas inside
+// nested brackets, braces or parens (`T interface{ ~[]E }, E any`) not
+// splitting. In `[A, B any]` the part `A` is a name with no constraint of its
+// own. The constraint itself is a type and never binds.
+func splitTypeParams(content string) []string {
+	return typeParamNames(splitTypeParamParts(content))
+}
+
+func splitTypeParamParts(content string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(content); i++ {
+		switch content[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(content[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, strings.TrimSpace(content[start:]))
+}
+
+func typeParamNames(parts []string) []string {
+	var out []string
+	for _, part := range parts {
+		k := 0
+		for k < len(part) && isWordByte(part[k]) {
+			k++
+		}
+		if k > 0 && !(part[0] >= '0' && part[0] <= '9') {
+			out = append(out, part[:k])
+		}
+	}
+	return out
 }

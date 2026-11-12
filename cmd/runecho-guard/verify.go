@@ -283,8 +283,22 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// block editing inside a literal or signature whose opener is unchanged
 	// context above it doesn't start scanning at depth 0.
 	hookSeedsFor(edit.ToolName, edit.OldString, edit.Edits, fileLines, lang).applyTo(&diffs[0])
+	// A dot import usually sits outside an Edit hunk (#474), so it is decided on
+	// the post-edit file. When the edit cannot be replayed, the pre-edit file
+	// and the hunk decide: an edit dropping the import over-abstains, and a dot
+	// spec added inside an existing block is missed (rare: replay fails only on
+	// a repeated or absent old_string).
+	if lang == guard.LangGo {
+		if post, ok := postEditFile(edit, fileLines); ok {
+			diffs[0].GoDotImport = guard.GoHasDotImport(post)
+			diffs[0].GoDotImportWhole = true
+		} else {
+			diffs[0].GoDotImport = guard.GoHasDotImport(fileLines)
+		}
+	}
 
-	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
+	rawViolations := guard.Run(symbols, ignorePath, diffs)
+	violations := dropUnchanged(rawViolations, violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
 	// status — OK/Violation/Unknown/Skipped, replacing firedChecks/degraded's
 	// untyped bools+counter), in checkOrder's canonical order. firedChecksFrom
@@ -295,7 +309,13 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// "violations" captured before recv-method/var-type below append (the only
 	// two checks still merging into `violations` — qualified/deps-go/
 	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
-	results := []CheckResult{classifyResult("violations", len(violations) > 0, "")}
+	// A Go file with a dot-import abstains on bare names (#474); like star-import
+	// that is a degraded abstain, recorded rather than silent.
+	additiveReason := ""
+	if lang == guard.LangGo && dotImportHid(symbols, ignorePath, diffs, len(rawViolations)) {
+		additiveReason = "dot-import"
+	}
+	results := []CheckResult{classifyResult("violations", len(violations) > 0, additiveReason)}
 	// learnEligible is the additive check's OWN finding set, captured here for the
 	// same reason firedChecks is: recv-method and var-type below append into
 	// `violations` too, and reading learn-eligibility back off the merged slice

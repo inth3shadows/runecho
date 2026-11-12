@@ -1249,7 +1249,7 @@ table is intentionally honest: gaps here are tracked, not silently accepted.
 |---|---|---|---|---|---|
 | **Go** | `.go` | Exported top-level `func` (→ Functions), `type` (→ Classes), `var`/`const` (→ Exports). Unexported top-level declarations → Unexported; struct fields → Fields (see below) | Qualified by receiver: `Reader.Fetch`; exported interface method signatures qualified by type: `Reader.Read` (→ Functions) | Top-level decls + methods + interface signatures + fields | `go/ast` (stdlib) |
 | **JS/TS/JSX/TSX** | `.js`, `.mjs`, `.cjs`, `.ts`, `.jsx`, `.tsx`, `.gs` | `function` decls, var-bound `arrow`/`function`/`class` consts (→ Functions/Classes), `class`/`interface`/`enum`/`type` (→ Classes); imports/exports via AST, regex fallback when the grammar is unavailable | Qualified by class: `Widget.render` (→ Functions) | Top-level decls + methods (no function-body recursion) | tree-sitter (subset grammar) |
-| **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + public module-level assignment targets, #477) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
+| **Python** | `.py` | `def` functions, `class` declarations; imports via regex; exports = `__all__` if declared, else the no-underscore fallback (top-level public defs/classes + module-level `UPPER_CASE` constants) | Qualified by scope: `Reader.fetch` (→ Functions) | Recurses nested defs/classes | tree-sitter |
 | **Shell** | `.sh`, `.bash` | Top-level function definitions (`name() { … }` and `function name { … }`) → Functions, body-hashed (name through the matching brace) so a body edit shows as `modified`; no imports (`source` binds no named symbols), no classes/exports | None (shell has no methods) | Function defs found + bodies delimited on a masked view — strings, `$(…)`/`` `…` ``, `${…}`, comments, and heredoc bodies (incl. quoted/`<<-`/stacked delimiters) are blanked so a brace/def inside them never counts | masking scan (regex + state) |
 | **Rust** | `.rs` | `fn`, `struct`, `enum`, `trait`, `type`, `const`/`static` | Qualified by `impl` type: `Parser.parse` | Top-level items + `impl`/`trait` methods | tree-sitter (subset grammar) |
 | **Ruby** | `.rb` | `def` methods, `class`/`module` declarations | Qualified by enclosing class/module | Nested class/module scopes | tree-sitter (subset grammar) |
@@ -1324,17 +1324,11 @@ which member changed.
   local name `ns`, which **is** captured in Exports.
 - **All** Imports/exports for JS/TS and Python are still regex; only function/
   class/method *definitions* go through the AST.
-- **Python** no-`__all__` export fallback: public module-level assignment targets
-  (`name = ...`, `name: T = ...`, `a, (b, *c) = ...`, chained `a = b = ...`) are
-  recorded as plain exports, so `from m import *` of `get_config =
-  functools.lru_cache()(_impl)`, `square = lambda ...` or `Point = namedtuple(...)`
-  resolves (#477). Module-level `if`/`try`/`with` bodies are walked (they bind at
-  module scope; `if TYPE_CHECKING:` names are over-included, the fail-open
-  direction). Function and class bodies, loops, `_private` names and `if __name__ ==
-  "__main__":` blocks are not. `UPPER_CASE` constants still come from a line regex
-  (an assignment-shaped line inside a triple-quoted string can be matched — the same
-  cheap-and-deterministic tradeoff the import/`__all__` regexes accept). An explicit
-  `__all__` (even empty) is authoritative and disables the fallback.
+- **Python** no-`__all__` export fallback is line-oriented: tuple-target constants
+  (`A, B = 1, 2`) are not captured, and an assignment-shaped line inside a
+  triple-quoted string can be matched — the same cheap-and-deterministic tradeoff
+  the import/`__all__` regexes already accept. An explicit `__all__` (even empty)
+  is authoritative and disables the fallback.
 - **Python star imports, additive check** abstain per file (degraded token
   `star-import`, check result `violations` = unknown) when a `from m import *`
   resolves to anything but an in-repo module with a single literal `__all__`. An

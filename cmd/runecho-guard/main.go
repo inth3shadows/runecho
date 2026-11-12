@@ -394,15 +394,18 @@ func runPreCommit(dryRun, verbose bool) int {
 	}
 
 	// Abstain per file on a star import whose exports are not fully known (#477);
-	// see guard.PyStarImportReason. The reason is recorded on the check's result.
+	// see guard.PyStarImport. The star source is read from the index, not the working tree (#524). The reason is recorded on the check's result.
 	starReason := ""
+	env := guard.PyStarEnv{Root: wtRoot, Read: stagedBlobReader(wtRoot)}
 	for i := range diffs {
 		if guard.LangFor(diffs[i].Path) != guard.LangPython {
 			continue
 		}
-		if r := guard.PyStarImportReason(filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path)), stagedFileLines(diffs[i]), diffs[i].AddedLines); r != "" {
+		sr := guard.PyStarImport(filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path)), env, stagedFileLines(diffs[i]), diffs[i])
+		diffs[i].StarImportNames = sr.Names
+		if sr.Reason != "" {
 			diffs[i].StarImportAbstain = true
-			starReason = r
+			starReason = sr.Reason
 		}
 	}
 	violations := guard.Run(symbols, ignorePath, diffs)

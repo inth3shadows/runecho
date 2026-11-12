@@ -276,8 +276,7 @@ func TestPythonParser_AllExportsMultiLine(t *testing.T) {
 }
 
 // When __all__ is absent, exports fall back to the no-underscore convention:
-// top-level public functions/classes plus public module-level assignment targets
-// (UPPER_CASE or not, #477: `import *` binds every public global).
+// top-level public functions/classes plus module-level UPPER_CASE constants.
 // Private (_-prefixed), nested, and method symbols are excluded.
 func TestPythonParser_FallbackExportsNoAll(t *testing.T) {
 	src := "" +
@@ -305,12 +304,12 @@ func TestPythonParser_FallbackExportsNoAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	for _, want := range []string{"MAX_SIZE", "DEFAULT_NAME", "lowercase_var", "public_fn", "PublicClass"} {
+	for _, want := range []string{"MAX_SIZE", "DEFAULT_NAME", "public_fn", "PublicClass"} {
 		if !slices.Contains(fs.Exports, want) {
 			t.Errorf("missing fallback export %q (got %v)", want, fs.Exports)
 		}
 	}
-	for _, notWant := range []string{"_PRIVATE_CONST", "_private_fn", "_PrivateClass", "nested", "method", "PublicClass.method", "public_fn.nested"} {
+	for _, notWant := range []string{"_PRIVATE_CONST", "lowercase_var", "_private_fn", "_PrivateClass", "nested", "method", "PublicClass.method", "public_fn.nested"} {
 		if slices.Contains(fs.Exports, notWant) {
 			t.Errorf("fallback exports should not include %q (got %v)", notWant, fs.Exports)
 		}
@@ -456,7 +455,7 @@ func TestPythonParser_CRLFLineEndings(t *testing.T) {
 // must appear in the no-__all__ fallback export list. The single-name pyConstRegex
 // cannot match a name followed by a comma, so both were previously dropped.
 func TestPyFallbackExports_TupleConstants(t *testing.T) {
-	got := pyFallbackExports("MIN, MAX = 0, 100\nTHRESHOLD = 5\n", nil, nil, nil)
+	got := pyFallbackExports("MIN, MAX = 0, 100\nTHRESHOLD = 5\n", nil, nil)
 	for _, want := range []string{"MIN", "MAX", "THRESHOLD"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("want constant %q in fallback exports, got %v", want, got)
@@ -480,83 +479,16 @@ func TestPythonParser_AllComparisonDoesNotSuppressFallback(t *testing.T) {
 	}
 }
 
-// TestPythonParser_ModuleAssignmentExports pins #477: with no __all__, `from m
-// import *` binds every public module global, so public module-level assignment
-// targets are exports. Each case lists names that must and must not appear.
-func TestPythonParser_ModuleAssignmentExports(t *testing.T) {
-	src := `import functools
-from collections import namedtuple
-
-def _impl(x): return x
-
-get_config = functools.lru_cache()(_impl)
-square = lambda x: x * x
-Point = namedtuple("Point", "x y")
-Alias: int = 3
-bare_annotation: int
-first, (second, *rest) = 1, (2, 3)
-chain_a = chain_b = 0
-_private = 1
-holder.attr = 2
-cache["k"] = 3
-total = 0
-total += 1
-
-if sys.version_info >= (3, 9):
-    in_if = 1
-else:
-    in_else = 2
-
-try:
-    in_try = 1
-except ImportError:
-    in_except = 2
-
-if __name__ == "__main__":
-    only_script = 1
-
-def f():
-    local_in_func = 1
-
-class C:
-    class_attr = 1
-`
-	fs, err := NewPythonParser().Parse(src)
+// TestPythonParser_LowercaseAssignmentsAreNotExports pins the #564 review's P1:
+// a public lowercase module-level assignment must not become an export, because
+// exports are loaded as repo-wide known symbols and would hide a hallucinated
+// call to a same-named function in an unrelated file.
+func TestPythonParser_LowercaseAssignmentsAreNotExports(t *testing.T) {
+	fs, err := NewPythonParser().Parse("client = make_client()\nsquare = lambda x: x\nMAX = 1\n")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	for _, want := range []string{
-		"get_config", "square", "Point", "Alias", "first", "second", "rest",
-		"chain_a", "chain_b", "total", "in_if", "in_else", "in_try", "in_except",
-	} {
-		if !slices.Contains(fs.Exports, want) {
-			t.Errorf("want %q in exports, got %v", want, fs.Exports)
-		}
-	}
-	for _, not := range []string{
-		"_private", "_impl", "bare_annotation", "holder", "attr", "cache", "only_script",
-		"local_in_func", "class_attr",
-	} {
-		if slices.Contains(fs.Exports, not) {
-			t.Errorf("%q must not be an export, got %v", not, fs.Exports)
-		}
-	}
-	// Assignments are exports only: no new symbol kind, so functions/classes (and
-	// their hashes/lines) are exactly what they were before #477.
-	if slices.Contains(fs.Functions, "get_config") || slices.Contains(fs.Classes, "Point") {
-		t.Errorf("assignments leaked into functions/classes: %v %v", fs.Functions, fs.Classes)
-	}
-}
-
-// TestPythonParser_AllWinsOverAssignments: an explicit __all__ stays
-// authoritative; an assignment it does not list is not an export.
-func TestPythonParser_AllWinsOverAssignments(t *testing.T) {
-	src := "__all__ = [\"listed\"]\nlisted = 1\nunlisted = 2\n"
-	fs, err := NewPythonParser().Parse(src)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if !slices.Equal(fs.Exports, []string{"listed"}) {
-		t.Errorf("exports = %v, want [listed]", fs.Exports)
+	if !slices.Equal(fs.Exports, []string{"MAX"}) {
+		t.Errorf("exports = %v, want [MAX] only", fs.Exports)
 	}
 }

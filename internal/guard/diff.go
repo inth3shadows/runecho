@@ -28,6 +28,11 @@ type FileDiff struct {
 	// from it and flagging one would be a false alarm (#477). Definitions and
 	// imports in the diff are still folded into the known set.
 	StarImportAbstain bool
+	// StarImportNames are the names this file's fully-known star imports bring in
+	// (the literal __all__ of each in-repo source). Run treats them as resolved
+	// for THIS file only, so a stale or unindexed source cannot bring the #477
+	// false positive back, and one file's names never leak into another's check.
+	StarImportNames []string
 	// AbsPath is the absolute on-disk path of the file, used only to seed
 	// pre-hunk multi-line string state so a hunk that begins inside a
 	// pre-existing docstring is masked rather than scanned as code (issue #145).

@@ -287,11 +287,19 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// A star import whose exports are not fully known (`from tkinter import *`, an
 	// in-repo module with no literal __all__) can bind any bare name, so the
 	// additive check abstains for the file rather than flag it (#477). fileLines
-	// is the pre-edit whole file: an Edit's hunk rarely contains the import.
+	// is the pre-edit whole file: an Edit's hunk rarely contains the import. A
+	// Write's added text is the whole proposed file, so the stale pre-edit copy
+	// must not decide for it (it may hold a star import the Write drops).
 	starReason := ""
 	if lang == guard.LangPython {
-		starReason = guard.PyStarImportReason(filePath, fileLines, newLines)
-		diffs[0].StarImportAbstain = starReason != ""
+		starWhole := fileLines
+		if edit.ToolName == "Write" {
+			starWhole = nil
+		}
+		sr := guard.PyStarImport(filePath, guard.PyStarEnv{}, starWhole, diffs[0])
+		starReason = sr.Reason
+		diffs[0].StarImportAbstain = sr.Reason != ""
+		diffs[0].StarImportNames = sr.Names
 	}
 	violations := dropUnchanged(guard.Run(symbols, ignorePath, diffs), violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic

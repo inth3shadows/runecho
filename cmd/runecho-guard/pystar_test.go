@@ -127,3 +127,55 @@ func TestPyStarImport_EditOutsideStarImportHunk(t *testing.T) {
 		t.Errorf("Label() through a star import outside the hunk was flagged: code=%d %q", code, d.Hook.PermissionReason)
 	}
 }
+
+// writeFile writes content at repo-relative rel, creating directories.
+func pyStarWrite(t *testing.T, repo, rel, content string) {
+	t.Helper()
+	p := filepath.Join(repo, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// P2: a Write's added text is the whole proposed file, so a star import in the
+// stale pre-edit copy that the Write drops must not abstain.
+func TestPyStarImport_WriteDroppingStarImportStillFlags(t *testing.T) {
+	repo := pyStarRepo(t, map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/ui.py":       "from tkinter import *\n\nroot = Tk()\n",
+	})
+	got := pyStarFlagged(t, repo, "pkg/ui.py", "root = Tk()\n")
+	if !strings.Contains(got, "Tk") {
+		t.Errorf("a Write that removes the star import must flag Tk, got %q", got)
+	}
+}
+
+// P3: a docstring that merely shows a star import must not blind the file.
+func TestPyStarImport_DocstringExampleDoesNotAbstain(t *testing.T) {
+	repo := pyStarRepo(t, map[string]string{"pkg/__init__.py": ""})
+	src := "\"\"\"Usage:\n\n    from foo import *\n\"\"\"\n\nnot_a_real_function(1)\n"
+	if got := pyStarFlagged(t, repo, "pkg/doc.py", src); !strings.Contains(got, "not_a_real_function") {
+		t.Errorf("a docstring example must not abstain, got %q", got)
+	}
+}
+
+// P4: the literal __all__ names resolve even when the index has never seen them
+// (stale or unindexed source), so the #477 false positive cannot come back.
+func TestPyStarImport_LiteralAllNamesFoldedWhenIndexStale(t *testing.T) {
+	repo := pyStarRepo(t, map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/models.py":   "def old(): pass\n",
+	})
+	pyStarWrite(t, repo, "pkg/models.py", "__all__ = [\"fresh_name\"]\nfresh_name = lambda: 1\n")
+	app := "from pkg.models import *\n\nfresh_name()\nnot_in_all()\n"
+	got := pyStarFlagged(t, repo, "pkg/app.py", app)
+	if strings.Contains(got, "fresh_name") {
+		t.Errorf("a name in the source's literal __all__ was flagged: %q", got)
+	}
+	if !strings.Contains(got, "not_in_all") {
+		t.Errorf("a name outside __all__ must still be flagged, got %q", got)
+	}
+}

@@ -50,14 +50,49 @@ func TestPyStarImportReason(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := PyStarImportReason(importer, TextToAddedLines("import os\n"+tc.line+"\n"))
+			got := PyStarImport(importer, PyStarEnv{}, nil, FileDiff{AddedLines: TextToAddedLines("import os\n" + tc.line + "\n")}).Reason
 			if got != tc.want {
 				t.Errorf("PyStarImportReason(%q) = %q, want %q", tc.line, got, tc.want)
 			}
 		})
 	}
 	// The import may be in either slice (pre-edit file or hunk).
-	if got := PyStarImportReason(importer, nil, TextToAddedLines("from tkinter import *\n")); got != "star-import" {
+	if got := PyStarImport(importer, PyStarEnv{}, TextToAddedLines("from tkinter import *\n"), FileDiff{}).Reason; got != "star-import" {
 		t.Errorf("star import in the added lines = %q, want star-import", got)
 	}
+}
+
+// P7: an absolute import resolves from the import roots, not the importer's own
+// directory first (py2 implicit relative), and a package wins over a module.
+func TestResolvePyModule_RootsAndPackagePrecedence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(rel string) string {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	rootMod := mk("util.py")
+	mk("pkg/util.py") // a sibling of the importer that py3 absolute imports do not see
+	importer := mk("pkg/app.py")
+	if got := resolvePyModuleDisk(importer, "util"); got != rootMod {
+		t.Errorf("absolute import resolved to %q, want the root module %q", got, rootMod)
+	}
+	both := mk("both/__init__.py")
+	mk("both.py")
+	if got := resolvePyModuleDisk(importer, "both"); got != both {
+		t.Errorf("package and module of one name resolved to %q, want the package %q", got, both)
+	}
+}
+
+func resolvePyModuleDisk(importer, module string) string {
+	p, _, _ := resolvePyModule(importer, module, "", readDiskCapped)
+	return p
 }

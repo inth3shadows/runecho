@@ -393,6 +393,21 @@ func runPreCommit(dryRun, verbose bool) int {
 		infof("checking %d file(s) against %d known symbols", len(diffs), len(symbols))
 	}
 
+	// Abstain per file on a star import whose exports are not fully known (#477);
+	// see guard.PyStarImport. The star source is read from the index, not the working tree (#524). The reason is recorded on the check's result.
+	starReason := ""
+	env := guard.PyStarEnv{Root: wtRoot, Read: stagedBlobReader(wtRoot)}
+	for i := range diffs {
+		if guard.LangFor(diffs[i].Path) != guard.LangPython {
+			continue
+		}
+		sr := guard.PyStarImport(filepath.Join(wtRoot, filepath.FromSlash(diffs[i].Path)), env, stagedFileLines(diffs[i]), diffs[i])
+		diffs[i].StarImportNames = sr.Names
+		if sr.Reason != "" {
+			diffs[i].StarImportAbstain = true
+			starReason = sr.Reason
+		}
+	}
 	// A dot-import in the staged file may sit outside the hunk (#474), as in the
 	// hook path. Past maxInFileBytes stagedFileLines reads nothing, as there.
 	markDotImports(diffs)
@@ -401,8 +416,9 @@ func runPreCommit(dryRun, verbose bool) int {
 	// results accumulates one CheckResult per applicable check (#330), mirroring
 	// runHookMode — see checkresult.go. Pre-commit has no deletion-side checks
 	// and no strict-mode degraded advisory, so unlike runHookMode this is a
-	// pure internal bookkeeping refactor: Skipped/OK/Violation only, no Unknown
-	// verdict is ever produced here, and firedChecksFrom/askReason's output is
+	// pure internal bookkeeping refactor: Skipped/OK/Violation only, except that
+	// "violations" is Unknown (reason "star-import") when the additive check
+	// abstained on a star import (#477); firedChecksFrom/askReason's output is
 	// unchanged for every existing input.
 	//
 	// "violations" captured here, before any other check runs, so it names only
@@ -412,8 +428,8 @@ func runPreCommit(dryRun, verbose bool) int {
 	// fileScopeV below), so today they never touch this slice at all.
 	// A dot-import abstain that hid a name is a degraded abstain, recorded
 	// rather than OK (#474, G17).
-	additiveReason := ""
-	if dotImportHid(symbols, ignorePath, diffs, len(violations)) {
+	additiveReason := starReason
+	if additiveReason == "" && dotImportHid(symbols, ignorePath, diffs, len(violations)) {
 		additiveReason = "dot-import"
 	}
 	results := []CheckResult{classifyResult("violations", len(violations) > 0, additiveReason)}

@@ -189,7 +189,7 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 	var violations []Violation
 	for i, fd := range diffs {
 		lang := LangFor(fd.Path)
-		if lang == LangUnknown {
+		if lang == LangUnknown || fd.StarImportAbstain {
 			continue
 		}
 		// A dot-import binds every EXPORTED name of another package as a bare
@@ -200,8 +200,18 @@ func Run(symbols map[string]struct{}, ignorePath string, diffs []FileDiff) []Vio
 		// When the file is on disk (pre-commit path), seed the per-hunk string
 		// state from the lines above each hunk so a hunk that begins inside a
 		// pre-existing docstring is masked, not scanned as code (#145).
+		var starNames map[string]struct{}
+		if len(fd.StarImportNames) > 0 {
+			starNames = make(map[string]struct{}, len(fd.StarImportNames))
+			for _, n := range fd.StarImportNames {
+				starNames[n] = struct{}{}
+			}
+		}
 		for _, ref := range extractRefs(lang, fd.AddedLines, openSeeds[i], braceSeeds[i], dotSeeds[i]) {
 			if _, ok := known[ref.Name]; ok {
+				continue
+			}
+			if _, ok := starNames[ref.Name]; ok {
 				continue
 			}
 			if dot && startsUpper(ref.Name) {

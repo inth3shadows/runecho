@@ -297,6 +297,24 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 		}
 	}
 
+	// A star import whose exports are not fully known (`from tkinter import *`, an
+	// in-repo module with no literal __all__) can bind any bare name, so the
+	// additive check abstains for the file rather than flag it (#477). An Edit's
+	// hunk rarely contains the import, so it is decided on the post-edit file
+	// (an edit may drop the import, or add it in one place and use it in
+	// another). When the edit cannot be replayed, the pre-edit file plus the
+	// added text decide, which can only over-abstain.
+	starReason := ""
+	if lang == guard.LangPython {
+		starWhole, starFD := fileLines, diffs[0]
+		if post, ok := postEditFile(edit, fileLines); ok {
+			starWhole, starFD = post, guard.FileDiff{}
+		}
+		sr := guard.PyStarImport(filePath, guard.PyStarEnv{}, starWhole, starFD)
+		starReason = sr.Reason
+		diffs[0].StarImportAbstain = sr.Reason != ""
+		diffs[0].StarImportNames = sr.Names
+	}
 	rawViolations := guard.Run(symbols, ignorePath, diffs)
 	violations := dropUnchanged(rawViolations, violationLine, unchanged)
 	// results accumulates one CheckResult per check (#330's typed epistemic
@@ -311,7 +329,7 @@ func verifyEdit(edit hookEdit, filePath, sessionID string) verification {
 	// file-scope stopped as of #269; see qualifiedV/depsGoV/fsv further down).
 	// A Go file with a dot-import abstains on bare names (#474); like star-import
 	// that is a degraded abstain, recorded rather than silent.
-	additiveReason := ""
+	additiveReason := starReason
 	if lang == guard.LangGo && dotImportHid(symbols, ignorePath, diffs, len(rawViolations)) {
 		additiveReason = "dot-import"
 	}

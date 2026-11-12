@@ -1329,6 +1329,11 @@ which member changed.
   triple-quoted string can be matched — the same cheap-and-deterministic tradeoff
   the import/`__all__` regexes already accept. An explicit `__all__` (even empty)
   is authoritative and disables the fallback.
+- **Python star imports, additive check** abstain per file (degraded token
+  `star-import`, check result `violations` = unknown) when a `from m import *`
+  resolves to anything but an in-repo module with a single literal `__all__`. An
+  in-repo source with such an `__all__` has a fully known export set, so a name
+  outside it is still flagged.
 
 ## Known Limitations
 

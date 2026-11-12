@@ -752,23 +752,32 @@ func TestJSParamNamesRoundFiveShapes(t *testing.T) {
 // TestJSParamNamesLinearInLineLength cannot catch this: its input is the shape
 // where every group BINDS, and a bound group is skipped whole. This one uses
 // the shape where none bind.
+//
+// It used to compare two wall-clock times (depth 5000 vs 20000, fail past 8x).
+// Linear is ~4x and quadratic ~16x, but the small run is ~0.5 ms, so scheduler
+// noise under a loaded `go test ./...` pushed the ratio past 8x on correct code
+// (observed: 537µs vs 8.3ms). It now bounds ONE in-cap input absolutely: the
+// linear scan takes ~1.5 ms on a 60 KB line, the quadratic one took 835 ms on
+// 40 KB (~1.9 s at 60 KB by its n² curve), and the 250 ms ceiling sits about two
+// orders of magnitude above the first and ~7x below the second. Best of 3
+// filters a single preemption.
 func TestJSParamNamesNestedParenNotQuadratic(t *testing.T) {
-	measure := func(depth int) time.Duration {
-		lines := TextToAddedLines(strings.Repeat("(", depth) + strings.Repeat(")", depth) + ";")
-		best := time.Hour
-		for i := 0; i < 3; i++ {
-			st := time.Now()
-			_ = JSParamNames(lines)
-			if d := time.Since(st); d < best {
-				best = d
-			}
-		}
-		return best
+	const depth = 30000 // 60 KB of parens + ";": under TextToAddedLines' 64 KiB capLine
+	src := strings.Repeat("(", depth) + strings.Repeat(")", depth) + ";"
+	lines := TextToAddedLines(src)
+	if len(lines) != 1 || len(lines[0].Text) != len(src) {
+		t.Fatalf("input was capped or split (%d lines); the bound below would measure a truncated line", len(lines))
 	}
-	small, large := measure(5000), measure(20000)
-	// 4x the depth. Linear predicts ~4x; the quadratic version was ~16x.
-	if large > 8*small+2*time.Millisecond {
-		t.Errorf("nested-paren scan is superlinear: depth 5000 %v, depth 20000 %v", small, large)
+	best := time.Hour
+	for i := 0; i < 3; i++ {
+		st := time.Now()
+		_ = JSParamNames(lines)
+		if d := time.Since(st); d < best {
+			best = d
+		}
+	}
+	if best > 250*time.Millisecond {
+		t.Errorf("nested-paren scan is superlinear: depth %d took %v (linear is ~1.5ms; the quadratic regression took ~1.9s)", depth, best)
 	}
 }
 

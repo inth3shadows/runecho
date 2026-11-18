@@ -16,6 +16,11 @@ install time from `git describe --tags` (see `install.sh`).
 
 ## [Unreleased]
 
+## [0.91.1] — 2026-11-18
+
+### Changed
+- ci: add security scan and fix workflow findings (#569)
+
 ## [0.91.0] — 2026-11-12
 
 ### Changed

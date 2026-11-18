@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_run:
+  workflow_run:  # zizmor: ignore[dangerous-triggers] -- runs only after CI succeeds on a master push; checks out no PR code
     workflows: ["CI"]
     types: [completed]
     branches: [master]
@@ -25,9 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with: { go-version-file: go.mod }
+        with: { go-version-file: "go.mod", cache: false }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with: { version: "~> v2", args: "check" }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
@@ -90,7 +90,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] -- this job pushes a tag with the checkout's token
         with:
           # The commit CI actually tested — not whatever master has drifted to
           # by the time this job starts, which can be later (another merge
@@ -112,7 +112,7 @@ jobs:
       - name: Guard against a stale base
         id: guard
         run: |
-          tested="${{ github.event.workflow_run.head_sha }}"
+          tested="${GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA}"
           current="$(git rev-parse origin/master)"
           if [ "$current" != "$tested" ]; then
             echo "master is now at $current; this run tested $tested and is superseded. Deferring to that commit's own CI run."
@@ -120,6 +120,8 @@ jobs:
           else
             echo "stale=false" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
 
       - name: Decide the release
         id: decide
@@ -131,11 +133,13 @@ jobs:
 
       - name: Report a skip
         if: steps.guard.outputs.stale == 'false' && steps.decide.outputs.version == ''
-        run: echo "No release for this merge (${{ steps.decide.outputs.skip }})."
+        run: echo "No release for this merge (${STEPS_DECIDE_OUTPUTS_SKIP})."
+        env:
+          STEPS_DECIDE_OUTPUTS_SKIP: ${{ steps.decide.outputs.skip }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.decide.outputs.version != ''
-        with: { go-version-file: go.mod }
+        with: { go-version-file: "go.mod", cache: false }
 
       - name: Commit the changelog and tag
         if: steps.decide.outputs.version != ''
@@ -180,9 +184,9 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with: { go-version-file: go.mod }
+        with: { go-version-file: "go.mod", cache: false }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with: { version: "~> v2", args: "release --clean" }
         env:
